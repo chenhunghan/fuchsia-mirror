@@ -1,0 +1,70 @@
+// Copyright 2023 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [ "driver/platform-device.shard.cml" ],
+    program: {
+        binary: "driver/dwc3.so",
+        bind: "meta/bind/dwc3.bindbc",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        service_connect_validation: "true",
+        default_dispatcher_scheduler_role: "fuchsia.devices.usb.drivers.dwc3.interrupt",
+        suspend_enabled: "false",
+    },
+    capabilities: [
+        { protocol: "fuchsia.hardware.usb.endpoint.Endpoint" },
+        { service: "fuchsia.hardware.usb.dci.UsbDciService" },
+        { service: "fuchsia.boot.metadata.MacAddressMetadata" },
+        { service: "fuchsia.boot.metadata.SerialNumberMetadata" },
+        { service: "fuchsia.hardware.usb.phy.Metadata" },
+        { service: "fuchsia.hardware.usb.policy.Service" },
+    ],
+    use: [
+        {
+            config: "fuchsia.power.SuspendEnabled",
+            key: "enable_suspend",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+        { protocol: "fuchsia.power.system.ActivityGovernor" },
+        { service: "fuchsia.hardware.clock.Service" },
+        { service: "fuchsia.hardware.interconnect.PathService" },
+        { service: "fuchsia.hardware.reset.Service" },
+        { service: "fuchsia.hardware.usb.phy.ConnectionWatcherService" },
+        { service: "fuchsia.hardware.usb.phy.Service" },
+        { service: "fuchsia.hardware.vreg.Service" },
+        { service: "fuchsia.boot.metadata.MacAddressMetadata" },
+        { service: "fuchsia.boot.metadata.SerialNumberMetadata" },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.usb.dci.UsbDciService",
+            from: "self",
+        },
+        {
+            protocol: "fuchsia.hardware.usb.endpoint.Endpoint",
+            from: "self",
+        },
+        {
+            service: "fuchsia.boot.metadata.MacAddressMetadata",
+            from: "self",
+        },
+        {
+            service: "fuchsia.boot.metadata.SerialNumberMetadata",
+            from: "self",
+        },
+        {
+            service: "fuchsia.hardware.usb.phy.Metadata",
+            from: "self",
+        },
+        {
+            service: "fuchsia.hardware.usb.policy.Service",
+            from: "self",
+        },
+    ],
+    config: {
+        // TEST ONLY: Used to bypass hardware mocks in generic unit tests.
+        bypass_platform_extension: { type: "bool" },
+    },
+}

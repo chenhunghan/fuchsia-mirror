@@ -1,0 +1,94 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#![no_std]
+
+#[cfg(test)]
+extern crate self as ksync;
+
+pub use kstring::declare_interned_string;
+pub use ksync_macro::{declare_singleton_lock, guarded};
+pub use pin_init;
+
+/// Locks a mutex.
+///
+/// Usage:
+///   `ksync::lock!(let mut guard = self.lock_mu());`
+///   Locks the mutex and binds a mutable pin to `guard`. Useful when you need to mutate
+///   guarded fields via `guard.as_mut().fields_mut()`.
+///
+///   `ksync::lock!(let guard = self.lock_mu());`
+///   Locks the mutex and binds an immutable pin to `guard`. Useful for read-only access
+///   to guarded fields via `guard.fields()`.
+///
+///   `ksync::lock!(self.lock_mu());`
+///   Locks the mutex and keeps it locked until the end of the scope, without binding the guard.
+#[macro_export]
+macro_rules! lock {
+    (let mut $guard:ident = $lock_init:expr) => {
+        $crate::pin_init::stack_pin_init!(let $guard = $lock_init);
+        let mut $guard = $guard;
+    };
+    (let $guard:ident = $lock_init:expr) => {
+        $crate::pin_init::stack_pin_init!(let $guard = $lock_init);
+    };
+    ($lock_init:expr) => {
+        $crate::pin_init::stack_pin_init!(let _guard = $lock_init);
+    };
+}
+
+mod kcell;
+mod kmutex;
+mod konce_cell;
+mod lock_token;
+mod phantom_mutex;
+mod raw_lock;
+mod singleton;
+
+#[cfg(not(feature = "kernel"))]
+mod raw_userspace_mutex;
+
+#[cfg(feature = "kernel")]
+mod raw_kernel_mutex;
+#[cfg(feature = "kernel")]
+mod raw_spin_lock;
+
+pub use kcell::{KCell, KCellInit, kcell_init};
+pub use konce_cell::{KOnceCell, KOnceCellGuard};
+#[cfg(any(feature = "kernel", test))]
+mod brwlock;
+
+#[cfg(feature = "kernel")]
+mod raw_kernel_brwlock;
+
+#[cfg(all(not(feature = "kernel"), test))]
+mod raw_userspace_brwlock;
+
+pub use kmutex::{
+    AliasedLock, KMutex, KMutexAliasedGuard, KMutexGuard, aliased_lock, aliased_lock_policy,
+};
+pub use lock_token::LockToken;
+pub use lockdep::{LOCK_FLAGS_SINGLETON_LOCK, LockClass, LockClassRegistration, LockFlags};
+pub use phantom_mutex::PhantomMutex;
+pub use raw_lock::{LockPolicy, RawLock};
+pub use singleton::SingletonMutex;
+
+#[cfg(not(feature = "kernel"))]
+pub use raw_userspace_mutex::RawMutex;
+
+#[cfg(not(feature = "kernel"))]
+pub type LockEntryStorage = ();
+
+#[cfg(feature = "kernel")]
+pub use raw_spin_lock::{InterruptSavedState, IrqSavePolicy, NoIrqSavePolicy, RawSpinlock};
+#[cfg(feature = "kernel")]
+pub type KSpinlock<Class> = KMutex<Class, RawSpinlock>;
+#[cfg(any(feature = "kernel", test))]
+pub use brwlock::{BrwLockPi, BrwLockPiReadGuard, BrwLockPiWriteGuard};
+#[cfg(feature = "kernel")]
+pub use raw_kernel_brwlock::RawBrwLockPi;
+#[cfg(feature = "kernel")]
+pub use raw_kernel_mutex::{LockEntryStorage, RawCriticalMutex, RawMutex};
+#[cfg(all(not(feature = "kernel"), test))]
+pub use raw_userspace_brwlock::RawBrwLockPi;

@@ -1,0 +1,44 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+{
+  children: [
+    {
+      name: "wifi",
+      url: "fuchsia-pkg://fuchsia.com/brcmfmac#meta/brcmfmac.cm",
+      compatible: "broadcom,bcm4359"
+    }
+  ],
+  offers: [
+    {
+      service: "fuchsia.hardware.gpio.Service",
+      name: "gpio-oob",
+      from: "#gpio-controller-ff634400",
+      to: "#wifi",
+      constraints: {
+        pin: 63,
+        function: 0,
+        pull: "None"
+      }
+    },
+    {
+      from: "#mmc-ffe03000",
+      service: "fuchsia.hardware.sdio.Service",
+      name: "sdio-function-1",
+      to: "#wifi",
+      constraints: {
+        function: 1
+      }
+    },
+    {
+      from: "#mmc-ffe03000",
+      service: "fuchsia.hardware.sdio.Service",
+      name: "sdio-function-2",
+      to: "#wifi",
+      constraints: {
+        function: 2
+      }
+    }
+  ]
+}

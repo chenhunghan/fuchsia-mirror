@@ -1,0 +1,33 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+@available(added=HEAD)
+library fuchsia.storage.mapping;
+
+using zx;
+
+@discoverable
+open protocol MappingProvider {
+    /// Establishes a new mapping session, returning the mapping VMO.
+    flexible OpenSession(resource struct {
+        session server_end:MappingSession;
+    }) -> (resource struct {
+        mapping_vmo zx.Handle:VMO;
+    }) error zx.Status;
+};
+
+open protocol MappingSession {
+    /// Registers an active node by its generic identifier (e.g. blob Merkle hash), returning its
+    /// size and the session-unique key allocated by the filesystem.
+    flexible Open(struct {
+        identifier vector<uint8>:MAX;
+    }) -> (struct {
+        size uint64;
+        key uint32;
+    }) error zx.Status;
+
+    /// Unregisters a node by its session-unique key.
+    flexible Close(struct {
+        key uint32;
+    }) -> () error zx.Status;
+};

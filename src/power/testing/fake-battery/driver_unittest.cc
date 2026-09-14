@@ -1,0 +1,182 @@
+// Copyright 2023 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include "driver.h"
+
+#include <fidl/fuchsia.hardware.power.battery/cpp/wire.h>
+#include <fidl/fuchsia.hardware.power.source/cpp/wire.h>
+#include <fidl/fuchsia.power.battery/cpp/wire.h>
+#include <lib/driver/testing/cpp/driver_test.h>
+
+#include <gtest/gtest.h>
+#include <sdk/lib/syslog/cpp/macros.h>
+
+#include "src/lib/testing/predicates/status.h"
+
+namespace fake_battery::testing {
+
+namespace fbattery = fuchsia_power_battery;
+namespace hbattery = fuchsia_hardware_power_battery;
+
+class FakeBatteryDriverTestEnvironment : public fdf_testing::Environment {
+ public:
+  zx::result<> Serve(fdf::OutgoingDirectory& to_driver_vfs) override { return zx::ok(); }
+};
+
+class FixtureConfig final {
+ public:
+  using DriverType = Driver;
+  using EnvironmentType = FakeBatteryDriverTestEnvironment;
+};
+
+class FakeBatteryDriverTest : public ::testing::Test {
+ public:
+  void SetUp() override {
+    ASSERT_OK(driver_test_.StartDriver());
+
+    // Connect to old protocol
+    zx::result connect_old = driver_test().Connect<fbattery::InfoService::Device>();
+    ASSERT_EQ(ZX_OK, connect_old.status_value());
+    battery_info_provider_ = std::move(connect_old.value());
+
+    // Connect to new protocol
+    zx::result connect_new = driver_test().Connect<hbattery::Service::Battery>();
+    ASSERT_EQ(ZX_OK, connect_new.status_value());
+    hardware_battery_ = std::move(connect_new.value());
+  }
+
+  void TearDown() override {
+    ASSERT_OK(driver_test_.StopDriver());
+    driver_test().ShutdownAndDestroyDriver();
+  }
+
+ protected:
+  fidl::ClientEnd<fbattery::BatteryInfoProvider>& GetBatteryInfoProviderClient() {
+    return battery_info_provider_;
+  }
+  fidl::ClientEnd<hbattery::Battery>& GetHardwareBatteryClient() { return hardware_battery_; }
+  fdf_testing::BackgroundDriverTest<FixtureConfig>& driver_test() { return driver_test_; }
+
+ private:
+  fidl::ClientEnd<fbattery::BatteryInfoProvider> battery_info_provider_;
+  fidl::ClientEnd<hbattery::Battery> hardware_battery_;
+  fdf_testing::BackgroundDriverTest<FixtureConfig> driver_test_;
+};
+
+TEST_F(FakeBatteryDriverTest, CanGetInfoOldProtocol) {
+  auto result = fidl::WireCall(GetBatteryInfoProviderClient())->GetBatteryInfo();
+  ASSERT_EQ(result.status(), ZX_OK);
+  const auto& info = result.value().info;
+  ASSERT_EQ(info.status(), fuchsia_power_battery::BatteryStatus::kOk);
+  ASSERT_EQ(info.time_remaining().Which(),
+            fuchsia_power_battery::wire::TimeRemaining::Tag::kFullCharge);
+  ASSERT_EQ(info.time_remaining().full_charge(), zx::sec(59).to_nsecs());
+}
+
+TEST_F(FakeBatteryDriverTest, CanGetInfoNewProtocol) {
+  auto result = fidl::WireCall(GetHardwareBatteryClient())->GetStatus();
+  ASSERT_EQ(result.status(), ZX_OK);
+  ASSERT_TRUE(result->is_ok());
+  const auto& status = result->value()->status;
+  ASSERT_TRUE(status.has_level_percent());
+  ASSERT_EQ(status.level_percent(), 98.7f);
+  ASSERT_TRUE(status.has_charge_status());
+  ASSERT_EQ(status.charge_status(), hbattery::wire::ChargeStatus::kCharging);
+  ASSERT_TRUE(status.has_time_remaining());
+  ASSERT_EQ(status.time_remaining(), zx::sec(59).to_nsecs());
+
+  // Verify source_status and current_role (AC Charger)
+  ASSERT_TRUE(status.has_source_status());
+  const auto& source_status = status.source_status();
+  ASSERT_TRUE(source_status.has_current_role());
+  const auto& current_role = source_status.current_role();
+  ASSERT_TRUE(current_role.is_sink());
+  const auto& sink = current_role.sink();
+  ASSERT_TRUE(sink.has_type());
+  ASSERT_EQ(sink.type(), fuchsia_hardware_power_source::wire::SourceType::kAc);
+}
+
+TEST_F(FakeBatteryDriverTest, CanWatchNewProtocol) {
+  auto result = fidl::WireCall(GetHardwareBatteryClient())->Watch({}, {}, {});
+  ASSERT_EQ(result.status(), ZX_OK);
+  const auto& status = result.value()->status;
+  ASSERT_TRUE(status.has_level_percent());
+  ASSERT_EQ(status.level_percent(), 98.7f);
+  ASSERT_TRUE(status.has_charge_status());
+  ASSERT_EQ(status.charge_status(), hbattery::wire::ChargeStatus::kCharging);
+}
+
+class ForegroundFakeBatteryDriverTest : public ::testing::Test {
+ public:
+  void SetUp() override {
+    ASSERT_OK(driver_test_.StartDriver());
+    zx::result connect_result = driver_test().Connect<fbattery::InfoService::Device>();
+    EXPECT_EQ(ZX_OK, connect_result.status_value());
+    battery_info_provider_ = std::move(connect_result.value());
+  }
+
+  void TearDown() override {
+    ASSERT_OK(driver_test_.StopDriver());
+    driver_test().ShutdownAndDestroyDriver();
+  }
+
+ protected:
+  fdf_testing::ForegroundDriverTest<FixtureConfig>& driver_test() { return driver_test_; }
+  fidl::ClientEnd<fbattery::BatteryInfoProvider>& GetBatteryInfoProviderClient() {
+    return battery_info_provider_;
+  }
+
+ private:
+  fdf_testing::ForegroundDriverTest<FixtureConfig> driver_test_;
+  fidl::ClientEnd<fbattery::BatteryInfoProvider> battery_info_provider_;
+};
+
+// Picking ForegroundDriverTest to test Watch. Otherwise we have to use a control fidl to make sure
+// the driver receives the reply for OnChangeBatteryInfo, or we have to ignore ZX_ERR_CANCELED.
+TEST_F(ForegroundFakeBatteryDriverTest, CanWatchOldProtocol) {
+  class FakeBatteryInfoWatcher : public fidl::Server<fbattery::BatteryInfoWatcher> {
+   public:
+    void Bind(fidl::ServerEnd<fbattery::BatteryInfoWatcher> server_end,
+              fdf_testing::DriverRuntime* runtime) {
+      bindings_.AddBinding(runtime->GetForegroundDispatcher()->async_dispatcher(),
+                           std::move(server_end), this, fidl::kIgnoreBindingClosure);
+      test_runtime_ = runtime;
+    }
+
+    void OnChangeBatteryInfo(OnChangeBatteryInfoRequest& request,
+                             OnChangeBatteryInfoCompleter::Sync& completer) override {
+      EXPECT_EQ(request.info().charge_status(), fbattery::ChargeStatus::kCharging);
+      EXPECT_EQ(request.info().charge_source(), fbattery::ChargeSource::kAcAdapter);
+      EXPECT_EQ(request.info().present_voltage_mv(), 4752);
+      EXPECT_EQ(request.info().present_charging_current_ua(), 250014);
+      EXPECT_EQ(request.info().health(), fbattery::HealthStatus::kGood);
+      completer.Reply();
+      EXPECT_TRUE(test_runtime_);
+      completed_ = true;
+    }
+
+    bool Completed() const { return completed_; }
+
+   private:
+    fidl::ServerBindingGroup<fbattery::BatteryInfoWatcher> bindings_;
+    fdf_testing::DriverRuntime* test_runtime_;
+    bool completed_ = false;
+
+  } fake_watcher;
+  {
+    auto& battery_info_provider = GetBatteryInfoProviderClient();
+    auto [client_end, server_end] = fidl::Endpoints<fbattery::BatteryInfoWatcher>::Create();
+    fake_watcher.Bind(std::move(server_end), &driver_test().runtime());
+    auto result = fidl::WireCall(battery_info_provider)->Watch(std::move(client_end));
+    ASSERT_TRUE(result.ok());
+
+    // Wait for the driver to receive and handle Watch message.
+    driver_test().runtime().RunUntilIdle();
+    driver_test().runtime().RunUntil([&fake_watcher]() { return fake_watcher.Completed(); });
+    // Wait for the driver to receive and handle the reply from the fake watcher.
+    driver_test().runtime().RunUntilIdle();
+  }
+}
+
+}  // namespace fake_battery::testing

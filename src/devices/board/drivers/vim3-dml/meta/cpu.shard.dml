@@ -1,0 +1,102 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+{
+  children: [
+    {
+      name: "cpu-controller-0",
+      url: "fuchsia-pkg://fuchsia.com/aml-cpu#meta/aml-cpu.cm",
+      compatible: "amlogic,cpu"
+    }
+  ],
+  offers: [
+    {
+      service: "fuchsia.hardware.power.Service",
+      name: "power-01",
+      from: "#power-controller",
+      to: "#cpu-controller-0",
+      constraints: {
+        domain: 0
+      }
+    },
+    {
+      service: "fuchsia.hardware.clock.Service",
+      name: "sys-cpu-div16",
+      from: "#clock-controller-ff63c000",
+      to: "#cpu-controller-0",
+      constraints: {
+        id: 0x10001
+      }
+    },
+    {
+      service: "fuchsia.hardware.clock.Service",
+      name: "sys-cpu-big-clk",
+      from: "#clock-controller-ff63c000",
+      to: "#cpu-controller-0",
+      constraints: {
+        id: 1048576
+      }
+    },
+    {
+      service: "fuchsia.hardware.clock.Service",
+      name: "sys-cpub-div16",
+      from: "#clock-controller-ff63c000",
+      to: "#cpu-controller-0",
+      constraints: {
+        id: 0x10004
+      }
+    },
+    {
+      service: "fuchsia.hardware.clock.Service",
+      name: "sys-cpu-little-clk",
+      from: "#clock-controller-ff63c000",
+      to: "#cpu-controller-0",
+      constraints: {
+        id: 1048577
+      }
+    },
+    {
+      service: "fuchsia.hardware.clock.Service",
+      name: "sys-pll-div16",
+      from: "#clock-controller-ff63c000",
+      to: "#cpu-controller-0",
+      constraints: {
+        id: 0x10000
+      }
+    },
+    {
+      service: "fuchsia.hardware.clock.Service",
+      name: "sys-pllb-div16",
+      from: "#clock-controller-ff63c000",
+      to: "#cpu-controller-0",
+      constraints: {
+        id: 0x10003
+      }
+    },
+    {
+      from: "parent",
+      service: "fuchsia.hardware.platform.device.Service",
+      name: "pdev",
+      to: "#cpu-controller-0",
+      constraints: {
+        mmio: [
+          {
+            name: "control",
+            address: 0xff800000,
+            size: 0x1000
+          }
+        ]
+      }
+    },
+    {
+      service: "fuchsia.hardware.power.Service",
+      name: "power-02",
+      from: "#power-controller",
+      to: "#cpu-controller-0",
+      constraints: {
+        domain: 1
+      }
+    }
+  ]
+}

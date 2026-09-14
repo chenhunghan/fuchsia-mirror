@@ -1,0 +1,19 @@
+// Copyright 2020 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+composite goldfish_address_space;
+
+
+primary parent "pci" {
+  fuchsia.Service == "fuchsia.hardware.pci.Service";
+
+  // QEMU_GFX_VID
+  fuchsia.BIND_PCI_VID == 0x1234;
+  // QEMU_VGA_DID
+  fuchsia.BIND_PCI_DID == 0x1111;
+}
+
+optional parent "acpi" {
+  fuchsia.BIND_PROTOCOL == fuchsia.acpi.BIND_PROTOCOL.DEVICE;
+}

@@ -1,0 +1,27 @@
+// Copyright 2022 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//sdk/lib/driver/compat/compat.shard.cml",
+        "driver/platform-device.shard.cml",
+    ],
+    program: {
+        bind: "meta/bind/aml_eth_bind.bindbc",
+        compat: "driver/aml-ethernet.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+    },
+    capabilities: [
+        { service: "fuchsia.hardware.ethernet.board.Service" },
+    ],
+    use: [
+        { service: "fuchsia.hardware.gpio.Service" },
+        { service: "fuchsia.hardware.i2c.Service" },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.ethernet.board.Service",
+            from: "self",
+        },
+    ],
+}

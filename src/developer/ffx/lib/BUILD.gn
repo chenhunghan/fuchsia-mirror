@@ -1,0 +1,99 @@
+# Copyright 2021 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+assert(is_host, "ffx/lib is for use with the host toolchain only")
+
+libs = [
+  # keep-sorted start
+  "addr",
+  "arg_parsing",
+  "auth",
+  "buildid",
+  "compat_info",
+  "daemonize",
+  "diagnostics",
+  "discovery",
+  "doctor_utils",
+  "emulator_instance",
+  "errors",
+  "executor",
+  "fastboot",
+  "fastboot_file_discovery",
+  "fho",
+  "gce",
+  "isolate",
+  "logging",
+  "manual_targets",
+  "mdns_discovery",
+  "metrics",
+  "netext",
+  "pbms",
+  "pkg",
+  "port_picker",
+  "rcs",
+  "safe_string",
+  "sdk",
+  "ssh",
+  "stream_util",
+  "symbol-index",
+  "symbolize",
+  "target",
+  "target/connector",
+  "target/holders",
+  "target_errors",
+  "target_net",
+  "tasks",
+  "termio",
+  "testing",
+  "timeout",
+  "trace",
+  "traceable_error",
+  "usb_driver_api",
+  "usb_fastboot_discovery",
+  "usb_vsock_host",
+  "version",
+  "writer",
+
+  # keep-sorted end
+]
+
+# The fuchsia-controller library supports end-to-end testing from
+# Linux hosts, and we don't intend to explicitly support end-to-end
+# testing from other operating systems at this time.
+if (is_linux) {
+  libs += [ "fuchsia-controller" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = []
+  foreach(lib, libs) {
+    deps += [ "${lib}:tests" ]
+  }
+
+  deps -= [
+    # These tests are migrated to Bazel.
+    "compat_info:tests",
+  ]
+}
+
+group("lib") {
+  testonly = true
+
+  deps = []
+  foreach(lib, libs) {
+    deps += [ lib ]
+  }
+}
+
+group("host_tests") {
+  testonly = true
+  deps = [
+    "e2e_emu:host_tests",
+    "fuchsia-controller:host_tests",
+    "profiler:host_tests",
+    "symbolize:host_tests",
+    "target_net:host_tests",
+  ]
+}

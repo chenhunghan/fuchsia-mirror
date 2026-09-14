@@ -1,0 +1,23 @@
+# Copyright 2020 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/images/paths.gni")
+
+if (is_host) {
+  import("//build/testing/host_test_data.gni")
+
+  host_test_data("default_product_bundle_for_emulator.go") {
+    # No tests should be assuming the default product bundle because it varies
+    # depending on the build configuration, but many tests that use
+    # //tools/emulator/emulator.go use it.
+    # TODO(https://fxbug.dev/552542769): Every test that uses emulator.go should
+    # declare its own product bundle.
+    visibility = [
+      "//src/bringup/bin/console-launcher/qemu-tests:*",
+      "//src/tests/drivers_serial_log:*",
+      "//src/tests/reboot/power_reboot_bringup_test:*",
+    ]
+    sources = [ files.product_bundle_dir ]
+  }
+}

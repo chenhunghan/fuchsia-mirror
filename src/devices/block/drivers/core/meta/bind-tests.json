@@ -1,0 +1,16 @@
+[
+    {
+        "device": {
+            "fuchsia.BIND_PROTOCOL": "fuchsia.block.BIND_PROTOCOL.BLOCK"
+        },
+        "expected": "abort",
+        "name": "BlockProtocol"
+    },
+    {
+        "device": {
+            "fuchsia.BIND_PROTOCOL": "fuchsia.block.BIND_PROTOCOL.BLOCK_IMPL"
+        },
+        "expected": "match",
+        "name": "BlockImplProtocol"
+    }
+]

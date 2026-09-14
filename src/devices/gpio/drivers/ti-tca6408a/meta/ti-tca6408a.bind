@@ -1,0 +1,20 @@
+// Copyright 2021 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+composite ti_tca6408a;
+
+
+primary parent "i2c" {
+    fuchsia.Service == "fuchsia.hardware.i2c.Service";
+}
+
+parent "pdev" {
+  if fuchsia.COMPATIBLE == "ti,tca6408a" {
+    true;
+  } else {
+    fuchsia.BIND_PROTOCOL == fuchsia.platform.BIND_PROTOCOL.DEVICE;
+    fuchsia.BIND_PLATFORM_DEV_VID == fuchsia.ti.platform.BIND_PLATFORM_DEV_VID.TI;
+    fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.ti.platform.BIND_PLATFORM_DEV_DID.TCA6408A;
+  }
+}

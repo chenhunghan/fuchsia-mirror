@@ -1,0 +1,35 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+{
+  name: "fake-clock",
+  include: [
+    "driver_component/driver.shard.cml"
+  ],
+  program: {
+    colocate: "true"
+  },
+  use: [
+    {
+      name: "pdev",
+      primary: true,
+      service: "fuchsia.hardware.platform.device.Service",
+      requirements: {
+        protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+        compat: "fake,clock"
+      }
+    }
+  ],
+  capabilities: [
+    {
+      service: "fuchsia.hardware.clock.Service"
+    }
+  ],
+  expose: [
+    {
+      service: "fuchsia.hardware.clock.Service",
+      from: "self"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+composite leaf;
+
+primary parent "left" {
+  fuchsia.nodemanagerbind.test.TEST_DEVICE_TYPE ==
+    fuchsia.nodemanagerbind.test.TEST_DEVICE_TYPE.LEFT_SPKR;
+}
+
+parent "right" {
+  fuchsia.nodemanagerbind.test.TEST_DEVICE_TYPE ==
+    fuchsia.nodemanagerbind.test.TEST_DEVICE_TYPE.RIGHT_SPKR;
+}

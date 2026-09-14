@@ -1,0 +1,33 @@
+// Copyright 2022 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [ "driver/platform-device.shard.cml" ],
+    program: {
+        binary: "driver/ti-tca6408a.so",
+        bind: "meta/bind/ti-tca6408a-bind.bindbc",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+    },
+    capabilities: [
+        { service: "fuchsia.hardware.pinimpl.Service" },
+        { service: "fuchsia.hardware.pinimpl.Metadata" },
+        { service: "fuchsia.scheduler.RoleName" },
+    ],
+    use: [
+        { service: "fuchsia.hardware.i2c.Service" },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.pinimpl.Service",
+            from: "self",
+        },
+        {
+            service: "fuchsia.hardware.pinimpl.Metadata",
+            from: "self",
+        },
+        {
+            service: "fuchsia.scheduler.RoleName",
+            from: "self",
+        },
+    ],
+}

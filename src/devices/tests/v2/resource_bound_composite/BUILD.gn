@@ -1,0 +1,115 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/drivers.gni")
+import("//build/rust/rustc_test.gni")
+import("//sdk/ctf/build/ctf.gni")
+
+group("tests") {
+  testonly = true
+  deps = [ ":resourceboundcomposite_test_pkg" ]
+}
+
+fidl("fuchsia.resourceboundcomposite.test") {
+  testonly = true
+  sources = [ "resourceboundcomposite.test.fidl" ]
+  public_deps = [ "//zircon/vdso/zx" ]
+}
+
+bind_library("fuchsia.resourceboundcompositebind.test") {
+  source = "resourceboundcomposite.test.bind"
+}
+
+driver_bind_rules("root_bind") {
+  rules = "meta/root.bind"
+  deps = [ "//src/devices/bind/fuchsia.test" ]
+  bind_output = "root.bindbc"
+}
+
+fuchsia_cc_driver("root_driver") {
+  testonly = true
+  output_name = "resourceboundcomposite_root"
+  sources = [ "root_driver.cc" ]
+  deps = [
+    ":fuchsia.resourceboundcomposite.test_cpp",
+    ":fuchsia.resourceboundcompositebind.test_cpp",
+    ":root_bind",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
+    "//sdk/lib/driver/compat/cpp",
+    "//sdk/lib/driver/component/cpp",
+    "//src/devices/lib/driver:driver_runtime",
+  ]
+}
+
+fuchsia_driver_component("root") {
+  testonly = true
+  manifest = "meta/root.cml"
+  deps = [ ":root_driver" ]
+  info = "meta/root_info.json"
+}
+
+driver_bind_rules("leaf_bind") {
+  rules = "meta/leaf.bind"
+  bind_output = "leaf.bindbc"
+  deps = [ ":fuchsia.resourceboundcompositebind.test" ]
+}
+
+fuchsia_cc_driver("leaf_driver") {
+  testonly = true
+  output_name = "resourceboundcomposite_leaf"
+  sources = [ "leaf_driver.cc" ]
+  deps = [
+    ":fuchsia.resourceboundcomposite.test_cpp",
+    ":leaf_bind",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/driver/component/cpp",
+    "//src/devices/lib/driver:driver_runtime",
+  ]
+}
+
+fuchsia_driver_component("leaf") {
+  testonly = true
+  manifest = "meta/leaf.cml"
+  deps = [ ":leaf_driver" ]
+  info = "meta/leaf_info.json"
+}
+
+rustc_test("bin") {
+  edition = "2024"
+  testonly = true
+  output_name = "resourceboundcomposite_test_bin"
+  source_root = "test.rs"
+  sources = [ "test.rs" ]
+  deps = [
+    ":fuchsia.resourceboundcomposite.test_rust",
+    "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
+    "//sdk/lib/driver_test_realm/realm_builder/rust:rust_no_driver_manager",
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-component-test:lib",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+}
+
+fuchsia_test_component("test_root") {
+  testonly = true
+  manifest = "meta/test_root.cml"
+  deps = [ ":bin" ]
+  test_type = "ctf"
+}
+
+fuchsia_test_package("resourceboundcomposite_test_pkg") {
+  test_components = [ ":test_root" ]
+  deps = [
+    ":leaf",
+    ":root",
+    "//sdk/lib/driver_test_realm:driver_manager_test",
+    "//sdk/lib/driver_test_realm:driver_test_realm_component",
+    "//src/devices/misc/drivers/test-parent",
+  ]
+}

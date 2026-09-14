@@ -1,0 +1,126 @@
+// Copyright 2022 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    actions: [
+        {
+            type: "skip",
+            matchers: [
+                // Tests that flake in Fuchsia's CQ.
+                // https://fxbug.dev/42063461
+                "AllInetTests/TcpSocketTest.ClosedWriteBlockingSocket/*",
+
+                // https://fxbug.dev/42063462
+                "AllInetTests/TcpSocketTest.PollWithFullBufferBlocks/*",
+
+                // https://fxbug.dev/42063368
+                "AllInetTests/SimpleTcpSocketTest.SynRcvdOnListenerShutdown/*",
+
+                // https://fxbug.dev/42152555
+                "AllTCPSockets/TCPSocketPairTest.RSTCausesPollHUP/*",
+
+                // https://fxbug.dev/42152559
+                "AllTCPSockets/TCPSocketPairTest.RSTSentOnCloseWithUnreadDataAllowsReadBuffered/*",
+
+                // https://fxbug.dev/42150125
+                // Skip this test as it flakes often because of reaching file descriptor
+                // resource limits on Fuchsia. Bumping up the resource limit in Fuchsia might
+                // be more involved.
+                "AllTCPSockets/TCPSocketPairTest.TCPResetDuringClose/*",
+
+                // This test hangs until cl/390312274 is in the Fuchsia SDK.
+                "AllInetTests/TcpSocketTest.SendUnblocksOnSendBufferIncrease/*",
+
+                // https://fxbug.dev/42141171
+                // Skip flaky test.
+                "AllInetTests/SimpleTcpSocketTest.SelfConnectSendRecv/*",
+
+                // https://fxbug.dev/42152572
+                "AllInetTests/SimpleTcpSocketTest.NonBlockingConnect_PollWrNorm/*",
+
+                // https://fxbug.dev/42166160
+                "AllInetTests/SimpleTcpSocketTest.ShutdownReadConnectingSocket/*",
+
+                // https://fxbug.dev/42166160
+                "AllInetTests/SimpleTcpSocketTest.ShutdownWriteConnectingSocket/*",
+
+                // https://fxbug.dev/42166160
+                "AllInetTests/SimpleTcpSocketTest.ShutdownReadWriteConnectingSocket/*",
+
+                // See https://fxbug.dev/42078010#comment17 for an explanation of why this test
+                // flakes.
+                "AllInetTests/SimpleTcpSocketTest.SelfConnectSendShutdownWrite/*",
+            ],
+        },
+        {
+            type: "expect_failure",
+            matchers: [
+                // third_party/gvisor/test/syscalls/linux/socket_ip_tcp_generic.cc:125
+                // Value of: RetryEINTR(read)(sockets->first_fd(), buf, sizeof(buf))
+                // Expected: -1 (failure), with errno PosixError(errno=104 0)
+                //   Actual: 0 (of type long)
+                "AllTCPSockets/TCPSocketPairTest.RSTSentOnCloseWithUnreadData/*",
+
+                // https://fxbug.dev/42152560
+                "AllTCPSockets/TCPSocketPairTest.ShutdownRdUnreadDataShouldCauseNoPacketsUnlessClosed/*",
+
+                // https://fxbug.dev/42094401
+                "AllTCPSockets/TCPSocketPairTest.MsgTruncMsgPeek/*",
+
+                // TODO(https://fxbug.dev/42121767): support sendmmsg
+                "AllTCPSockets/AllSocketPairTest.BasicSendmmsg/*",
+                "AllTCPSockets/AllSocketPairTest.SendmmsgIsLimitedByMAXIOV/*",
+
+                // TODO(https://fxbug.dev/42121765): support recvmmsg
+                "AllTCPSockets/AllSocketPairTest.BasicRecvmmsg/*",
+                "AllTCPSockets/AllSocketPairTest.RecvmmsgTimeoutBeforeRecv/*",
+                "AllTCPSockets/AllSocketPairTest.RecvmmsgInvalidTimeout/*",
+
+                // Fuchsia does not implement recvmsg correctly for TCP.
+                "AllTCPSockets/AllSocketPairTest.RecvmsgMsghdrFlagsCleared/*",
+                "AllTCPSockets/AllSocketPairTest.RecvmsgPeekMsghdrFlagsCleared/*",
+
+                // Fuchsia does not implement MSG_WAITALL for TCP.
+                "AllTCPSockets/AllSocketPairTest.RecvWaitAll/*",
+                "AllTCPSockets/AllSocketPairTest.RecvWaitAllDontWait/*",
+                "AllTCPSockets/AllSocketPairTest.RecvTimeoutWaitAll/*",
+
+                // https://fxbug.dev/42154562
+                "AllTCPSockets/AllSocketPairTest.SetAndGetBooleanSocketOptions/*",
+
+                // https://fxbug.dev/42154343
+                "AllTCPSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
+
+                // https://fxbug.dev/42094401
+                "AllInetTests/TcpSocketTest.MsgTrunc/*",
+
+                // https://fxbug.dev/42094401
+                "AllInetTests/TcpSocketTest.MsgTruncWithCtrunc/*",
+
+                // https://fxbug.dev/42094401
+                "AllInetTests/TcpSocketTest.MsgTruncLargeSize/*",
+
+                // https://fxbug.dev/42094401
+                "AllInetTests/TcpSocketTest.MsgTruncPeek/*",
+
+                // Setting PMTUD is not supported.
+                "AllInetTests/TcpSocketTest.SetPMTUD/*",
+
+                // https://fxbug.dev/42117720
+                "AllInetTests/TcpSocketTest.TcpInqSetSockOpt/*",
+
+                // https://fxbug.dev/42117720
+                "AllInetTests/TcpSocketTest.TcpInq/*",
+
+                // https://fxbug.dev/42117720
+                "AllInetTests/TcpSocketTest.TcpSCMPriority/*",
+
+                // https://fxbug.dev/42094401
+                "AllTCPSockets/TCPSocketPairTest.MsgTruncMsgPeek/*",
+
+                // Fuchsia does not implement IP_MTU_DISCOVER socket option.
+                "AllInetTests/SimpleTcpSocketTest.SetUnsupportedPMTUDISC/*",
+            ],
+        },
+    ],
+}

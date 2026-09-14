@@ -1,0 +1,20 @@
+// Copyright 2023 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//sdk/lib/driver/compat/compat.shard.cml",
+        "driver/platform-device.shard.cml",
+    ],
+    program: {
+        bind: "meta/bind/aml-securemem.bindbc",
+        compat: "driver/aml-securemem.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        allowed_scheduler_roles: [ "fuchsia.devices.securemem.drivers.aml-securemem.server-loop" ],
+    },
+    use: [
+        { protocol: "fuchsia.scheduler.RoleManager" },
+        { protocol: "fuchsia.hardware.sysmem.Sysmem" },
+        { service: "fuchsia.hardware.tee.Service" },
+    ],
+}

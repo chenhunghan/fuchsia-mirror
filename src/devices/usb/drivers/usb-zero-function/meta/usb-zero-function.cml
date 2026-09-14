@@ -1,0 +1,18 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "inspect/client.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        runner: "driver",
+        binary: "driver/usb-zero-function.so",
+        bind: "meta/bind/usb-zero-function.bindbc",
+        colocate: "true",
+    },
+    use: [
+        { service: "fuchsia.hardware.usb.function.UsbFunctionService" },
+    ],
+}

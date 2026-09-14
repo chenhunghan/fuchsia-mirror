@@ -1,0 +1,97 @@
+// Copyright 2022 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    actions: [
+        {
+            type: "expect_failure",
+            matchers: [
+                // https://fxbug.dev/42129881
+                // Fuchsia only supports IPV6_PKTINFO, and these variants exercise IP_PKTINFO.
+                "AllInetTests/UdpSocketControlMessagesTest.SetAndReceivePktInfo/0",
+                "AllInetTests/UdpSocketControlMessagesTest.SetAndReceivePktInfo/2",
+
+                // https://fxbug.dev/42165502
+                "AllInetTests/UdpSocketTest.DisconnectAfterBindToUnspecAndConnect/*",
+
+                // https://fxbug.dev/42118191
+                "AllInetTests/UdpSocketTest.Fionread/*",
+
+                // https://fxbug.dev/42118191
+                "AllInetTests/UdpSocketTest.FIONREADShutdown/*",
+
+                // https://fxbug.dev/42118191
+                "AllInetTests/UdpSocketTest.FIONREADWriteShutdown/*",
+
+                // https://fxbug.dev/42118191
+                "AllInetTests/UdpSocketTest.FIONREADZeroLengthPacket/*",
+
+                // https://fxbug.dev/42118191
+                "AllInetTests/UdpSocketTest.FIONREADZeroLengthWriteShutdown/*",
+
+                // https://fxbug.dev/42118194
+                "AllInetTests/UdpSocketTest.SoTimestamp/*",
+
+                // https://fxbug.dev/42118194
+                "AllInetTests/UdpSocketTest.TimestampIoctl/*",
+
+                // https://fxbug.dev/42118194
+                "AllInetTests/UdpSocketTest.TimestampIoctlNothingRead/*",
+
+                // https://fxbug.dev/42118194
+                "AllInetTests/UdpSocketTest.TimestampIoctlPersistence/*",
+
+                // https://fxbug.dev/42121765
+                "AllUDPSockets/AllSocketPairTest.BasicRecvmmsg/*",
+
+                // https://fxbug.dev/42121767
+                "AllUDPSockets/AllSocketPairTest.BasicSendmmsg/*",
+
+                // https://fxbug.dev/42154343
+                "AllUDPSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
+
+                // https://fxbug.dev/42121765
+                "AllUDPSockets/AllSocketPairTest.RecvmmsgInvalidTimeout/*",
+
+                // https://fxbug.dev/42121765
+                "AllUDPSockets/AllSocketPairTest.RecvmmsgTimeoutBeforeRecv/*",
+
+                // https://fxbug.dev/42121766
+                "AllUDPSockets/AllSocketPairTest.RecvmsgMsghdrFlagsCleared/*",
+
+                // https://fxbug.dev/42121766
+                "AllUDPSockets/AllSocketPairTest.RecvmsgPeekMsghdrFlagsCleared/*",
+
+                // https://fxbug.dev/42121767
+                "AllUDPSockets/AllSocketPairTest.SendmmsgIsLimitedByMAXIOV/*",
+
+                // https://fxbug.dev/42154563
+                "AllUDPSockets/AllSocketPairTest.SetAndGetBooleanSocketOptions/*",
+
+                // https://fxbug.dev/42145888
+                "AllUDPSockets/UDPSocketPairTest.ReceiveOrigDstAddrDefault/*",
+                "AllUDPSockets/UDPSocketPairTest.SetAndGetReceiveOrigDstAddr/*",
+            ],
+        },
+        {
+            type: "skip",
+            matchers: [
+                // https://fxbug.dev/42118192
+                // Deadlock? Test makes no progress even when run in isolation.
+                "AllInetTests/UdpSocketTest.ReadShutdown/*",
+
+                // https://fxbug.dev/42118192
+                // Deadlock? Test makes no progress even when run in isolation.
+                "AllInetTests/UdpSocketTest.ReadShutdownDifferentThread/*",
+
+                // Tests that flake in Fuchsia's CQ.
+                // https://fxbug.dev/42065721
+                "AllInetTests/UdpSocketTest.SendToAddressOtherThanConnected/*",
+
+                // https://fxbug.dev/42085960
+                "AllInetTests/UdpSocketTest.ReconnectDoesNotClearReadShutdown/*",
+                "AllInetTests/UdpSocketTest.ReconnectDoesNotClearWriteShutdown/*",
+            ],
+        },
+    ],
+}

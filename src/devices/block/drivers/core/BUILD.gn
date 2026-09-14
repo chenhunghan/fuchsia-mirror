@@ -1,0 +1,155 @@
+# Copyright 2019 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bind/bind.gni")
+import("//build/components.gni")
+import("//build/drivers.gni")
+import("//build/test.gni")
+import("//src/storage/testing/driver_test_realm.gni")
+
+fuchsia_driver_dml("core-dml") {
+  dml = "meta/core.dml"
+  driver_name = "block.core"
+  golden_bind = "meta/core.bind"
+  golden_cml = "meta/core.cml"
+}
+
+fuchsia_cc_driver("core-driver") {
+  legacy = true
+  output_name = "block.core"
+  configs += [
+    "//build/config:all_source",
+    "//build/config/fuchsia:enable_zircon_asserts",
+  ]
+  deps = [
+    ":shared",
+    "//src/devices/lib/driver",
+  ]
+}
+
+fuchsia_driver_component("core") {
+  visibility = [
+    ":*",
+    "//src/bringup/bin/device-name-provider/tests:*",
+    "//src/bringup/bin/netsvc:*",
+    "//src/devices/block:drivers",
+    "//src/devices/block/drivers/core",
+    "//src/devices/block/drivers/ftl/tests:ftl-integration",
+    "//src/devices/block/drivers/usb-mass-storage:ums-integration",
+    "//src/firmware/paver/test:*",
+    "//src/recovery/factory_reset:*",
+    "//src/storage/fvm:fvm-integration",
+    "//src/storage/testing:storage_drivers",
+  ]
+  component_name = "block.core"
+  dml_label = ":core-dml"
+  deps = [ ":core-driver" ]
+  info = "meta/core-info.json"
+}
+
+fuchsia_driver_package("package") {
+  package_name = "block-core"
+  driver_components = [ ":core" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":block-core-bind_test",
+    ":block-driver-integration-tests",
+    ":core-unittest",
+  ]
+}
+
+test("core-unittest-bin") {
+  output_name = "blockcore"
+  include_dirs = [ "." ]
+  sources = [
+    "test/main.cc",
+    "test/server.cc",
+    "test/stub-block-device.cc",
+  ]
+  deps = [
+    ":shared",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/fdio",
+    "//src/devices/testing/mock-ddk",
+    "//zircon/system/ulib/fzl",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/zircon-internal",
+    "//zircon/system/ulib/zx",
+    "//zircon/system/ulib/zxtest",
+  ]
+}
+
+fuchsia_unittest_package("core-unittest") {
+  deps = [ ":core-unittest-bin" ]
+}
+
+driver_bind_rules("block-core-bind") {
+  dml_label = ":core-dml"
+  bind_output = "block.core.bindbc"
+  tests = "meta/bind-tests.json"
+  deps = [ "//src/devices/bind/fuchsia.block" ]
+}
+
+source_set("shared") {
+  visibility = [ "./*" ]
+  configs += [ "//build/config:all_source" ]
+  sources = [
+    "block-device.cc",
+    "block-device.h",
+    "iobuffer.cc",
+    "message-group.cc",
+    "message.cc",
+    "server.cc",
+  ]
+  deps = [
+    ":block-core-bind",
+    "//sdk/fidl/fuchsia.boot.metadata:fuchsia.boot.metadata_cpp",
+    "//src/devices/lib/block",
+    "//src/devices/lib/driver:driver_runtime",
+    "//src/lib/ddk",
+    "//src/lib/ddktl",
+    "//src/storage/lib/block_protocol:block_fifo",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/fzl",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/trace",
+    "//zircon/system/ulib/zircon-internal",
+    "//zircon/system/ulib/zx",
+    "//zircon/third_party/ulib/safemath",
+  ]
+
+  public_deps = [
+    "//sdk/banjo/fuchsia.hardware.block.partition:fuchsia.hardware.block.partition_banjo_cpp",
+    "//sdk/banjo/fuchsia.hardware.block.volume:fuchsia.hardware.block.volume_banjo_cpp",
+    "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_cpp",
+    "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_cpp",
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+    "//src/devices/lib/dev-operation",
+  ]
+}
+
+rustc_test("block_driver_integration_test") {
+  edition = "2024"
+  sources = [ "test/integration/src/main.rs" ]
+  source_root = "test/integration/src/main.rs"
+  deps = [
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/storage/lib/block_client/rust",
+    "//src/storage/lib/ramdevice_client",
+  ]
+}
+
+storage_driver_test_realm_component("block-driver-integration-test") {
+  deps = [ ":block_driver_integration_test" ]
+}
+
+fuchsia_test_package("block-driver-integration-tests") {
+  test_components = [ ":block-driver-integration-test" ]
+}
