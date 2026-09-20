@@ -35,27 +35,6 @@ template("host_test_data") {
       !is_fuchsia,
       "host_test_data should only be used on host, to fix this, wrap you target with `if (is_host) { ... }`")
 
-  foreach(source, invoker.sources) {
-    if (source == "$root_build_dir/fuchsia.zbi") {
-      _label_no_toolchain =
-          get_label_info(":$target_name", "label_no_toolchain")
-      assert(
-          _label_no_toolchain ==
-              "//build/images/fuchsia:default_product_bundle_for_emulator.go",
-          "Only the '//build/images/fuchsia:default_product_bundle_for_emulator.go' is allowed to provide the default product bundle for host tests.")
-    } else if (source == "$root_build_dir/zedboot.zbi") {
-      assert(
-          get_label_info(":$target_name", "label_no_toolchain") ==
-              "//build/images/fuchsia:default_product_bundle_for_emulator.go",
-          "Only the '//build/images/fuchsia:default_product_bundle_for_emulator.go' is allowed to provide the default product bundle for host tests.")
-    } else if (source == "$root_build_dir/bringup.zbi") {
-      assert(
-          get_label_info(":$target_name", "label_no_toolchain") ==
-              "//build/images/bringup:bringup_zbi_for_host_tests",
-          "Only the '//build/images/bringup:bringup_zbi_for_host_tests' is allowed to provide bringup.zbi for host tests.")
-    }
-  }
-
   _testonly = true
   if (defined(invoker.testonly)) {
     _testonly = invoker.testonly

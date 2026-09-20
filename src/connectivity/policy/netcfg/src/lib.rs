@@ -46,6 +46,7 @@ use fidl_fuchsia_net_name as fnet_name;
 use fidl_fuchsia_net_ndp as fnet_ndp;
 use fidl_fuchsia_net_policy_properties as fnp_properties;
 use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
+use fidl_fuchsia_net_reachability as freachability;
 use fidl_fuchsia_net_resources as fnet_resources;
 use fidl_fuchsia_net_routes_admin as fnet_routes_admin;
 use fidl_fuchsia_net_routes_ext as fnet_routes_ext;
@@ -904,6 +905,7 @@ enum RequestStream {
     NetworkAttributes(fnp_properties::NetworksRequestStream),
     DelegatedNetworks(fnp_socketproxy::NetworkRegistryRequestStream),
     NetworkTokenResolver(fnp_properties::NetworkTokenResolverRequestStream),
+    Reachability(freachability::MonitorRequestStream),
 }
 
 impl std::fmt::Debug for RequestStream {
@@ -916,6 +918,7 @@ impl std::fmt::Debug for RequestStream {
             RequestStream::NetworkAttributes(_) => write!(f, "NetworkAttributes"),
             RequestStream::DelegatedNetworks(_) => write!(f, "DelegatedNetworks"),
             RequestStream::NetworkTokenResolver(_) => write!(f, "NetworkTokenResolver"),
+            RequestStream::Reachability(_) => write!(f, "Reachability"),
         }
     }
 }
@@ -1050,7 +1053,7 @@ impl<'a> NetCfg<'a> {
             interface::InterfaceNamingConfig::from_naming_rules(interface_naming_policy);
         let telemetry_node = inspector.root().create_child(TELEMETRY_INSPECT_NODE_NAME);
         let netpol_networks_service = network::NetpolNetworksService::default()
-            .with_inspect(&telemetry_node, "operations")
+            .with_inspect(&telemetry_node, "operations", &telemetry_node, "network_registry")
             .context("failed to initialize network registry inspect")?;
 
         Ok(NetCfg {
@@ -1299,7 +1302,8 @@ impl<'a> NetCfg<'a> {
             .add_fidl_service(RequestStream::DnsServerWatcher)
             .add_fidl_service(RequestStream::NetworkAttributes)
             .add_fidl_service(RequestStream::DelegatedNetworks)
-            .add_fidl_service(RequestStream::NetworkTokenResolver);
+            .add_fidl_service(RequestStream::NetworkTokenResolver)
+            .add_fidl_service(RequestStream::Reachability);
 
         let _inspect_server_task =
             inspect_runtime::publish(&self.inspector, inspect_runtime::PublishOptions::default())
@@ -1689,6 +1693,9 @@ impl<'a> NetCfg<'a> {
                         self.netpol_networks_service.add_stream(req_stream);
                     }
                     RequestStream::NetworkTokenResolver(req_stream) => {
+                        self.netpol_networks_service.add_stream(req_stream);
+                    }
+                    RequestStream::Reachability(req_stream) => {
                         self.netpol_networks_service.add_stream(req_stream);
                     }
                 };

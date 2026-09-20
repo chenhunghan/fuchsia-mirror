@@ -52,19 +52,23 @@ enum NetdeviceId {
 struct RxBuffer(netdevice_client::Buffer<netdevice_client::Rx>);
 
 impl MaybeContiguousBuffer for RxBuffer {
-    fn linearized<'a, 'b>(&'a mut self, vec: &'b mut Vec<u8>) -> BufferSlice<'a, 'b> {
+    fn linearized<'a, 'b>(
+        &'a mut self,
+        vec: Option<&'b mut Vec<u8>>,
+    ) -> Option<BufferSlice<'a, 'b>> {
         let Self(buf) = self;
         if let Some(slice) = buf.as_slice_mut() {
-            BufferSlice::Contiguous(slice)
+            Some(BufferSlice::Contiguous(slice))
         } else {
+            let vec = vec?;
             let frame_length = buf.len();
             if vec.len() < frame_length {
                 vec.resize(frame_length, 0);
             }
             let slice = &mut vec[..frame_length];
             let read_len = buf.io().read_at(0, slice);
-            debug_assert_eq!(read_len, frame_length);
-            BufferSlice::Linearized(slice)
+            assert_eq!(read_len, frame_length);
+            Some(BufferSlice::Linearized(slice))
         }
     }
 }

@@ -112,7 +112,7 @@ fuchsia_test_package("verity-benchmarks") {
   # Prevent this test from being run as a target-side test, because it
   # is run by a host-side wrapper.
   test_specs = {
-    environments = []
+    build_only = true
 
     package_resolution_timeout_secs = 660
   }

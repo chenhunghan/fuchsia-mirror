@@ -471,7 +471,7 @@ mod test {
     use crate::testing::spawn_kernel_and_run;
     use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
     use crate::vfs::fs_args::MountParams;
-    use crate::vfs::{FdNumber, UnlinkKind};
+    use crate::vfs::{DirectoryMode, FdNumber, UnlinkKind};
     use starnix_uapi::errno;
     use starnix_uapi::mount_flags::FileSystemFlags;
     use starnix_uapi::vfs::ResolveFlags;
@@ -641,7 +641,12 @@ mod test {
                 .expect("failed to open /usr/bin");
             usr_bin
                 .name
-                .unlink(&current_task, "test.txt".into(), UnlinkKind::NonDirectory, false)
+                .unlink(
+                    &current_task,
+                    "test.txt".into(),
+                    UnlinkKind::NonDirectory,
+                    DirectoryMode::AllowAny,
+                )
                 .expect("failed to unlink test.text");
             assert_eq!(
                 errno!(ENOENT),
@@ -651,7 +656,12 @@ mod test {
                 errno!(ENOENT),
                 usr_bin
                     .name
-                    .unlink(&current_task, "test.txt".into(), UnlinkKind::NonDirectory, false)
+                    .unlink(
+                        &current_task,
+                        "test.txt".into(),
+                        UnlinkKind::NonDirectory,
+                        DirectoryMode::AllowAny,
+                    )
                     .unwrap_err()
             );
 
@@ -674,7 +684,7 @@ mod test {
                 current_task.open_file("/usr/foo".into(), OpenFlags::RDONLY).unwrap_err()
             );
             usr.name
-                .unlink(&current_task, "bin".into(), UnlinkKind::Directory, false)
+                .unlink(&current_task, "bin".into(), UnlinkKind::Directory, DirectoryMode::AllowAny)
                 .expect("failed to unlink /usr/bin");
         })
         .await;

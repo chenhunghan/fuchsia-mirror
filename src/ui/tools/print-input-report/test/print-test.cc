@@ -937,4 +937,13 @@ TEST_F(PrintInputReport, InputReportsReaderV2AcknowledgeEdgeCases) {
   EXPECT_EQ(received_stamps[2], 3u);
 }
 
+TEST_F(PrintInputReport, InputReportsReaderV1NotSupported) {
+  fuchsia::input::report::InputReportsReaderPtr reader;
+  fake_device_->GetInputReportsReader(reader.NewRequest(loop_->dispatcher()));
+  zx_status_t reader_error = ZX_OK;
+  reader.set_error_handler([&](zx_status_t status) { reader_error = status; });
+  loop_->RunUntilIdle();
+  EXPECT_EQ(reader_error, ZX_ERR_NOT_SUPPORTED);
+}
+
 }  // namespace test

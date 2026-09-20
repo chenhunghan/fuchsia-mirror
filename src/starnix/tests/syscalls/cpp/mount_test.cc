@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -23,11 +24,13 @@
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 #include <linux/loop.h>
 
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
 #include "src/lib/fxl/strings/split_string.h"
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/proc_test_base.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
@@ -1321,6 +1324,281 @@ TEST_F(MountTest, BindMountInheritsAtimeFlags) {
   EXPECT_FALSE(cpp23::contains(bind_info->mount_options, "nodiratime"));
   EXPECT_FALSE(cpp23::contains(bind_info->mount_options, "relatime"));
   EXPECT_FALSE(cpp23::contains(bind_info->mount_options, "noatime"));
+}
+
+inline int sys_pivot_root(const char *new_root, const char *put_old) {
+  return static_cast<int>(syscall(SYS_pivot_root, new_root, put_old));
+}
+
+TEST_F(MountTest, PivotRootSuccess) {
+  if (!test_helper::HasSysAdmin() || !test_helper::HasCapability(CAP_SYS_CHROOT)) {
+    GTEST_SKIP() << "Not running with sysadmin/chroot capabilities, skipping.";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+  std::string root = temp_dir.path() + "/root";
+  std::string new_root = root + "/new_root";
+  std::string put_old = new_root + "/put_old";
+  std::string file_in_old = root + "/file_in_old";
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(unshare(CLONE_NEWNS), SyscallSucceeds());
+    ASSERT_THAT(mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(new_root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", new_root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(mkdir(put_old.c_str(), 0777), SyscallSucceeds());
+
+    ASSERT_TRUE(files::WriteFile(new_root + "/file_in_new", "new_content"));
+    ASSERT_TRUE(files::WriteFile(file_in_old, "old_content"));
+
+    ASSERT_THAT(chroot(root.c_str()), SyscallSucceeds());
+    ASSERT_THAT(chdir("/"), SyscallSucceeds());
+
+    ASSERT_THAT(sys_pivot_root("/new_root", "/new_root/put_old"), SyscallSucceeds());
+
+    // Calling process began with CWD == "/", so pivot_root must have updated CWD to "/".
+    char cwd_buf[PATH_MAX];
+    ASSERT_NE(getcwd(cwd_buf, sizeof(cwd_buf)), nullptr);
+    EXPECT_STREQ(cwd_buf, "/");
+
+    // Relative file lookup from CWD should find file in new root.
+    std::string content;
+    EXPECT_TRUE(files::ReadFileToString("file_in_new", &content));
+    EXPECT_EQ(content, "new_content");
+
+    EXPECT_TRUE(files::ReadFileToString("/file_in_new", &content));
+    EXPECT_EQ(content, "new_content");
+
+    EXPECT_TRUE(files::ReadFileToString("/put_old/file_in_old", &content));
+    EXPECT_EQ(content, "old_content");
+
+    // Unmount the old root.
+    EXPECT_THAT(umount2("/put_old", MNT_DETACH), SyscallSucceeds());
+    EXPECT_FALSE(files::ReadFileToString("/put_old/file_in_old", &content));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(MountTest, PivotRootDotDot) {
+  if (!test_helper::HasSysAdmin() || !test_helper::HasCapability(CAP_SYS_CHROOT)) {
+    GTEST_SKIP() << "Not running with sysadmin/chroot capabilities, skipping.";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+  std::string root = temp_dir.path() + "/root";
+  std::string new_root = root + "/new_root";
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(unshare(CLONE_NEWNS), SyscallSucceeds());
+    ASSERT_THAT(mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(new_root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", new_root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+
+    ASSERT_TRUE(files::WriteFile(new_root + "/dot_dot_marker", "marker_data"));
+
+    ASSERT_THAT(chroot(root.c_str()), SyscallSucceeds());
+    ASSERT_THAT(chdir("/new_root"), SyscallSucceeds());
+    ASSERT_THAT(sys_pivot_root(".", "."), SyscallSucceeds());
+
+    // Old root is now mounted over ".". Unmount it.
+    ASSERT_THAT(umount2(".", MNT_DETACH), SyscallSucceeds());
+
+    ASSERT_THAT(chdir("/"), SyscallSucceeds());
+    std::string content;
+    EXPECT_TRUE(files::ReadFileToString("/dot_dot_marker", &content));
+    EXPECT_EQ(content, "marker_data");
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(MountTest, PivotRootErrors) {
+  if (!test_helper::HasSysAdmin() || !test_helper::HasCapability(CAP_SYS_CHROOT)) {
+    GTEST_SKIP() << "Not running with sysadmin/chroot capabilities, skipping.";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+  std::string root = temp_dir.path() + "/root";
+  std::string dir = root + "/dir";
+  std::string put_old = dir + "/old";
+  std::string other_dir = root + "/other";
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(unshare(CLONE_NEWNS), SyscallSucceeds());
+    ASSERT_THAT(mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(dir.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mkdir(put_old.c_str(), 0777), SyscallSucceeds());
+
+    // EINVAL: current root has no parent mount (is rootfs).
+    EXPECT_THAT(sys_pivot_root(dir.c_str(), put_old.c_str()), SyscallFailsWithErrno(EINVAL));
+
+    ASSERT_THAT(chroot(root.c_str()), SyscallSucceeds());
+    ASSERT_THAT(chdir("/"), SyscallSucceeds());
+
+    // EBUSY: /dir is on the current root mount.
+    EXPECT_THAT(sys_pivot_root("/dir", "/dir/old"), SyscallFailsWithErrno(EBUSY));
+
+    // Mount tmpfs on /dir so it is a mount root.
+    ASSERT_THAT(mount("tmpfs", "/dir", "tmpfs", 0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(mkdir("/dir/old", 0777), SyscallSucceeds());
+
+    // EINVAL: subdir is on a separate mount, but is not itself a mountpoint.
+    std::string not_mountpoint = "/dir/sub";
+    std::string sub_put_old = not_mountpoint + "/old";
+    ASSERT_THAT(mkdir(not_mountpoint.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mkdir(sub_put_old.c_str(), 0777), SyscallSucceeds());
+    EXPECT_THAT(sys_pivot_root(not_mountpoint.c_str(), sub_put_old.c_str()),
+                SyscallFailsWithErrno(EINVAL));
+
+    // ENOTDIR: not a directory.
+    std::string file = "/dir/file";
+    ASSERT_TRUE(files::WriteFile(file, "content"));
+    EXPECT_THAT(sys_pivot_root(file.c_str(), "/dir/old"), SyscallFailsWithErrno(ENOTDIR));
+    EXPECT_THAT(sys_pivot_root("/dir", file.c_str()), SyscallFailsWithErrno(ENOTDIR));
+    // ENOTDIR for new_root takes precedence over ENOENT for put_old.
+    EXPECT_THAT(sys_pivot_root(file.c_str(), "/nonexistent"), SyscallFailsWithErrno(ENOTDIR));
+    // ENOENT for new_root takes precedence over ENOTDIR for put_old.
+    EXPECT_THAT(sys_pivot_root("/nonexistent", file.c_str()), SyscallFailsWithErrno(ENOENT));
+
+    // EBUSY: put_old is on the current root mount (takes precedence over EINVAL for not under
+    // new_root).
+    ASSERT_THAT(mkdir("/other", 0777), SyscallSucceeds());
+    EXPECT_THAT(sys_pivot_root("/dir", "/other"), SyscallFailsWithErrno(EBUSY));
+
+    // EINVAL: put_old not under new_root (when put_old is on a separate mount from root).
+    ASSERT_THAT(mount("tmpfs", "/other", "tmpfs", 0, nullptr), SyscallSucceeds());
+    EXPECT_THAT(sys_pivot_root("/dir", "/other"), SyscallFailsWithErrno(EINVAL));
+    ASSERT_THAT(umount2("/other", MNT_DETACH), SyscallSucceeds());
+
+    // EBUSY: new_root is on the same mount as current root (takes precedence over EINVAL for not a
+    // mountpoint).
+    EXPECT_THAT(sys_pivot_root("/other", "/dir/old"), SyscallFailsWithErrno(EBUSY));
+    EXPECT_THAT(sys_pivot_root("/", "/dir/old"), SyscallFailsWithErrno(EBUSY));
+
+    // EINVAL: new_root has propagation type shared.
+    ASSERT_THAT(mount(nullptr, "/dir", nullptr, MS_SHARED, nullptr), SyscallSucceeds());
+    EXPECT_THAT(sys_pivot_root("/dir", "/dir/old"), SyscallFailsWithErrno(EINVAL));
+    ASSERT_THAT(mount(nullptr, "/dir", nullptr, MS_PRIVATE, nullptr), SyscallSucceeds());
+
+    // EINVAL: current root has propagation type shared.
+    ASSERT_THAT(mount(nullptr, "/", nullptr, MS_SHARED | MS_REC, nullptr), SyscallSucceeds());
+    EXPECT_THAT(sys_pivot_root("/dir", "/dir/old"), SyscallFailsWithErrno(EINVAL));
+    ASSERT_THAT(mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr), SyscallSucceeds());
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(MountTest, PivotRootUpdatesOtherTasksInNamespace) {
+  if (!test_helper::HasSysAdmin() || !test_helper::HasCapability(CAP_SYS_CHROOT)) {
+    GTEST_SKIP() << "Not running with sysadmin/chroot capabilities, skipping.";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+  std::string root = temp_dir.path() + "/root";
+  std::string new_root = root + "/new_root";
+  std::string put_old = new_root + "/put_old";
+  std::string sub_dir = root + "/sub";
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(unshare(CLONE_NEWNS), SyscallSucceeds());
+    ASSERT_THAT(mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(new_root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", new_root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(mkdir(put_old.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mkdir(sub_dir.c_str(), 0777), SyscallSucceeds());
+
+    ASSERT_TRUE(files::WriteFile(new_root + "/file_in_new", "new_content"));
+    ASSERT_TRUE(files::WriteFile(sub_dir + "/file_in_sub", "sub_content"));
+
+    ASSERT_THAT(chroot(root.c_str()), SyscallSucceeds());
+    ASSERT_THAT(chdir("/"), SyscallSucceeds());
+
+    test_helper::Rendezvous child_ready = test_helper::MakeRendezvous();
+    test_helper::Rendezvous parent_done = test_helper::MakeRendezvous();
+
+    test_helper::ForkHelper inner_helper;
+    inner_helper.RunInForkedProcess([&] {
+      // Child changes CWD to /sub (not root).
+      ASSERT_THAT(chdir("/sub"), SyscallSucceeds());
+
+      // Signal parent that child is ready.
+      child_ready.poker.poke();
+
+      // Wait for parent to pivot_root.
+      parent_done.holder.hold();
+
+      // Child's root should have been updated to /new_root.
+      std::string content;
+      EXPECT_TRUE(files::ReadFileToString("/file_in_new", &content));
+      EXPECT_EQ(content, "new_content");
+
+      // Child's CWD should NOT have been changed because it was at /sub, not old root.
+      EXPECT_TRUE(files::ReadFileToString("file_in_sub", &content));
+      EXPECT_EQ(content, "sub_content");
+    });
+
+    // Wait for child to change CWD.
+    child_ready.holder.hold();
+
+    // Parent performs pivot_root.
+    ASSERT_THAT(sys_pivot_root("/new_root", "/new_root/put_old"), SyscallSucceeds());
+
+    // Signal child to check its root and CWD.
+    parent_done.poker.poke();
+
+    ASSERT_TRUE(inner_helper.WaitForChildren());
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(MountTest, PivotRootWithoutCapability) {
+  if (!test_helper::HasSysAdmin() || !test_helper::HasCapability(CAP_SYS_CHROOT)) {
+    GTEST_SKIP() << "Not running with sysadmin/chroot capabilities, skipping.";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+  std::string root = temp_dir.path() + "/root";
+  std::string new_root = root + "/new_root";
+  std::string put_old = new_root + "/put_old";
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(unshare(CLONE_NEWNS), SyscallSucceeds());
+    ASSERT_THAT(mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+
+    ASSERT_THAT(mkdir(new_root.c_str(), 0777), SyscallSucceeds());
+    ASSERT_THAT(mount("tmpfs", new_root.c_str(), "tmpfs", 0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(mkdir(put_old.c_str(), 0777), SyscallSucceeds());
+
+    ASSERT_THAT(chroot(root.c_str()), SyscallSucceeds());
+    ASSERT_THAT(chdir("/"), SyscallSucceeds());
+
+    test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+    EXPECT_THAT(sys_pivot_root("/new_root", "/new_root/put_old"), SyscallFailsWithErrno(EPERM));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
 }
 
 }  // namespace

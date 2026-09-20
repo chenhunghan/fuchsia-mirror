@@ -4,6 +4,7 @@
 
 use crate::args::ShowCommand;
 use async_trait::async_trait;
+use discovery::gce_watcher;
 use ffx_config::EnvironmentContext;
 use ffx_gce::GceContext;
 use ffx_gce::models::Instance;
@@ -68,25 +69,30 @@ impl FfxMain for ShowTool {
     type Error = fho::Error;
 
     async fn main(self, mut writer: Self::Writer) -> Result<()> {
+        gce_watcher::Instance::validate_name(&self.cmd.name).map_err(|e| user_error!("{e}"))?;
+
         let gce = match GceContext::new(self.context, self.cmd.project, self.cmd.zone).await {
             Ok(c) => c,
             Err(e) => return_user_error!("{e}"),
         };
+        let instance = gce_watcher::Instance::new(&gce.project, &gce.zone, &self.cmd.name)
+            .map_err(|e| user_error!("{e}"))?;
 
         let inst = gce
             .client
-            .get_instance(&gce.project, &gce.zone, &self.cmd.name)
+            .get_instance(&instance.project, &instance.zone, &instance.name)
             .await
             .map_err(|e| user_error!("{e}"))?;
 
         let serial_endpoint = gce.serial_endpoint();
-        let details = InstanceDetails::from_instance(inst, gce.project, gce.zone, serial_endpoint);
+        let details =
+            InstanceDetails::from_instance(inst, instance.project, instance.zone, serial_endpoint);
 
         output_instance(&details, &mut writer)
     }
 }
 
-pub(crate) fn output_instance(
+fn output_instance(
     details: &InstanceDetails,
     writer: &mut MachineWriter<InstanceDetails>,
 ) -> Result<()> {
@@ -111,7 +117,7 @@ pub(crate) fn output_instance(
         if let Some(ref link) = details.self_link {
             table.add_row(row!["Self Link:", link]);
         }
-        table.print(writer).map_err(|e| fho::Error::Unexpected(anyhow::anyhow!("{e}")))?;
+        table.print(writer).map_err(|e| user_error!("{e}"))?;
     }
     Ok(())
 }
@@ -132,8 +138,13 @@ mod tests {
             self_link: Some("https://compute.googleapis.com/...".to_string()),
             network_interfaces: vec![NetworkInterface {
                 network_ip: Some("10.128.0.2".to_string()),
-                access_configs: vec![AccessConfig { nat_ip: Some("34.120.10.20".to_string()) }],
+                access_configs: vec![AccessConfig {
+                    nat_ip: Some("34.120.10.20".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
             }],
+            ..Default::default()
         }
     }
 

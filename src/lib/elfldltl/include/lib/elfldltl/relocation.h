@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "layout.h"
 #include "machine.h"
 
 namespace elfldltl {
@@ -33,15 +34,15 @@ namespace elfldltl {
 // in-place addend.  VisitRelative passes either an Elf::Rela with separate
 // address and addend, or an Elf::size_type address using an in-place addend.
 
-template <class ElfLayout>
+template <ElfApi ElfLayout>
 class RelocationInfo {
  public:
   using Elf = ElfLayout;
-  using size_type = typename Elf::size_type;
-  using Addr = typename Elf::Addr;
-  using Addend = typename Elf::Addend;
-  using Rel = typename Elf::Rel;
-  using Rela = typename Elf::Rela;
+  using size_type = Elf::size_type;
+  using Addr = Elf::Addr;
+  using Addend = Elf::Addend;
+  using Rel = Elf::Rel;
+  using Rela = Elf::Rela;
 
   // These span types hold the various relocation tables in their raw forms.
   // The JMPREL table is in either REL or RELA format, so a variant is used.

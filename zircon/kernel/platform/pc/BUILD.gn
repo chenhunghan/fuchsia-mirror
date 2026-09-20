@@ -100,6 +100,7 @@ kernel_rust_mod("platform_pc") {
     "//sdk/rust/zx-types",
     "//src/lib/kprint",
     "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/zr",
     "//third_party/rust_crates:zerocopy",
     "//zircon/kernel/lib/acpi_lite/rust:acpi_lite",

@@ -516,7 +516,7 @@ ProcessDispatcher::State ProcessDispatcher::state() const {
   return state_;
 }
 
-fbl::RefPtr<JobDispatcher> ProcessDispatcher::job() { return job_; }
+fbl::RefPtr<JobDispatcher> ProcessDispatcher::job() const { return job_; }
 
 void ProcessDispatcher::SetStateLocked(State s) {
   LTRACEF("process %p: state %u (%s)\n", this, static_cast<unsigned int>(s), StateToString(s));

@@ -17,8 +17,8 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 import fuchsia
 from api.log import log_pb2
@@ -40,7 +40,7 @@ class DownloadEvent(object):
 
     def distribute_over_intervals(
         self, interval_seconds: float
-    ) -> Iterable[Tuple[int, float, float]]:
+    ) -> Iterable[tuple[int, float, float]]:
         """Distribute bytes_downloaded into indexed time intervals.
 
         Args:
@@ -72,7 +72,7 @@ def distribute_bytes_downloaded_over_time(
     total_time_seconds: float,
     interval_seconds: float,
     events: Iterable[DownloadEvent],
-) -> Sequence[Tuple[float, float]]:
+) -> Sequence[tuple[float, float]]:
     """Distribute a series of download intervals over discrete time-partitions.
 
     Returns:
@@ -109,15 +109,15 @@ class ReproxyLog(object):
         self._records_by_output_file = self._index_records_by_output_file()
         self._records_by_action_digest = self._index_records_by_action_digest()
 
-    def _index_records_by_output_file(self) -> Dict[Path, log_pb2.LogRecord]:
+    def _index_records_by_output_file(self) -> dict[Path, log_pb2.LogRecord]:
         """Map files to the records of the actions that created them."""
-        records: Dict[Path, log_pb2.LogRecord] = dict()
+        records: dict[Path, log_pb2.LogRecord] = dict()
         for record in self.proto.records:
             for output_file in record.command.output.output_files:
                 records[Path(output_file)] = record
         return records
 
-    def _index_records_by_action_digest(self) -> Dict[str, log_pb2.LogRecord]:
+    def _index_records_by_action_digest(self) -> dict[str, log_pb2.LogRecord]:
         """Map action records by their action digest (hash/size)."""
         return {
             record.remote_metadata.action_digest: record
@@ -134,18 +134,18 @@ class ReproxyLog(object):
         return self._proto
 
     @property
-    def records_by_output_file(self) -> Dict[Path, log_pb2.LogRecord]:
+    def records_by_output_file(self) -> dict[Path, log_pb2.LogRecord]:
         return self._records_by_output_file
 
     @property
-    def records_by_action_digest(self) -> Dict[str, log_pb2.LogRecord]:
+    def records_by_action_digest(self) -> dict[str, log_pb2.LogRecord]:
         return self._records_by_action_digest
 
     def diff_by_outputs(
         self,
         other: "ReproxyLog",
         eq_comparator: Callable[[log_pb2.LogRecord, log_pb2.LogRecord], bool],
-    ) -> Iterable[Tuple[Path, log_pb2.LogRecord, log_pb2.LogRecord]]:
+    ) -> Iterable[tuple[Path, log_pb2.LogRecord, log_pb2.LogRecord]]:
         """Compare actions output-by-output.
 
         Args:
@@ -179,7 +179,7 @@ class ReproxyLog(object):
             for p in common_outputs:
                 visited_outputs.add(p)
 
-    def bandwidth_summary(self) -> Tuple[int, int]:
+    def bandwidth_summary(self) -> tuple[int, int]:
         total_upload_bytes = 0
         total_download_bytes = 0
         for record in self.proto.records:
@@ -190,7 +190,7 @@ class ReproxyLog(object):
                 )
         return total_download_bytes, total_upload_bytes
 
-    def _min_max_event_times(self) -> Tuple[float, float]:
+    def _min_max_event_times(self) -> tuple[float, float]:
         """Find the minimum and maximum event times in the reproxy log."""
         min_time = None
         max_time = None
@@ -244,7 +244,7 @@ class ReproxyLog(object):
 
     def download_profile(
         self, interval_seconds: float
-    ) -> Sequence[Tuple[float, float]]:
+    ) -> Sequence[tuple[float, float]]:
         """Plots download bandwidth at each point in time.
 
         Assumes that for each DownloadResult event time entry in the
@@ -473,7 +473,7 @@ def warmth_logs(args: argparse.Namespace) -> int:
     return 0
 
 
-def lookup_output_file_digest(log: Path, path: Path) -> Optional[str]:
+def lookup_output_file_digest(log: Path, path: Path) -> str | None:
     """Lookup the digest of an output file in the reproxy log.
 
     Args:

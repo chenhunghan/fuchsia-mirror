@@ -6,5 +6,5 @@
 
 fuchsia.BIND_PROTOCOL == fuchsia.usb.BIND_PROTOCOL.FUNCTION;
 fuchsia.BIND_USB_CLASS == fuchsia.usb.BIND_USB_CLASS.VENDOR_SPECIFIC;
-fuchsia.BIND_USB_PROTOCOL == fuchsia.google.platform.usb.BIND_USB_PROTOCOL.ADB;
 fuchsia.BIND_USB_SUBCLASS == fuchsia.google.platform.usb.BIND_USB_SUBCLASS.ADB;
+fuchsia.BIND_USB_PROTOCOL == fuchsia.google.platform.usb.BIND_USB_PROTOCOL.ADB;

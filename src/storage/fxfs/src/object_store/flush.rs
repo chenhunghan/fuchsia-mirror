@@ -333,7 +333,7 @@ impl ObjectStore {
             layer.close_layer().await;
             if let Some(object_id) = object_id {
                 parent_store
-                    .tombstone_object(object_id, txn_options)
+                    .tombstone_object(object_id, txn_options, None)
                     .await
                     .context("Failed to tombstone old layer")?;
             }
@@ -341,7 +341,7 @@ impl ObjectStore {
 
         if old_encrypted_mutations_object_id != INVALID_OBJECT_ID {
             parent_store
-                .tombstone_object(old_encrypted_mutations_object_id, txn_options)
+                .tombstone_object(old_encrypted_mutations_object_id, txn_options, None)
                 .await
                 .context("Failed to tombstone old encrypted mutations")?;
         }
@@ -496,7 +496,6 @@ mod tests {
     use std::sync::Arc;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
-
 
     #[fuchsia::test]
     async fn test_flush_when_locked() {

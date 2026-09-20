@@ -10,7 +10,7 @@
 
 #include <lib/fit/result.h>
 
-#include <type_traits>
+#include <concepts>
 
 #include "diagnostics.h"
 #include "machine.h"
@@ -25,13 +25,12 @@ namespace elfldltl {
 // or memory.StoreAdd(reloc_address, bias) to store the adjusted values.
 // Returns false iff any calls into the Memory object returned false.
 template <class Diagnostics, class RelocInfo>
-
 constexpr bool RelocateRelative(
     Diagnostics& diag,
     MemoryWriter<typename RelocInfo::size_type, typename RelocInfo::Addr> auto& memory,
     const RelocInfo& info, typename RelocInfo::size_type bias) {
-  using Addr = typename RelocInfo::Addr;
-  using size_type = typename RelocInfo::size_type;
+  using Addr = RelocInfo::Addr;
+  using size_type = RelocInfo::size_type;
 
   struct Visitor {
     constexpr bool CheckStore(bool b, size_type addr) {
@@ -42,7 +41,7 @@ constexpr bool RelocateRelative(
     }
 
     // RELA entry with separate addend.
-    constexpr bool operator()(const typename RelocInfo::Rela& reloc) {
+    constexpr bool operator()(const RelocInfo::Rela& reloc) {
       auto addr = bias_ + reloc.addend();
       return CheckStore(memory_.template Store<Addr>(reloc.offset, addr), reloc.offset);
     }
@@ -69,61 +68,110 @@ enum class RelocateTls {
   kDesc,     // TLSDESC reloc: the definition must supply hook and parameter.
 };
 
+// This concept defines the contract for types referred to as Definition in the
+// RelocateSymbolic API specified here.  See <lib/elfldltl/resolve.h> for some
+// examples implementing this contract.
+//
+// Callback methods that can fail return `fit::result<bool, ...>`.  The error
+// value is like the return value from a Diagnostics object, indicating whether
+// to continue applying more relocations or to bail out immediately.
+template <class Definition, class Elf, class Diagnostics, ElfMachine Machine>
+concept RelocateSymbolicDefinitionApi =
+    ElfApi<Elf> &&
+    requires(const Definition& defn) {
+      // Returns true iff the symbol was resolved as an undefined weak
+      // reference.
+      { defn.undefined_weak() } -> std::convertible_to<bool>;
+
+      // Returns the load bias for symbol addresses in the defining module.
+      { defn.bias() } -> std::convertible_to<typename Elf::size_type>;
+
+      // Returns the defining symbol table entry.
+      { defn.symbol() } -> std::convertible_to<const typename Elf::Sym&>;
+
+      // Returns the TLS module ID number for the defining module.
+      { defn.tls_module_id() } -> std::convertible_to<typename Elf::size_type>;
+
+      // Returns the static TLS layout bias for the defining module.
+      { defn.static_tls_bias() } -> std::convertible_to<typename Elf::size_type>;
+    } &&  // If the one-argument tls_desc_undefined_weak() is provided, it will
+          // always be used.  If not, the no-argument tls_desc_undefined_weak()
+          // must be provided instead.
+    (
+        requires(const Definition& defn, Elf::Addend addend) {
+          // This is only called if undefined_weak() returned true first.
+          // Returns the GOT contents for a TLSDESC resolution that was an
+          // undefined weak.  This overload can use the relocation addend in
+          // choosing the particular TLSDESC implementation, but this requires
+          // an extra load in the DT_REL case.  The return value will be used
+          // as is.
+          {
+            defn.tls_desc_undefined_weak(addend)
+          } -> std::convertible_to<typename Elf::template TlsDescGot<Machine>>;
+        } ||
+        requires(const Definition& defn) {
+          // This is only called if undefined_weak() returned true first.
+          // Returns the GOT contents for a TLSDESC resolution that was an
+          // undefined weak symbol.  This overload does not require the addend
+          // up front.  Instead, the TlsDescGot::value field will have the
+          // addend applied implicitly.
+          {
+            defn.tls_desc_undefined_weak()
+          } -> std::convertible_to<typename Elf::template TlsDescGot<Machine>>;
+        }) &&  // If the two-argument tls_desc() is provided, it will always be
+               // used.  If not, the one-argument tls_desc() must be provided
+               // instead.
+    (
+        requires(const Definition& defn, Elf::Addend addend, Diagnostics& diag) {
+          // Returns the GOT contents for a TLSDESC resolution, which can fail.
+          // If this overload is present, then it is always used and the second
+          // overload below need not be defined.  This overload can use the
+          // relocation addend in choosing the TLSDESC implementation, but this
+          // requires an extra load in the DT_REL case.  The return value will
+          // be used as is.
+          {
+            defn.tls_desc(diag, addend)
+          } -> std::same_as<fit::result<bool, typename Elf::template TlsDescGot<Machine>>>;
+        } ||
+        requires(const Definition& defn, Diagnostics& diag) {
+          // Returns the GOT contents for a TLSDESC resolution, which can fail.
+          // This overload does not require the addend up front.  Instead, the
+          // TlsDescGot::value field will have the addend applied implicitly.
+          {
+            defn.tls_desc(diag)
+          } -> std::same_as<fit::result<bool, typename Elf::template TlsDescGot<Machine>>>;
+        });
+
+// This is a helper concept, describing the fit::result<bool, ...> return value
+// for a RelocateSymbolicResolverApi<Elf> callable.
+template <typename T, class Elf, class Diagnostics, ElfMachine Machine>
+concept RelocateSymbolicResolverResultApi =
+    std::same_as<T, fit::result<bool, typename T::value_type>> &&
+    RelocateSymbolicDefinitionApi<typename T::value_type, Elf, Diagnostics, Machine>;
+
+// This describes the callback passed to RelocateSymbolic to do the actual
+// symbol resolution.  It returns fit::result<bool, Definition> where the
+// error_value treatment is as described for Definition methods above.
+template <typename T, class Elf, class Diagnostics, ElfMachine Machine>
+concept RelocateSymbolicResolverApi =
+    ElfApi<Elf> && std::invocable<T, const typename Elf::Sym&, RelocateTls> &&
+    RelocateSymbolicResolverResultApi<
+        std::invoke_result_t<T, const typename Elf::Sym&, RelocateTls>,  //
+        Elf, Diagnostics, Machine>;
+
 // Apply symbolic relocations as directed by Elf::RelocationInfo, referring to
 // Elf::SymbolInfo as adjusted by the load bias (as used in RelocateRelative).
 // The callback function and methods on its returned Definition here use
 // `fit::result<bool, ...>` for cases where failure to deliver a result is an
-// option.  The error value is like the return value from a Diagnostics object,
-// indicating whether to continue applying more relocations or to bail out
-// after this failure.  The callback function is:
+// option.  The callback function is:
 //
 //  * fit::result<bool, Definition> resolve(const Sym&, RelocateTls)
 //
 // where Definition is some type defined by the caller that supports methods:
 //
-//  * bool undefined_weak()
-//    Returns true iff the symbol was resolved as an undefined weak reference.
-//
-//  * size_type bias()
-//    Returns the load bias for symbol addresses in the defining module.
-//
-//  * const Sym& symbol()
-//    Returns the defining symbol table entry.
-//
-//  * size_type tls_module_id()
-//    Returns the TLS module ID number for the defining module.
-//
-//  * size_type static_tls_bias()
-//    Returns the static TLS layout bias for the defining module.
-//
-//  * TlsDescGot tls_desc_undefined_weak()
-//    This is only called if undefined_weak() returned true first.
-//    Returns the GOT contents for a TLSDESC resolution that was an
-//    undefined weak symbol.  This overload does not require the addend
-//    up front.  Instead, the TlsDescGot::value field will have the
-//    addend applied implicitly.
-//
-//  * TlsDescGot tls_desc_undefined_weak(Addend addend)
-//    This is only called if undefined_weak() returned true first.
-//    Returns the GOT contents for a TLSDESC resolution that was an
-//    undefined weak.  This overload can use the relocation addend in
-//    choosing the TLSDESC implementation, but this requires an extra
-//    load in the DT_REL case.  The return value will be used as is.
-//
-//  * fit::result<bool, <TlsDescGot> tls_desc(Diagnostics&, Addend addend)
-//    Returns the GOT contents for a TLSDESC resolution, which can fail.
-//    If this overload is present, then it is always used and the second
-//    overload need not be defined.  This overload can use the relocation
-//    addend in choosing the TLSDESC implementation, but this requires an
-//    extra load in the DT_REL case.  The return value will be used as is.
-//
-//  * fit::result<bool, TlsDescGot> tls_desc(Diagnostics&)
-//    Returns the GOT contents for a TLSDESC resolution, which can fail.
-//    This overload does not require the addend up front.  Instead, the
-//    TlsDescGot::value field will have the addend applied implicitly.
-//
 template <ElfMachine Machine = ElfMachine::kNative, class DiagnosticsType, class RelocInfo,
-          class SymbolInfo, typename Resolve>
+          class SymbolInfo,
+          RelocateSymbolicResolverApi<typename RelocInfo::Elf, DiagnosticsType, Machine> Resolve>
 constexpr bool RelocateSymbolic(
     MemoryApi<typename RelocInfo::size_type, typename RelocInfo::Elf::Addr,
               typename RelocInfo::Elf::Addend> auto& memory,
@@ -139,16 +187,16 @@ constexpr bool RelocateSymbolic(
   using Rela = Elf::Rela;
   using TlsDescGot = Elf::template TlsDescGot<Machine>;
 
-  static_assert(std::is_same_v<typename SymbolInfo::Addr, Addr>,
+  static_assert(std::same_as<typename SymbolInfo::Addr, Addr>,
                 "incompatible RelocInfo and SymbolInfo types passed to elfldltl::RelocateSymbolic");
   using Sym = SymbolInfo::Sym;
 
-  static_assert(std::is_invocable_v<Resolve, const Sym&, RelocateTls>,
+  static_assert(std::invocable<Resolve, const Sym&, RelocateTls>,
                 "elfldltl::RelocateSymbolic requires resolve(const Sym&, RelocateTls) callback");
 
   using Traits = RelocationTraits<Machine>;
   using Tls = TlsTraits<Elf, Machine>;
-  using Type = typename Traits::Type;
+  using Type = Traits::Type;
 
   // Apply either a REL or RELA reloc resolved to a value, ignoring the addend.
   auto apply_no_addend = [&](const auto& reloc, size_type value) -> bool {
@@ -157,10 +205,10 @@ constexpr bool RelocateSymbolic(
 
   // Apply either a REL or RELA reloc resolved to a value, using the addend.
   auto apply_with_addend = [&](const auto& reloc, size_type value) -> bool {
-    if constexpr (std::is_same_v<decltype(reloc), const Rel&>) {
+    if constexpr (std::same_as<decltype(reloc), const Rel&>) {
       return memory.template StoreAdd<Addr>(reloc.offset, value);
     } else {
-      static_assert(std::is_same_v<decltype(reloc), const Rela&>);
+      static_assert(std::same_as<decltype(reloc), const Rela&>);
       return memory.template Store<Addr>(reloc.offset, value + reloc.addend());
     }
   };
@@ -252,8 +300,8 @@ constexpr bool RelocateSymbolic(
     // It cannot fail, so wrap it in an OK result.  The return type is always
     // fit::result<bool, TlsDescGot>, which is what would be deduced.  But
     // using explicit decltype on the call expression makes calls
-    // SFINAE-friendly so that std::is_invocable_v can be used below.
-    // Otherwise the lambda looks like it can be called with any arguments.
+    // SFINAE-friendly so that std::invocable can be used below.  Otherwise the
+    // lambda looks like it can be called with any arguments.
     auto weak_desc = [&defn](auto&&... args)
         -> fit::result<  //
             bool, decltype(defn.tls_desc_undefined_weak(std::forward<decltype(args)>(args)...))> {
@@ -270,7 +318,7 @@ constexpr bool RelocateSymbolic(
     auto apply = [reloc, value_reloc, apply_no_addend, apply_with_addend,
                   &memory](auto&& get_desc) -> bool {
       using Reloc = std::decay_t<decltype(value_reloc)>;
-      constexpr bool kAddend = std::is_invocable_v<decltype(get_desc), Addend>;
+      constexpr bool kAddend = std::invocable<decltype(get_desc), Addend>;
 
       const auto& apply_value = [&]() -> auto& {
         if constexpr (kAddend) {
@@ -284,7 +332,7 @@ constexpr bool RelocateSymbolic(
       }();
 
       auto get_addend = [&]() -> fit::result<bool, Addend> {
-        if constexpr (std::is_same_v<Reloc, Rel>) {
+        if constexpr (std::same_as<Reloc, Rel>) {
           // The addend must be read out of the memory being relocated.
           auto read = memory.template ReadArray<Addend>(value_reloc.offset, 1);
           if (!read) {
@@ -292,7 +340,7 @@ constexpr bool RelocateSymbolic(
           }
           return fit::ok(read->front());
         } else {
-          static_assert(std::is_same_v<Reloc, Rela>);
+          static_assert(std::same_as<Reloc, Rela>);
           std::ignore = &memory;
           return fit::ok(value_reloc.addend);
         }

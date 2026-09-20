@@ -28,7 +28,6 @@ use starnix_sync::{IoUringStateLock, LockDepMutex};
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
 use starnix_types::user_buffer::{UserBuffer, UserBuffers};
 use starnix_uapi::errors::Errno;
-use starnix_uapi::file_mode::Access;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::user_address::{ArchSpecific, UserAddress, UserRef};
 use starnix_uapi::user_value::UserValue;
@@ -1192,7 +1191,6 @@ impl FileOps for IoUringFileObject {
             0,
             length,
             prot_flags,
-            Access::rwx(),
             options,
             MappingName::File(file.to_mapping(None)?),
         )

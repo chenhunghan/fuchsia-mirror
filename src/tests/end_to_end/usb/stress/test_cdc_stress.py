@@ -52,11 +52,6 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """Called once before running test cases in the class."""
         await super().setup_class()
-        self._usb_power_hub: usb_power_hub.UsbPowerHub
-        self._usb_port: int | None
-        (self._usb_power_hub, self._usb_port) = self._lookup_usb_power_hub(
-            self.dut
-        )
         await self._wait_for_network_settled()
 
     async def _wait_for_ssh_ready(self, timeout_sec: float = 60.0) -> None:
@@ -512,6 +507,15 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
         Physically cuts USB VBUS power, verifies device drop from host bus, restores
         power, and confirms automatic re-enumeration and IP connection recovery.
         """
+        # Only this test case needs a hub, so fail just this case rather than
+        # aborting the class. We fail instead of skipping because a skipped test
+        # still shows up as passing in CI/CQ, hiding the missing hub.
+        hub: usb_power_hub.UsbPowerHub | None = self.dut.usb_power_hub
+        assert (
+            hub is not None
+        ), f"USB power hub is not configured for {self.dut.device_name}."
+        port: int | None = self.dut.usb_power_hub_port
+
         num_iterations = int(self.user_params.get("power_iterations", 3))
         disconnect_duration = int(
             self.user_params.get("disconnect_duration_sec", 5)
@@ -529,10 +533,10 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
             try:
                 # Cut physical VBUS power via hardware USB hub
                 self.dut.ffx.notify_intentional_disconnect()
-                self._usb_power_hub.power_off(port=self._usb_port)
+                hub.power_off(port=port)
                 _LOGGER.info(
                     "Powered off USB port %s. Waiting for offline...",
-                    self._usb_port,
+                    port,
                 )
                 await asyncio.to_thread(self.dut.wait_for_offline)
 
@@ -541,10 +545,10 @@ class CdcStressTest(fuchsia_base_test.FuchsiaBaseTest):
                     await asyncio.sleep(disconnect_duration)
             finally:
                 # Restore VBUS power and verify CDC Ethernet network re-enumeration
-                self._usb_power_hub.power_on(port=self._usb_port)
+                hub.power_on(port=port)
                 _LOGGER.info(
                     "Powered on USB port %s. Waiting for CDC network recovery...",
-                    self._usb_port,
+                    port,
                 )
                 await self.dut.wait_for_online()
                 await self.dut.on_device_boot()

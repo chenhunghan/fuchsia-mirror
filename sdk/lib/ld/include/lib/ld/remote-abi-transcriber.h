@@ -195,7 +195,7 @@ struct RemoteAbiTranscriberImpl<T, RemoteAbiTranscriberImplType::kClass> {
   static_assert(std::has_unique_object_representations_v<T>,
                 "padding bytes not allowed in transcribable types");
 
-  using Local = typename T::AbiLocal;
+  using Local = T::AbiLocal;
   static_assert(!std::is_same_v<Local, T>,
                 "should specialize to kVerbatim for types with no AbiTraits"
                 " unless layout types, which kIsLayout should match");
@@ -223,11 +223,11 @@ struct RemoteAbiTranscriberImpl<T, RemoteAbiTranscriberImplType::kClass> {
 
     template <typename Context>
     static constexpr bool FromLocal(Context& ctx, T& out, const Local& in) {
-      using Impl = typename Local::template AbiBases<LocalBasesImpl>;
+      using Impl = Local::template AbiBases<LocalBasesImpl>;
       return Impl::FromLocal(ctx, out, in);
     }
   };
-  using Bases = typename T::template AbiBases<BasesImpl>;
+  using Bases = T::template AbiBases<BasesImpl>;
 
   template <auto Member, auto LocalMember, typename Context>
   static constexpr bool MemberFromLocal(Context& ctx, T& out, const Local& in) {
@@ -283,11 +283,11 @@ struct RemoteAbiTranscriberImpl<T, RemoteAbiTranscriberImplType::kClass> {
 
     template <typename Context>
     static constexpr bool FromLocal(Context& ctx, T& out, const Local& in) {
-      using Impl = typename Local::template AbiMembers<LocalMembersImpl>;
+      using Impl = Local::template AbiMembers<LocalMembersImpl>;
       return Impl::FromLocal(ctx, out, in);
     }
   };
-  using Members = typename T::template AbiMembers<MembersImpl>;
+  using Members = T::template AbiMembers<MembersImpl>;
 
   template <typename Context>
   static constexpr bool FromLocal(Context&& ctx, T& out, const Local& in) {
@@ -320,7 +320,7 @@ struct RemoteAbiTranscriberImpl<T, RemoteAbiTranscriberImplType::kUnsupported> {
 template <typename T, size_t N>
 struct RemoteAbiTranscriber<std::array<T, N>> {
   using Remote = std::array<T, N>;
-  using LocalT = typename RemoteAbiTranscriber<T>::Local;
+  using LocalT = RemoteAbiTranscriber<T>::Local;
   using Local = std::array<LocalT, N>;
 
   template <typename Context>
@@ -362,7 +362,7 @@ struct RemoteAbiTranscriber<std::array<T, N>> {
 //
 template <typename T, class Elf, class RemoteTraits>
 struct RemoteAbiTranscriber<elfldltl::AbiPtr<T, Elf, RemoteTraits>> {
-  using Addr = typename Elf::Addr;
+  using Addr = Elf::Addr;
 
   using Remote = elfldltl::AbiPtr<T, Elf, RemoteTraits>;
   using DecayedT = std::decay_t<T>;
@@ -405,10 +405,10 @@ struct RemoteAbiTranscriber<elfldltl::AbiPtr<T, Elf, RemoteTraits>> {
 template <typename T, size_t N, class Elf, class RemoteTraits>
 struct RemoteAbiTranscriber<elfldltl::AbiSpan<T, N, Elf, RemoteTraits>> {
   using Remote = elfldltl::AbiSpan<T, N, Elf, RemoteTraits>;
-  using RemotePtr = typename Remote::Ptr;
+  using RemotePtr = Remote::Ptr;
   using PtrTranscriber = RemoteAbiTranscriber<RemotePtr>;
-  using LocalPtr = typename PtrTranscriber::Local;
-  using LocalValue = typename LocalPtr::value_type;
+  using LocalPtr = PtrTranscriber::Local;
+  using LocalValue = LocalPtr::value_type;
   using Local = elfldltl::AbiSpan<LocalValue, N, Elf>;
 
   template <typename Context>

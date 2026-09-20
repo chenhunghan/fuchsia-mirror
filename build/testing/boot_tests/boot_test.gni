@@ -116,13 +116,17 @@ template("_boot_test") {
                              "assert_no_deps",
                              "data_deps",
                              "deps",
-                             "environments",
                              "visibility",
                            ])
 
     if ((defined(invoker.disabled) && invoker.disabled) || disable_boot_tests) {
-      # A disabled test is marked by an empty environments list.
-      environments = []
+      # A disabled test is still built.
+      build_only = true
+
+      # But acknowledge that we're ignoring it's environments.
+      not_needed(invoker, [ "environments" ])
+    } else {
+      forward_variables_from(invoker, [ "environments" ])
     }
 
     timeout_secs = timeout_secs

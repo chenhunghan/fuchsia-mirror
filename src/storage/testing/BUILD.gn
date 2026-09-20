@@ -11,7 +11,6 @@ expect_includes("storage_test_includes") {
 group("storage_drivers") {
   testonly = true
   deps = [
-    "//src/devices/block/drivers/core",
     "//src/devices/block/drivers/ftl",
     "//src/devices/block/drivers/ramdisk",
     "//src/devices/nand/drivers/ram-nand",

@@ -122,6 +122,9 @@ class HostapdTest(unittest.TestCase):
         self.assertEqual(status.rssi, -45)
         self.assertEqual(status.tx_rate_mbps, 144.4)
         self.assertEqual(status.rx_rate_mbps, 72.2)
+        self.assertIsNone(status.snr)
+        self.assertEqual(status.phy_mode, "vht")
+        self.assertIsNone(status.nss)
 
     def test_get_sta_status_without_rates(self):
         hostapd_mock = hostapd.Hostapd("mock_runner", "wlan0")
@@ -142,10 +145,13 @@ class HostapdTest(unittest.TestCase):
             "tx_rate_info=8667\n"
             "rx_rate_info=4333\n"
         )
-        rssi, tx_mbps, rx_mbps = hostapd.parse_station_output(mib_output)
-        self.assertEqual(rssi, -55)
-        self.assertEqual(tx_mbps, 866.7)
-        self.assertEqual(rx_mbps, 433.3)
+        telemetry = hostapd.parse_station_output(mib_output)
+        self.assertEqual(telemetry.rssi, -55)
+        self.assertEqual(telemetry.tx_rate_mbps, 866.7)
+        self.assertEqual(telemetry.rx_rate_mbps, 433.3)
+        self.assertIsNone(telemetry.snr)
+        self.assertIsNone(telemetry.phy_mode)
+        self.assertIsNone(telemetry.nss)
 
     def test_parse_station_output_iw_format(self):
         iw_output = (
@@ -155,19 +161,25 @@ class HostapdTest(unittest.TestCase):
             "  tx bitrate: 144.4 MBit/s\n"
             "  rx bitrate: 72.2 Mbps\n"
         )
-        rssi, tx_mbps, rx_mbps = hostapd.parse_station_output(iw_output)
-        self.assertEqual(rssi, -48)
-        self.assertEqual(tx_mbps, 144.4)
-        self.assertEqual(rx_mbps, 72.2)
+        telemetry = hostapd.parse_station_output(iw_output)
+        self.assertEqual(telemetry.rssi, -48)
+        self.assertEqual(telemetry.tx_rate_mbps, 144.4)
+        self.assertEqual(telemetry.rx_rate_mbps, 72.2)
+        self.assertIsNone(telemetry.snr)
+        self.assertIsNone(telemetry.phy_mode)
+        self.assertIsNone(telemetry.nss)
 
     def test_parse_station_output_gbit_and_kbit(self):
         output = (
             "signal: -30 dBm\ntx bitrate: 1.2 GBit/s\nrx bitrate: 500 kbps\n"
         )
-        rssi, tx_mbps, rx_mbps = hostapd.parse_station_output(output)
-        self.assertEqual(rssi, -30)
-        self.assertEqual(tx_mbps, 1200.0)
-        self.assertEqual(rx_mbps, 0.5)
+        telemetry = hostapd.parse_station_output(output)
+        self.assertEqual(telemetry.rssi, -30)
+        self.assertEqual(telemetry.tx_rate_mbps, 1200.0)
+        self.assertEqual(telemetry.rx_rate_mbps, 0.5)
+        self.assertIsNone(telemetry.snr)
+        self.assertIsNone(telemetry.phy_mode)
+        self.assertIsNone(telemetry.nss)
 
     def test_parse_station_output_result_object(self):
         res = Result(
@@ -175,10 +187,29 @@ class HostapdTest(unittest.TestCase):
             stdout=b"signal=-60\ntx_rate: 300.0 Mbps\nrx_rate: 150.0 Mbps\n",
             exit_status=0,
         )
-        rssi, tx_mbps, rx_mbps = hostapd.parse_station_output(res)
-        self.assertEqual(rssi, -60)
-        self.assertEqual(tx_mbps, 300.0)
-        self.assertEqual(rx_mbps, 150.0)
+        telemetry = hostapd.parse_station_output(res)
+        self.assertEqual(telemetry.rssi, -60)
+        self.assertEqual(telemetry.tx_rate_mbps, 300.0)
+        self.assertEqual(telemetry.rx_rate_mbps, 150.0)
+        self.assertIsNone(telemetry.snr)
+        self.assertIsNone(telemetry.phy_mode)
+        self.assertIsNone(telemetry.nss)
+
+    def test_parse_station_output_snr_phy_mode_nss(self):
+        output = (
+            "Station aa:bb:cc:dd:ee:ff (on wlan0)\n"
+            "  signal: -45 dBm\n"
+            "  noise: -95 dBm\n"
+            "  tx bitrate: 1201.0 MBit/s HE-MCS 11 80MHz HE-NSS 2\n"
+            "  rx bitrate: 864.7 MBit/s VHT-MCS 9 80MHz VHT-NSS 2\n"
+        )
+        telemetry = hostapd.parse_station_output(output)
+        self.assertEqual(telemetry.rssi, -45)
+        self.assertEqual(telemetry.tx_rate_mbps, 1201.0)
+        self.assertEqual(telemetry.rx_rate_mbps, 864.7)
+        self.assertEqual(telemetry.snr, 50)
+        self.assertEqual(telemetry.phy_mode, "he")
+        self.assertEqual(telemetry.nss, 2)
 
 
 if __name__ == "__main__":

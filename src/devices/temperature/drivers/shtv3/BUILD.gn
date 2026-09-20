@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("shtv3-dml") {
+  dml = "meta/shtv3.dml"
+  driver_name = "shtv3"
+}
+
 driver_bind_rules("shtv3-bind") {
-  rules = "meta/shtv3.bind"
+  bind_output = "shtv3.bindbc"
+  dml_label = ":shtv3-dml"
   tests = "meta/shtv3-bind-test.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -43,10 +49,10 @@ fuchsia_cc_driver("shtv3-driver") {
 }
 
 fuchsia_driver_component("shtv3") {
+  dml_label = ":shtv3-dml"
   info = "meta/shtv3-info.json"
   component_name = "shtv3"
   deps = [ ":shtv3-driver" ]
-  manifest = "meta/shtv3.cml"
 }
 
 fuchsia_driver_package("package") {

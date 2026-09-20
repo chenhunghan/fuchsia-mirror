@@ -54,27 +54,57 @@ static bool IsOpteeApiRevisionSupported(const tee_smc::TrustedOsCallRevisionResu
 }
 
 void OpteeControllerBase::WaitQueueWait(const uint64_t key) {
-  wq_lock_.Acquire();
-  if (wait_queue_.find(key) == wait_queue_.end()) {
-    wait_queue_.emplace(std::piecewise_construct, std::forward_as_tuple(key),
-                        std::forward_as_tuple());
+  std::shared_ptr<WaitCtx> wait_ctx;
+  {
+    fbl::AutoLock wq_lock(&wq_lock_);
+    auto it = wait_queue_.find(key);
+    // If a signal was already sent (wake up before sleep), consume it and return immediately.
+    if (it != wait_queue_.end() && it->second.has_pending_signal) {
+      it->second.has_pending_signal = false;
+      // Clean up the map entry if there are no other waiters to prevent memory leaks.
+      if (it->second.waiters.empty()) {
+        wait_queue_.erase(it);
+      }
+      return;
+    }
+
+    // Allocate a new WaitCtx for this waiter. It is managed by shared_ptr to prevent
+    // use-after-free if the entry is erased from the map while we are still waiting.
+    wait_ctx = std::make_shared<WaitCtx>();
+    if (it == wait_queue_.end()) {
+      it = wait_queue_.emplace(key, WaitQueueEntry{}).first;
+    }
+    it->second.waiters.push_back(wait_ctx);
   }
-  wq_lock_.Release();
 
-  wait_queue_.at(key).Wait();
-
-  wq_lock_.Acquire();
-  wait_queue_.erase(key);
-  wq_lock_.Release();
+  // Block the thread until signaled. The lock is released here to allow other threads
+  // to run concurrent wait/signal operations.
+  wait_ctx->Wait();
 }
 
 void OpteeControllerBase::WaitQueueSignal(const uint64_t key) {
   fbl::AutoLock wq_lock(&wq_lock_);
-  if (wait_queue_.find(key) == wait_queue_.end()) {
-    wait_queue_.emplace(std::piecewise_construct, std::forward_as_tuple(key),
-                        std::forward_as_tuple());
+  auto it = wait_queue_.find(key);
+  // If the key is not in the map, buffer the signal for a future waiter.
+  if (it == wait_queue_.end()) {
+    wait_queue_.emplace(key, WaitQueueEntry{.has_pending_signal = true});
+    return;
   }
-  wait_queue_.at(key).Signal();
+
+  // Wake up the first waiter in the queue (1:1 mapping between signal and waiter).
+  if (!it->second.waiters.empty()) {
+    std::shared_ptr<WaitCtx> wait_ctx = it->second.waiters.front();
+    it->second.waiters.pop_front();
+    wait_ctx->Signal();
+  } else {
+    // If all waiters have already been signaled, buffer the signal.
+    it->second.has_pending_signal = true;
+  }
+
+  // Clean up the map entry if the queue is empty and there are no buffered signals.
+  if (it->second.waiters.empty() && !it->second.has_pending_signal) {
+    wait_queue_.erase(it);
+  }
 }
 
 size_t OpteeControllerBase::WaitQueueSize() const { return wait_queue_.size(); }

@@ -29,6 +29,8 @@ config("headers.config") {
 config("disable_warnings") {
   visibility = [ ":*" ]
 
+  configs = [ "//build/config:Wno-unterminated-string-initialization" ]
+
   cflags = [
     "-Wno-conversion",
     "-Wno-extern-c-compat",

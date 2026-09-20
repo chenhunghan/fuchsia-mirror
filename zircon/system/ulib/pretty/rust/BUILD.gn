@@ -13,6 +13,7 @@ rustc_library("pretty") {
     "src/lib.rs",
     "src/sizes.rs",
   ]
+  deps = [ "//src/lib/kprint" ]
   with_unit_tests = true
 
   # TODO(https://fxbug.dev/548748442): remove when all fixed in the code

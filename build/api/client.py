@@ -140,7 +140,7 @@ class BuildApiModuleList(object):
     """Models the list of all build API module files."""
 
     def __init__(self, build_dir: Path):
-        self._modules: T.List[BuildApiModule] = []
+        self._modules: list[BuildApiModule] = []
         self.list_path = build_dir / "build_api_client_info"
         if not self.list_path.exists():
             return
@@ -1173,7 +1173,7 @@ class FileToTestPackageCache(object):
                 file=sys.stderr,
             )
 
-    def get(self, source_path: str) -> T.Optional[list[str]]:
+    def get(self, source_path: str) -> list[str] | None:
         """Retrieves the list of test packages associated with a source file.
 
         Args:

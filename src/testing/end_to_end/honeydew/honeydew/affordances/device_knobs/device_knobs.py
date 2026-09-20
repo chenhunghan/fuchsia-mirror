@@ -25,6 +25,7 @@ from honeydew.affordances.tracing import tracing
 from honeydew.affordances.ui.screenshot import screenshot
 from honeydew.affordances.ui.user_input import user_input
 from honeydew.affordances.virtual_audio import audio
+from honeydew.transports.adb import adb as adb_transport
 from honeydew.transports.fastboot import fastboot as fastboot_transport
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.fuchsia_controller import (
@@ -125,6 +126,18 @@ class DeviceKnobs(abc.ABC):
         """
 
     # List all the transports
+    @properties.Transport
+    @abc.abstractmethod
+    def adb(self) -> adb_transport.Adb:
+        """Returns the ADB transport object.
+
+        Returns:
+            ADB transport interface implementation.
+
+        Raises:
+            errors.AdbError: Failed to instantiate.
+        """
+
     @properties.Transport
     @abc.abstractmethod
     def fastboot(self) -> fastboot_transport.Fastboot:

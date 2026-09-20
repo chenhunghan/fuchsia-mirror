@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	v2config "go.fuchsia.dev/fuchsia/tools/check-licenses/config"
-	v2readme "go.fuchsia.dev/fuchsia/tools/check-licenses/readme"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/config"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
 )
 
 // ReconstructCommand scans raw args to find -bug and -desc flags and their values,
@@ -86,63 +86,11 @@ func ReconstructCommand(commandPath string, args []string, placeholders []string
 	return cmdBuilder.String(), misplacedFlags
 }
 
-func findProjectBasename(fuchsiaDir, targetPath string, config *v2config.MasterConfig) string {
-	cleanTargetPath := filepath.Clean(targetPath)
-	absTargetPath := filepath.Join(fuchsiaDir, cleanTargetPath)
-
-	// Priority 1: Check README.fuchsia (or Cargo.toml / go.mod) for an explicit Name
-	metadataFiles := []string{"README.fuchsia", "Cargo.toml", "go.mod", "pubspec.yaml"}
-	for _, mf := range metadataFiles {
-		metaPath := filepath.Join(absTargetPath, mf)
-		if _, err := os.Stat(metaPath); err == nil {
-			if rootReadmes, subReadmes, err := v2readme.ParseAnyMetadata(metaPath); err == nil {
-				if len(rootReadmes) > 0 && rootReadmes[0].Name != "" {
-					return filepath.Base(rootReadmes[0].Name)
-				}
-				if len(subReadmes) > 0 && subReadmes[0].Name != "" {
-					return filepath.Base(subReadmes[0].Name)
-				}
-			}
-		}
+func findProjectBasename(fuchsiaDir, targetPath string, cfg *config.MasterConfig) string {
+	if cfg != nil {
+		return cfg.FindProjectBasename(targetPath)
 	}
-
-	// Priority 1.5: Check Virtual Out-Of-Tree READMEs from MasterConfig
-	if config != nil && config.Boundary.OutOfTreeReadmes != nil {
-		if virtualReadmePath, ok := config.Boundary.OutOfTreeReadmes[cleanTargetPath]; ok {
-			absVirtualPath := virtualReadmePath
-			if !filepath.IsAbs(absVirtualPath) {
-				absVirtualPath = filepath.Join(fuchsiaDir, virtualReadmePath)
-			}
-			if _, err := os.Stat(absVirtualPath); err == nil {
-				if rootReadmes, _, err := v2readme.ParseAnyMetadata(absVirtualPath); err == nil && len(rootReadmes) > 0 && rootReadmes[0].Name != "" {
-					return filepath.Base(rootReadmes[0].Name)
-				}
-			}
-		}
-	}
-
-	// Priority 2: Check Jiri Manifest mapping
-	if config != nil {
-		if name := config.ManifestNameFor(cleanTargetPath); name != "" {
-			return filepath.Base(name)
-		}
-	}
-
-	// Priority 3: Fallback for first-party or paths not in manifest
-	dir := filepath.Dir(cleanTargetPath)
-	if dir == "." || dir == "/" {
-		return "root"
-	}
-
-	parts := strings.Split(cleanTargetPath, string(filepath.Separator))
-	if len(parts) > 0 && parts[0] != "" {
-		if parts[0] == "src" && len(parts) > 1 && parts[1] != "" {
-			return parts[1]
-		}
-		return parts[0]
-	}
-
-	return "root"
+	return config.NewMasterConfig(fuchsiaDir).FindProjectBasename(targetPath)
 }
 
 // ResolveAndValidatePath normalizes the fuchsia root and ensures the given input path
@@ -192,7 +140,7 @@ type InputContext struct {
 	FuchsiaDir string
 	RelPath    string
 	AbsPath    string
-	Config     *v2config.MasterConfig
+	Config     *config.MasterConfig
 }
 
 // LoadInputContext normalizes the input path within the Fuchsia workspace and loads the v2 MasterConfig.
@@ -202,7 +150,7 @@ func LoadInputContext(fuchsiaDirFlag, inputPath string) (*InputContext, error) {
 		return nil, err
 	}
 	absPath := filepath.Join(absFuchsia, relPath)
-	builder := v2config.NewBuilder(absFuchsia)
+	builder := config.NewBuilder(absFuchsia)
 	if err := builder.Assemble(); err != nil {
 		return nil, fmt.Errorf("failed to assemble configuration: %w", err)
 	}
@@ -221,23 +169,16 @@ func (ic *InputContext) ResolveProjectRoot(inputPath string) (string, error) {
 		return "", err
 	}
 	absPath := filepath.Join(fuchsiaDir, relPath)
-	info, err := os.Stat(absPath)
-	if err != nil {
+	if _, err := os.Stat(absPath); err != nil {
 		return "", fmt.Errorf("path does not exist: %s", inputPath)
 	}
-	r, bestReadmePath, err := v2readme.FindProjectReadme(absPath, fuchsiaDir, ic.Config.Boundary.OutOfTreeReadmes)
-	if err == nil && bestReadmePath != "" && r != nil {
-		return v2readme.ResolveProjectRoot(r, bestReadmePath, fuchsiaDir, ic.Config.Boundary.OutOfTreeReadmes), nil
-	}
-	if info.IsDir() {
-		return absPath, nil
-	}
-	return filepath.Dir(absPath), nil
+	grouper := boundary.NewGrouper(fuchsiaDir, ic.Config.Boundary)
+	return grouper.ResolveProjectRoot(absPath), nil
 }
 
 // UpdateConfigFile reads, mutates, and writes back a ConfigFile.
-func UpdateConfigFile(destFile string, mutate func(*v2config.ConfigFile)) error {
-	var cfg v2config.ConfigFile
+func UpdateConfigFile(destFile string, mutate func(*config.ConfigFile)) error {
+	var cfg config.ConfigFile
 	if data, err := os.ReadFile(destFile); err == nil {
 		json.Unmarshal(data, &cfg)
 	}

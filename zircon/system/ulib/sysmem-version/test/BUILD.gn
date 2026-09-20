@@ -6,13 +6,13 @@ import("//build/components.gni")
 import("//build/test.gni")
 
 executable("sysmem-version-test") {
+  testonly = true
+
   sources = [ "sysmem-version-test.cc" ]
   deps = [
-    "//sdk/lib/fdio",
     "//zircon/system/ulib/sysmem-version",
     "//zircon/system/ulib/zxtest",
   ]
-  testonly = true
 
   # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
   # rather than builders.

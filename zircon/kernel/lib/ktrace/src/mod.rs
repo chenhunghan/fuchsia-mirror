@@ -278,29 +278,29 @@ impl<'a> Argument<'a> {
     }
 }
 
-pub struct KTraceScope<'a> {
+pub struct KTraceScope<'a, const N: usize> {
     category: &'static InternedCategory,
     name: &'static InternedString,
     timestamp: InstantBootTicks,
     context: Context,
-    args: &'a [Argument<'a>],
+    args: [Argument<'a>; N],
 }
 
-impl<'a> KTraceScope<'a> {
+impl<'a, const N: usize> KTraceScope<'a, N> {
     #[inline(never)]
     #[cold]
     pub fn begin(
         category: &'static InternedCategory,
         name: &'static InternedString,
         context: Context,
-        args: &'a [Argument<'a>],
+        args: [Argument<'a>; N],
     ) -> Self {
         let timestamp = timer_current_boot_ticks();
         Self { category, name, timestamp, context, args }
     }
 }
 
-impl<'a> Drop for KTraceScope<'a> {
+impl<'a, const N: usize> Drop for KTraceScope<'a, N> {
     #[inline(never)]
     #[cold]
     fn drop(&mut self) {
@@ -313,7 +313,7 @@ impl<'a> Drop for KTraceScope<'a> {
             self.timestamp,
             self.context,
             Some(end_time.0 as u64),
-            self.args,
+            &self.args,
         );
     }
 }
@@ -1594,6 +1594,24 @@ mod tests {
         word_idx += 2;
 
         expect_eq!(word_idx, total_words);
+    }
+
+    /// A scope with arguments can be bound to a local variable.
+    #[test]
+    fn scope_owns_arguments() {
+        let value = timer_current_boot_ticks().0 as u64;
+        let scope = begin_scope!(META_CAT, "scope_owns_arguments", "val" => value);
+
+        expect_ne!(scope.timestamp.0, 0);
+        expect_eq!(scope.args.len(), 1);
+        match scope.args[0].value {
+            ArgValue::Uint64(v) => {
+                expect_eq!(v, value);
+            }
+            _ => panic!("Expected ArgValue::Uint64"),
+        }
+
+        // Dropping `scope` here emits the complete event from the arguments it owns.
     }
 
     /// Verifies bitfield layout construction and encoding.

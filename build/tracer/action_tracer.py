@@ -20,17 +20,11 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Collection, Iterable, Sequence
 from typing import (
     AbstractSet,
     Any,
-    Callable,
-    Collection,
-    FrozenSet,
-    Iterable,
-    Optional,
-    Sequence,
     TextIO,
-    Tuple,
 )
 
 trailing_white_spaces = re.compile("\\\s+\r?\n")
@@ -38,7 +32,7 @@ trailing_white_spaces = re.compile("\\\s+\r?\n")
 
 def _partition(
     iterable: Iterable[Any], predicate: Callable[[Any], bool]
-) -> Tuple[Sequence[Any], Sequence[Any]]:
+) -> tuple[Sequence[Any], Sequence[Any]]:
     """Splits sequence into two sequences based on predicate function."""
     trues = []
     falses = []
@@ -58,10 +52,10 @@ class FileAccessType(enum.Enum):
 
 @dataclasses.dataclass
 class MatchConditions(object):
-    prefixes: FrozenSet[str] = dataclasses.field(default_factory=set)
-    suffixes: FrozenSet[str] = dataclasses.field(default_factory=set)
-    components: FrozenSet[str] = dataclasses.field(default_factory=set)
-    component_prefixes: FrozenSet[str] = dataclasses.field(default_factory=set)
+    prefixes: frozenset[str] = dataclasses.field(default_factory=set)
+    suffixes: frozenset[str] = dataclasses.field(default_factory=set)
+    components: frozenset[str] = dataclasses.field(default_factory=set)
+    component_prefixes: frozenset[str] = dataclasses.field(default_factory=set)
 
     def matches(self, path: str) -> bool:
         """Returns true if path matches any of the conditions."""
@@ -175,7 +169,7 @@ class FSAccess(object):
         return not ignore_conditions.matches(self.path)
 
     def allowed(
-        self, allowed_reads: FrozenSet[str], allowed_writes: FrozenSet[str]
+        self, allowed_reads: frozenset[str], allowed_writes: frozenset[str]
     ) -> bool:
         """Validates a file system access against a set of allowed accesses.
 
@@ -263,13 +257,13 @@ def _abspaths(container: Iterable[str]) -> AbstractSet[str]:
 class AccessConstraints(object):
     """Set of file system accesses constraints."""
 
-    allowed_reads: FrozenSet[str] = dataclasses.field(default_factory=set)
-    allowed_writes: FrozenSet[str] = dataclasses.field(default_factory=set)
-    required_writes: FrozenSet[str] = dataclasses.field(default_factory=set)
+    allowed_reads: frozenset[str] = dataclasses.field(default_factory=set)
+    allowed_writes: frozenset[str] = dataclasses.field(default_factory=set)
+    required_writes: frozenset[str] = dataclasses.field(default_factory=set)
     # TODO(fangism): forbidden_deletes should probably include declared inputs
 
     @property
-    def inputs(self) -> FrozenSet[str]:
+    def inputs(self) -> frozenset[str]:
         # allowed_reads includes allowed_writes (and required_writes), so consider
         # "inputs" as their set-difference.
         return self.allowed_reads - self.allowed_writes - self.required_writes
@@ -277,8 +271,8 @@ class AccessConstraints(object):
 
 @dataclasses.dataclass
 class DepEdges(object):
-    ins: FrozenSet[str] = dataclasses.field(default_factory=set)
-    outs: FrozenSet[str] = dataclasses.field(default_factory=set)
+    ins: frozenset[str] = dataclasses.field(default_factory=set)
+    outs: frozenset[str] = dataclasses.field(default_factory=set)
 
     def abspaths(self) -> "DepEdges":
         return DepEdges(ins=_abspaths(self.ins), outs=_abspaths(self.outs))
@@ -389,7 +383,7 @@ def parse_depfile(depfile_lines: Iterable[str]) -> DepFile:
 
 
 def abspaths_from_depfile(
-    depfile: DepFile, allowed_abspaths: FrozenSet[str]
+    depfile: DepFile, allowed_abspaths: frozenset[str]
 ) -> Collection[str]:
     return [
         f
@@ -404,9 +398,9 @@ class Action(object):
 
     inputs: Sequence[str] = dataclasses.field(default_factory=list)
     outputs: Collection[str] = dataclasses.field(default_factory=list)
-    depfile: Optional[str] = None
-    hermetic_inputs: Optional[Collection[str]] = None
-    parsed_depfile: Optional[DepFile] = None
+    depfile: str | None = None
+    hermetic_inputs: Collection[str] | None = None
+    parsed_depfile: DepFile | None = None
 
     def access_constraints(
         self, writeable_depfile_inputs: bool = False
@@ -458,12 +452,12 @@ def _sorted_join(elements: Iterable[str], joiner: str) -> str:
 
 @dataclasses.dataclass
 class FSAccessSet(object):
-    reads: FrozenSet[str] = dataclasses.field(default_factory=set)
-    writes: FrozenSet[str] = dataclasses.field(default_factory=set)
-    deletes: FrozenSet[str] = dataclasses.field(default_factory=set)
+    reads: frozenset[str] = dataclasses.field(default_factory=set)
+    writes: frozenset[str] = dataclasses.field(default_factory=set)
+    deletes: frozenset[str] = dataclasses.field(default_factory=set)
 
     @property
-    def all_accesses(self) -> FrozenSet[str]:
+    def all_accesses(self) -> frozenset[str]:
         return self.reads | self.writes | self.deletes
 
     def __str__(self) -> str:
@@ -548,7 +542,7 @@ def check_access_permissions(
 
 
 def check_missing_writes(
-    accesses: Iterable[FSAccess], required_writes: FrozenSet[str]
+    accesses: Iterable[FSAccess], required_writes: frozenset[str]
 ) -> AbstractSet[str]:
     """Tracks sequence of access to verify that required files are written.
 
@@ -591,15 +585,15 @@ def _verbose_path(path: str) -> str:
 class StalenessDiagnostics(object):
     """Just a structure to capture results of diagnosing outputs."""
 
-    required_writes: FrozenSet[str] = dataclasses.field(default_factory=set)
-    nonexistent_outputs: FrozenSet[str] = dataclasses.field(default_factory=set)
+    required_writes: frozenset[str] = dataclasses.field(default_factory=set)
+    nonexistent_outputs: frozenset[str] = dataclasses.field(default_factory=set)
     # If there are stale_outputs, then it must have been compared against a
     # newest_input.
-    newest_input: Optional[str] = None
-    stale_outputs: FrozenSet[str] = dataclasses.field(default_factory=set)
+    newest_input: str | None = None
+    stale_outputs: frozenset[str] = dataclasses.field(default_factory=set)
 
     @property
-    def has_findings(self) -> FrozenSet[str]:
+    def has_findings(self) -> frozenset[str]:
         return self.nonexistent_outputs or self.stale_outputs
 
     def print_findings(self, stream: TextIO) -> None:
@@ -805,7 +799,7 @@ def get_intended_tool(command: ToolCommand) -> str:
     return command.tool
 
 
-def get_python_script(command: ToolCommand) -> Optional[str]:
+def get_python_script(command: ToolCommand) -> str | None:
     """If the script being invoked is python, return the relevant .py file"""
     # Cover both cases when the tool:
     #

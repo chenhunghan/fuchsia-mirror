@@ -8,8 +8,9 @@
 import argparse
 import dataclasses
 import enum
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import AbstractSet, Any, Iterable, Optional, Sequence, Tuple
+from typing import AbstractSet, Any
 
 import cl_utils
 
@@ -21,7 +22,7 @@ def _remove_suffix(text: str, suffix: str) -> str:
     return text
 
 
-def _cxx_command_scanner() -> Tuple[argparse.ArgumentParser, Sequence[str]]:
+def _cxx_command_scanner() -> tuple[argparse.ArgumentParser, Sequence[str]]:
     parser = argparse.ArgumentParser(
         description="Detects C++ compilation attributes (clang, gcc)",
         argument_default=[],
@@ -640,11 +641,11 @@ class CxxAction(object):
         return self._command
 
     @property
-    def output_file(self) -> Optional[Path]:
+    def output_file(self) -> Path | None:
         return self._attributes.output  # usually this is the -o file
 
     @property
-    def crash_diagnostics_dir(self) -> Optional[Path]:
+    def crash_diagnostics_dir(self) -> Path | None:
         return self._attributes.crash_diagnostics_dir
 
     @property
@@ -652,7 +653,7 @@ class CxxAction(object):
         return self._compiler
 
     @property
-    def depfile(self) -> Optional[Path]:
+    def depfile(self) -> Path | None:
         return self._cpp_attributes.depfile
 
     @property
@@ -660,7 +661,7 @@ class CxxAction(object):
         return self._attributes.target
 
     @property
-    def sysroot(self) -> Optional[Path]:
+    def sysroot(self) -> Path | None:
         return self._attributes.sysroot
 
     @property
@@ -732,23 +733,23 @@ class CxxAction(object):
         return self._linker_driver_flags
 
     @property
-    def linker_depfile(self) -> Optional[Path]:
+    def linker_depfile(self) -> Path | None:
         return self._linker_attributes.depfile
 
     @property
-    def linker_mapfile(self) -> Optional[Path]:
+    def linker_mapfile(self) -> Path | None:
         return self._linker_attributes.mapfile
 
     @property
-    def linker_just_symbols(self) -> Optional[Path]:
+    def linker_just_symbols(self) -> Path | None:
         return self._linker_attributes.just_symbols
 
     @property
-    def linker_retain_symbols_file(self) -> Optional[Path]:
+    def linker_retain_symbols_file(self) -> Path | None:
         return self._linker_attributes.retain_symbols_file
 
     @property
-    def linker_version_script(self) -> Optional[Path]:
+    def linker_version_script(self) -> Path | None:
         return self._linker_attributes.version_script
 
     @property
@@ -763,7 +764,7 @@ class CxxAction(object):
         return [p for p in all_scripts if "=" not in str(p)]
 
     @property
-    def rtlib(self) -> Optional[str]:
+    def rtlib(self) -> str | None:
         return self._attributes.rtlib
 
     @property
@@ -803,15 +804,15 @@ class CxxAction(object):
         return "undefined" in self._attributes.sanitize
 
     @property
-    def profile_list(self) -> Optional[Path]:
+    def profile_list(self) -> Path | None:
         return self._attributes.profile_list
 
     @property
-    def profile_generate(self) -> Optional[Path]:
+    def profile_generate(self) -> Path | None:
         return self._attributes.profile_generate
 
     @property
-    def profile_instr_generate(self) -> Optional[Path]:
+    def profile_instr_generate(self) -> Path | None:
         return self._attributes.profile_instr_generate
 
     @property
@@ -822,15 +823,15 @@ class CxxAction(object):
         )
 
     @property
-    def lto(self) -> Optional[str]:
+    def lto(self) -> str | None:
         return self._attributes.lto
 
     @property
-    def use_ld(self) -> Optional[str]:
+    def use_ld(self) -> str | None:
         return self._attributes.use_ld
 
     @property
-    def unwindlib(self) -> Optional[str]:
+    def unwindlib(self) -> str | None:
         return self._attributes.unwindlib
 
     @property
@@ -901,7 +902,7 @@ class CxxAction(object):
             yield self.crash_diagnostics_dir
 
     @property
-    def pdb(self) -> Optional[Path]:
+    def pdb(self) -> Path | None:
         if "windows" in self.target or "uefi" in self.target:
             if any("/debug" in f for f in self.linker_driver_flags):
                 if self.output_file:
@@ -958,7 +959,7 @@ class CxxAction(object):
             # everything else is kept in the compile command
             yield tok
 
-    def split_preprocessing(self) -> Tuple[Sequence[str], Sequence[str]]:
+    def split_preprocessing(self) -> tuple[Sequence[str], Sequence[str]]:
         """Create separate preprocessing and compile commands.
 
         Returns:

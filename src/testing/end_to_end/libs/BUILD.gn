@@ -28,6 +28,12 @@ python_library("libs") {
 
   sources = [
     "__init__.py",
+    "commands/__init__.py",
+    "commands/command.py",
+    "commands/date.py",
+    "commands/journalctl.py",
+    "commands/nmcli.py",
+    "commands/pgrep.py",
     "exception_utils.py",
     "proc/__init__.py",
     "proc/job.py",

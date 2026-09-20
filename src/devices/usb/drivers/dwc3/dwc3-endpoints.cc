@@ -487,9 +487,9 @@ void Dwc3::HandleEpTransferEndedEvent(uint8_t ep_num) {
   fdf::debug("Dwc3::HandleEpTransferEndedEvent ep {}", ep_num);
 
   if (uep->server) {
-    // Reason may not be set if the endpoint is reset from under us, fallback to
-    // IO_NOT_PRESENT.
-    zx_status_t reason = uep->server->pending_cancel_reason.value_or(ZX_ERR_IO_NOT_PRESENT);
+    // Reason may not be set if the endpoint is reset/halted from under us, fallback to
+    // IO_REFUSED.
+    zx_status_t reason = uep->server->pending_cancel_reason.value_or(ZX_ERR_IO_REFUSED);
     uep->server->pending_cancel_reason.reset();
     size_t pending_trbs = 0;
     while (!uep->server->active_reqs.empty()) {

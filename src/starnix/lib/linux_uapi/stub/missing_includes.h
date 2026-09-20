@@ -34,6 +34,7 @@ C(BLKRASET);
 
 C(EVIOCGVERSION);
 C(EVIOCGID);
+C(EVIOCGRAB);
 
 C(RWF_HIPRI);
 C(RWF_DSYNC);
@@ -43,17 +44,9 @@ C(RWF_APPEND);
 C(RWF_SUPPORTED);
 
 // `EVIOCGBIT`, `EVIOCGPROP`, and `EVIOCGABS` are invoked with various
-// paraemters to query metadata about an input device. Create Rust symbols for
-// the commonly used invocations.
-//
-// The `EVIOCGBIT` invocations specify a `size` _just_ large enough to report
-// all off the feature bits for that attribute.
-//
-// TODO(quiche): Eventually, it will probably be better to provide a way to
-// parse the fields within an `ioctl()`'s `request` parameter. That would allow,
-// e.g., the input code to respond to any request for `EV_KEY` feature bits,
-// even if the caller provided a buffer larger than that needed for the
-// available bits.
+// parameters to query metadata about an input device. Create Rust symbols for
+// the commonly used invocations (`input_file.rs` masks off the `size` bits on
+// the variable-length queries to support arbitrary caller buffer lengths).
 #define N_BYTES(BITS) (((BITS) + CHAR_BIT - 1) / CHAR_BIT)
 const __u32 EVIOCGBIT_0 = EVIOCGBIT(0, N_BYTES(EV_MAX));
 const __u32 EVIOCGBIT_EV_KEY = EVIOCGBIT(EV_KEY, N_BYTES(KEY_MAX));
@@ -63,6 +56,7 @@ const __u32 EVIOCGBIT_EV_SW = EVIOCGBIT(EV_SW, N_BYTES(SW_MAX));
 const __u32 EVIOCGBIT_EV_LED = EVIOCGBIT(EV_LED, N_BYTES(LED_MAX));
 const __u32 EVIOCGBIT_EV_FF = EVIOCGBIT(EV_FF, N_BYTES(FF_MAX));
 const __u32 EVIOCGBIT_EV_MSC = EVIOCGBIT(EV_MSC, N_BYTES(MSC_MAX));
+const __u32 EVIOCGBIT_EV_SND = EVIOCGBIT(EV_SND, N_BYTES(SND_MAX));
 const __u32 EVIOCGPROP = EVIOCGPROP(N_BYTES(INPUT_PROP_MAX));
 const __u32 EVIOCGABS_X = EVIOCGABS(ABS_X);
 const __u32 EVIOCGABS_Y = EVIOCGABS(ABS_Y);
@@ -70,8 +64,18 @@ const __u32 EVIOCGABS_MT_SLOT = EVIOCGABS(ABS_MT_SLOT);
 const __u32 EVIOCGABS_MT_TRACKING_ID = EVIOCGABS(ABS_MT_TRACKING_ID);
 const __u32 EVIOCGABS_MT_POSITION_X = EVIOCGABS(ABS_MT_POSITION_X);
 const __u32 EVIOCGABS_MT_POSITION_Y = EVIOCGABS(ABS_MT_POSITION_Y);
-// Zero-size device name.
+// Zero-size device name, phys, and uniq.
 const __u32 EVIOCGNAME_0 = EVIOCGNAME(0);
+const __u32 EVIOCGPHYS_0 = EVIOCGPHYS(0);
+const __u32 EVIOCGUNIQ_0 = EVIOCGUNIQ(0);
+// Zero-size current-state queries. These report which keys are currently held,
+// which LEDs are lit, which sounds are playing, and which switches are toggled.
+// Like the strings above, they are variable-length, so only the base code is
+// useful as a match target.
+const __u32 EVIOCGKEY_0 = EVIOCGKEY(0);
+const __u32 EVIOCGLED_0 = EVIOCGLED(0);
+const __u32 EVIOCGSND_0 = EVIOCGSND(0);
+const __u32 EVIOCGSW_0 = EVIOCGSW(0);
 #undef N_BYTES
 
 // Symbols for remote binder device driver

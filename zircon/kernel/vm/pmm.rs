@@ -171,6 +171,17 @@ pub fn node() -> &'static PmmNode {
     unsafe { &PMM_NODE }
 }
 
+/// Returns the `VmCompression` instance if compression is enabled.
+pub fn get_page_compression() -> Option<&'static crate::vm::compression::VmCompression> {
+    let raw = unsafe { bindings::cpp_pmm_get_page_compression() };
+    if raw.is_null() {
+        None
+    } else {
+        // SAFETY: `raw` points to a live `VmCompression` owned by the global PmmNode.
+        Some(unsafe { &*(raw as *const crate::vm::compression::VmCompression) })
+    }
+}
+
 /// Unit tests for PMM.
 #[cfg(ktest)]
 #[unittest::suite(name = "pmm_rust")]

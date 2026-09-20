@@ -29,7 +29,8 @@ recorded by this tool.
     program.
 
 * Run your program as usual.
-* The `ffx profile stacktrack` tool, to dump the results, is not yet available.
+* Use `ffx profile stacktrack` while your program is running to dump the
+  peak stack usage of all the threads in the process observed so far.
 
 ### Quickstart: Running the example
 
@@ -39,6 +40,12 @@ fx set ... --with src/performance/memory/stacktrack/example
 
 # Build and run Fuchsia as usual, then start the example component.
 ffx component run /core/ffx-laboratory:example fuchsia-pkg://fuchsia.com/stacktrack-example#meta/stacktrack-example.cm
+
+# Dump the peak stack usage report in Markdown format.
+ffx profile stacktrack
+
+# OR: dump machine-readable JSON.
+ffx --machine json-pretty profile stacktrack
 ```
 
 ## Design

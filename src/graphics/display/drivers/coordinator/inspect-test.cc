@@ -127,6 +127,19 @@ TEST_F(InspectTest, VsyncMonitorHierarchy) {
   const inspect::UintPropertyValue* vsync_stalls =
       vsync_monitor_node.get_property<inspect::UintPropertyValue>("vsync_stalls");
   ASSERT_NE(vsync_stalls, nullptr);
+
+  ASSERT_NE(nullptr, vsync_monitor_node.get_property<inspect::UintPropertyValue>("vsync_count"));
+  ASSERT_NE(nullptr, vsync_monitor_node.get_property<inspect::UintPropertyValue>(
+                         "expected_vsync_interval_ns"));
+  ASSERT_NE(nullptr,
+            vsync_monitor_node.get_property<inspect::IntPropertyValue>("last_vsync_jitter_ns"));
+  ASSERT_NE(nullptr, vsync_monitor_node.get_property<inspect::UintPropertyValue>(
+                         "time_since_last_vsync_sampled_ns"));
+  ASSERT_NE(nullptr, vsync_monitor_node.get_property<inspect::UintPropertyValue>(
+                         "time_since_last_vsync_ns"));
+  ASSERT_NE(nullptr,
+            vsync_monitor_node.get_property<inspect::UintArrayValue>("vsync_frequency_hz"));
+  ASSERT_NE(nullptr, vsync_monitor_node.get_property<inspect::IntArrayValue>("vsync_jitter_us"));
 }
 
 }  // namespace

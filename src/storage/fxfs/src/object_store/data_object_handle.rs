@@ -3778,6 +3778,7 @@ mod tests {
             .tombstone_object(
                 object.object_id(),
                 Options { borrow_metadata_space: true, ..Default::default() },
+                None,
             )
             .await
             .expect("purge failed");

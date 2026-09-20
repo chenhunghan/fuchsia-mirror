@@ -68,7 +68,7 @@ def generate_bazel_content_hash_files(
     build_dir: Path,
     output_dir: Path,
     bazel_content_hashes: T.Any,
-) -> T.Set[Path]:
+) -> set[Path]:
     """Generate the content hash files required by the Bazel workspace.
 
     For each entry of the input list, write {output_dir}/{repo_name}.hash
@@ -85,7 +85,7 @@ def generate_bazel_content_hash_files(
         plan. This ensures that any modification to one of these files will re-trigger a call
         to //build/regenerator.
     """
-    result: T.Set[Path] = set()
+    result: set[Path] = set()
     for entry in bazel_content_hashes:
         # Prepare hashing state
         cipd_name = entry.get("cipd_name", None)
@@ -417,7 +417,7 @@ def main() -> int:
         # and build.ninja.stamp will be deleted upon error.
 
         # The list of extra inputs to add to the Ninja build plan.
-        extra_ninja_build_inputs: T.Set[Path] = set()
+        extra_ninja_build_inputs: set[Path] = set()
         extra_ninja_build_inputs.add(fuchsia_dir / "build" / "regenerator")
         extra_ninja_build_inputs.add(fuchsia_dir / "build" / "regenerator.py")
 

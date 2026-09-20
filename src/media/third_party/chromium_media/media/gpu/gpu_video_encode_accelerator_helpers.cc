@@ -25,13 +25,13 @@ constexpr size_t kMaxTemporalLayers = 3;
 constexpr size_t kMaxBitstreamBufferSizeInBytes = 2 * 1024 * 1024;  // 2MB
 
 // The frame size for 1080p (FHD) video in pixels.
-constexpr int k1080PSizeInPixels = 1920 * 1080;
+constexpr uint64_t k1080PSizeInPixels = 1920 * 1080;
 // The frame size for 1440p (QHD) video in pixels.
-constexpr int k1440PSizeInPixels = 2560 * 1440;
+constexpr uint64_t k1440PSizeInPixels = 2560 * 1440;
 
 // The mapping from resolution, bitrate, framerate to the bitstream buffer size.
 struct BitstreamBufferSizeInfo {
-  int coded_size_area;
+  uint64_t coded_size_area;
   uint32_t bitrate_in_bps;
   uint32_t framerate;
   uint32_t buffer_size_in_bytes;
@@ -51,10 +51,12 @@ constexpr BitstreamBufferSizeInfo kBitstreamBufferSizeTable[] = {
 // empirically for some 4k encoding use cases and Android CTS VideoEncoderTest
 // (crbug.com/927284).
 size_t GetMaxEncodeBitstreamBufferSize(const gfx::Size& size) {
-  if (size.GetArea() > k1440PSizeInPixels)
+  if (size.Area64() > k1440PSizeInPixels) {
     return kMaxBitstreamBufferSizeInBytes * 4;
-  if (size.GetArea() > k1080PSizeInPixels)
+  }
+  if (size.Area64() > k1080PSizeInPixels) {
     return kMaxBitstreamBufferSizeInBytes * 2;
+  }
   return kMaxBitstreamBufferSizeInBytes;
 }
 }  // namespace
@@ -104,8 +106,11 @@ size_t GetEncodeBitstreamBufferSize(const gfx::Size& size,
                                     uint32_t bitrate,
                                     uint32_t framerate) {
   DCHECK_NE(framerate, 0u);
+  if (framerate == 0) {
+    return GetMaxEncodeBitstreamBufferSize(size);
+  }
   for (auto& data : kBitstreamBufferSizeTable) {
-    if (size.GetArea() <= data.coded_size_area) {
+    if (size.Area64() <= data.coded_size_area) {
       // The buffer size is proportional to (bitrate / framerate), but linear
       // interpolation for smaller ratio is not enough. Therefore we only use
       // linear extrapolation for larger ratio.
@@ -113,8 +118,11 @@ size_t GetEncodeBitstreamBufferSize(const gfx::Size& size,
           std::max(1.0f * static_cast<float>(bitrate / framerate) /
                        static_cast<float>(data.bitrate_in_bps / data.framerate),
                    1.0f);
-      return std::min(static_cast<size_t>(data.buffer_size_in_bytes * ratio),
-                      GetMaxEncodeBitstreamBufferSize(size));
+      // Use saturated_cast to avoid float-to-int overflow UB if ratio is very
+      // large before std::min clamps to GetMaxEncodeBitstreamBufferSize(size).
+      return std::min(
+          base::saturated_cast<size_t>(data.buffer_size_in_bytes * ratio),
+          GetMaxEncodeBitstreamBufferSize(size));
     }
   }
   return GetMaxEncodeBitstreamBufferSize(size);

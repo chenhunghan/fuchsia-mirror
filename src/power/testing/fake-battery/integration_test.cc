@@ -58,7 +58,7 @@ class FakeBatteryRealmTest : public ::testing::Test {
   std::optional<component_testing::RealmRoot> realm_;
 };
 
-TEST_F(FakeBatteryRealmTest, DriversExist) {
+TEST_F(FakeBatteryRealmTest, LegacyBatteryDriversExist) {
   fidl::ClientEnd<fuchsia_io::Directory> svc_root(
       Realm().component().CloneExposedDir().TakeChannel());
   component::SyncServiceMemberWatcher<fuchsia_power_battery::InfoService::Device> watcher(
@@ -77,7 +77,7 @@ TEST_F(FakeBatteryRealmTest, DriversExist) {
   ASSERT_EQ(info.charge_source(), fuchsia_power_battery::ChargeSource::kAcAdapter);
 }
 
-TEST_F(FakeBatteryRealmTest, NewDriversExist) {
+TEST_F(FakeBatteryRealmTest, HardwareBatteryDriversExist) {
   fidl::ClientEnd<fuchsia_io::Directory> svc_root(
       Realm().component().CloneExposedDir().TakeChannel());
   component::SyncServiceMemberWatcher<fuchsia_hardware_power_battery::Service::Battery> watcher(
@@ -92,6 +92,7 @@ TEST_F(FakeBatteryRealmTest, NewDriversExist) {
   // Send a FIDL request.
   fidl::WireResult result2 = client->GetStatus();
   ASSERT_EQ(ZX_OK, result2.status());
+  ASSERT_TRUE(result2->is_ok());
   const auto& status = result2.value()->status;
-  ASSERT_TRUE(status.source_status().present());
+  ASSERT_TRUE(status.has_level_percent());
 }

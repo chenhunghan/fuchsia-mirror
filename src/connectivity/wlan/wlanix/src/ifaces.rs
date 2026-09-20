@@ -1168,7 +1168,6 @@ pub mod test_utils {
     use futures::StreamExt;
     use futures::channel::mpsc;
     use ieee80211::{MacAddrBytes, Ssid};
-    use rand::Rng as _;
     use wlan_common::random_bss_description;
 
     pub static FAKE_IFACE_RESPONSE: fidl_device_service::QueryIfaceResponse =
@@ -1497,6 +1496,7 @@ pub mod test_utils {
         mock_set_tx_power_scenario_result: Result<(), Error>,
         mock_reset_phy_result: Result<(), Error>,
         mock_list_phys_result: Result<Vec<u16>, Error>,
+        mock_get_power_element_dependency_token_result: Result<(), Error>,
         iface_id: Arc<Mutex<u16>>,
     }
 
@@ -1515,6 +1515,7 @@ pub mod test_utils {
                 mock_set_tx_power_scenario_result: Ok(()),
                 mock_reset_phy_result: Ok(()),
                 mock_list_phys_result: Ok(vec![1]),
+                mock_get_power_element_dependency_token_result: Ok(()),
                 iface_id: Arc::new(Mutex::new(FAKE_IFACE_RESPONSE.id)),
             }
         }
@@ -1606,6 +1607,15 @@ pub mod test_utils {
 
         pub fn mock_reset_phy_failure(self) -> Self {
             Self { mock_reset_phy_result: Err(format_err!("mocked ResetPhy failure")), ..self }
+        }
+
+        pub fn mock_get_power_element_dependency_token_failure(self) -> Self {
+            Self {
+                mock_get_power_element_dependency_token_result: Err(format_err!(
+                    "mocked GetPowerElementDependencyToken failure"
+                )),
+                ..self
+            }
         }
     }
 
@@ -1733,7 +1743,10 @@ pub mod test_utils {
             phy_id: u16,
         ) -> Result<fidl_fuchsia_power_broker::DependencyToken, Error> {
             self.calls.lock().push(IfaceManagerCall::GetPowerElementDependencyToken(phy_id));
-            Ok(zx::Event::create())
+            match &self.mock_get_power_element_dependency_token_result {
+                Ok(()) => Ok(zx::Event::create()),
+                Err(e) => bail!("{}", e),
+            }
         }
 
         async fn reset_tx_power_scenario(&self, phy_id: u16) -> Result<(), Error> {

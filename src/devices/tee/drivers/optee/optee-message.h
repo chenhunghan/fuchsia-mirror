@@ -10,6 +10,7 @@
 #include <zircon/assert.h>
 
 #include <cinttypes>
+#include <limits>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -117,31 +118,34 @@ struct MessageParam {
   } payload;
 };
 
-// MessageParamList
+// MessageParamListBase
 //
-// MessageParamList is a non-owning view of the parameters in a Message. It is only valid within
+// MessageParamListBase is a non-owning view of the parameters in a Message. It is only valid within
 // the lifetime of the Message.
-class MessageParamList {
+template <typename T>
+class MessageParamListBase {
  public:
-  constexpr MessageParamList() : params_(nullptr), count_(0U) {}
+  constexpr MessageParamListBase() : params_(nullptr), count_(0U) {}
 
-  MessageParamList(MessageParam* params, size_t count) : params_(params), count_(count) {}
+  MessageParamListBase(T* params, size_t count) : params_(params), count_(count) {}
 
   size_t size() const { return count_; }
-  MessageParam* get() const { return params_; }
+  T* get() const { return params_; }
 
-  MessageParam& operator[](size_t i) const {
+  T& operator[](size_t i) const {
     ZX_DEBUG_ASSERT(i < count_);
     return params_[i];
   }
 
-  MessageParam* begin() const { return params_; }
-  MessageParam* end() const { return &params_[count_]; }
+  T* begin() const { return params_; }
+  T* end() const { return &params_[count_]; }
 
  private:
-  MessageParam* params_;
+  T* params_;
   size_t count_;
 };
+using MessageParamList = MessageParamListBase<MessageParam>;
+using ConstMessageParamList = MessageParamListBase<const MessageParam>;
 
 template <typename PtrType>
 class MessageBase {
@@ -152,17 +156,39 @@ class MessageBase {
  public:
   using SharedMemoryPtr = PtrType;
 
-  zx_paddr_t paddr() const { return memory_->paddr(); }
+  zx_paddr_t paddr() const {
+    ZX_DEBUG_ASSERT(memory_ != nullptr);
+    return memory_->paddr();
+  }
 
  protected:
   static constexpr size_t CalculateSize(size_t num_params) {
+    // Check for overflow before calculating the size.
+    if (num_params >
+        (std::numeric_limits<size_t>::max() - sizeof(MessageHeader)) / sizeof(MessageParam)) {
+      return std::numeric_limits<size_t>::max();
+    }
     return sizeof(MessageHeader) + (sizeof(MessageParam) * num_params);
   }
 
   // MessageBase
   //
   // Move constructor for MessageBase.
-  MessageBase(MessageBase&& msg) : memory_(std::move(msg.memory_)) { msg.memory_ = nullptr; }
+  MessageBase(MessageBase&& msg) : memory_(std::move(msg.memory_)) {
+    // Null out the moved-from pointer to prevent access after move,
+    // which is especially important when PtrType is a raw pointer.
+    msg.memory_ = nullptr;
+  }
+
+  MessageBase& operator=(MessageBase&& msg) {
+    if (this != &msg) {
+      memory_ = std::move(msg.memory_);
+      // Null out the moved-from pointer to prevent access after move,
+      // which is especially important when PtrType is a raw pointer.
+      msg.memory_ = nullptr;
+    }
+    return *this;
+  }
 
   // Move-only, so explicitly delete copy constructor and copy assignment operator for clarity
   MessageBase(const MessageBase&) = delete;
@@ -172,7 +198,10 @@ class MessageBase {
     ZX_DEBUG_ASSERT_MSG(memory_ != nullptr, "Cannot create Message with null backing memory");
   }
 
-  MessageHeader* header() const { return reinterpret_cast<MessageHeader*>(memory_->vaddr()); }
+  MessageHeader* header() const {
+    ZX_DEBUG_ASSERT(memory_ != nullptr);
+    return reinterpret_cast<MessageHeader*>(memory_->vaddr());
+  }
 
   // TODO(rjascani): Change this to return a reference to make ownership rules clearer
   MessageParamList params() const {
@@ -353,7 +382,20 @@ class RpcMessage : public MessageBase<SharedMemory*> {
   // RpcMessage
   //
   // Move constructor for RpcMessage.
-  RpcMessage(RpcMessage&& rpc_msg) : MessageBase(std::move(rpc_msg)) {}
+  RpcMessage(RpcMessage&& rpc_msg)
+      : MessageBase(std::move(rpc_msg)),
+        local_header_(rpc_msg.local_header_),
+        local_params_(std::move(rpc_msg.local_params_)) {}
+
+  // Move assignment operator
+  RpcMessage& operator=(RpcMessage&& rpc_msg) {
+    if (this != &rpc_msg) {
+      MessageBase::operator=(std::move(rpc_msg));
+      local_header_ = rpc_msg.local_header_;
+      local_params_ = std::move(rpc_msg.local_params_);
+    }
+    return *this;
+  }
 
   // Move-only, so explicitly delete copy constructor and copy assignment operator for clarity
   RpcMessage(const RpcMessage&) = delete;
@@ -368,14 +410,45 @@ class RpcMessage : public MessageBase<SharedMemory*> {
   //              be non-null and valid.
   static fpromise::result<RpcMessage, zx_status_t> CreateFromSharedMemory(SharedMemory* memory);
 
-  uint32_t command() const { return header()->command; }
+  const MessageHeader* header() const { return &local_header_; }
+  MessageHeader* header() { return &local_header_; }
 
-  void set_return_origin(uint32_t return_origin) { header()->return_origin = return_origin; }
+  ConstMessageParamList params() const {
+    return ConstMessageParamList(local_params_.data(), local_params_.size());
+  }
+  MessageParamList params() { return MessageParamList(local_params_.data(), local_params_.size()); }
 
-  void set_return_code(uint32_t return_code) { header()->return_code = return_code; }
+  uint32_t command() const { return local_header_.command; }
+
+  void set_return_origin(uint32_t return_origin) {
+    local_header_.return_origin = return_origin;
+    shared_header()->return_origin = return_origin;
+  }
+
+  void set_return_code(uint32_t return_code) {
+    local_header_.return_code = return_code;
+    shared_header()->return_code = return_code;
+  }
 
  protected:
-  explicit RpcMessage(SharedMemory* memory) : MessageBase(memory) {}
+  explicit RpcMessage(SharedMemory* memory) : MessageBase(memory), local_header_{} {}
+
+  // Helper for subclasses to get pointers to shared memory for output parameters
+  MessageParam* GetSharedParam(size_t index) {
+    ZX_DEBUG_ASSERT(index < local_header_.num_params);
+    MessageHeader* shared_hdr = shared_header();
+    MessageParam* shared_params = reinterpret_cast<MessageParam*>(shared_hdr + 1);
+    return &shared_params[index];
+  }
+
+ private:
+  MessageHeader* shared_header() const {
+    ZX_DEBUG_ASSERT(memory_ != nullptr);
+    return reinterpret_cast<MessageHeader*>(memory_->vaddr());
+  }
+
+  MessageHeader local_header_;
+  fbl::Vector<MessageParam> local_params_;
 };
 
 // LoadTaRpcMessage

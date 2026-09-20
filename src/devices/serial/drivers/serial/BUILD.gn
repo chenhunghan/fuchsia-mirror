@@ -6,8 +6,13 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("serial-dml") {
+  dml = "meta/serial.dml"
+  driver_name = "serial"
+}
+
 driver_bind_rules("serial_bind") {
-  rules = "meta/serial.bind"
+  dml_label = ":serial-dml"
   bind_output = "serial.bindbc"
   tests = "tests/tests.json"
   deps = [
@@ -26,10 +31,10 @@ fuchsia_cc_driver("serial-driver") {
 }
 
 fuchsia_driver_component("serial") {
+  dml_label = ":serial-dml"
   info = "meta/serial-info.json"
   component_name = "serial"
   deps = [ ":serial-driver" ]
-  manifest = "meta/serial.cml"
 }
 
 fuchsia_driver_package("package") {

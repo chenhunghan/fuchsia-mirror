@@ -97,16 +97,18 @@ impl Extent {
 }
 
 impl SerializeKey for Extent {
+    #[inline]
     fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
         assert!(
             MIN_BLOCK_SIZE.is_aligned(&self.0),
             "Extent bounds must be aligned to MIN_BLOCK_SIZE"
         );
-        assert!(self.0.start < self.0.end, "Extent length must be non-zero");
+        assert!(self.0.start <= self.0.end, "Extent length cannot be negative");
         serializer.write_u64(self.0.end / MIN_BLOCK_SIZE);
         serializer.write_u64((self.0.end - self.0.start) / MIN_BLOCK_SIZE);
     }
 
+    #[inline]
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, anyhow::Error> {
         let end = deserializer
             .read_u64()?
@@ -255,7 +257,7 @@ mod tests {
             let mut ser =
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, Some(0));
             key.serialize_key_to(&mut ser);
-            ser.finalize();
+            ser.finalize().unwrap();
         }
 
         let (mut deser, length) = KeyDeserializer::new(&buf, Some(0)).unwrap();
@@ -269,8 +271,8 @@ mod tests {
         // len = 1536 / 512 = 3.
         // Delta encoding applies to first field (end = 4). Base is 0. 4 - 0 = 4.
         // Second field is len = 3. Base is None (taken). So writes 3.
-        // Buffer should be [0, 2, 4, 3].
-        assert_eq!(buf, vec![0, 2, 4, 3]);
+        // Buffer should be [2, 4, 3] with 1-byte varint length prefix (len = 2 bytes).
+        assert_eq!(buf, vec![2, 4, 3]);
     }
 
     #[test]
@@ -281,7 +283,7 @@ mod tests {
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
             ser.write_u64(u64::MAX);
             ser.write_u64(u64::MAX);
-            ser.finalize();
+            ser.finalize().unwrap();
         }
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());
@@ -298,7 +300,7 @@ mod tests {
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
             ser.write_u64(1); // end = 512
             ser.write_u64(2); // len = 1024 (len > end)
-            ser.finalize();
+            ser.finalize().unwrap();
         }
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());
@@ -392,7 +394,7 @@ mod tests {
             let mut ser =
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
             extent.serialize_key_to(&mut ser);
-            ser.finalize();
+            ser.finalize().unwrap();
         }
 
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
@@ -432,9 +434,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Extent length must be non-zero")]
-    fn test_extent_key_serialization_zero_length_panics() {
+    fn test_extent_key_serialization_zero_length() {
         let key = Extent(2 * MIN_BLOCK_SIZE..2 * MIN_BLOCK_SIZE);
+        let mut buf = Vec::new();
+        key.serialize_key_into(&mut buf, None).unwrap();
+        let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
+        assert_eq!(length, buf.len());
+        let result = Extent::deserialize_key_from(&mut deser);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Zero-length extent");
+    }
+
+    #[test]
+    #[should_panic(expected = "Extent length cannot be negative")]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn test_extent_key_serialization_inverted_panics() {
+        let key = Extent(2 * MIN_BLOCK_SIZE..MIN_BLOCK_SIZE.get());
         let mut buf = Vec::new();
         let mut ser = crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
         key.serialize_key_to(&mut ser);
@@ -448,7 +463,7 @@ mod tests {
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
             ser.write_u64(4); // end = 2048 (4 * 512)
             ser.write_u64(0); // len = 0
-            ser.finalize();
+            ser.finalize().unwrap();
         }
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());

@@ -768,6 +768,10 @@ zx_status_t VmAddressRegion::RangeOp(RangeOpType op, vaddr_t base, size_t len,
 
           auto stream_size = paged->saturating_stream_size_locked();
           DEBUG_ASSERT(stream_size);
+          if (vmo_offset > *stream_size) {
+            result = ZX_ERR_OUT_OF_RANGE;
+            return;
+          }
           if (size > *stream_size - vmo_offset) {
             result = ZX_ERR_OUT_OF_RANGE;
             return;

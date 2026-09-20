@@ -326,12 +326,12 @@ closed protocol Debug {
     /// persisted.
     strict StopProfileTasks() -> () error zx.Status;
 
-    /// Clears the directory entry cache (dirent cache) for all volumes. This drops the strong
-    /// references held by the cache to filesystem nodes (files and directories). If these nodes
-    /// are not currently open elsewhere, they will be dropped, freeing their associated resources
-    /// (including VMOs). Subsequent access to these paths will force Fxfs to recreate the nodes.
-    /// Note that this does not clear other internal caches (e.g., CachingObjectHandle's caches
-    /// used for LSM tree layers).
+    /// Clears the directory entry cache (dirent cache) and internal object store caches (including
+    /// LSM tree object caches, layer file chunk caches, and non-permanent unwrapped keys). This
+    /// drops strong references held by the cache to filesystem nodes (files and directories). If
+    /// these nodes are not currently open elsewhere, they will be dropped, freeing their associated
+    /// resources (including VMOs). Subsequent access to these paths will force Fxfs to recreate
+    /// the nodes and reload metadata from disk.
     strict ClearCaches() -> () error zx.Status;
 };
 

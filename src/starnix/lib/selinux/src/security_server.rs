@@ -155,6 +155,13 @@ pub(crate) struct SecurityServerBackend {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PolicySeqNo(u32);
 
+impl PolicySeqNo {
+    pub const INITIAL: Self = Self(0);
+
+    #[cfg(test)]
+    pub const OTHER: Self = Self(1);
+}
+
 pub struct SecurityServer {
     /// The access vector cache that is shared between threads subject to access control by this
     /// security server.

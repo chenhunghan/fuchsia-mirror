@@ -11,6 +11,7 @@
 #include <zircon/syscalls/iommu.h>
 
 #include <thread>
+#include <vector>
 
 #include <zxtest/zxtest.h>
 
@@ -18,59 +19,65 @@
 
 namespace {
 
-void CreateVmoWithCharFill(zx::vmo* vmo, char content, size_t size) {
-  char buf[size];
-  memset(buf, content, size);
-  ASSERT_OK(zx::vmo::create(size, 0, vmo));
-  ASSERT_OK(vmo->write(buf, 0, size));
+constexpr uint32_t kChildTypes[] = {
+    ZX_VMO_CHILD_SNAPSHOT,
+    ZX_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE,
+
+    // TODO(https://fxbug.dev/42074633): Add ZX_VMO_CHILD_SNAPSHOT_MODIFIED to
+    // this list.
+};
+
+constexpr uint64_t kPageCount = 5;
+
+template <char Fill>
+void CreateVmoWithCharFill(zx::vmo& vmo) {
+  const std::span fill_data = vmo_test::TestFillPages<kPageCount, static_cast<uint8_t>(Fill)>();
+  ASSERT_OK(zx::vmo::create(fill_data.size_bytes(), 0, &vmo));
+  ASSERT_OK(vmo.write(fill_data.data(), 0, fill_data.size_bytes()));
 }
 
 TEST(VmoTransferDataTestCase, DestroyedParentWithNonZeroOffset) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kChildSize = kPageSize * 3;
   const uint64_t kChildOffset = kPageSize;
-  char got[kSize];
-  char expected[kSize];
+  std::vector<char> got(kSize), expected(kSize);
 
   // Create VMOs to act as the source and destination of the transfer.
   // In this test case, the source VMO is offset from the parent VMO by kChildOffset, and the
   // parent is subsequently deleted. This will allow us to test the case where we have to
   // `TakePages` from a source VMO with non-zero list_skew_.
   zx::vmo parent_vmo;
-  CreateVmoWithCharFill(&parent_vmo, 's', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(parent_vmo));
   zx::vmo src_vmo;
   ASSERT_OK(parent_vmo.create_child(ZX_VMO_CHILD_SNAPSHOT, kChildOffset, kChildSize, &src_vmo));
   parent_vmo.reset();
   zx::vmo dst_vmo;
-  CreateVmoWithCharFill(&dst_vmo, 'd', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(dst_vmo));
 
   // Verify that the transfer from source still works.
   ASSERT_OK(dst_vmo.transfer_data(0, 0, kChildSize, &src_vmo, 0));
 
   // Verify that the src VMO has been zeroed out.
-  ASSERT_OK(src_vmo.read(got, 0, kChildSize));
-  memset(expected, 0, kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kChildSize);
+  ASSERT_OK(src_vmo.read(got.data(), 0, kChildSize));
+  memset(expected.data(), 0, kChildSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kChildSize);
 
   // Verify that the dst VMO correctly received the transferred data.
-  ASSERT_OK(dst_vmo.read(got, 0, kSize));
-  memset(expected, 's', kChildSize);
+  ASSERT_OK(dst_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 's', kChildSize);
   memset(&expected[kChildSize], 'd', kSize - kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 }
 
 TEST(VmoTransferDataTestCase, SnapshotChildSrc) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kChildSize = kPageSize * 3;
-  char got[kSize];
-  char expected[kSize];
-  // TODO(https://fxbug.dev/42074633): Add ZX_VMO_CHILD_SNAPSHOT_MODIFIED to this list.
-  uint32_t child_types[] = {ZX_VMO_CHILD_SNAPSHOT, ZX_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE};
+  std::vector<char> got(kSize), expected(kSize);
 
   for (auto child_of_src : {true, false}) {
-    for (auto child_type : child_types) {
+    for (auto child_type : kChildTypes) {
       // Create VMOs to act as the source and destination VMOs for a transfer.
       zx::vmo parent_vmo;
       if (child_type == ZX_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE) {
@@ -85,11 +92,11 @@ TEST(VmoTransferDataTestCase, SnapshotChildSrc) {
 
         // Presupply pages to the pager backed VMO so that we don't need to wait for a request.
         zx::vmo aux_vmo;
-        CreateVmoWithCharFill(&aux_vmo, 's', kSize);
+        ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(aux_vmo));
         ASSERT_OK(pager.supply_pages(parent_vmo, 0, kSize, aux_vmo, 0));
       } else {
         // If the child type is a pure snapshot, create an anonymous VMO.
-        CreateVmoWithCharFill(&parent_vmo, 's', kSize);
+        ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(parent_vmo));
       }
       zx::vmo src_vmo;
       ASSERT_OK(parent_vmo.create_child(child_type, 0, kChildSize, &src_vmo));
@@ -99,50 +106,47 @@ TEST(VmoTransferDataTestCase, SnapshotChildSrc) {
         // If making a child of the source we must populate part of the clone range, otherwise
         // the child can get hung off the common parent without needing to be a CoW child of
         // ourselves.
-        memset(expected, 's', kChildSize);
-        EXPECT_OK(src_vmo.write(expected, 0, kPageSize));
+        memset(expected.data(), 's', kChildSize);
+        EXPECT_OK(src_vmo.write(expected.data(), 0, kPageSize));
         EXPECT_OK(src_vmo.create_child(child_type, 0, kChildSize, &src_child_vmo));
       }
 
       zx::vmo dst_vmo;
-      CreateVmoWithCharFill(&dst_vmo, 'd', kSize);
+      ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(dst_vmo));
 
       // Verify that transferring data from a snapshot child works.
       ASSERT_OK(dst_vmo.transfer_data(0, 0, kChildSize, &src_vmo, 0));
 
       // Verify that the src VMO has been zeroed out.
-      ASSERT_OK(src_vmo.read(got, 0, kChildSize));
-      memset(expected, 0, kChildSize);
-      EXPECT_BYTES_EQ(got, expected, kChildSize);
+      ASSERT_OK(src_vmo.read(got.data(), 0, kChildSize));
+      memset(expected.data(), 0, kChildSize);
+      EXPECT_BYTES_EQ(got.data(), expected.data(), kChildSize);
 
       // Verify that the parent of the src VMO is unaffected.
-      ASSERT_OK(parent_vmo.read(got, 0, kSize));
-      memset(expected, 's', kSize);
-      EXPECT_BYTES_EQ(got, expected, kSize);
+      ASSERT_OK(parent_vmo.read(got.data(), 0, kSize));
+      memset(expected.data(), 's', kSize);
+      EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
       // Verify that the dst VMO correctly received the transferred data.
-      ASSERT_OK(dst_vmo.read(got, 0, kSize));
-      memset(expected, 's', kChildSize);
+      ASSERT_OK(dst_vmo.read(got.data(), 0, kSize));
+      memset(expected.data(), 's', kChildSize);
       memset(&expected[kChildSize], 'd', kSize - kChildSize);
-      EXPECT_BYTES_EQ(got, expected, kSize);
+      EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
     }
   }
 }
 
 TEST(VmoTransferDataTestCase, SnapshotChildDst) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kChildSize = kPageSize * 3;
-  char got[kSize];
-  char expected[kSize];
-  // TODO(https://fxbug.dev/42074633): Add ZX_VMO_CHILD_SNAPSHOT_MODIFIED to this list.
-  uint32_t child_types[] = {ZX_VMO_CHILD_SNAPSHOT, ZX_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE};
+  std::vector<char> got(kSize), expected(kSize);
 
   for (auto child_of_dst : {true, false}) {
-    for (auto child_type : child_types) {
+    for (auto child_type : kChildTypes) {
       // Create VMOs to act as the source and destination VMOs for a transfer.
       zx::vmo src_vmo;
-      CreateVmoWithCharFill(&src_vmo, 's', kSize);
+      ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(src_vmo));
       zx::vmo parent_vmo;
       if (child_type == ZX_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE) {
         // If the child type is SNAPSHOT_AT_LEAST_ON_WRITE, we need the parent VMO to be pager
@@ -156,11 +160,11 @@ TEST(VmoTransferDataTestCase, SnapshotChildDst) {
 
         // Presupply pages to the pager backed VMO so that we don't need to wait for a request.
         zx::vmo aux_vmo;
-        CreateVmoWithCharFill(&aux_vmo, 'd', kSize);
+        ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(aux_vmo));
         ASSERT_OK(pager.supply_pages(parent_vmo, 0, kSize, aux_vmo, 0));
       } else {
         // If the child type is a pure snapshot, create an anonymous VMO.
-        CreateVmoWithCharFill(&parent_vmo, 'd', kSize);
+        ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(parent_vmo));
       }
       zx::vmo dst_vmo;
       ASSERT_OK(parent_vmo.create_child(child_type, 0, kChildSize, &dst_vmo));
@@ -170,8 +174,8 @@ TEST(VmoTransferDataTestCase, SnapshotChildDst) {
         // If making a child of the destination we must populate part of the clone range, otherwise
         // the child can get hung off the common parent without needing to be a CoW child of
         // ourselves.
-        memset(expected, 's', kChildSize);
-        EXPECT_OK(dst_vmo.write(expected, 0, kPageSize));
+        memset(expected.data(), 's', kChildSize);
+        EXPECT_OK(dst_vmo.write(expected.data(), 0, kPageSize));
         EXPECT_OK(dst_vmo.create_child(child_type, 0, kChildSize, &dst_child_vmo));
       }
 
@@ -179,190 +183,184 @@ TEST(VmoTransferDataTestCase, SnapshotChildDst) {
       ASSERT_OK(dst_vmo.transfer_data(0, 0, kChildSize, &src_vmo, 0));
 
       // Verify that the destination has the transferred contents.
-      ASSERT_OK(dst_vmo.read(got, 0, kChildSize));
-      memset(expected, 's', kChildSize);
-      EXPECT_BYTES_EQ(got, expected, kChildSize);
+      ASSERT_OK(dst_vmo.read(got.data(), 0, kChildSize));
+      memset(expected.data(), 's', kChildSize);
+      EXPECT_BYTES_EQ(got.data(), expected.data(), kChildSize);
 
       // Verify that the src vmo was zeroed out in the transfer range.
-      ASSERT_OK(src_vmo.read(got, 0, kSize));
-      memset(expected, 0, kChildSize);
+      ASSERT_OK(src_vmo.read(got.data(), 0, kSize));
+      memset(expected.data(), 0, kChildSize);
       memset(&expected[kChildSize], 's', kSize - kChildSize);
-      EXPECT_BYTES_EQ(got, expected, kSize);
+      EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
       // Verify that the parent of the destination remained unchanged.
-      memset(expected, 'd', kSize);
-      ASSERT_OK(parent_vmo.read(got, 0, kSize));
-      EXPECT_BYTES_EQ(got, expected, kSize);
+      memset(expected.data(), 'd', kSize);
+      ASSERT_OK(parent_vmo.read(got.data(), 0, kSize));
+      EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
     }
   }
 }
 
 TEST(VmoTransferDataTestCase, ChildSliceDst) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kChildSize = kPageSize * 3;
-  char got[kSize];
-  char expected[kSize];
+  std::vector<char> got(kSize), expected(kSize);
 
   // Create VMOs to act as the source and destination VMOs for a transfer.
   zx::vmo src_vmo;
-  CreateVmoWithCharFill(&src_vmo, 's', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(src_vmo));
   zx::vmo parent_vmo;
-  CreateVmoWithCharFill(&parent_vmo, 'd', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(parent_vmo));
   zx::vmo dst_vmo;
   ASSERT_OK(parent_vmo.create_child(ZX_VMO_CHILD_SLICE, 0, kChildSize, &dst_vmo));
 
   // Verify that transferring data to a VMO that is a child slice works.
   ASSERT_OK(dst_vmo.transfer_data(0, 0, kChildSize, &src_vmo, 0));
 
-  ASSERT_OK(src_vmo.read(got, 0, kSize));
-  memset(expected, 0, kChildSize);
+  ASSERT_OK(src_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 0, kChildSize);
   memset(&expected[kChildSize], 's', kSize - kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
-  ASSERT_OK(parent_vmo.read(got, 0, kSize));
-  memset(expected, 's', kChildSize);
+  ASSERT_OK(parent_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 's', kChildSize);
   memset(&expected[kChildSize], 'd', kSize - kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
-  ASSERT_OK(dst_vmo.read(got, 0, kChildSize));
-  memset(expected, 's', kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kChildSize);
+  ASSERT_OK(dst_vmo.read(got.data(), 0, kChildSize));
+  memset(expected.data(), 's', kChildSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kChildSize);
 }
 
 TEST(VmoTransferDataTestCase, ChildSliceSrc) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kChildSize = kPageSize * 3;
-  char got[kSize];
-  char expected[kSize];
+  std::vector<char> got(kSize), expected(kSize);
 
   // Create VMOs to act as the source and destination VMOs for a transfer.
   zx::vmo parent_vmo;
-  CreateVmoWithCharFill(&parent_vmo, 's', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(parent_vmo));
   zx::vmo src_vmo;
   ASSERT_OK(parent_vmo.create_child(ZX_VMO_CHILD_SLICE, 0, kChildSize, &src_vmo));
   zx::vmo dst_vmo;
-  CreateVmoWithCharFill(&dst_vmo, 'd', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(dst_vmo));
 
   // Verify that transferring data from a VMO that is a child slice works.
   ASSERT_OK(dst_vmo.transfer_data(0, 0, kChildSize, &src_vmo, 0));
 
-  ASSERT_OK(src_vmo.read(got, 0, kChildSize));
-  memset(expected, 0, kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kChildSize);
+  ASSERT_OK(src_vmo.read(got.data(), 0, kChildSize));
+  memset(expected.data(), 0, kChildSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kChildSize);
 
-  ASSERT_OK(parent_vmo.read(got, 0, kSize));
-  memset(expected, 0, kChildSize);
+  ASSERT_OK(parent_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 0, kChildSize);
   memset(&expected[kChildSize], 's', kSize - kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
-  ASSERT_OK(dst_vmo.read(got, 0, kSize));
-  memset(expected, 's', kChildSize);
+  ASSERT_OK(dst_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 's', kChildSize);
   memset(&expected[kChildSize], 'd', kSize - kChildSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 }
 
 TEST(VmoTransferDataTestCase, ReferenceChildSrc) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kTransferSize = kPageSize * 3;
-  char got[kSize];
-  char expected[kSize];
+  std::vector<char> got(kSize), expected(kSize);
 
   // Create VMOs to act as the source and destination VMOs for a transfer.
   zx::vmo parent_vmo;
-  CreateVmoWithCharFill(&parent_vmo, 's', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(parent_vmo));
   zx::vmo src_vmo;
   ASSERT_OK(parent_vmo.create_child(ZX_VMO_CHILD_REFERENCE, 0, 0, &src_vmo));
   zx::vmo dst_vmo;
-  CreateVmoWithCharFill(&dst_vmo, 'd', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(dst_vmo));
 
   // Verify that transferring data from a VMO that is a reference child works.
   ASSERT_OK(dst_vmo.transfer_data(0, 0, kTransferSize, &src_vmo, 0));
 
-  ASSERT_OK(src_vmo.read(got, 0, kTransferSize));
-  memset(expected, 0, kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kTransferSize);
+  ASSERT_OK(src_vmo.read(got.data(), 0, kTransferSize));
+  memset(expected.data(), 0, kTransferSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kTransferSize);
 
-  ASSERT_OK(parent_vmo.read(got, 0, kSize));
-  memset(expected, 0, kTransferSize);
+  ASSERT_OK(parent_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 0, kTransferSize);
   memset(&expected[kTransferSize], 's', kSize - kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
-  ASSERT_OK(dst_vmo.read(got, 0, kSize));
-  memset(expected, 's', kTransferSize);
+  ASSERT_OK(dst_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 's', kTransferSize);
   memset(&expected[kTransferSize], 'd', kSize - kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 }
 
 TEST(VmoTransferDataTestCase, ReferenceChildDst) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kTransferSize = kPageSize * 3;
-  char got[kSize];
-  char expected[kSize];
+  std::vector<char> got(kSize), expected(kSize);
 
   // Create VMOs to act as the source and destination VMOs for a transfer.
   zx::vmo src_vmo;
-  CreateVmoWithCharFill(&src_vmo, 's', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(src_vmo));
   zx::vmo parent_vmo;
-  CreateVmoWithCharFill(&parent_vmo, 'd', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(parent_vmo));
   zx::vmo dst_vmo;
   ASSERT_OK(parent_vmo.create_child(ZX_VMO_CHILD_REFERENCE, 0, 0, &dst_vmo));
 
   // Verify that transferring data to a VMO that is a reference child works.
   ASSERT_OK(dst_vmo.transfer_data(0, 0, kTransferSize, &src_vmo, 0));
 
-  ASSERT_OK(src_vmo.read(got, 0, kSize));
-  memset(expected, 0, kTransferSize);
+  ASSERT_OK(src_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 0, kTransferSize);
   memset(&expected[kTransferSize], 's', kSize - kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
-  ASSERT_OK(parent_vmo.read(got, 0, kSize));
-  memset(expected, 's', kTransferSize);
+  ASSERT_OK(parent_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 's', kTransferSize);
   memset(&expected[kTransferSize], 'd', kSize - kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
-  ASSERT_OK(dst_vmo.read(got, 0, kTransferSize));
-  memset(expected, 's', kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kTransferSize);
+  ASSERT_OK(dst_vmo.read(got.data(), 0, kTransferSize));
+  memset(expected.data(), 's', kTransferSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kTransferSize);
 }
 
 TEST(VmoTransferDataTestCase, SameSrcAndDst) {
   // Verify that passing the same VMO as the source and destination succeeds.
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kTransferSize = kPageSize * 3;
   const uint64_t kTransferOffset = kPageSize * 2;
-  char got[kSize];
-  char expected[kSize];
+  std::vector<char> got(kSize), expected(kSize);
 
   // Create VMOs to act as the source and destination VMOs for a transfer.
   zx::vmo vmo;
-  CreateVmoWithCharFill(&vmo, 's', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(vmo));
 
   ASSERT_OK(vmo.transfer_data(0, kTransferOffset, kTransferSize, &vmo, 0));
 
-  ASSERT_OK(vmo.read(got, 0, kSize));
-  memset(expected, 0, kTransferOffset);
+  ASSERT_OK(vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 0, kTransferOffset);
   memset(&expected[kTransferOffset], 's', kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 }
 
 TEST(VmoTransferDataTestCase, Basic) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kSize = kPageSize * 5;
+  const uint64_t kSize = kPageSize * kPageCount;
   const uint64_t kTransferSize = kPageSize * 3;
   const uint64_t kTransferOffset = kPageSize * 2;
-  char got[kSize];
-  char expected[kSize];
+  std::vector<char> got(kSize), expected(kSize);
 
   // Create VMOs to act as the source and destination VMOs for a transfer.
   zx::vmo src_vmo;
-  CreateVmoWithCharFill(&src_vmo, 's', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'s'>(src_vmo));
   zx::vmo dst_vmo;
-  CreateVmoWithCharFill(&dst_vmo, 'd', kSize);
+  ASSERT_NO_FATAL_FAILURE(CreateVmoWithCharFill<'d'>(dst_vmo));
 
   // Verify the happy case works by transfer the first three pages of the
   // original VMO into the last three pages of the destination VMO.
@@ -370,21 +368,20 @@ TEST(VmoTransferDataTestCase, Basic) {
 
   // Validate that the destination VMO retains its original contents for the first two pages and
   // contains the transferred data for the last three pages.
-  ASSERT_OK(dst_vmo.read(got, 0, kSize));
-  memset(expected, 'd', kTransferOffset);
+  ASSERT_OK(dst_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 'd', kTransferOffset);
   memset(&expected[kTransferOffset], 's', kTransferSize);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 
   // Validate that the transferred pages were zeroed out in the source VMO.
-  ASSERT_OK(src_vmo.read(got, 0, kSize));
-  memset(expected, 0, kTransferSize);
+  ASSERT_OK(src_vmo.read(got.data(), 0, kSize));
+  memset(expected.data(), 0, kTransferSize);
   memset(&expected[kTransferSize], 's', kTransferOffset);
-  EXPECT_BYTES_EQ(got, expected, kSize);
+  EXPECT_BYTES_EQ(got.data(), expected.data(), kSize);
 }
 
 TEST(VmoTransferDataTestCase, InvalidInputs) {
   const uint64_t kPageSize = zx_system_get_page_size();
-  const uint64_t kPageCount = 5;
   const uint64_t kSize = kPageSize * kPageCount;
 
   // Create VMOs to act as the source and destination VMOs for a transfer.

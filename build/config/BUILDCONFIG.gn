@@ -35,6 +35,17 @@ declare_args() {
   # Controls whether we should output GSYM files for Fuchsia binaries.
   output_gsym = false
 
+  # Upper bound on the build concurrency (-j) that `fx build` picks
+  # automatically. Zero means no upper bound.
+  #
+  # The automatic value is derived from the host CPU count, which assumes the
+  # CPU is the scarcest resource. Environments where that does not hold can
+  # lower it here; for example a FUSE-backed workspace exhausts file
+  # descriptors long before it saturates a high-core host.
+  #
+  # An explicit -j on the command line is always honored as-is.
+  max_build_concurrency = 0
+
   # Very unfortunately, GN never sets `current_toolchain` when executing
   # BUILDCONFIG.gn, so this variable is used to detect when this file
   # is executed in the context of the default toolchain.

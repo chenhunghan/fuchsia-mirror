@@ -16,9 +16,10 @@ import argparse
 import getpass
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any
 
 # --- Immutable Dataclass Data Structures representing parsed states ---
 
@@ -68,8 +69,8 @@ class DiskInfo:
         size_gb: The storage capacity of the disk in decimal Gigabytes.
     """
 
-    rotational: Optional[bool] = None
-    size_gb: Optional[float] = None
+    rotational: bool | None = None
+    size_gb: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Converts the disk info record to a clean JSON-serializable dictionary."""
@@ -133,7 +134,7 @@ class NetworkInterfaceInfo:
 
     name: str
     operstate: str
-    speed_mbps: Optional[int] = None
+    speed_mbps: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Converts the network interface info to a clean JSON-serializable dictionary."""

@@ -234,7 +234,8 @@ void IdentityPageAllocator::Activate() {
  *               just pass a vectored I/O list to the mexec assembly.
  */
 static zx_status_t vmo_coalesce_pages(zx_handle_t vmo_hdl, const size_t extra_bytes, paddr_t* addr,
-                                      uint8_t** vaddr, size_t* size) {
+                                      uint8_t** vaddr, size_t* size,
+                                      VmPageDoublyLinkedList* allocated_pages) {
   DEBUG_ASSERT(addr);
   if (!addr) {
     return ZX_ERR_INVALID_ARGS;
@@ -242,6 +243,11 @@ static zx_status_t vmo_coalesce_pages(zx_handle_t vmo_hdl, const size_t extra_by
 
   DEBUG_ASSERT(size);
   if (!size) {
+    return ZX_ERR_INVALID_ARGS;
+  }
+
+  DEBUG_ASSERT(allocated_pages);
+  if (!allocated_pages) {
     return ZX_ERR_INVALID_ARGS;
   }
 
@@ -265,8 +271,7 @@ static zx_status_t vmo_coalesce_pages(zx_handle_t vmo_hdl, const size_t extra_by
   const size_t num_pages = RoundUpPageSize(vmo_size + extra_bytes) / kPageSize;
 
   paddr_t base_addr;
-  VmPageDoublyLinkedList list;
-  st = Pmm::Node().AllocContiguous(num_pages, PMM_ALLOC_FLAG_ANY, 0, &base_addr, &list);
+  st = Pmm::Node().AllocContiguous(num_pages, PMM_ALLOC_FLAG_ANY, 0, &base_addr, allocated_pages);
   if (st != ZX_OK) {
     return st;
   }
@@ -275,7 +280,7 @@ static zx_status_t vmo_coalesce_pages(zx_handle_t vmo_hdl, const size_t extra_by
 
   st = vmo->Read(dst_addr, 0, vmo_size);
   if (st != ZX_OK) {
-    Pmm::Node().FreeList(&list);
+    Pmm::Node().FreeList(allocated_pages);
     return st;
   }
 
@@ -286,7 +291,6 @@ static zx_status_t vmo_coalesce_pages(zx_handle_t vmo_hdl, const size_t extra_by
   if (vaddr)
     *vaddr = dst_addr;
 
-  list.clear();
   return ZX_OK;
 }
 
@@ -294,11 +298,13 @@ NO_ASAN zx_status_t system_mexec_core(zx_handle_t resource, zx_handle_t kernel_v
                                       zx_handle_t data_zbi_vmo) {
   paddr_t new_kernel_addr;
   size_t new_kernel_len;
+  VmPageDoublyLinkedList kernel_pages;
   zx_status_t result =
-      vmo_coalesce_pages(kernel_vmo, 0, &new_kernel_addr, nullptr, &new_kernel_len);
+      vmo_coalesce_pages(kernel_vmo, 0, &new_kernel_addr, nullptr, &new_kernel_len, &kernel_pages);
   if (result != ZX_OK) {
     return result;
   }
+  auto cleanup_kernel = fit::defer([&kernel_pages]() { Pmm::Node().FreeList(&kernel_pages); });
 
   paddr_t new_kernel_entry;
   {
@@ -317,11 +323,14 @@ NO_ASAN zx_status_t system_mexec_core(zx_handle_t resource, zx_handle_t kernel_v
   paddr_t new_data_zbi_addr;
   uint8_t* data_zbi_buffer;
   size_t data_zbi_len;
+  VmPageDoublyLinkedList data_zbi_pages;
   result = vmo_coalesce_pages(data_zbi_vmo, kBootdataPlatformExtraBytes, &new_data_zbi_addr,
-                              &data_zbi_buffer, &data_zbi_len);
+                              &data_zbi_buffer, &data_zbi_len, &data_zbi_pages);
   if (result != ZX_OK) {
     return result;
   }
+  auto cleanup_data_zbi =
+      fit::defer([&data_zbi_pages]() { Pmm::Node().FreeList(&data_zbi_pages); });
 
   uintptr_t kernel_image_end = KernelPhysicalLoadAddress() + new_kernel_len;
 
@@ -373,6 +382,10 @@ NO_ASAN zx_status_t system_mexec_core(zx_handle_t resource, zx_handle_t kernel_v
   // Give the watchdog one last pet to hold it off until the new image has booted far enough to pet
   // the dog itself (or disable it).
   hw_watchdog_pet();
+
+  // Beyond this point mexec handoff is irreversible. Disarm cleanup guards.
+  cleanup_kernel.cancel();
+  cleanup_data_zbi.cancel();
 
   arch_disable_ints();
 

@@ -19,6 +19,7 @@ extern "C" {
 bool cpp_verify_mutex_id(const void* lock_ptr, const void* expected_id);
 bool cpp_verify_critical_mutex_id(const void* lock_ptr, const void* expected_id);
 bool cpp_verify_spinlock_id(const void* lock_ptr, const void* expected_id);
+bool cpp_verify_monitored_spinlock_id(const void* lock_ptr, const void* expected_id);
 bool cpp_verify_brwlock_id(const void* lock_ptr, const void* expected_id);
 
 const void* cpp_get_test_singleton_mutex_ptr();
@@ -43,6 +44,11 @@ bool cpp_verify_critical_mutex_id(const void* lock_ptr, const void* expected_id)
 
 bool cpp_verify_spinlock_id(const void* lock_ptr, const void* expected_id) {
   const auto* lock = static_cast<const lockdep::Lock<SpinLock>*>(lock_ptr);
+  return lock->id() == reinterpret_cast<lockdep::LockClassId>(expected_id);
+}
+
+bool cpp_verify_monitored_spinlock_id(const void* lock_ptr, const void* expected_id) {
+  const auto* lock = static_cast<const lockdep::Lock<MonitoredSpinLock>*>(lock_ptr);
   return lock->id() == reinterpret_cast<lockdep::LockClassId>(expected_id);
 }
 

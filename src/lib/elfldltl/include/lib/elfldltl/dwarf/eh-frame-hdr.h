@@ -81,13 +81,13 @@ constexpr decltype(auto) operator<<(Ostream&& ostream, const EhFrameHdrEntry<Siz
 // the entire segment is made accessible then both .eh_frame_hdr and entries it
 // locates can be gleaned from it can be accessed in a uniform manner.
 
-template <class Elf = Elf<>>
+template <ElfApi Elf = Elf<>>
 class EhFrameHdr {
  public:
   // This is usually called `size_type` in toolkit code, but here that refers
   // to the size of the element count in the container-style API.
-  using address_size_type = typename Elf::size_type;
-  using Phdr = typename Elf::Phdr;
+  using address_size_type = Elf::size_type;
+  using Phdr = Elf::Phdr;
 
   class iterator {
    public:

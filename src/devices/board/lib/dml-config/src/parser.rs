@@ -125,6 +125,99 @@ pub struct DmlParserConfig {
     pub service_configs: phf::Map<&'static str, ServiceBindConfig>,
 }
 
+pub static STANDARD_SERVICE_CONFIGS: phf::Map<&'static str, ServiceBindConfig> = phf::phf_map! {
+    "fuchsia.clock.Init" => ServiceBindConfig {
+        transport: TransportType::None,
+        rules: &[PropertyRule {
+            bind_key: "fuchsia.BIND_INIT_STEP",
+            sources: &[ValueSource::Integer(0x494B4C43)],
+            value_type: RuleValueType::Integer,
+            destination: Destination::Both,
+        }],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.pwm.Init" => ServiceBindConfig {
+        transport: TransportType::None,
+        rules: &[PropertyRule {
+            bind_key: "fuchsia.BIND_INIT_STEP",
+            sources: &[ValueSource::Integer(0x004D5750)],
+            value_type: RuleValueType::Integer,
+            destination: Destination::Both,
+        }],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.gpio.Init" => ServiceBindConfig {
+        transport: TransportType::None,
+        rules: &[PropertyRule {
+            bind_key: "fuchsia.BIND_INIT_STEP",
+            sources: &[ValueSource::Integer(0x4F495047)],
+            value_type: RuleValueType::Integer,
+            destination: Destination::Both,
+        }],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.hardware.gpu.mali.Service" => ServiceBindConfig {
+        transport: TransportType::Driver,
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.hardware.platform.device.Service" => ServiceBindConfig {
+        rules: &[
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PROTOCOL",
+                sources: &[ValueSource::Integer(BIND_PROTOCOL_DEVICE)],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_VID",
+                sources: &[ValueSource::ConstraintKey("vid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_DID",
+                sources: &[ValueSource::ConstraintKey("did")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+        ],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.hardware.platform.bus.Service" => ServiceBindConfig {
+        transport: TransportType::Driver,
+        rules: &[
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_VID",
+                sources: &[ValueSource::ConstraintKey("vid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_PID",
+                sources: &[ValueSource::ConstraintKey("pid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_DID",
+                sources: &[ValueSource::ConstraintKey("did")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+        ],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+};
+
+pub const DEFAULT_DML_PARSER_CONFIG: DmlParserConfig =
+    DmlParserConfig { service_configs: phf::phf_map! {} };
+
+impl Default for DmlParserConfig {
+    fn default() -> Self {
+        DEFAULT_DML_PARSER_CONFIG
+    }
+}
+
 fn resolve_value(
     _provider: &str,
     provider_id: u32,
@@ -228,8 +321,11 @@ pub fn generate_parent_spec_generic(
     let mut bind_rules = Vec::new();
     let mut properties = Vec::new();
 
-    let service_config =
-        config.service_configs.get(service_name).unwrap_or(&DEFAULT_SERVICE_BIND_CONFIG);
+    let service_config = config
+        .service_configs
+        .get(service_name)
+        .or_else(|| STANDARD_SERVICE_CONFIGS.get(service_name))
+        .unwrap_or(&DEFAULT_SERVICE_BIND_CONFIG);
 
     match service_config.transport {
         TransportType::Zircon => {
@@ -267,7 +363,7 @@ pub fn generate_parent_spec_generic(
     }
 
     if !properties.iter().any(|p| p.key == "fuchsia.NAME") {
-        let name_opt = crate::get_string(constraint, "name").or_else(|| res.name.clone());
+        let name_opt = res.name.clone().or_else(|| crate::get_string(constraint, "name"));
         if let Some(name) = name_opt {
             properties.push(make_property2("fuchsia.NAME", property_string(&name)));
         }

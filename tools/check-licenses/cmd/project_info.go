@@ -51,7 +51,8 @@ func (c *ProjectInfoCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...
 	}
 
 	// Step 2: Locate the governing README.fuchsia for the input path.
-	r, readmePath, err := readme.FindProjectReadme(inputCtx.AbsPath, inputCtx.FuchsiaDir, inputCtx.Config.Boundary.OutOfTreeReadmes)
+	grouper := boundary.NewGrouper(inputCtx.FuchsiaDir, inputCtx.Config.Boundary)
+	r, readmePath, err := grouper.FindProjectReadme(inputCtx.AbsPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to find project README: %v\n", err)
 		return subcommands.ExitFailure
@@ -82,7 +83,6 @@ func (c *ProjectInfoCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...
 	fmt.Printf("Readme Path:  %s%s\n", relReadme, virtualStr)
 
 	// Step 4: Collect active policy exceptions that apply to this project.
-	grouper := boundary.NewGrouper(inputCtx.FuchsiaDir, inputCtx.Config.Boundary)
 	activePolicies := make(map[string]config.RuleMetadata)
 	var activePolicyNames []string
 	for policyName, paths := range inputCtx.Config.Validate.PolicyExceptions {

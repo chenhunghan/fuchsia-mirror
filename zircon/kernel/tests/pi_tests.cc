@@ -966,7 +966,7 @@ bool pi_test_changing_priority() {
   // Changing the pressure thread's profile to a number of different profiles,
   // verifying that the pressure felt by the blocking thread changes
   // appropriately as we do.
-  for (auto profile : profiles) {
+  for (const auto& profile : profiles) {
     PRINT_LOOP_ITER(profile);
 
     profile->Apply(pressure_thread.thread());
@@ -1034,7 +1034,7 @@ bool pi_test_changing_priority_in_wait_queue() {
 
   // Changing the thread's base profile while it is blocked in the queue.  Its
   // effective profile should always match the base profile we set.
-  for (auto profile : profiles) {
+  for (const auto& profile : profiles) {
     PRINT_LOOP_ITER(profile);
 
     profile->Apply(thread.thread());
@@ -1256,7 +1256,7 @@ bool pi_test_multi_waiter() {
   };
   ktl::array<Waiter, WAITER_CNT> waiters;
 
-  for (auto bt_profile : profile_deck) {
+  for (const auto& bt_profile : profile_deck) {
     PRINT_LOOP_ITER(bt_profile);
 
     for (uint32_t pgen_ndx = 0; pgen_ndx < ktl::size(PRIORITY_GENERATORS); ++pgen_ndx) {
@@ -1449,7 +1449,7 @@ bool pi_test_multi_owned_queues() {
       DistroSpec{DistroSpec::Type::SHUFFLE, 0x06ec82d4ade8efba},
   };
 
-  for (auto bt_profile : profile_deck) {
+  for (const auto& bt_profile : profile_deck) {
     PRINT_LOOP_ITER(bt_profile);
 
     for (uint32_t pgen_ndx = 0; pgen_ndx < ktl::size(PRIORITY_GENERATORS); ++pgen_ndx) {

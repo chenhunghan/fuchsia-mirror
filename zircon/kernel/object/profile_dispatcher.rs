@@ -4,10 +4,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use core::mem::MaybeUninit;
 use fbl::Canary;
 use ksync::{KMutex, RawCriticalMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
-use zerocopy::FromZeros;
 use zx_status::Status;
 use zx_types::{
     ZX_OBJ_TYPE_PROFILE, ZX_PRIORITY_DEFAULT, ZX_PRIORITY_HIGH, ZX_PROFILE_INFO_FLAG_CPU_MASK,
@@ -20,9 +20,10 @@ use super::KernelHandle;
 use super::profile_dispatcher_ffi::{
     cpp_profile_dispatcher_create, cpp_profile_dispatcher_validate_and_create_profile,
 };
-use super::thread_dispatcher::{SchedulerStateBaseProfile, ThreadDispatcher};
+use super::thread_dispatcher::ThreadDispatcher;
 use super::vm_address_region_dispatcher::{MemoryPriority, VmAddressRegionDispatcher};
 use crate::counters;
+use crate::kernel::scheduler_state::SchedulerStateBaseProfile;
 use crate::kernel::types::cpu_mask_t;
 
 use object_constants_rs as object_constants;
@@ -53,16 +54,15 @@ fn parse_cpu_mask(set: &zx_cpu_set_t) -> cpu_mask_t {
 fn validate_and_create_profile(
     info: &zx_profile_info_t,
 ) -> Result<SchedulerStateBaseProfile, Status> {
-    let profile = SchedulerStateBaseProfile(zr::OpaqueBytes::new(FromZeros::new_zeroed()));
+    let mut profile = MaybeUninit::uninit();
     // SAFETY: info and profile pointers are valid.
     let status = unsafe {
-        cpp_profile_dispatcher_validate_and_create_profile(
-            info as *const _,
-            profile.get() as *mut _,
-        )
+        cpp_profile_dispatcher_validate_and_create_profile(info as *const _, &mut profile)
     };
     Status::ok(status)?;
-    Ok(profile)
+    // SAFETY: On success, cpp_profile_dispatcher_validate_and_create_profile() initializes
+    // profile
+    Ok(unsafe { profile.assume_init() })
 }
 
 fn parse_memory_priority(info: &zx_profile_info_t) -> Result<MemoryPriority, Status> {

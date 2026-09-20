@@ -162,6 +162,15 @@ pub fn netlink_ioctl(
     request: u32,
     arg: SyscallArg,
 ) -> Result<SyscallResult, Errno> {
+    // Capability checks must be validated against the user task's credentials
+    // before performing internal operations.
+    match request {
+        SIOCSIFADDR | SIOCSIFNETMASK | SIOCSIFFLAGS => {
+            security::check_task_capable(current_task, CAP_NET_ADMIN)?;
+        }
+        _ => {}
+    }
+
     let user_addr = UserAddress::from(arg);
 
     // TODO(https://fxbug.dev/42079507): Share this implementation with `fdio`
@@ -175,13 +184,15 @@ pub fn netlink_ioctl(
     //     Linux supports some standard ioctls to configure network devices.
     //     They can be used on any socket's file descriptor regardless of
     //     the family or type.
+    let socket = new_route_socket(current_task)?;
+
     match request {
         SIOCGIFADDR => {
             let in_ifreq: IfReq =
                 current_task.read_multi_arch_object(IfReqPtr::new(current_task, user_addr))?;
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-            let (_socket, address_msgs, _if_index) =
-                get_netlink_ipv4_addresses(current_task, &in_ifreq, &mut read_buf)?;
+            let (address_msgs, _if_index) =
+                get_netlink_ipv4_addresses(current_task, &socket, &in_ifreq, &mut read_buf)?;
             let mut maybe_errno = None;
             let ifru_addr = {
                 let mut addr = uapi::sockaddr::default();
@@ -239,8 +250,8 @@ pub fn netlink_ioctl(
             let in_ifreq: IfReq =
                 current_task.read_multi_arch_object(IfReqPtr::new(current_task, user_addr))?;
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-            let (_socket, address_msgs, _if_index) =
-                get_netlink_ipv4_addresses(current_task, &in_ifreq, &mut read_buf)?;
+            let (address_msgs, _if_index) =
+                get_netlink_ipv4_addresses(current_task, &socket, &in_ifreq, &mut read_buf)?;
 
             let mut maybe_errno = None;
             let ifru_netmask = {
@@ -288,8 +299,12 @@ pub fn netlink_ioctl(
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
             // SIOCGIFNAME calls provide the interface index and expect to
             // retrieve the interface name.
-            let (_socket, link_msg) =
-                get_netlink_interface_info_with_index(current_task, &in_ifreq, &mut read_buf)?;
+            let link_msg = get_netlink_interface_info_with_index(
+                current_task,
+                &socket,
+                &in_ifreq,
+                &mut read_buf,
+            )?;
 
             // Find the interface name attribute. We expect only one.
             let if_name = link_msg.attributes.iter().find_map(|attr| {
@@ -313,8 +328,8 @@ pub fn netlink_ioctl(
             let in_ifreq: IfReq =
                 current_task.read_multi_arch_object(IfReqPtr::new(current_task, user_addr))?;
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-            let (socket, address_msgs, if_index) =
-                get_netlink_ipv4_addresses(current_task, &in_ifreq, &mut read_buf)?;
+            let (address_msgs, if_index) =
+                get_netlink_ipv4_addresses(current_task, &socket, &in_ifreq, &mut read_buf)?;
 
             let request_header = {
                 let mut header = NetlinkHeader::default();
@@ -421,8 +436,8 @@ pub fn netlink_ioctl(
             }
 
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-            let (socket, address_msgs, _if_index) =
-                get_netlink_ipv4_addresses(current_task, &in_ifreq, &mut read_buf)?;
+            let (address_msgs, _if_index) =
+                get_netlink_ipv4_addresses(current_task, &socket, &in_ifreq, &mut read_buf)?;
 
             let request_header = {
                 let mut header = NetlinkHeader::default();
@@ -490,8 +505,12 @@ pub fn netlink_ioctl(
             let in_ifreq: IfReq =
                 current_task.read_multi_arch_object(IfReqPtr::new(current_task, user_addr))?;
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-            let (_socket, link_msg) =
-                get_netlink_interface_info_with_name(current_task, &in_ifreq, &mut read_buf)?;
+            let link_msg = get_netlink_interface_info_with_name(
+                current_task,
+                &socket,
+                &in_ifreq,
+                &mut read_buf,
+            )?;
 
             let hw_addr_and_type = {
                 let hw_type = link_msg.header.link_layer_type;
@@ -535,8 +554,12 @@ pub fn netlink_ioctl(
             let in_ifreq: IfReq =
                 current_task.read_multi_arch_object(IfReqPtr::new(current_task, user_addr))?;
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-            let (_socket, link_msg) =
-                get_netlink_interface_info_with_name(current_task, &in_ifreq, &mut read_buf)?;
+            let link_msg = get_netlink_interface_info_with_name(
+                current_task,
+                &socket,
+                &in_ifreq,
+                &mut read_buf,
+            )?;
             let index =
                 i32::try_from(link_msg.header.index).expect("interface ID should fit in an i32");
             let out_ifreq = IfReq::new_with_i32(current_task, in_ifreq.name(), index);
@@ -558,8 +581,12 @@ pub fn netlink_ioctl(
             let in_ifreq: IfReq =
                 current_task.read_multi_arch_object(IfReqPtr::new(current_task, user_addr))?;
             let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-            let (_socket, link_msg) =
-                get_netlink_interface_info_with_name(current_task, &in_ifreq, &mut read_buf)?;
+            let link_msg = get_netlink_interface_info_with_name(
+                current_task,
+                &socket,
+                &in_ifreq,
+                &mut read_buf,
+            )?;
             // Perform an `as` cast rather than `try_into` because:
             //   - flags are a bit mask and should not be
             //     interpreted as negative,
@@ -578,22 +605,22 @@ pub fn netlink_ioctl(
             let user_addr = UserAddress::from(arg);
             let in_ifreq: IfReq =
                 current_task.read_multi_arch_object(IfReqPtr::new(current_task, user_addr))?;
-            set_netlink_interface_flags(current_task, &in_ifreq).map(|()| SUCCESS)
+            set_netlink_interface_flags(current_task, &socket, &in_ifreq).map(|()| SUCCESS)
         }
         _ => error!(ENOTTY),
     }
 }
 
-/// Creates a netlink socket and performs an `RTM_GETLINK` request for the
-/// requested interface requested in `in_ifreq` using the iface name.
+/// Performs an `RTM_GETLINK` request on `socket` for the interface requested in `in_ifreq`
+/// using the iface name.
 ///
-/// Returns the netlink socket and the interface's information, or an [`Errno`]
-/// if the operation failed.
+/// Returns the interface's information, or an [`Errno`] if the operation failed.
 fn get_netlink_interface_info_with_name(
     current_task: &CurrentTask,
+    socket: &FileHandle,
     in_ifreq: &IfReq,
     read_buf: &mut VecOutputBuffer,
-) -> Result<(FileHandle, LinkMessage), Errno> {
+) -> Result<LinkMessage, Errno> {
     let iface_name = in_ifreq.name_as_str()?;
     // Send the request to get the link details with the requested
     // interface name.
@@ -609,19 +636,19 @@ fn get_netlink_interface_info_with_name(
             msg
         })),
     );
-    get_netlink_interface_info(current_task, read_buf, msg)
+    get_netlink_interface_info(current_task, socket, read_buf, msg)
 }
 
-/// Creates a netlink socket and performs an `RTM_GETLINK` request for the
-/// requested interface requested in `in_ifreq` using the iface index.
+/// Performs an `RTM_GETLINK` request on `socket` for the interface requested in `in_ifreq`
+/// using the iface index.
 ///
-/// Returns the netlink socket and the interface's information, or an [`Errno`]
-/// if the operation failed.
+/// Returns the interface's information, or an [`Errno`] if the operation failed.
 fn get_netlink_interface_info_with_index(
     current_task: &CurrentTask,
+    socket: &FileHandle,
     in_ifreq: &IfReq,
     read_buf: &mut VecOutputBuffer,
-) -> Result<(FileHandle, LinkMessage), Errno> {
+) -> Result<LinkMessage, Errno> {
     // Get the if_index which is stored in the "ivalue" field.
     let index: i32 = in_ifreq.ifru_ivalue();
     // Perform an `as` cast rather than `try_into` because:
@@ -642,26 +669,32 @@ fn get_netlink_interface_info_with_index(
             msg
         })),
     );
-    get_netlink_interface_info(current_task, read_buf, msg)
+    get_netlink_interface_info(current_task, socket, read_buf, msg)
+}
+
+fn new_route_socket(current_task: &CurrentTask) -> Result<FileHandle, Errno> {
+    let internal_creds = security::creds_start_internal_operation(current_task);
+    current_task.override_creds(internal_creds, || {
+        SocketFile::new_socket(
+            current_task,
+            SocketDomain::Netlink,
+            SocketType::Datagram,
+            OpenFlags::RDWR,
+            SocketProtocol::from_raw(NetlinkFamily::Route.as_raw()),
+            /* kernel_private=*/ true,
+        )
+    })
 }
 
 // Helper function for getting an interface's info through Netlink
 // using the supplied NetlinkMessage.
 fn get_netlink_interface_info(
     current_task: &CurrentTask,
+    socket: &FileHandle,
     read_buf: &mut VecOutputBuffer,
     msg: NetlinkMessage<RouteNetlinkMessage>,
-) -> Result<(FileHandle, LinkMessage), Errno> {
-    let socket = SocketFile::new_socket(
-        current_task,
-        SocketDomain::Netlink,
-        SocketType::Datagram,
-        OpenFlags::RDWR,
-        SocketProtocol::from_raw(NetlinkFamily::Route.as_raw()),
-        /* kernel_private=*/ true,
-    )?;
-
-    let resp = send_netlink_msg_and_wait_response(current_task, &socket, msg, read_buf)?;
+) -> Result<LinkMessage, Errno> {
+    let resp = send_netlink_msg_and_wait_response(current_task, socket, msg, read_buf)?;
     let link_msg = match resp.payload {
         NetlinkPayload::Error(ErrorMessage { code: Some(code), header: _, .. }) => {
             // `code` is an `i32` and may hold negative values so
@@ -677,91 +710,87 @@ fn get_netlink_interface_info(
         // RTM_NEWLINK response for our RTM_GETLINK request.
         payload => panic!("unexpected message = {:?}", payload),
     };
-    Ok((socket, link_msg))
+    Ok(link_msg)
 }
 
-/// Creates a netlink socket and performs an `RTM_GETADDR` dump request for the
-/// requested interface requested in `in_ifreq`.
+/// Performs an `RTM_GETADDR` dump request on `socket` for the requested interface
+/// requested in `in_ifreq`.
 ///
-/// Returns the netlink socket, the list of addresses and interface index, or an
-/// [`Errno`] if the operation failed.
-
+/// Returns the list of addresses and interface index, or an [`Errno`] if the operation failed.
 fn get_netlink_ipv4_addresses(
     current_task: &CurrentTask,
+    socket: &FileHandle,
     in_ifreq: &IfReq,
     read_buf: &mut VecOutputBuffer,
-) -> Result<(FileHandle, Vec<AddressMessage>, u32), Errno> {
+) -> Result<(Vec<AddressMessage>, u32), Errno> {
     let uapi::sockaddr { sa_family, sa_data: _ } = in_ifreq.ifru_addr();
     if *sa_family != AF_INET {
         return error!(EINVAL);
     }
 
-    let (socket, link_msg) =
-        get_netlink_interface_info_with_name(current_task, in_ifreq, read_buf)?;
+    let link_msg = get_netlink_interface_info_with_name(current_task, socket, in_ifreq, read_buf)?;
     let if_index = link_msg.header.index;
 
     // Send the request to dump all IPv4 addresses.
-    {
-        let mut msg = NetlinkMessage::new(
-            {
-                let mut header = NetlinkHeader::default();
-                header.flags = netlink_packet_core::NLM_F_DUMP | netlink_packet_core::NLM_F_REQUEST;
-                header
-            },
-            NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetAddress({
-                let mut msg = AddressMessage::default();
-                msg.header.family = AddressFamily::Inet.into();
-                msg
-            })),
-        );
-        msg.finalize();
-        let mut buf = vec![0; msg.buffer_len()];
-        msg.serialize(&mut buf[..]);
+    let mut msg = NetlinkMessage::new(
+        {
+            let mut header = NetlinkHeader::default();
+            header.flags = netlink_packet_core::NLM_F_DUMP | netlink_packet_core::NLM_F_REQUEST;
+            header
+        },
+        NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetAddress({
+            let mut msg = AddressMessage::default();
+            msg.header.family = AddressFamily::Inet.into();
+            msg
+        })),
+    );
+    msg.finalize();
+    let mut buf = vec![0; msg.buffer_len()];
+    msg.serialize(&mut buf[..]);
+
+    let internal_creds = security::creds_start_internal_operation(current_task);
+    let addrs = current_task.override_creds(internal_creds, || {
         assert_eq!(socket.write(current_task, &mut VecInputBuffer::from(buf))?, msg.buffer_len());
-    }
 
-    // Collect all the addresses.
-    let mut addrs = Vec::new();
-    loop {
-        read_buf.reset();
-        let n = socket.read(current_task, read_buf)?;
+        // Collect all the addresses.
+        let mut addrs = Vec::new();
+        loop {
+            read_buf.reset();
+            let n = socket.read(current_task, read_buf)?;
 
-        let msg = NetlinkMessage::<RouteNetlinkMessage>::deserialize(
-            &read_buf.data()[..n],
-            RouteNetlinkMessageParseMode::Strict,
-        )
-        .expect("netlink should always send well-formed messages");
-        match msg.payload {
-            NetlinkPayload::Done(_) => break,
-            NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(msg)) => {
-                if msg.header.index == if_index {
-                    addrs.push(msg);
+            let msg = NetlinkMessage::<RouteNetlinkMessage>::deserialize(
+                &read_buf.data()[..n],
+                RouteNetlinkMessageParseMode::Strict,
+            )
+            .expect("netlink should always send well-formed messages");
+            match msg.payload {
+                NetlinkPayload::Done(_) => break,
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(msg)) => {
+                    if msg.header.index == if_index {
+                        addrs.push(msg);
+                    }
                 }
+                payload => panic!("unexpected message = {:?}", payload),
             }
-            payload => panic!("unexpected message = {:?}", payload),
         }
-    }
+        Ok(addrs)
+    })?;
 
-    Ok((socket, addrs, if_index))
+    Ok((addrs, if_index))
 }
 
-/// Creates a netlink socket and performs `RTM_SETLINK` to update the flags.
-fn set_netlink_interface_flags(current_task: &CurrentTask, in_ifreq: &IfReq) -> Result<(), Errno> {
+/// Performs `RTM_SETLINK` on `socket` to update the flags.
+fn set_netlink_interface_flags(
+    current_task: &CurrentTask,
+    socket: &FileHandle,
+    in_ifreq: &IfReq,
+) -> Result<(), Errno> {
     let iface_name = in_ifreq.name_as_str()?;
     let flags: i16 = in_ifreq.ifru_flags();
     // Perform an `as` cast rather than `try_into` because:
     //   - flags are a bit mask and should not be interpreted as negative,
     //   - no loss in precision when upcasting 16 bits to 32 bits.
     let flags: u32 = flags as u32;
-
-    let socket = SocketFile::new_socket(
-        current_task,
-        SocketDomain::Netlink,
-        SocketType::Datagram,
-        OpenFlags::RDWR,
-        SocketProtocol::from_raw(NetlinkFamily::Route.as_raw()),
-        /* kernel_private=*/ true,
-    )?;
 
     // Send the request to set the link flags with the requested interface name.
     let msg = NetlinkMessage::new(
@@ -781,7 +810,7 @@ fn set_netlink_interface_flags(current_task: &CurrentTask, in_ifreq: &IfReq) -> 
         })),
     );
     let mut read_buf = VecOutputBuffer::new(NETLINK_ROUTE_BUF_SIZE);
-    let resp = send_netlink_msg_and_wait_response(current_task, &socket, msg, &mut read_buf)?;
+    let resp = send_netlink_msg_and_wait_response(current_task, socket, msg, &mut read_buf)?;
     match resp.payload {
         NetlinkPayload::Error(ErrorMessage { code: Some(code), header: _, .. }) => {
             // `code` is an `i32` and may hold negative values so
@@ -800,7 +829,6 @@ fn set_netlink_interface_flags(current_task: &CurrentTask, in_ifreq: &IfReq) -> 
 }
 
 /// Sends the msg on the provided NETLINK ROUTE socket, returning the response.
-
 fn send_netlink_msg_and_wait_response(
     current_task: &CurrentTask,
     socket: &FileHandle,
@@ -810,14 +838,18 @@ fn send_netlink_msg_and_wait_response(
     msg.finalize();
     let mut buf = vec![0; msg.buffer_len()];
     msg.serialize(&mut buf[..]);
-    assert_eq!(socket.write(current_task, &mut VecInputBuffer::from(buf))?, msg.buffer_len());
 
-    read_buf.reset();
-    let n = socket.read(current_task, read_buf)?;
-    let msg = NetlinkMessage::<RouteNetlinkMessage>::deserialize(
-        &read_buf.data()[..n],
-        RouteNetlinkMessageParseMode::Strict,
-    )
-    .expect("netlink should always send well-formed messages");
-    Ok(msg)
+    let internal_creds = security::creds_start_internal_operation(current_task);
+    current_task.override_creds(internal_creds, || {
+        assert_eq!(socket.write(current_task, &mut VecInputBuffer::from(buf))?, msg.buffer_len());
+
+        read_buf.reset();
+        let n = socket.read(current_task, read_buf)?;
+        let msg = NetlinkMessage::<RouteNetlinkMessage>::deserialize(
+            &read_buf.data()[..n],
+            RouteNetlinkMessageParseMode::Strict,
+        )
+        .expect("netlink should always send well-formed messages");
+        Ok(msg)
+    })
 }

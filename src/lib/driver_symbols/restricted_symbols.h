@@ -48,7 +48,6 @@ inline constexpr std::string_view kCreateThreadSymbolsDriversAllowlist[] = {
     "#meta/asix-88772b.cm",
     "#meta/astro.cm",
     "#meta/at-fake-transport.cm",
-    "#meta/block.core.cm",
     "#meta/brcmfmac.cm",
     "#meta/bt-hci-atheros.cm",
     "#meta/bt-hci-broadcom.cm",

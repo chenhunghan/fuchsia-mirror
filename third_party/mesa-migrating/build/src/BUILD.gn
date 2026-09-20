@@ -22,6 +22,8 @@
 import("../mesa.gni")
 
 config("common_config") {
+  configs = [ "//build/config:Wno-unterminated-string-initialization" ]
+
   mesa_version = read_file("$mesa_source_root/VERSION", "trim string")
 
   defines = [
@@ -113,6 +115,7 @@ config("common_config") {
     "-Wno-int-in-bool-context",
     "-Wno-conversion",
     "-Wno-deprecated-anon-enum-enum-conversion",
+    "-Wno-call-graph-section-no-prototype",
 
     # TODO(https://fxbug.dev/42055484): Fix the warning below and remove -Wno-deprecated-builtins:
     # src/compiler/glsl/list.h:58:4: error: builtin __has_trivial_destructor is deprecated.

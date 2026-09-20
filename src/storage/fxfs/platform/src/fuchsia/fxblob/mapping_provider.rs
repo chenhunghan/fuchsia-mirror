@@ -79,44 +79,32 @@ impl BlobMappingProvider {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct OpenedBlob {
-    /// The session-unique identifier for the registered blob.
-    pub key: u64,
-    /// The uncompressed byte size of the blob.
-    pub size: u64,
-}
-
 /// `BlobMappingSession` services requests to open or close blobs within a `BlobDirectory`.
 /// Upon opening a blob, the blob's underlying extents (data and merkle blocks) are retrieved and
-/// then forwarded to client asynchronously via `sender`. A a session-unique `key` is assigned for
-/// each opened blob, which the client can reference during a `Close` request.
+/// then forwarded to client asynchronously via `sender`. The client provides a session-unique
+/// `key` for each opened blob, which can also be referenced during a `Close` request.
 pub struct BlobMappingSession {
     blob_directory: Arc<BlobDirectory>,
     sender: AsyncSender<RawMappingCommand>,
-    next_key: u64,
 }
 
 impl BlobMappingSession {
     pub fn new(blob_directory: Arc<BlobDirectory>, sender: AsyncSender<RawMappingCommand>) -> Self {
-        Self { blob_directory, sender, next_key: 1 }
+        Self { blob_directory, sender }
     }
 
     /// Retrieves the extent mappings for the blob and registers the blob in the mapping session.
-    /// Returns an `OpenedBlob` containing the node size and the uniquely generated key used to
-    /// identify this blob in this session.
-    async fn open_blob(&mut self, hash: Hash) -> Result<OpenedBlob, Error> {
+    /// Returns the uncompressed byte size of the blob.
+    async fn open_blob(&mut self, key: u64, hash: Hash) -> Result<u64, Error> {
         let node = self.blob_directory.open_blob(&hash.into()).await?.ok_or(FxfsError::NotFound)?;
 
         let extents = node.get_mapping_extents().await?;
         let size = node.as_ref().byte_size();
         let stored_size = node.as_ref().stored_size().await?;
-        let blob_count = extents.data.len() as u32;
+        let extent_count = extents.data.len() as u32;
         let metadata_count = extents.merkle.len() as u32;
 
-        let key = self.next_key;
-        self.next_key += 1;
-        let allocation_size = (blob_count + metadata_count) as usize * std::mem::size_of::<u64>();
+        let allocation_size = (extent_count + metadata_count) as usize * std::mem::size_of::<u64>();
 
         if allocation_size > 0 {
             let mut payload = self.sender.reserve_payload(allocation_size).await?;
@@ -133,18 +121,19 @@ impl BlobMappingSession {
             }
 
             let command = MappingCommand::Mappings {
-                key: key as u64,
+                key,
                 offset: offset_in_vmo as u32,
                 stored_size,
                 device_offset: 0,
                 metadata_count,
-                blob_count,
+                extent_count,
+                encrypted: false,
             };
 
             payload.commit(command.into()).await?;
         }
 
-        Ok(OpenedBlob { key, size })
+        Ok(size)
     }
 
     /// Unregisters the blob mapping and signals the block driver to terminate tracking.
@@ -159,7 +148,7 @@ impl BlobMappingSession {
     ) {
         while let Ok(Some(request)) = stream.try_next().await {
             match request {
-                fmapping::MappingSessionRequest::Open { identifier, responder } => {
+                fmapping::MappingSessionRequest::Open { key, identifier, responder } => {
                     // We expect the identifier to be a Merkle Root Hash for the blob.
                     if identifier.len() != fuchsia_hash::HASH_SIZE {
                         responder.send(Err(zx::Status::INVALID_ARGS.into_raw())).unwrap_or_else(
@@ -168,13 +157,11 @@ impl BlobMappingSession {
                         continue;
                     }
                     let hash = Hash::from(<[u8; 32]>::try_from(identifier.as_slice()).unwrap());
-                    match self.open_blob(hash).await {
-                        Ok(opened_blob) => {
-                            responder
-                                .send(Ok((opened_blob.size, opened_blob.key as u32)))
-                                .unwrap_or_else(|error| {
-                                    warn!(error:?; "Failed to send mapping session response")
-                                });
+                    match self.open_blob(key, hash).await {
+                        Ok(size) => {
+                            responder.send(Ok(size)).unwrap_or_else(
+                                |error| warn!(error:?; "Failed to send mapping session response"),
+                            );
                         }
                         Err(error) => {
                             error!(error:?; "Failed to open blob");
@@ -185,7 +172,7 @@ impl BlobMappingSession {
                     }
                 }
                 fmapping::MappingSessionRequest::Close { key, responder } => {
-                    let result = match self.close_blob(key as u64).await {
+                    let result = match self.close_blob(key).await {
                         Ok(()) => Ok(()),
                         Err(error) => {
                             error!(error:?; "Failed to close blob");
@@ -263,25 +250,27 @@ mod tests {
             let cmd1_raw = receiver.peek().expect("peek failed");
             let cmd1 = MappingCommand::try_from(*cmd1_raw).expect("try_from failed");
 
-            let (cmd1_offset, cmd1_blob_count, cmd1_metadata_count) = match cmd1 {
+            let (cmd1_offset, cmd1_extent_count, cmd1_metadata_count) = match cmd1 {
                 MappingCommand::Mappings {
                     key,
                     offset,
                     stored_size: _,
                     device_offset: _,
                     metadata_count,
-                    blob_count,
+                    extent_count,
+                    encrypted,
                 } => {
                     assert_eq!(key, 1);
-                    assert_eq!(blob_count, data_extents.len() as u32);
+                    assert_eq!(extent_count, data_extents.len() as u32);
                     assert_eq!(metadata_count, merkle_extents.len() as u32);
-                    (offset, blob_count, metadata_count)
+                    assert!(!encrypted);
+                    (offset, extent_count, metadata_count)
                 }
                 _ => panic!("Expected Mappings command"),
             };
 
             // Verify payload
-            let total_extents = cmd1_blob_count + cmd1_metadata_count;
+            let total_extents = cmd1_extent_count + cmd1_metadata_count;
             let buffer = cmd1_raw.payload_slice(cmd1_offset, total_extents * 8).to_vec();
 
             let data_extents_container = Extents::try_new(&data_extents, 0).unwrap();
@@ -305,8 +294,9 @@ mod tests {
         });
 
         let server_task = async move {
-            let OpenedBlob { key, .. } = session.open_blob(hash).await.expect("open_blob failed");
-            assert_eq!(key, 1);
+            let key = 1;
+            let size = session.open_blob(key, hash).await.expect("open_blob failed");
+            assert_eq!(size, data.len() as u64);
 
             session.close_blob(key).await.expect("close_blob failed on existing key");
 
@@ -336,7 +326,7 @@ mod tests {
         let mut session = BlobMappingSession::new(blob_dir, sender);
         let hash = Hash::from([1u8; 32]);
         session
-            .open_blob(hash)
+            .open_blob(1, hash)
             .await
             .expect_err("open_blob should fail with blob that doesn't exist");
 
@@ -403,14 +393,14 @@ mod tests {
             .expect("vmo returned an error");
 
         let id: [u8; 32] = hash.into();
-        let (size, key) = session_proxy
-            .open(&id)
+        let key = 1;
+        let size = session_proxy
+            .open(key, &id)
             .await
             .expect("open failed")
             .expect("open explicitly returned an error");
 
         assert_eq!(size, 8192);
-        assert_eq!(key, 1);
 
         session_proxy
             .close(key)
@@ -422,14 +412,20 @@ mod tests {
 
         // Sending an invalid length hash to open should return INVALID_ARGS
         let bad_length_id = vec![1u8, 2, 3];
-        let invalid_args_err =
-            session_proxy.open(&bad_length_id).await.expect("open wire call failed").unwrap_err();
+        let invalid_args_err = session_proxy
+            .open(key, &bad_length_id)
+            .await
+            .expect("open wire call failed")
+            .unwrap_err();
         assert_eq!(invalid_args_err, zx::Status::INVALID_ARGS.into_raw());
 
         // Sending a valid length hash that does not exist should return NOT_FOUND
         let not_found_id = [0u8; 32];
-        let not_found_err =
-            session_proxy.open(&not_found_id).await.expect("open wire call failed").unwrap_err();
+        let not_found_err = session_proxy
+            .open(key, &not_found_id)
+            .await
+            .expect("open wire call failed")
+            .unwrap_err();
         assert_eq!(not_found_err, zx::Status::NOT_FOUND.into_raw());
 
         // Trying to close an invalid blob key currently always succeeds. The BlobMappingServer
@@ -588,8 +584,9 @@ mod tests {
         let files = Arc::new(mapping::Files::new(service, verifier));
 
         let id: [u8; 32] = hash.into();
-        let (blob_size, blob_key) = session_proxy
-            .open(&id)
+        let key = 1;
+        let blob_size = session_proxy
+            .open(key, &id)
             .await
             .expect("open failed")
             .expect("open explicitly returned an error");
@@ -597,23 +594,22 @@ mod tests {
         assert_eq!(blob_size as usize, uncompressed_data.len());
 
         let msg = receiver.peek().expect("Failed to peek message");
-        if let Ok(MappingCommand::Mappings { blob_count, metadata_count, .. }) =
+        if let Ok(MappingCommand::Mappings { extent_count, metadata_count, .. }) =
             MappingCommand::try_from(*msg)
         {
-            if (blob_count as usize) < min_data_extents
+            if (extent_count as usize) < min_data_extents
                 || (metadata_count as usize) < min_merkle_extents
             {
                 panic!(
-                    "EXTENTS MISMATCH: blob_count = {}, metadata_count = {}, \
+                    "EXTENTS MISMATCH: extent_count = {}, metadata_count = {}, \
                      required min_data = {}, min_merkle = {}",
-                    blob_count, metadata_count, min_data_extents, min_merkle_extents
+                    extent_count, metadata_count, min_data_extents, min_merkle_extents
                 );
             }
         }
         mapping::process_mapping_command(&msg, &files).expect("process_mapping_command failed");
         msg.pop().expect("pop failed");
 
-        let key = blob_key as u64;
         let paged_vmo = pager.create_vmo(zx::VmoOptions::empty(), &port, key, blob_size).unwrap();
         vmo_provider
             .register_vmo(key, paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap());
@@ -631,7 +627,7 @@ mod tests {
         let read_bytes = rx.await.unwrap();
         assert_eq!(&read_bytes[..], &uncompressed_data[..]);
 
-        session_proxy.close(blob_key).await.expect("close failed").expect("close error");
+        session_proxy.close(key).await.expect("close failed").expect("close error");
         let msg = receiver.peek().expect("Failed to peek close message");
         mapping::process_mapping_command(&msg, &files).expect("process_mapping_command failed");
         msg.pop().expect("pop failed");

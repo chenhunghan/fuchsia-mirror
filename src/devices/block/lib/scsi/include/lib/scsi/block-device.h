@@ -7,8 +7,6 @@
 
 #include <fidl/fuchsia.driver.token/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.block.volume/cpp/wire.h>
-#include <fuchsia/hardware/block/driver/c/banjo.h>
-#include <fuchsia/hardware/block/driver/cpp/banjo.h>
 #include <lib/driver/compat/cpp/compat.h>
 #include <lib/driver/component/cpp/driver_base.h>
 #include <lib/fit/function.h>
@@ -23,18 +21,6 @@
 #include "src/storage/lib/block_server/block_server.h"
 
 namespace scsi {
-
-struct DeviceOp {
-  void Complete(zx_status_t status) {
-    if (completion_cb != nullptr) {
-      completion_cb(cookie, status, &op);
-    }
-  }
-
-  block_op_t op;
-  block_impl_queue_callback completion_cb;
-  void* cookie;
-};
 
 struct DeviceOptions {
   static DeviceOptions Default() {
@@ -55,8 +41,7 @@ struct DeviceOptions {
 
 // |BlockDevice| represents a single SCSI direct access block device.
 // |BlockDevice| bridges between the Zircon block protocol and SCSI commands/responses.
-class BlockDevice : public ddk::BlockImplProtocol<BlockDevice>,
-                    public block_server::DriverInterface,
+class BlockDevice : public block_server::DriverInterface,
                     public fidl::Server<fuchsia_driver_token::NodeToken> {
  public:
   // Public so that we can use make_unique.
@@ -83,10 +68,8 @@ class BlockDevice : public ddk::BlockImplProtocol<BlockDevice>,
 
   // Remove this block device.
   void RemoveDevice() {
-    if (controller_->UseNewInterface()) {
-      if (auto& outgoing = controller_->driver_outgoing()) {
-        (void)outgoing->RemoveService<fuchsia_hardware_block_volume::Service>(DeviceName().c_str());
-      }
+    if (auto& outgoing = controller_->driver_outgoing()) {
+      (void)outgoing->RemoveService<fuchsia_hardware_block_volume::Service>(DeviceName().c_str());
     }
     if (node_controller_.is_valid()) {
       auto result = node_controller_->Remove();
@@ -107,10 +90,6 @@ class BlockDevice : public ddk::BlockImplProtocol<BlockDevice>,
 
   // fuchsia_driver_token::NodeToken implementation
   void Get(GetCompleter::Sync& completer) override;
-
-  // ddk::BlockImplProtocol functions.
-  void BlockImplQuery(block_info_t* info_out, size_t* block_op_size_out);
-  void BlockImplQueue(block_op_t* operation, block_impl_queue_callback completion_cb, void* cookie);
 
   uint8_t target() const { return target_; }
   uint16_t lun() const { return lun_; }
@@ -166,7 +145,6 @@ class BlockDevice : public ddk::BlockImplProtocol<BlockDevice>,
 
   std::optional<block_server::BlockServer> block_server_;
 
-  compat::BanjoServer block_impl_server_{ZX_PROTOCOL_BLOCK_IMPL, this, &block_impl_protocol_ops_};
   compat::SyncInitializedDeviceServer compat_server_;
 };
 

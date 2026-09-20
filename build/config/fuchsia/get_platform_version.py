@@ -10,7 +10,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 
 def main() -> int:
@@ -29,7 +29,7 @@ def main() -> int:
     return 0
 
 
-def get_gn_variables(version_history_path: Path) -> Dict[str, Any]:
+def get_gn_variables(version_history_path: Path) -> dict[str, Any]:
     """Reads from version_history.json to generate some data to expose to the GN
     build graph."""
 

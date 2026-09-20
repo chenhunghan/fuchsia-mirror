@@ -12,10 +12,13 @@
 
 #include "vm/pmm.h"
 
+class VmCompression;
+
 __BEGIN_CDECLS
 
 vm_page_t* cpp_paddr_to_vm_page(zx_paddr_t paddr);
 PageQueues* cpp_pmm_page_queues();
+VmCompression* cpp_pmm_get_page_compression(void);
 zx_status_t cpp_pmm_alloc_page(uint32_t flags, vm_page_t** out_page, zx_paddr_t* out_paddr);
 zx_status_t cpp_pmm_alloc_pages(size_t count, uint32_t flags, VmPageDoublyLinkedList* list);
 zx_status_t cpp_pmm_alloc_contiguous(size_t count, uint32_t flags, uint8_t align_log2,

@@ -14,15 +14,15 @@ import (
 
 	"github.com/google/subcommands"
 
-	v2config "go.fuchsia.dev/fuchsia/tools/check-licenses/config"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/config"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/metrics"
-	v2pipeline "go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
-	v2boundary "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
-	v2classify "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/classify"
-	v2discover "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover"
-	v2prune "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/prune"
-	v2report "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/report"
-	v2validate "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/classify"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/prune"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/report"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate"
 )
 
 type ValidateCommand struct {
@@ -71,52 +71,52 @@ func (p *ValidateCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...int
 		return subcommands.ExitFailure
 	}
 
-	log.Println("Starting v2 compliance validation...")
+	log.Println("Starting compliance validation...")
 	startTime := time.Now()
 
 	// 1. Assembly Phase
-	builder := v2config.NewBuilder(fuchsiaDir)
+	builder := config.NewBuilder(fuchsiaDir)
 	if err := builder.Assemble(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to assemble configuration: %v\n", err)
 		return subcommands.ExitFailure
 	}
-	config := builder.Config
+	cfg := builder.Config
 
 	log.Printf("Assembled configuration in %v", time.Since(startTime))
 
 	// 2. Instantiate Stages
-	discoverer := v2discover.NewCrawler(fuchsiaDir, config.Discover)
+	discoverer := discover.NewCrawler(fuchsiaDir, cfg.Discover)
 
-	boundaryCfg := config.Boundary
+	boundaryCfg := cfg.Boundary
 	boundaryCfg.FilesInReadmeOnly = p.filesInReadmeOnly
-	grouper := v2boundary.NewGrouper(fuchsiaDir, boundaryCfg)
+	grouper := boundary.NewGrouper(fuchsiaDir, boundaryCfg)
 
 	// Validate checks the entire tree, so we don't prune any targets based on the build graph.
 	// Passing nil to NewPruner makes it a no-op.
-	pruner := v2prune.NewPruner(nil)
+	pruner := prune.NewPruner(nil)
 
-	classifier, err := v2classify.NewClassifier(config.Classify)
+	classifier, err := classify.NewClassifier(cfg.Classify)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize classifier: %v\n", err)
 		return subcommands.ExitFailure
 	}
 
-	validator := v2validate.NewValidator(fuchsiaDir, config.Validate)
+	validator := validate.NewValidator(fuchsiaDir, cfg.Validate)
 	metricsOutDir := ""
 	if p.logLevel >= 2 {
 		metricsOutDir = p.outDir
 	}
-	renderers := v2pipeline.MultiRenderer{
+	renderers := pipeline.MultiRenderer{
 		// TODO: Re-enable README.fuchsia verification.
-		// v2report.NewReadmeVerifier(fuchsiaDir),
-		v2report.NewMetricsRenderer(metricsOutDir),
+		// report.NewReadmeVerifier(fuchsiaDir),
+		report.NewMetricsRenderer(metricsOutDir),
 	}
 	if p.findingsFile != "" {
-		renderers = append(renderers, v2report.NewFindingsReporter(fuchsiaDir, p.findingsFile))
+		renderers = append(renderers, report.NewFindingsReporter(fuchsiaDir, p.findingsFile))
 	}
-	renderers = append(renderers, v2report.NewConsoleErrorReporter(fuchsiaDir))
+	renderers = append(renderers, report.NewConsoleErrorReporter(fuchsiaDir))
 
-	orchestrator := v2pipeline.NewOrchestrator(discoverer, grouper, pruner, classifier, validator, renderers)
+	orchestrator := pipeline.NewOrchestrator(discoverer, grouper, pruner, classifier, validator, renderers)
 
 	if err := orchestrator.Run(ctx, []string{fuchsiaDir}); err != nil {
 		fmt.Fprintf(os.Stderr, "Validation failed: %v\n", err)

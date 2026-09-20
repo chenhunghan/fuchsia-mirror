@@ -27,7 +27,7 @@ type EncodingType = flexible enum {
 ///
 /// If a device supports multiple encoders with *different* rate/channel constraints
 /// (e.g. AAC supports 48kHz but SBC only supports 44.1kHz), the device must
-/// report them as separate entries in the `SupportedFormats` vector.
+/// report them as separate entries in the `SupportedFormats2` vector.
 @available(added=HEAD)
 type SupportedEncodings = table {
     /// Vector of possible `ChannelSets` supported.

@@ -33,7 +33,6 @@ source_set("common") {
 
   public_deps = [
     "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_cpp",
-    "//sdk/fidl/fuchsia.hardware.power.source:fuchsia.hardware.power.source_cpp",
     "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_cpp",
     "//sdk/lib/driver/component/cpp",
     "//sdk/lib/driver/devfs/cpp",

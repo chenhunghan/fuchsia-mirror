@@ -84,7 +84,7 @@ type DaiFrameFormatCustom = struct {
 
 /// DAI format. Frames are made up of `number_of_channels` samples which have `bits_per_sample` bits
 /// of data within `bits_per_slot` arranged in `frame_format`. For more detailed information see
-/// [Digital Audio Interface](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_dai).
+/// [Digital Audio Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/dai).
 type DaiFormat = struct {
     /// Number of channels.
     /// Must be 2, if `frame_format` is DaiFrameFormatStandard::I2S, STEREO_LEFT or STEREO_RIGHT.
@@ -109,10 +109,10 @@ type DaiFormat = struct {
 /// Formats supported by the DAI. Frames are made up of `number_of_channels` samples which have
 /// `bits_per_sample` bits of data within `bits_per_slot` bits arranged in `frame_formats`.
 /// All values listed in each vector are supported. When not all combinations supported by the driver
-/// can be described with one `DaiSupportedFormats`, `GetDaiSupportedFormats` returns more than one
+/// can be described with one `DaiSupportedFormats`, `GetDaiFormats` returns more than one
 /// `DaiSupportedFormats` in the returned vector.
 /// For more detailed information see
-/// [Digital Audio Interface](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_dai).
+/// [Digital Audio Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/dai).
 type DaiSupportedFormats = struct {
     /// Possible number of channels supported.
     number_of_channels vector<uint32>:MAX_COUNT_DAI_SUPPORTED_NUMBER_OF_CHANNELS;

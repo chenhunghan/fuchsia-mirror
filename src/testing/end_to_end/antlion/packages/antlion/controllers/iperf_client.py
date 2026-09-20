@@ -20,9 +20,9 @@ from antlion.capabilities.ssh import SSHConfig
 from antlion.controllers.adb_lib.error import AdbCommandError
 from antlion.controllers.android_device import AndroidDevice
 from antlion.controllers.fuchsia_lib.ssh import SSHProvider
-from antlion.controllers.utils_lib.commands.date import LinuxDateCommand
 from antlion.types import ControllerConfig, Json
 from antlion.validation import MapValidator
+from libs.commands.date import LinuxDateCommand
 
 MOBLY_CONTROLLER_CONFIG_NAME: str = "IPerfClient"
 

@@ -426,7 +426,7 @@ fn open_blob_with_reader<P: ProtocolsExt + Send>(
             }
         })?;
         let vmo = get_vmo_result.map_err(zx::Status::err_from_raw)?;
-        let vmo_blob = vmo_blob::VmoBlob::new(vmo);
+        let vmo_blob = vmo_blob::VmoBlob::new(vmo, blob_hash.into());
         object_request
             .create_connection::<StreamIoConnection<_>, _>(scope, vmo_blob, protocols)
             .await

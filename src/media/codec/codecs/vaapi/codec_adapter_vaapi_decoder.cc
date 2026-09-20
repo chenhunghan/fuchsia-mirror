@@ -14,6 +14,7 @@
 #include <zircon/status.h>
 
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1211,8 +1212,15 @@ fit::result<std::string, bool> CodecAdapterVaApiDecoder::IsBufferReconfiguration
 
   // TODO(https://fxbug.dev/42073232): This isn't the correct calculation as it does not factor in
   // alignment for tiled surfaces
+  //
+  // Because width() and height() are clamped to [0, 2^31 - 1], Area64() is at
+  // most (2^31 - 1)^2 < 2^62. Multiplying by 3 yields < 3 * 2^62 < 2^64 - 1,
+  // so (surface_size.Area64() * 3) / 2 cannot overflow uint64_t. Cast<uint32_t>()
+  // then verifies that the resulting byte size fits in uint32_t.
+  static_assert(std::numeric_limits<decltype(surface_size.width())>::max() <= (1ULL << 31) - 1);
+  static_assert(std::numeric_limits<decltype(surface_size.height())>::max() <= (1ULL << 31) - 1);
   auto total_plane_size_checked =
-      ((safemath::CheckedNumeric(surface_size.GetArea()) * 3) / 2).Cast<uint32_t>();
+      safemath::CheckedNumeric((surface_size.Area64() * 3) / 2).Cast<uint32_t>();
 
   // The check above should ensure that we never get to an unsupported hardware size, but
   // better safe than sorry when calling ValueOrDie()

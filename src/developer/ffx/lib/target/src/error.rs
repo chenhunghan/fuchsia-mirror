@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use errors::FfxError;
 use std::net::SocketAddr;
+use target_errors::FfxTargetError;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
 pub enum TargetResolutionError {
@@ -49,7 +51,7 @@ pub enum FfxTargetCrateError {
     Discovery(#[from] discovery::error::Error),
 
     #[error("Target error: {0}")]
-    Target(#[from] target_errors::FfxTargetError),
+    Target(#[from] FfxError),
 
     #[error("Target parsing error: {0}")]
     JsonParse(#[from] serde_json::Error),
@@ -70,7 +72,25 @@ pub enum FfxTargetCrateError {
     Fidl(#[from] fidl::Error),
 
     #[error(transparent)]
-    Fallback(#[from] anyhow::Error),
+    Fallback(anyhow::Error),
+}
+
+impl From<FfxTargetError> for FfxTargetCrateError {
+    fn from(err: FfxTargetError) -> Self {
+        Self::Target(err.into())
+    }
+}
+
+impl From<anyhow::Error> for FfxTargetCrateError {
+    fn from(err: anyhow::Error) -> Self {
+        match err.downcast::<FfxError>() {
+            Ok(ffx_err) => Self::Target(ffx_err),
+            Err(err) => match err.downcast::<FfxTargetError>() {
+                Ok(target_err) => Self::Target(target_err.into()),
+                Err(err) => Self::Fallback(err),
+            },
+        }
+    }
 }
 
 impl FfxTargetCrateError {
@@ -79,23 +99,9 @@ impl FfxTargetCrateError {
     /// user (such as target not found or ambiguous target query). Otherwise, wraps it as an
     /// unexpected error (`Error::Unexpected`).
     pub fn into_command_error(self) -> ffx_command_error::Error {
-        // TODO(b/523421855): Simplify this nested downcasting once FfxTargetCrateError
-        // has a more unified representation of target resolution/connection errors.
         match self {
-            Self::Target(err) => {
-                let ffx_err: errors::FfxError = err.into();
-                ffx_command_error::Error::User(anyhow::Error::new(ffx_err))
-            }
-            Self::Fallback(err) => match err.downcast::<target_errors::FfxTargetError>() {
-                Ok(target_err) => {
-                    let ffx_err: errors::FfxError = target_err.into();
-                    ffx_command_error::Error::User(anyhow::Error::new(ffx_err))
-                }
-                Err(err) => match err.downcast::<errors::FfxError>() {
-                    Ok(ffx_err) => ffx_command_error::Error::User(anyhow::Error::new(ffx_err)),
-                    Err(err) => ffx_command_error::Error::Unexpected(err),
-                },
-            },
+            Self::Target(err) => ffx_command_error::Error::User(anyhow::Error::new(err)),
+            Self::Fallback(err) => ffx_command_error::Error::Unexpected(err),
             other => ffx_command_error::Error::Unexpected(anyhow::Error::new(other)),
         }
     }
@@ -104,5 +110,110 @@ impl FfxTargetCrateError {
 impl Into<ffx_command_error::Error> for FfxTargetCrateError {
     fn into(self) -> ffx_command_error::Error {
         self.into_command_error()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidl_fuchsia_developer_ffx as ffx;
+
+    #[test]
+    fn test_into_command_error_from_ffx_target_error() {
+        let target_err = FfxTargetError::OpenTargetError {
+            err: ffx::OpenTargetError::TargetNotFound,
+            target: Some("test-target".to_string()),
+            targets: vec![],
+            target_source: None,
+        };
+        let crate_err: FfxTargetCrateError = target_err.into();
+        let cmd_err = crate_err.into_command_error();
+        match cmd_err {
+            ffx_command_error::Error::User(user_err) => {
+                let ffx_err = user_err.downcast_ref::<FfxError>().expect("expected FfxError");
+                assert!(matches!(ffx_err, FfxError::OpenTargetError { .. }));
+                let inner = user_err
+                    .source()
+                    .and_then(|s| s.downcast_ref::<FfxTargetError>())
+                    .expect("expected inner FfxTargetError");
+                assert!(matches!(
+                    inner,
+                    FfxTargetError::OpenTargetError {
+                        err: ffx::OpenTargetError::TargetNotFound,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Error::User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_into_command_error_from_ffx_error() {
+        let ffx_err = errors::ffx_error!("some ffx error");
+        let crate_err: FfxTargetCrateError = ffx_err.into();
+        let cmd_err = crate_err.into_command_error();
+        match cmd_err {
+            ffx_command_error::Error::User(user_err) => {
+                let inner = user_err.downcast_ref::<FfxError>().expect("expected FfxError");
+                assert_eq!(inner.to_string(), "some ffx error");
+            }
+            other => panic!("expected Error::User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_into_command_error_from_anyhow_wrapping_ffx_target_error() {
+        let target_err = FfxTargetError::OpenTargetError {
+            err: ffx::OpenTargetError::QueryAmbiguous,
+            target: Some("ambiguous".to_string()),
+            targets: vec!["t1".to_string(), "t2".to_string()],
+            target_source: None,
+        };
+        let anyhow_err = anyhow::Error::new(target_err);
+        let crate_err: FfxTargetCrateError = anyhow_err.into();
+        let cmd_err = crate_err.into_command_error();
+        match cmd_err {
+            ffx_command_error::Error::User(user_err) => {
+                let ffx_err = user_err.downcast_ref::<FfxError>().expect("expected FfxError");
+                assert!(matches!(ffx_err, FfxError::OpenTargetError { .. }));
+            }
+            other => panic!("expected Error::User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_into_command_error_from_anyhow_wrapping_ffx_error() {
+        let ffx_err = errors::ffx_error!("wrapped error");
+        let anyhow_err = anyhow::Error::new(ffx_err);
+        let crate_err: FfxTargetCrateError = anyhow_err.into();
+        let cmd_err = crate_err.into_command_error();
+        match cmd_err {
+            ffx_command_error::Error::User(user_err) => {
+                let inner = user_err.downcast_ref::<FfxError>().expect("expected FfxError");
+                assert_eq!(inner.to_string(), "wrapped error");
+            }
+            other => panic!("expected Error::User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_into_command_error_from_unexpected_anyhow() {
+        let anyhow_err = anyhow::anyhow!("something unexpected broke");
+        let crate_err: FfxTargetCrateError = anyhow_err.into();
+        let cmd_err = crate_err.into_command_error();
+        match cmd_err {
+            ffx_command_error::Error::Unexpected(err) => {
+                assert_eq!(err.to_string(), "something unexpected broke");
+            }
+            other => panic!("expected Error::Unexpected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_into_command_error_from_other_variants() {
+        let crate_err = FfxTargetCrateError::Resolution(TargetResolutionError::NonNetworkTarget);
+        let cmd_err = crate_err.into_command_error();
+        assert!(matches!(cmd_err, ffx_command_error::Error::Unexpected(_)));
     }
 }

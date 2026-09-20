@@ -99,7 +99,10 @@ bool test_validate_processor_not_leaf() {
   FlatTopo topo = ComplexTopology();
 
   // Replace a die node with a processor.
-  topo.nodes[1].entity.discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR;
+  topo.nodes[1].entity = {
+      .discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR,
+      .processor = {.architecture_info = {.discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64}},
+  };
 
   Graph graph;
   ASSERT_EQ(ZX_ERR_INVALID_ARGS, Graph::Initialize(&graph, topo.nodes, topo.node_count));
@@ -165,6 +168,19 @@ bool test_validate_hierarchical_storage() {
   END_TEST;
 }
 
+bool test_validate_logical_id_count_exceeds_capacity() {
+  BEGIN_TEST;
+  FlatTopo topo = SimpleTopology();
+
+  topo.nodes[1].entity.processor.logical_id_count =
+      static_cast<uint8_t>(std::size(topo.nodes[1].entity.processor.logical_ids) + 1);
+
+  Graph graph;
+  ASSERT_EQ(ZX_ERR_INVALID_ARGS, Graph::Initialize(&graph, topo.nodes, topo.node_count));
+
+  END_TEST;
+}
+
 UNITTEST_START_TESTCASE(system_topology_tests)
 UNITTEST("Parse flat topology, simple.", test_flat_to_heap_simple)
 UNITTEST("Parse flat topology, complex.", test_flat_to_heap_complex)
@@ -174,6 +190,8 @@ UNITTEST("Fail validation if leaf is not processor.", test_validate_leaf_not_pro
 UNITTEST("Fail validation if there is a cycle.", test_validate_cycle)
 UNITTEST("Fail validation if a cycle with a shared parent.", test_validate_cycle_shared_parent)
 UNITTEST("Fail validation if storage order is incorrect.", test_validate_hierarchical_storage)
+UNITTEST("Fail validation if logical_id_count exceeds capacity.",
+         test_validate_logical_id_count_exceeds_capacity)
 UNITTEST_END_TESTCASE(system_topology_tests, "system-topology",
                       "Test parsing and validation of the flat system topology.")
 
@@ -204,7 +222,8 @@ FlatTopo SimpleTopology() {
       .entity = {.discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR,
                  .processor =
                      {
-                         .architecture_info = {},
+                         .architecture_info = {.discriminant =
+                                                   ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64},
                          .flags = ZBI_TOPOLOGY_PROCESSOR_FLAGS_PRIMARY,
                          .logical_ids = {logical_processor++, logical_processor++},
                          .logical_id_count = 2,
@@ -230,7 +249,7 @@ FlatTopo SimpleTopology() {
               .discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR,
               .processor =
                   {
-                      .architecture_info = {},
+                      .architecture_info = {.discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64},
                       .flags = 0,
                       .logical_ids = {logical_processor++},
                       .logical_id_count = 1,
@@ -245,7 +264,7 @@ FlatTopo SimpleTopology() {
               .discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR,
               .processor =
                   {
-                      .architecture_info = {},
+                      .architecture_info = {.discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64},
                       .flags = 0,
                       .logical_ids = {logical_processor++},
                       .logical_id_count = 1,
@@ -296,7 +315,7 @@ FlatTopo HierarchicalTopology() {
               .discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR,
               .processor =
                   {
-                      .architecture_info = {},
+                      .architecture_info = {.discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64},
                       .flags = ZBI_TOPOLOGY_PROCESSOR_FLAGS_PRIMARY,
                       .logical_ids = {logical_processor++, logical_processor++},
                       .logical_id_count = 2,
@@ -312,7 +331,7 @@ FlatTopo HierarchicalTopology() {
               .discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR,
               .processor =
                   {
-                      .architecture_info = {},
+                      .architecture_info = {.discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64},
                       .flags = 0,
                       .logical_ids = {logical_processor++},
                       .logical_id_count = 1,
@@ -329,7 +348,7 @@ FlatTopo HierarchicalTopology() {
               .processor =
                   {
 
-                      .architecture_info = {},
+                      .architecture_info = {.discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64},
                       .flags = 0,
                       .logical_ids = {logical_processor++},
                       .logical_id_count = 1,
@@ -371,7 +390,7 @@ void AddCCX(uint16_t parent, zbi_topology_node_t* nodes, uint16_t* index,
                 .processor =
                     {
 
-                        .architecture_info = {},
+                        .architecture_info = {.discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64},
                         .flags = 0,
                         .logical_ids = {(*logical_processor)++, (*logical_processor)++},
                         .logical_id_count = 2,

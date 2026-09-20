@@ -14,8 +14,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, Sequence, Tuple
+from typing import Any
 
 import cl_utils
 import fuchsia
@@ -35,7 +36,7 @@ class ParseError(ValueError):
         super().__init__(msg)
 
 
-def _must_partition_string(text: str, sep: str) -> Tuple[str, str]:
+def _must_partition_string(text: str, sep: str) -> tuple[str, str]:
     before, found_sep, after = text.partition(sep)
     if found_sep != sep:
         raise ParseError(
@@ -46,21 +47,21 @@ def _must_partition_string(text: str, sep: str) -> Tuple[str, str]:
 
 def _must_partition_sequence(
     seq: Sequence[str], sep: str
-) -> Tuple[Sequence[str], Sequence[str]]:
+) -> tuple[Sequence[str], Sequence[str]]:
     before, found_sep, after = cl_utils.partition_sequence(seq, sep)
     if found_sep != sep:
         raise ParseError(f'Expected but failed to find line == "{sep}".')
     return before, after
 
 
-def _parse_input_digest(line: str) -> Tuple[Path, str]:
+def _parse_input_digest(line: str) -> tuple[Path, str]:
     path, right = _must_partition_string(line, ":")
     ignored, right = _must_partition_string(right, ":")
     digest = right.lstrip().rstrip("]")
     return Path(path), digest
 
 
-def _parse_output_digest(line: str) -> Tuple[Path, str]:
+def _parse_output_digest(line: str) -> tuple[Path, str]:
     path, right = _must_partition_string(line, ",")
     ignored, right = _must_partition_string(right, ":")
     digest = right.lstrip()
@@ -71,7 +72,7 @@ def _parse_output_digest(line: str) -> Tuple[Path, str]:
 class DictionaryDiff(object):
     """Representation of a difference between dictionaries."""
 
-    def __init__(self, left: Dict[Any, Any], right: Dict[Any, Any]):
+    def __init__(self, left: dict[Any, Any], right: dict[Any, Any]):
         left_keys = set(left.keys())
         right_keys = set(right.keys())
         self._left_only = {k: left[k] for k in left_keys - right_keys}
@@ -82,19 +83,19 @@ class DictionaryDiff(object):
         self._matches = {k: v[0] for k, v in paired if v[0] == v[1]}
 
     @property
-    def left_only(self) -> Dict[Any, Any]:
+    def left_only(self) -> dict[Any, Any]:
         return self._left_only
 
     @property
-    def right_only(self) -> Dict[Any, Any]:
+    def right_only(self) -> dict[Any, Any]:
         return self._right_only
 
     @property
-    def value_diffs(self) -> Dict[Any, Tuple[Any, Any]]:
+    def value_diffs(self) -> dict[Any, tuple[Any, Any]]:
         return self._value_diffs
 
     @property
-    def matches(self) -> Dict[Any, Any]:
+    def matches(self) -> dict[Any, Any]:
         return self._matches
 
     def report(self) -> Iterable[str]:
@@ -118,9 +119,9 @@ class ShowActionResult(object):
     """Structured representation of `remotetool --operation show_action`."""
 
     command: Sequence[str]
-    platform: Dict[str, str]
-    inputs: Dict[Path, str]
-    output_files: Dict[Path, str]
+    platform: dict[str, str]
+    inputs: dict[Path, str]
+    output_files: dict[Path, str]
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ShowActionResult):
@@ -232,7 +233,7 @@ def parse_show_action_output(lines: Iterable[str]) -> ShowActionResult:
 
 
 class RemoteTool(object):
-    def __init__(self, reproxy_cfg: Dict[str, str]):
+    def __init__(self, reproxy_cfg: dict[str, str]):
         self._reproxy_cfg = reproxy_cfg
 
     def __eq__(self, other: object) -> bool:
@@ -241,7 +242,7 @@ class RemoteTool(object):
         return self.config == other.config
 
     @property
-    def config(self) -> Dict[str, str]:
+    def config(self) -> dict[str, str]:
         return self._reproxy_cfg
 
     def run(

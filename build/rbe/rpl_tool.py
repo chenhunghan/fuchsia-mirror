@@ -12,8 +12,8 @@ import argparse
 import contextlib
 import os
 import sys
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
 
 import cl_utils
 import fuchsia

@@ -10,7 +10,8 @@
 #[cfg(test)]
 extern crate self as unittest;
 
-use core::ffi::c_char;
+use core::ffi::{CStr, c_char};
+use core::slice;
 
 #[doc(hidden)]
 pub use zx_status::Status as __Status;
@@ -156,6 +157,38 @@ pub struct TestSuiteRegistration {
 
 unsafe impl Sync for TestSuiteRegistration {}
 
+impl TestSuiteRegistration {
+    /// The name of the suite.
+    ///
+    /// Registrations are emitted by the #[suite] macro as compile-time
+    /// constants, so a missing or non-UTF-8 name is a programming error.
+    pub fn name(&self) -> &'_ str {
+        assert!(!self.name.is_null(), "test suite registration has no name");
+        // Safety: the name is a static, NUL-terminated string.
+        unsafe { CStr::from_ptr(self.name) }.to_str().expect("test suite name is not valid UTF-8")
+    }
+
+    /// The description of the suite, if it has one.
+    pub fn desc(&self) -> Option<&'_ str> {
+        if self.desc.is_null() {
+            return None;
+        }
+        // Safety: the description is a static, NUL-terminated string.
+        let desc = unsafe { CStr::from_ptr(self.desc) };
+        Some(desc.to_str().expect("test suite description is not valid UTF-8"))
+    }
+
+    /// The test cases of the suite.
+    pub fn cases(&self) -> &'_ [TestCaseRegistration] {
+        if self.test_cnt == 0 {
+            return &[];
+        }
+        assert!(!self.tests.is_null(), "test suite registration has tests but no test array");
+        // Safety: the registration records `test_cnt` contiguous test cases.
+        unsafe { slice::from_raw_parts(self.tests, self.test_cnt) }
+    }
+}
+
 /// The data structure defining a test case within a suite, also intended be
 /// defined via the #[suite] macro to encoded into a special section in
 /// the kernel
@@ -168,6 +201,18 @@ pub struct TestCaseRegistration {
 }
 
 unsafe impl Sync for TestCaseRegistration {}
+
+impl TestCaseRegistration {
+    /// The name of the test case.
+    ///
+    /// Registrations are emitted by the #[suite] macro as compile-time
+    /// constants, so a missing or non-UTF-8 name is a programming error.
+    pub fn name(&self) -> &'_ str {
+        assert!(!self.name.is_null(), "test case registration has no name");
+        // Safety: the name is a static, NUL-terminated string.
+        unsafe { CStr::from_ptr(self.name) }.to_str().expect("test case name is not valid UTF-8")
+    }
+}
 
 /// Asserts that two expressions are equal, but does not short-circuit on failure.
 #[macro_export]
@@ -580,6 +625,53 @@ macro_rules! unwrap_ok {
     };
 }
 
+/// Asserts that the expression evaluates to Option::Some and returns the resulting value, otherwise
+/// short-circuits.
+#[macro_export]
+macro_rules! unwrap_some {
+    ($actual:expr) => {
+        $crate::unwrap_some!($actual, "")
+    };
+    ($actual:expr, $msg:expr) => {
+        match ($actual) {
+            Option::Some(val) => val,
+            Option::None => {
+                $crate::check_condition!(false, true, "is None!", $actual, $msg);
+                return false;
+            }
+        }
+    };
+}
+
+/// Creates an isolated subtest closure with its own failure tracking.
+///
+/// Within a subtest, assertions (`expect_*!`, `assert_*!`, `unwrap_*!`) record failures to the
+/// subtest's local status flag rather than the enclosing test's flag. Hard assertions (`assert_*!`,
+/// `unwrap_*!`) return `false` early from the subtest without returning from the enclosing test.
+///
+/// Returns `bool`: `true` if all assertions in the subtest passed, `false` otherwise.
+#[macro_export]
+macro_rules! subtest {
+    (|$($param:ident : $ty:ty),* $(,)?| $body:block) => {
+        |$($param : $ty),*| -> bool {
+            // Unused when the subtest body contains no soft assertions.
+            #[allow(unused_mut)]
+            let mut all_ok = true;
+            macro_rules! record_failure {
+                () => {
+                    // Unused when an early-return assertion mutates all_ok before returning.
+                    #[allow(unused_assignments)]
+                    {
+                        all_ok = false;
+                    }
+                };
+            }
+            $body
+            all_ok
+        }
+    };
+}
+
 // When building this crate with unit tests we also pass `--cfg ktest` to
 // enable the unconditional use of #[suite] below.
 #[cfg(test)]
@@ -714,6 +806,7 @@ mod tests {
             assert_err!(zx_status::Status::INVALID_ARGS, zx_status::Status::INVALID_ARGS);
 
             let _ = unwrap_ok!(Ok::<(), zx_status::Status>(()));
+            let _ = unwrap_some!(Some(42));
 
             mark_end_as_reached();
         }
@@ -806,6 +899,13 @@ mod tests {
         #[test]
         fn test_unwrap_ok() {
             let _: () = unwrap_ok!(Err(zx_status::Status::INTERNAL));
+            mark_end_as_reached();
+        }
+
+        /// Test that unwrap_some fails when value is None.
+        #[test]
+        fn test_unwrap_some() {
+            let _: () = unwrap_some!(None::<()>);
             mark_end_as_reached();
         }
     }
@@ -939,10 +1039,26 @@ mod tests {
         }
     }
 
+    /// Subtests description.
+    #[suite(name = "subtests")]
+    mod subtests {
+        /// Test that record_failure inside a subtest does not fail the outer test.
+        #[test]
+        fn test_shadowing() {
+            let failing = subtest!(|should_fail: bool| {
+                if should_fail {
+                    record_failure!();
+                }
+            });
+            expect_false!(failing(true));
+            expect_true!(failing(false));
+        }
+    }
+
     #[test]
     fn check_suite_count() {
         let suites = get_suites();
-        std::assert_eq!(suites.len(), 5);
+        std::assert_eq!(suites.len(), 6);
     }
 
     #[test]
@@ -952,7 +1068,7 @@ mod tests {
         let suite = &suites[0];
 
         std::assert_eq!(unsafe { CStr::from_ptr(suite.name) }.to_bytes(), b"assertions");
-        std::assert_eq!(suite.test_cnt, 14);
+        std::assert_eq!(suite.test_cnt, 15);
 
         let cases_rodata = unsafe { slice::from_raw_parts(suite.tests, suite.test_cnt) };
         for case in cases_rodata {
@@ -1010,10 +1126,27 @@ mod tests {
     }
 
     #[test]
-    fn check_suite_with_other_items() {
+    fn check_suite_subtests() {
         let suites = get_suites();
         std::assert!(suites.len() > 3);
         let suite = &suites[3];
+
+        std::assert_eq!(unsafe { CStr::from_ptr(suite.name) }.to_bytes(), b"subtests");
+        std::assert_eq!(
+            unsafe { CStr::from_ptr(suite.desc) }.to_str().unwrap(),
+            "Subtests description."
+        );
+        std::assert_eq!(suite.test_cnt, 1);
+        let case = unsafe { &*suite.tests };
+        std::assert_eq!(unsafe { CStr::from_ptr(case.name) }.to_bytes(), b"test_shadowing");
+        assert!((case.fn_)());
+    }
+
+    #[test]
+    fn check_suite_with_other_items() {
+        let suites = get_suites();
+        std::assert!(suites.len() > 4);
+        let suite = &suites[4];
 
         std::assert_eq!(
             unsafe { CStr::from_ptr(suite.name) }.to_bytes(),
@@ -1032,8 +1165,8 @@ mod tests {
     #[test]
     fn check_suite_with_ignored() {
         let suites = get_suites();
-        std::assert!(suites.len() > 4);
-        let suite = &suites[4];
+        std::assert!(suites.len() > 5);
+        let suite = &suites[5];
 
         std::assert_eq!(unsafe { CStr::from_ptr(suite.name) }.to_bytes(), b"with_ignored");
         std::assert_eq!(suite.test_cnt, 1);

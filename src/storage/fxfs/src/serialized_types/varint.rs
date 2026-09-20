@@ -33,18 +33,51 @@
 //!   - First byte: `0xff`
 
 use anyhow::{Error, ensure};
-use std::ops::IndexMut;
 
-pub trait Buffer: AsRef<[u8]> + IndexMut<usize, Output = u8> + Send {
+/// Abstraction over a contiguous in-memory byte buffer that supports appending and truncation.
+pub trait Buffer: AsRef<[u8]> + AsMut<[u8]> + Send {
+    /// Appends data to the end of the buffer.
     fn put(&mut self, data: &[u8]);
+
+    /// Truncates the buffer to `len` bytes.
+    fn truncate(&mut self, len: usize);
 }
 
 impl Buffer for Vec<u8> {
     fn put(&mut self, data: &[u8]) {
         self.extend_from_slice(data);
     }
+    fn truncate(&mut self, len: usize) {
+        self.truncate(len);
+    }
 }
 
+/// Encodes `v` into an order-preserving varint returned as a fixed-size byte array and length.
+#[inline]
+pub fn encode_varint_bytes(v: u64) -> ([u8; 9], usize) {
+    let mut buf = [0u8; 9];
+    let len = if v < 0xc0 {
+        buf[0] = v as u8;
+        1
+    } else if v < 0x2000 {
+        buf[..2].copy_from_slice(&(v as u16 | 0xc000).to_be_bytes());
+        2
+    } else if v < 0x1000_0000 {
+        buf[..4].copy_from_slice(&(v as u32 | 0xe000_0000).to_be_bytes());
+        4
+    } else if v < 0x0f00_0000_0000_0000 {
+        buf[..8].copy_from_slice(&(v | 0xf000_0000_0000_0000).to_be_bytes());
+        8
+    } else {
+        buf[0] = 0xff;
+        buf[1..9].copy_from_slice(&v.to_be_bytes());
+        9
+    };
+    (buf, len)
+}
+
+/// Encodes `v` into an order-preserving varint directly written to `buf`.
+#[inline]
 pub fn encode_varint(v: u64, buf: &mut impl Buffer) -> usize {
     if v < 0xc0 {
         buf.put(&[v as u8]);
@@ -59,41 +92,48 @@ pub fn encode_varint(v: u64, buf: &mut impl Buffer) -> usize {
         buf.put(&(v | 0xf000_0000_0000_0000).to_be_bytes());
         8
     } else {
-        buf.put(&[0xff]);
-        buf.put(&v.to_be_bytes());
+        let mut b = [0u8; 9];
+        b[0] = 0xff;
+        b[1..9].copy_from_slice(&v.to_be_bytes());
+        buf.put(&b);
         9
     }
 }
 
-pub fn decode_varint(data: &[u8]) -> Result<(u64, usize), Error> {
+/// Decodes an order-preserving varint from the beginning of `data`.
+///
+/// Returns the decoded `u64` value and the remaining unconsumed slice.
+#[inline]
+pub fn decode_varint<'a>(data: &'a [u8]) -> Result<(u64, &'a [u8]), Error> {
     ensure!(!data.is_empty(), "Data too short");
     let b = data[0];
-    if b < 0xc0 {
-        Ok((b as u64, 1))
+    let (val, len) = if b < 0xc0 {
+        (b as u64, 1)
     } else if b < 0xe0 {
         ensure!(data.len() >= 2, "Data too short");
         let v = u16::from_be_bytes(data[..2].try_into().unwrap());
         let val = (v & !0xc000) as u64;
         ensure!(val >= 0xc0, "Non-canonical varint");
-        Ok((val, 2))
+        (val, 2)
     } else if b < 0xf0 {
         ensure!(data.len() >= 4, "Data too short");
         let v = u32::from_be_bytes(data[..4].try_into().unwrap());
         let val = (v & !0xe000_0000) as u64;
         ensure!(val >= 0x2000, "Non-canonical varint");
-        Ok((val, 4))
+        (val, 4)
     } else if b < 0xff {
         ensure!(data.len() >= 8, "Data too short");
         let v = u64::from_be_bytes(data[..8].try_into().unwrap());
         let val = v & !0xf000_0000_0000_0000;
         ensure!(val >= 0x1000_0000, "Non-canonical varint");
-        Ok((val, 8))
+        (val, 8)
     } else {
         ensure!(data.len() >= 9, "Data too short");
         let val = u64::from_be_bytes(data[1..9].try_into().unwrap());
         ensure!(val >= 0x0f00_0000_0000_0000, "Non-canonical varint");
-        Ok((val, 9))
-    }
+        (val, 9)
+    };
+    Ok((val, &data[len..]))
 }
 
 #[cfg(test)]
@@ -120,10 +160,14 @@ mod tests {
         for v in test_cases {
             let mut buf = Vec::new();
             let len = encode_varint(v, &mut buf);
-            let (decoded, decoded_len) = decode_varint(&buf).unwrap();
+            let (decoded, remainder) = decode_varint(&buf).unwrap();
             assert_eq!(v, decoded);
-            assert_eq!(len, decoded_len);
+            assert_eq!(remainder.len(), 0);
             assert_eq!(buf.len(), len);
+
+            let (bytes, bytes_len) = encode_varint_bytes(v);
+            assert_eq!(len, bytes_len);
+            assert_eq!(&buf[..], &bytes[..bytes_len]);
         }
     }
 

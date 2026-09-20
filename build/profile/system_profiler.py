@@ -14,10 +14,11 @@ import json
 import os
 import signal
 import time
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any
 
 # Type alias representing a Chrome trace event dictionary
 TraceEvent = dict[str, Any]
@@ -29,10 +30,10 @@ TraceEvent = dict[str, Any]
 @dataclass(frozen=True, slots=True)
 class ProcStatData:
     cpu_ticks: list[int]
-    procs_running: Optional[int]
-    procs_blocked: Optional[int]
-    intr: Optional[int]
-    ctxt: Optional[int]
+    procs_running: int | None
+    procs_blocked: int | None
+    intr: int | None
+    ctxt: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,8 +76,8 @@ class PressureLine:
 
 @dataclass(frozen=True, slots=True)
 class PressureData:
-    some: Optional[PressureLine]
-    full: Optional[PressureLine]
+    some: PressureLine | None
+    full: PressureLine | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,10 +132,10 @@ def parse_proc_stat(lines: list[str]) -> ProcStatData:
         process counts, context switches, and interrupt counts.
     """
     cpu_ticks: list[int] = []
-    procs_running: Optional[int] = None
-    procs_blocked: Optional[int] = None
-    intr: Optional[int] = None
-    ctxt: Optional[int] = None
+    procs_running: int | None = None
+    procs_blocked: int | None = None
+    intr: int | None = None
+    ctxt: int | None = None
 
     for line in lines:
         if line.startswith("cpu "):
@@ -240,7 +241,7 @@ def parse_file_nr(content: str) -> FileNrData:
     return FileNrData(allocated=allocated, free_allocated=free_allocated)
 
 
-def parse_loadavg(content: str) -> Optional[LoadAvgData]:
+def parse_loadavg(content: str) -> LoadAvgData | None:
     """Parses /proc/loadavg content into LoadAvgData.
 
     Args:
@@ -273,8 +274,8 @@ def parse_pressure_file(lines: list[str]) -> PressureData:
         A PressureData instance containing 10s, 60s, 300s avg stalls for 'some'
         and 'full' categories, where applicable.
     """
-    some: Optional[PressureLine] = None
-    full: Optional[PressureLine] = None
+    some: PressureLine | None = None
+    full: PressureLine | None = None
 
     for line in lines:
         parts = line.split()
@@ -425,9 +426,7 @@ def count_process_tree_fds(proc_dir: Path, pids: set[int]) -> int:
 class MetricSampler:
     """Interface for isolated, state-encapsulated metric pollers."""
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         """Polls raw performance stats and yields Chrome Trace counter events.
 
         Args:
@@ -455,13 +454,11 @@ class CpuAndSystemSampler(MetricSampler):
 
     def __init__(self, proc_dir: Path):
         self._proc_dir = proc_dir
-        self._prev_cpu_ticks: Optional[list[int]] = None
-        self._prev_intr: Optional[int] = None
-        self._prev_ctxt: Optional[int] = None
+        self._prev_cpu_ticks: list[int] | None = None
+        self._prev_intr: int | None = None
+        self._prev_ctxt: int | None = None
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         try:
             with open(self._proc_dir / "stat", "r") as f:
                 lines = f.readlines()
@@ -586,9 +583,7 @@ class MemorySampler(MetricSampler):
     def __init__(self, proc_dir: Path):
         self._proc_dir = proc_dir
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         try:
             with open(self._proc_dir / "meminfo", "r") as f:
                 lines = f.readlines()
@@ -631,12 +626,10 @@ class DiskIoAndPagingSampler(MetricSampler):
 
     def __init__(self, proc_dir: Path):
         self._proc_dir = proc_dir
-        self._prev_pgpg: Optional[tuple[int, int]] = None
-        self._prev_pswp: Optional[tuple[int, int]] = None
+        self._prev_pgpg: tuple[int, int] | None = None
+        self._prev_pswp: tuple[int, int] | None = None
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         try:
             with open(self._proc_dir / "vmstat", "r") as f:
                 lines = f.readlines()
@@ -692,13 +685,11 @@ class FileDescriptorSampler(MetricSampler):
         - fds.process: Sum of open file descriptors across the target PID's tree (count).
     """
 
-    def __init__(self, proc_dir: Path, target_pid: Optional[int] = None):
+    def __init__(self, proc_dir: Path, target_pid: int | None = None):
         self._proc_dir = proc_dir
         self._target_pid = target_pid
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         try:
             with open(self._proc_dir / "sys/fs/file-nr", "r") as f:
                 content = f.read()
@@ -737,9 +728,7 @@ class LoadAverageSampler(MetricSampler):
     def __init__(self, proc_dir: Path):
         self._proc_dir = proc_dir
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         try:
             with open(self._proc_dir / "loadavg", "r") as f:
                 content = f.read()
@@ -772,9 +761,7 @@ class PressureSampler(MetricSampler):
     def __init__(self, proc_dir: Path):
         self._proc_dir = proc_dir
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         for resource in ("cpu", "memory", "io"):
             try:
                 path = self._proc_dir / "pressure" / resource
@@ -823,9 +810,7 @@ class NetworkSampler(MetricSampler):
         self._proc_dir = proc_dir
         self._prev_net: dict[str, tuple[int, int, int, int]] = {}
 
-    def sample(
-        self, ts_us: int, elapsed: Optional[float]
-    ) -> Iterator[TraceEvent]:
+    def sample(self, ts_us: int, elapsed: float | None) -> Iterator[TraceEvent]:
         try:
             with open(self._proc_dir / "net/dev", "r") as f:
                 lines = f.readlines()
@@ -945,7 +930,7 @@ class SystemProfiler:
     def __init__(
         self,
         samplers: Sequence[MetricSampler],
-        metadata: Optional[dict[str, str]],
+        metadata: dict[str, str] | None,
         time_fn: Callable[[], float],
     ):
         """Initializes the coordinator SystemProfiler.
@@ -962,7 +947,7 @@ class SystemProfiler:
         self._is_first_sample = True
 
         # State to compute rates
-        self._prev_time: Optional[float] = None
+        self._prev_time: float | None = None
 
     def sample(self, ts_us: int) -> Iterator[TraceEvent]:
         """Executes a single sampling loop yielding trace events across all sub-samplers.
@@ -1086,7 +1071,7 @@ def streaming_trace_writer(
 def run_profiler(
     interval_sec: float,
     output_path: Path,
-    target_pid: Optional[int],
+    target_pid: int | None,
     metadata: dict[str, str],
     proc_dir: str,
     time_fn: Callable[[], float],

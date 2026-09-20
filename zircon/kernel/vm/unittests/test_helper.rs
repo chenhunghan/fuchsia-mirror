@@ -11,11 +11,13 @@ use crate::vm::attribution::AttributionCounts;
 use crate::vm::page::VmPagePtr;
 use crate::vm::vm_object::VmObject;
 use crate::vm::vm_object_paged::VmObjectPaged;
+use core::convert::Infallible;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
+use core::num::NonZeroI64;
 use fbl::RefPtr;
-use rand::RngCore;
-use rand::rand_core::impls;
+use rand::TryRng;
+use rand::rand_core::utils;
 use test_helper_bindings as bindings;
 use zx_status::Status;
 
@@ -157,6 +159,17 @@ pub fn make_private_attribution_counts(uncompressed: u64, compressed: u64) -> At
     unsafe { counts.assume_init() }
 }
 
+/// Changes `vmo`'s high priority count by `delta`, taking care of the prepare and locking steps
+/// required by the C++ `PriorityChanger`.
+///
+/// The count may never go negative, so callers must only subtract what they have already added,
+/// and must remove any additions before `vmo` is destroyed. Violating either trips a kernel
+/// `DEBUG_ASSERT`.
+pub fn change_vmo_high_priority_count(vmo: &VmObjectPaged, delta: NonZeroI64) {
+    // SAFETY: `vmo.as_raw()` points to a live `VmObjectPaged`.
+    unsafe { bindings::cpp_change_vmo_high_priority_count(vmo.as_raw(), delta.get()) }
+}
+
 /// fill a region of memory with a pattern based on the address of the region
 pub fn fill_region(seed: usize, buf: &mut [MaybeUninit<u8>]) -> &mut [u8] {
     let ptr: *mut MaybeUninit<u8> = buf.as_mut_ptr();
@@ -201,17 +214,19 @@ impl TestRand {
     }
 }
 
-impl RngCore for TestRand {
-    fn next_u32(&mut self) -> u32 {
+impl TryRng for TestRand {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         self.state = test_rand(self.state);
-        self.state
+        Ok(self.state)
     }
 
-    fn next_u64(&mut self) -> u64 {
-        impls::next_u64_via_u32(self)
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        utils::next_u64_via_u32(self)
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        impls::fill_bytes_via_next(self, dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
+        utils::fill_bytes_via_next_word(dest, || self.try_next_u64())
     }
 }

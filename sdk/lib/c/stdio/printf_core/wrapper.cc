@@ -7,34 +7,47 @@
 #include "src/__support/printf_core/printf_main.h"
 
 namespace LIBC_NAMESPACE::printf_core {
+namespace {
 
-constexpr cpp::string_view kNewline = "\n";
-constexpr cpp::string_view kEmpty = "";
+struct WriteHook {
+  int (*write)(std::string_view str, void* hook);
+  void* hook;
+};
+
+int WriteHookSink(cpp::string_view str, void* arg) {
+  auto [write, hook] = *static_cast<const WriteHook*>(arg);
+  return write({str.data(), str.size()}, hook);
+}
+
+constexpr cpp::string_view MaybeNewline(PrintfNewline newline) {
+  if (newline == PrintfNewline::kYes) {
+    return "\n";
+  }
+  return {};
+}
+
+}  // namespace
 
 int PrintfImpl(int (*write)(std::string_view str, void* hook), void* hook, std::span<char> buffer,
                PrintfNewline newline, const char* format, va_list args) {
-  struct WriteBufferHook {
-    int (*write)(std::string_view str, void* hook);
-    void* hook;
-  } write_buffer_hook = {.write = write, .hook = hook};
-
-  FlushingBuffer write_buffer{
-      buffer.data(),
-      buffer.size(),
-      [](cpp::string_view str, void* arg) -> int {
-        auto [write, hook] = *static_cast<const WriteBufferHook*>(arg);
-        return write({str.data(), str.size()}, hook);
-      },
-      &write_buffer_hook,
-  };
-  Writer writer{write_buffer};
+  WriteHook write_hook = {.write = write, .hook = hook};
+  Writer writer = make_writer(buffer.data(), buffer.size(),
+                              &overflow_write_flush_to_sink<char, WriteHookSink>, &write_hook);
 
   internal::ArgList arg_list{args};
   auto wrote = printf_main(&writer, format, arg_list);
-  write_buffer.flush_to_stream(newline == PrintfNewline::kYes ? kNewline : kEmpty);
+  if (!wrote) [[unlikely]] {
+    // Any error code is lost, but it ultimately came from the callback anyway.
+    return -1;
+  }
 
-  // Any error code is lost, but it ultimately came from the callback anyway.
-  return wrote ? static_cast<int>(*wrote) : -1;
+  int n = overflow_write_flush_to_sink<char, WriteHookSink>(  //
+      writer.get_write_buffer(), MaybeNewline(newline), &write_hook);
+  if (n < 0) [[unlikely]] {
+    return -1;
+  }
+
+  return static_cast<int>(*wrote) + n;
 }
 
 }  // namespace LIBC_NAMESPACE::printf_core

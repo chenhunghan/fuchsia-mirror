@@ -15,6 +15,9 @@ use futures::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// Type alias for the injected touch report callback handler.
+pub type TouchReportHandler = Arc<dyn Fn(&[TouchContact], zx::MonotonicInstant) + Send + Sync>;
+
 /// Touch controller managing the GT6853 touch IC state and coordinate reporting.
 pub struct Controller<K: zx::InterruptKind = zx::RealInterruptKind> {
     i2c: MessageInterfaceUnitI2c,
@@ -24,6 +27,7 @@ pub struct Controller<K: zx::InterruptKind = zx::RealInterruptKind> {
     attention_interrupt_ack: Arc<zx::Interrupt<K, zx::MonotonicTimeline>>,
     #[expect(unused)]
     interrupt_gpio: Option<fidl_next::Client<fidl_gpio::Gpio>>,
+    touch_report_handler: Option<TouchReportHandler>,
 }
 
 impl Controller<zx::RealInterruptKind> {
@@ -85,7 +89,18 @@ impl<K: zx::InterruptKind> Controller<K> {
                 .expect("Failed to duplicate attention interrupt for ACK Arc"),
         );
         let attention_interrupt = Box::pin(OnInterrupt::new(attention_interrupt));
-        Self { i2c, attention_interrupt, attention_interrupt_ack, interrupt_gpio }
+        Self {
+            i2c,
+            attention_interrupt,
+            attention_interrupt_ack,
+            interrupt_gpio,
+            touch_report_handler: None,
+        }
+    }
+
+    /// Sets the callback handler invoked when touch reports are processed.
+    pub fn set_touch_report_handler(&mut self, handler: TouchReportHandler) {
+        self.touch_report_handler = Some(handler);
     }
 
     async fn read_remaining_contacts(
@@ -120,7 +135,7 @@ impl<K: zx::InterruptKind> Controller<K> {
     /// Always acknowledges the interrupt before returning, ensuring the interrupt line
     /// is unmasked even if touch report processing encounters errors.
     pub async fn process_interrupt(&mut self) -> Result<bool, zx::Status> {
-        let _event_time = match self.attention_interrupt.next().await {
+        let event_time = match self.attention_interrupt.next().await {
             Some(Ok(timestamp)) => timestamp,
             Some(Err(error)) => {
                 log::warn!("Error waiting for touch interrupt: {error:?}");
@@ -141,17 +156,15 @@ impl<K: zx::InterruptKind> Controller<K> {
             }
         }
 
-        self.process_touch_report().await
+        self.process_touch_report(event_time).await
     }
 
-    /// Reads and processes coordinate data from the hardware touch buffer.
-    ///
-    /// If new coordinates are ready, parses contact count and contact coordinates,
-    /// logs each active contact, and clears the coordinate buffer to unlock it for future touches.
-    ///
-    /// Returns `Ok(true)` if a touch event was processed, `Ok(false)` if the
-    /// hardware had no new event ready, or `Err(status)` on hardware transfer failure.
-    pub async fn process_touch_report(&mut self) -> Result<bool, zx::Status> {
+    /// Reads and processes coordinate data from the hardware touch buffer, dispatching active
+    /// contacts and release events to [`Self::touch_report_handler`].
+    pub async fn process_touch_report(
+        &mut self,
+        event_time: zx::MonotonicInstant,
+    ) -> Result<bool, zx::Status> {
         let report = self.i2c.read_reg::<InitialTouchReport>().await?;
 
         if !report.status.coordinates_ready() {
@@ -167,14 +180,17 @@ impl<K: zx::InterruptKind> Controller<K> {
         }
 
         if count > 0 {
-            log::info!("Touch event: count={count}");
+            log::debug!("Touch event: count={count}");
             // TODO(https://fxbug.dev/558521383): Validate the coordinate checksum.
             let remaining =
                 if count > 1 { self.read_remaining_contacts(count - 1).await? } else { Vec::new() };
 
-            let contacts_iter = core::iter::once(&report.first_contact).chain(&remaining);
-            for (index, contact) in contacts_iter.enumerate() {
-                log::info!(
+            let mut contacts = Vec::with_capacity(count);
+            contacts.push(report.first_contact);
+            contacts.extend(remaining);
+
+            for (index, contact) in contacts.iter().enumerate() {
+                log::debug!(
                     "  contact[{index}]: id={}, x={}, y={}, pressure={}",
                     contact.id(),
                     contact.x(),
@@ -182,8 +198,15 @@ impl<K: zx::InterruptKind> Controller<K> {
                     contact.pressure()
                 );
             }
+
+            if let Some(handler) = &self.touch_report_handler {
+                handler(&contacts, event_time);
+            }
         } else {
-            log::info!("Touch release (all contacts lifted)");
+            log::debug!("Touch release (all contacts lifted)");
+            if let Some(handler) = &self.touch_report_handler {
+                handler(&[], event_time);
+            }
         }
 
         // Acknowledge the touch report and release the coordinate buffer lock.
@@ -311,8 +334,12 @@ mod tests {
         let idle_report = vec![0x00; 10];
         fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(idle_report));
 
-        let has_event =
-            fixture.controller.process_touch_report().await.expect("process_touch_report failed");
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let has_event = fixture
+            .controller
+            .process_touch_report(event_time)
+            .await
+            .expect("process_touch_report failed");
         assert!(!has_event);
         fixture.mock.check_all_expectations_replayed();
     }
@@ -329,8 +356,12 @@ mod tests {
         fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
         fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
 
-        let has_event =
-            fixture.controller.process_touch_report().await.expect("process_touch_report failed");
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let has_event = fixture
+            .controller
+            .process_touch_report(event_time)
+            .await
+            .expect("process_touch_report failed");
         assert!(has_event);
         fixture.mock.check_all_expectations_replayed();
     }
@@ -351,8 +382,12 @@ mod tests {
         fixture.mock.expect_read(RemainingTouchContacts::<1>::ADDRESS, 8, Ok(contact1.to_vec()));
         fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
 
-        let has_event =
-            fixture.controller.process_touch_report().await.expect("process_touch_report failed");
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let has_event = fixture
+            .controller
+            .process_touch_report(event_time)
+            .await
+            .expect("process_touch_report failed");
         assert!(has_event);
         fixture.mock.check_all_expectations_replayed();
     }
@@ -379,8 +414,12 @@ mod tests {
         fixture.mock.expect_read(RemainingTouchContacts::<2>::ADDRESS, 16, Ok(remaining_bytes));
         fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
 
-        let has_event =
-            fixture.controller.process_touch_report().await.expect("process_touch_report failed");
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let has_event = fixture
+            .controller
+            .process_touch_report(event_time)
+            .await
+            .expect("process_touch_report failed");
         assert!(has_event);
         fixture.mock.check_all_expectations_replayed();
     }
@@ -394,8 +433,12 @@ mod tests {
         fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
         fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
 
-        let has_event =
-            fixture.controller.process_touch_report().await.expect("process_touch_report failed");
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let has_event = fixture
+            .controller
+            .process_touch_report(event_time)
+            .await
+            .expect("process_touch_report failed");
         assert!(has_event);
         fixture.mock.check_all_expectations_replayed();
     }
@@ -412,7 +455,8 @@ mod tests {
         fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
         fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
 
-        let result = fixture.controller.process_touch_report().await;
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let result = fixture.controller.process_touch_report(event_time).await;
         assert_eq!(result.err(), Some(zx::Status::BAD_STATE));
         fixture.mock.check_all_expectations_replayed();
     }
@@ -422,7 +466,8 @@ mod tests {
         let mut fixture = TestFixture::new();
         fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Err(zx::Status::PEER_CLOSED));
 
-        let result = fixture.controller.process_touch_report().await;
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let result = fixture.controller.process_touch_report(event_time).await;
         assert_eq!(result.err(), Some(zx::Status::PEER_CLOSED));
         fixture.mock.check_all_expectations_replayed();
     }
@@ -439,7 +484,8 @@ mod tests {
         fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
         fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Err(zx::Status::IO_REFUSED));
 
-        let result = fixture.controller.process_touch_report().await;
+        let event_time = zx::MonotonicInstant::from_nanos(123_456_789);
+        let result = fixture.controller.process_touch_report(event_time).await;
         assert_eq!(result.err(), Some(zx::Status::IO_REFUSED));
         fixture.mock.check_all_expectations_replayed();
     }
@@ -548,5 +594,87 @@ mod tests {
             fixture.controller.run().await;
             fixture.mock.check_all_expectations_replayed();
         });
+    }
+
+    #[fuchsia::test]
+    async fn test_process_touch_report_dispatches_to_handler() {
+        let mut fixture = TestFixture::new();
+
+        let received_report = Arc::new(std::sync::Mutex::new(None));
+        let received_report_clone = Arc::clone(&received_report);
+        fixture.controller.set_touch_report_handler(Arc::new(move |contacts, event_time| {
+            *received_report_clone.lock().unwrap() = Some((contacts.to_vec(), event_time));
+        }));
+
+        // EventStatus: coordinates_ready = true (0x80), ContactCount = 2 (0x02)
+        let mut initial_report_bytes = vec![0x80, 0x02];
+        // contact0: id=0, x=90 (0x005A), y=953 (0x03B9), pressure=174 (0xAE)
+        let contact0 = [0x00, 0x5A, 0x00, 0xB9, 0x03, 0xAE, 0x00, 0x00];
+        initial_report_bytes.extend_from_slice(&contact0);
+
+        // contact1: id=2, x=498 (0x01F2), y=68 (0x0044), pressure=108 (0x6C)
+        let contact1 = [0x02, 0xF2, 0x01, 0x44, 0x00, 0x6C, 0x00, 0x00];
+
+        fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(initial_report_bytes));
+        fixture.mock.expect_read(RemainingTouchContacts::<1>::ADDRESS, 8, Ok(contact1.to_vec()));
+        fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
+
+        const EVENT_TIME_NANOS: i64 = 888_777_666;
+        let event_time = zx::MonotonicInstant::from_nanos(EVENT_TIME_NANOS);
+
+        let has_event = fixture
+            .controller
+            .process_touch_report(event_time)
+            .await
+            .expect("process_touch_report failed");
+        assert!(has_event);
+        fixture.mock.check_all_expectations_replayed();
+
+        let (contacts, reported_time) =
+            received_report.lock().unwrap().take().expect("missing dispatched touch report");
+        assert_eq!(reported_time, event_time);
+        assert_eq!(contacts.len(), 2);
+
+        assert_eq!(contacts[0].id(), 0);
+        assert_eq!(contacts[0].x(), 90);
+        assert_eq!(contacts[0].y(), 953);
+        assert_eq!(contacts[0].pressure(), 174);
+
+        assert_eq!(contacts[1].id(), 2);
+        assert_eq!(contacts[1].x(), 498);
+        assert_eq!(contacts[1].y(), 68);
+        assert_eq!(contacts[1].pressure(), 108);
+    }
+
+    #[fuchsia::test]
+    async fn test_process_touch_report_dispatches_release_to_handler() {
+        let mut fixture = TestFixture::new();
+
+        let received_report = Arc::new(std::sync::Mutex::new(None));
+        let received_report_clone = Arc::clone(&received_report);
+        fixture.controller.set_touch_report_handler(Arc::new(move |contacts, event_time| {
+            *received_report_clone.lock().unwrap() = Some((contacts.to_vec(), event_time));
+        }));
+
+        // Hardware reports coordinates_ready = true (0x80), but contact_count = 0 (0x00).
+        let report_bytes = vec![0x80, 0x00, 0, 0, 0, 0, 0, 0, 0, 0];
+        fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
+        fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
+
+        const RELEASE_TIME_NANOS: i64 = 999_888_777;
+        let release_time = zx::MonotonicInstant::from_nanos(RELEASE_TIME_NANOS);
+
+        let has_event = fixture
+            .controller
+            .process_touch_report(release_time)
+            .await
+            .expect("process_touch_report failed");
+        assert!(has_event);
+        fixture.mock.check_all_expectations_replayed();
+
+        let (contacts, reported_time) =
+            received_report.lock().unwrap().take().expect("missing dispatched release report");
+        assert_eq!(reported_time, release_time);
+        assert!(contacts.is_empty(), "touch release should dispatch empty contacts slice");
     }
 }

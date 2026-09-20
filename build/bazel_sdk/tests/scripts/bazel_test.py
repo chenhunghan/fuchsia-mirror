@@ -162,7 +162,7 @@ def _run_command(
 
 def _get_command_output_lines(
     args: T.Sequence[StrOrPath],
-    extra_env: T.Optional[T.Dict[str, str]] = None,
+    extra_env: dict[str, str] | None = None,
     **kwargs: T.Any,
 ) -> T.Sequence[str]:
     """Run a given command, then return its standard output as text lines.
@@ -193,7 +193,7 @@ def _print_error(msg: str) -> int:
     return 1
 
 
-def _find_fuchsia_source_dir_from(path: Path) -> T.Optional[Path]:
+def _find_fuchsia_source_dir_from(path: Path) -> Path | None:
     """Try to find the Fuchsia source directory from a starting location.
 
     Args:
@@ -214,7 +214,7 @@ def _find_fuchsia_source_dir_from(path: Path) -> T.Optional[Path]:
         path = path.parent
 
 
-def _find_fuchsia_build_dir(fuchsia_source_dir: Path) -> T.Optional[Path]:
+def _find_fuchsia_build_dir(fuchsia_source_dir: Path) -> Path | None:
     """Find the current Fuchsia build directory.
 
     Args:
@@ -272,7 +272,7 @@ def build_metadata_flags(siblings_link_template: str) -> T.Sequence[str]:
 
     # Propagate some build metadata from the environment.
     # Some of these values are set by infra.
-    def forward_build_metadata_from_env(var: str) -> T.Optional[str]:
+    def forward_build_metadata_from_env(var: str) -> str | None:
         env_value = os.environ.get(var)  # set by infra
         if env_value is None:
             return None
@@ -318,8 +318,8 @@ class BazelRepositoryMap(object):
         fuchsia_source_dir: Path,
         rules_fuchsia_dir: Path,
         bazel_vendor_dir: Path,
-        explicit_fuchsia_sdk: T.Optional[Path],
-        explicit_fuchsia_in_tree_idk: T.Optional[Path],
+        explicit_fuchsia_sdk: Path | None,
+        explicit_fuchsia_in_tree_idk: Path | None,
         workspace_dir: Path,
         output_base: Path,
     ):
@@ -328,7 +328,7 @@ class BazelRepositoryMap(object):
         self._output_base = output_base
 
         # These repository overrides are passed to the Bazel invocation.
-        self._overrides: T.Dict[str, Path] = {}
+        self._overrides: dict[str, Path] = {}
 
         if explicit_fuchsia_sdk:
             self._overrides[
@@ -396,7 +396,7 @@ class BazelRepositoryMap(object):
             for name, path in self._overrides.items()
         ]
 
-    def resolve_bazel_path(self, bazel_path: str) -> T.Optional[Path]:
+    def resolve_bazel_path(self, bazel_path: str) -> Path | None:
         """Convert a Bazel path label to a real Path or None if it should be ignored."""
         if bazel_path.startswith("//"):
             target_path = bazel_path[2:]
@@ -662,7 +662,7 @@ def main() -> int:
     rules_fuchsia_dir = rules_fuchsia_dir.resolve()
 
     def check_fuchsia_build_dir(
-        print_error: T.Optional[T.Callable[[str], T.Any]] = None,
+        print_error: T.Callable[[str], T.Any] | None = None,
     ) -> bool:
         """Check that fuchsia_build_dir is set and exists. Return True on success."""
         if not fuchsia_build_dir:
@@ -813,7 +813,7 @@ def main() -> int:
     # Bazel will track changes to these files properly, as repository rules
     # cannot track changes to files outside the workspace :-(
 
-    def setup_version_file(name: str, source_path: Path) -> T.Optional[str]:
+    def setup_version_file(name: str, source_path: Path) -> str | None:
         if not source_path.exists():
             return None
 
@@ -1002,24 +1002,41 @@ def main() -> int:
         bazel_test_args += [f"--test_output={args.test_output}"]
 
     # Detect when to use remote service endpoint overrides from infra.
-    for config_arg, env_var, bazel_flag in (
-        ("sponge", "BAZEL_sponge_socket_path", "--bes_proxy"),
-        ("sponge_infra", "BAZEL_sponge_socket_path", "--bes_proxy"),
-        ("resultstore", "BAZEL_resultstore_socket_path", "--bes_proxy"),
-        ("resultstore_infra", "BAZEL_resultstore_socket_path", "--bes_proxy"),
-        ("remote", "BAZEL_rbe_socket_path", "--remote_proxy"),
-        ("remote_cache_only", "BAZEL_rbe_socket_path", "--remote_proxy"),
-    ):
-        if f"--config={config_arg}" in bazel_config_args:
-            env_value = os.environ.get(env_var)
-            if env_value:
-                bazel_config_args += [f"{bazel_flag}=unix://{env_value}"]
+    # TODO(https://fxbug.dev/450234102): Deprecate legacy BAZEL_*_socket_path after recipes migrate to main_build.py.
+    # LINT.IfChange(bazel_socket_env_vars)
+    SERVICE_SOCKET_MAP = [
+        (
+            ["resultstore", "resultstore_infra"],
+            [
+                "FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH",
+                "BAZEL_resultstore_socket_path",  # legacy fallback
+            ],
+            "--bes_proxy",
+        ),
+        (
+            ["remote", "remote_cache_only"],
+            [
+                "FX_INTERNAL_BAZEL_RBE_SOCKET_PATH",
+                "BAZEL_rbe_socket_path",  # legacy fallback
+            ],
+            "--remote_proxy",
+        ),
+    ]
+    # LINT.ThenChange(//build/scripts/main_build.py:bazel_socket_env_vars)
+    for config_args, env_vars, bazel_flag in SERVICE_SOCKET_MAP:
+        if any(
+            f"--config={config_arg}" in bazel_config_args
+            for config_arg in config_args
+        ):
+            for env_var in env_vars:
+                env_value = os.environ.get(env_var)
+                if env_value:
+                    bazel_config_args += [f"{bazel_flag}=unix://{env_value}"]
+                    break
 
     siblings_link_template: str = ""
     for config_arg in bazel_config_args:
-        if "sponge" in config_arg:
-            siblings_link_template = "http://sponge/invocations/"
-        elif "resultstore" in config_arg:
+        if "resultstore" in config_arg:
             siblings_link_template = "http://go/fxbtx/"
 
     jobs = None
@@ -1190,7 +1207,7 @@ def main() -> int:
 
     if args.depfile:
 
-        def find_build_files() -> T.Set[Path]:
+        def find_build_files() -> set[Path]:
             # Perform a query to retrieve all build files.
             build_files = _get_command_output_lines(
                 args=(
@@ -1211,7 +1228,7 @@ def main() -> int:
 
             return result
 
-        def find_source_files() -> T.Set[Path]:
+        def find_source_files() -> set[Path]:
             # Perform a cquery to find all input source files.
             lines = _get_command_output_lines(
                 args=(

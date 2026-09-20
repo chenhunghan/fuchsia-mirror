@@ -230,16 +230,17 @@ where
             .lock()
             .ot_instance
             .border_routing_dhcp6_pd_state_change_stream()
-            .then(move |pd_state| async move {
-                if let Err(e) =
-                    self.driver_state.lock().dhcp_v6_pd.process_pd_state_change(pd_state)
-                {
-                    error!(
-                        "failed to process DHCPv6 PD state change: {:?}. State: {:?}.",
-                        e, pd_state
-                    );
+            .then(move |pd_state| {
+                let dhcp_v6_pd = self.driver_state.lock().dhcp_v6_pd.clone();
+                async move {
+                    if let Err(e) = dhcp_v6_pd.process_pd_state_change(pd_state).await {
+                        error!(
+                            "failed to process DHCPv6 PD state change: {:?}. State: {:?}.",
+                            e, pd_state
+                        );
+                    }
+                    Ok(())
                 }
-                Ok(())
             });
 
         let border_agent_update_stream = futures::stream::unfold((), move |_| {

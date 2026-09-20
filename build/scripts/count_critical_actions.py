@@ -83,9 +83,9 @@ def main() -> int:
     if not bids:
         raise Exception(f"No build IDs found in {args.build_ids}")
 
-    counts: T.DefaultDict[str, int] = defaultdict(int)
-    drags: T.DefaultDict[str, list[float]] = defaultdict(list)
-    durations: T.DefaultDict[str, list[float]] = defaultdict(list)
+    counts: defaultdict[str, int] = defaultdict(int)
+    drags: defaultdict[str, list[float]] = defaultdict(list)
+    durations: defaultdict[str, list[float]] = defaultdict(list)
 
     i, tot = 0, len(bids)
 

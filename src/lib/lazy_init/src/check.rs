@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// TODO(https://github.com/rust-lang/rust/issues/143874): Replace constants
+// with the return values of a const trait method instead.
+#![allow(clippy::declare_interior_mutable_const)]
+
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU8, Ordering};
 

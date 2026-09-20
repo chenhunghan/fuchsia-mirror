@@ -475,6 +475,10 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   // 2) If it hosts a layer stack, drop the stack and release its layers via `ReleaseLayerObject()`.
   void ProcessDeadTransforms(const TransformGraph::TopologyData& data);
 
+  // Validates sample_rect extents for an image layer during Present().
+  // Returns true if valid, otherwise logs an error via `error_reporter_` and returns false.
+  bool IsLayerSampleRectValidForPresent(const LayerObject& layer_obj) const;
+
   // The dispatcher this Flatland instance is running on.
   async_dispatcher_t* dispatcher() const { return dispatcher_holder_->dispatcher(); }
   std::shared_ptr<utils::DispatcherHolder> dispatcher_holder_;
@@ -548,6 +552,10 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   // Supplies the session-unique suffix for new LayerHandles.
   uint64_t next_layer_handle_ = 1;
 
+  // A mapping from user-generated `ImageId` to the internal `GlobalImageId`.
+  // Erased the moment the client releases the id.
+  std::pmr::unordered_map<ImageId, allocation::GlobalImageId> images2_;
+
   // Flatland2 layer state authored by this session, keyed by session-internal handles.
   // `layer_objects_` owns the layers; `layer_stacks_` maps a stack's content handle (its
   // attachment point in the transform graph) to the ordered list of layers it displays
@@ -592,12 +600,13 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   void SetLayerImageForTest(LayerHandle handle, allocation::GlobalImageId image);
   void SetLayerSolidColorForTest(LayerHandle handle);
   LayerObject* GetLayerObjectForTest(LayerHandle handle);
-  ImageObject* GetImageObjectForTest(allocation::GlobalImageId id);
+  const ImageObject* GetImageObjectForTest(allocation::GlobalImageId global_id) const;
   const LayerStackData* GetLayerStackDataForTest(TransformHandle handle);
   void ReleaseTransformForTest(TransformHandle handle);
   void SetPriorityChildForTest(TransformId parent, TransformHandle child);
   LayerHandle GetLayerHandleForTest(LayerId layer_id);
   size_t PendingImageReleaseCountForTest() const;
+  allocation::GlobalImageId GetGlobalImageIdForTest(ImageId image_id) const;
 
  private:
   // The only place that `ImageObject::ref_count` is decremented.  At zero the object is erased,
@@ -622,6 +631,11 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   // TODO(https://fxbug.dev/523371761): after transition to Flatland2 UberStruct schema is complete,
   // revisit order of public/private sections, and verify "methods-first, fields-last" declaration
   // order (as mandated by style guide).
+
+  // Shared image import helper for CreateImage and CreateImage2.
+  std::optional<allocation::ImageMetadata> ImportImage(
+      fuchsia_ui_composition::wire::BufferCollectionImportToken import_token, uint32_t vmo_index,
+      const fuchsia_ui_composition::wire::ImageProperties& properties);
 
   // Return the `LayerObject` corresponding to `handle`, which must exist.
   // The returned reference remains valid until this element is erased.

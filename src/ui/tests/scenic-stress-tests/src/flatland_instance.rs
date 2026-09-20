@@ -4,19 +4,20 @@
 
 use crate::input_listener;
 use fidl::endpoints::*;
+use fidl_fuchsia_math as fmath;
+use fidl_fuchsia_ui_composition as flatland;
+use fidl_fuchsia_ui_pointer as fpointer;
+use fidl_fuchsia_ui_views as fviews;
+use fuchsia_async as fasync;
 use fuchsia_component_test::ScopedInstance;
+use fuchsia_scenic as scenic;
 use futures::StreamExt;
 use log::debug;
+use rand::RngExt as _;
 use rand::rngs::SmallRng;
-use rand::seq::IndexedMutRandom;
-use rand::Rng;
-use std::sync::atomic::{AtomicU64, Ordering};
+use rand::seq::IndexedMutRandom as _;
 use std::sync::Arc;
-use {
-    fidl_fuchsia_math as fmath, fidl_fuchsia_ui_composition as flatland,
-    fidl_fuchsia_ui_pointer as fpointer, fidl_fuchsia_ui_views as fviews, fuchsia_async as fasync,
-    fuchsia_scenic as scenic,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DISPLAY_WIDTH: u16 = 1024;
 pub const DISPLAY_HEIGHT: u16 = 600;
@@ -36,8 +37,11 @@ async fn create_instance(
     token: fviews::ViewCreationToken,
     realm: &ScopedInstance,
 ) -> (flatland::FlatlandProxy, fviews::ViewRef, flatland::TransformId) {
-    let flatland_instance: flatland::FlatlandProxy =
-        realm.connect_to_protocol_at_exposed_dir().expect("Failed to connect Flatland instance");
+    let flatland_factory: flatland::FlatlandFactoryProxy =
+        realm.connect_to_protocol_at_exposed_dir().expect("Failed to connect FlatlandFactory");
+    let (flatland_instance, server_end) = create_proxy::<flatland::FlatlandMarker>();
+    let create_flatland_fut =
+        flatland_factory.create_flatland(server_end, &flatland::FlatlandConfig::default());
     let view_identity = fviews::ViewIdentityOnCreation::from(
         scenic::ViewRefPair::new().expect("failed to create ViewRefPair"),
     );
@@ -58,6 +62,9 @@ async fn create_instance(
     flatland_instance.set_root_transform(&root_transform).expect("fidl error");
 
     create_and_attach_rect(&flatland_instance, &mut root_transform);
+
+    // Optimistic pipelining: await the CreateFlatland() future after we call Flatland methods.
+    create_flatland_fut.await.expect("fidl error").expect("failed to create Flatland session");
 
     (flatland_instance, view_ref, root_transform)
 }
@@ -254,9 +261,11 @@ impl FlatlandInstance {
 
     // Create a child instance.
     async fn new_child(realm: &ScopedInstance) -> (Self, fviews::ViewportCreationToken) {
-        let flatland_instance: flatland::FlatlandProxy = realm
-            .connect_to_protocol_at_exposed_dir()
-            .expect("Failed to connect Flatland instance");
+        let flatland_factory: flatland::FlatlandFactoryProxy =
+            realm.connect_to_protocol_at_exposed_dir().expect("Failed to connect FlatlandFactory");
+        let (flatland_instance, server_end) = create_proxy::<flatland::FlatlandMarker>();
+        let create_flatland_fut =
+            flatland_factory.create_flatland(server_end, &flatland::FlatlandConfig::default());
         let fuchsia_scenic::flatland::ViewCreationTokenPair {
             view_creation_token,
             viewport_creation_token,
@@ -284,6 +293,9 @@ impl FlatlandInstance {
         let flatland_instance = Arc::new(flatland_instance);
         safe_present(&flatland_instance, &mut stream).await;
         let _present_task = { autopresent(Arc::clone(&flatland_instance), stream) };
+
+        // Optimistic pipelining: await the CreateFlatland() future after we call Flatland methods.
+        create_flatland_fut.await.expect("fidl error").expect("failed to create Flatland session");
 
         let child = Self::Child {
             instance: flatland_instance,

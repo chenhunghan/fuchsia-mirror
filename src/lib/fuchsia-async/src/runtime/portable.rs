@@ -261,6 +261,12 @@ pub mod executor {
             self
         }
 
+        /// Sets whether the executor should support binding interrupts.
+        pub fn allow_interrupts(self, #[expect(unused)] allow_interrupts: bool) -> Self {
+            // Interrupt binding is not supported on this platform, so we ignore it.
+            self
+        }
+
         /// Builds the `SendExecutor`, consuming this `SendExecutorBuilder`.
         pub fn build(self) -> SendExecutor {
             SendExecutor::new(self.num_threads.unwrap_or(1))
@@ -320,6 +326,12 @@ pub mod executor {
             Self::default()
         }
 
+        /// Sets whether the executor should support binding interrupts.
+        pub fn allow_interrupts(self, #[expect(unused)] allow_interrupts: bool) -> Self {
+            // Interrupt binding is not supported on this platform, so we ignore it.
+            self
+        }
+
         /// Builds the `LocalExecutor`, consuming this `LocalExecutorBuilder`.
         pub fn build(self) -> LocalExecutor {
             LocalExecutor::default()
@@ -355,6 +367,12 @@ pub mod executor {
         /// Creates a new builder used for constructing a `TestExecutor`.
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Sets whether the executor should support binding interrupts.
+        pub fn allow_interrupts(self, #[expect(unused)] allow_interrupts: bool) -> Self {
+            // Interrupt binding is not supported on this platform, so we ignore it.
+            self
         }
 
         /// Builds the `TestExecutor`, consuming this `TestExecutorBuilder`.

@@ -35,7 +35,6 @@ if (is_host) {
 
 fidl("fuchsia.net.policy.socketproxy") {
   sources = [
-    "fuchsia.fidl",
     "network_registry.fidl",
     "socketproxy.fidl",
     "starnix.fidl",

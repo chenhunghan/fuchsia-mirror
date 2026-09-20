@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 use fidl_fuchsia_pkg as fpkg;
+use fuchsia_inspect as finspect;
+use fuchsia_inspect::NumericProperty as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -49,7 +51,9 @@ impl PackageFetcher {
         blob_fetcher: crate::blob_fetcher::BlobFetcher,
         root_dir_factory: crate::root_dir::RootDirFactory,
         open_packages: crate::RootDirCache,
+        inspect: finspect::Node,
     ) -> (impl Future<Output = ()>, Self) {
+        let fetch_count = std::sync::atomic::AtomicU64::new(0);
         let (queue, sender) = work_queue::work_queue(
             max_concurrency,
             move |pkg_id: fuchsia_hash::Hash, context: QueueContext| {
@@ -58,6 +62,9 @@ impl PackageFetcher {
                 let blob_fetcher = blob_fetcher.clone();
                 let root_dir_factory = root_dir_factory.clone();
                 let open_packages = open_packages.clone();
+                let inspect = inspect.create_child(
+                    fetch_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string(),
+                );
                 async move {
                     fetch(
                         pkg_id,
@@ -68,6 +75,7 @@ impl PackageFetcher {
                         &blob_fetcher,
                         &root_dir_factory,
                         &open_packages,
+                        inspect,
                     )
                     .await
                 }
@@ -98,6 +106,7 @@ async fn fetch(
     blob_fetcher: &crate::blob_fetcher::BlobFetcher,
     root_dir_factory: &crate::root_dir::RootDirFactory,
     open_packages: &crate::RootDirCache,
+    inspect: finspect::Node,
 ) -> Result<Arc<crate::RootDir>, Arc<Error>> {
     let gc_guard = package_index.write().await.start_writing(pkg_id, gc_protection);
     let fetch_ret = fetch_impl(
@@ -109,6 +118,7 @@ async fn fetch(
         blob_fetcher,
         root_dir_factory,
         open_packages,
+        inspect,
     )
     .await;
     let stop_ret = package_index.write().await.stop_writing(gc_guard);
@@ -131,7 +141,13 @@ async fn fetch_impl(
     blob_fetcher: &crate::blob_fetcher::BlobFetcher,
     root_dir_factory: &crate::root_dir::RootDirFactory,
     open_packages: &crate::RootDirCache,
+    inspect: finspect::Node,
 ) -> Result<Arc<crate::RootDir>, Error> {
+    inspect.record_int("start_boot_ns", zx::BootInstant::get().into_nanos());
+    inspect.record_string("package_hash", pkg_id.to_string());
+    inspect.record_string("gc_protection", format!("{gc_protection:?}"));
+    inspect.record_string("blob_source", blob_source.to_string());
+    let inspect_outstanding = inspect.create_uint("known_outstanding_blobs", 1);
     let mut queue = std::collections::VecDeque::from([pkg_id]);
     let mut queued = HashSet::from([pkg_id]);
     let context = crate::blob_fetcher::QueueContext::new(
@@ -149,6 +165,7 @@ async fn fetch_impl(
                 .map_err(Error::BlobPush)?
                 .map_err(Error::BlobFetch)?;
         }
+        inspect_outstanding.subtract(1);
         let root_dir = root_dir_factory
             .create(blob_id)
             .await
@@ -171,6 +188,7 @@ async fn fetch_impl(
         for sub in subpackages {
             if queued.insert(sub) {
                 queue.push_back(sub);
+                inspect_outstanding.add(1);
             }
         }
         let content = root_dir.external_file_hashes().copied().collect::<HashSet<_>>();
@@ -185,10 +203,12 @@ async fn fetch_impl(
                 missing_content.push(content_id);
             }
         }
+        inspect_outstanding.add(missing_content.len() as u64);
         for fut in
             blob_fetcher.push_all(missing_content.into_iter().map(|h| (h.into(), context.clone())))
         {
             let _: Option<u64> = fut.await.map_err(Error::BlobPush)?.map_err(Error::BlobFetch)?;
+            inspect_outstanding.subtract(1);
         }
         ret.get_or_insert(root_dir);
     }

@@ -7,7 +7,6 @@ load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(
     default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
 )
 
 go_library(
@@ -88,5 +87,6 @@ go_library(
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/fidl/fidlgen_cpp/codegen",
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools/fidl/fidlgen_cpp:__pkg__"],
     deps = ["//tools/fidl/lib/fidlgen_cpp"],
 )

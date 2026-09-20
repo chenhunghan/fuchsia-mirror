@@ -5,7 +5,6 @@
 #include "sata.h"
 
 #include <inttypes.h>
-#include <lib/ddk/binding_driver.h>
 #include <lib/sync/completion.h>
 #include <lib/zx/vmo.h>
 #include <limits.h>
@@ -171,7 +170,8 @@ zx_status_t SataDevice::Init() {
   // READ_FPDMA_QUEUED and WRITE_FPDMA_QUEUED commands support FUA, whereas for non-NCQ, FUA read
   // commands do not exist (FUA writes do).
   if (use_command_queue_) {
-    partition_info_.device_flags |= DEVICE_FLAG_FUA_SUPPORT;
+    partition_info_.device_flags |=
+        static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kFuaSupport);
   }
 
   uint32_t max_sg_size = SATA_MAX_BLOCK_COUNT * block_size;  // SATA cmd limit

@@ -382,6 +382,47 @@ class Gt6853Test : public zxtest::Test {
     i2c_.SyncCall(&FakeTouchDevice::set_sensor_id, 0);
   }
 
+  class SyncReaderV2EventHandler
+      : public fidl::WireSyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+   public:
+    explicit SyncReaderV2EventHandler(
+        fit::function<
+            void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+            callback)
+        : callback_(std::move(callback)) {}
+
+    void OnInputReports(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*
+                            event) override {
+      last_report_stamp = event->last_report_stamp;
+      if (callback_) {
+        callback_(event);
+      }
+    }
+
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+    uint64_t last_report_stamp = 0;
+
+   private:
+    fit::function<void(
+        fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+        callback_;
+  };
+
+  static zx_status_t ReadAndAcknowledgeOneEvent(
+      fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader,
+      fit::function<
+          void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+          callback) {
+    SyncReaderV2EventHandler handler(std::move(callback));
+    fidl::Status result = reader.HandleOneEvent(handler);
+    if (!result.ok()) {
+      return result.status();
+    }
+    return reader->AcknowledgeReports(handler.last_report_stamp).status();
+  }
+
   void WaitForNextReader() { device_->GetDeviceContext<Gt6853Device>()->WaitForNextReader(); }
   zx_status_t WaitForFirmwareDownload() {
     return device_->GetDeviceContext<Gt6853Device>()->WaitForFirmwareDownload();
@@ -540,43 +581,48 @@ TEST_F(Gt6853Test, ReadReport) {
 
   fidl::WireSyncClient client(GetInputDeviceClient());
 
-  auto [reader_client, reader_server] =
-      fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
   // TODO(https://fxbug.dev/42180237) Consider handling the error instead of ignoring it.
-  (void)client->GetInputReportsReader(std::move(reader_server));
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader(std::move(reader_client));
+  (void)client->GetInputReportsReaderV2(std::move(endpoints.server), 10);
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(endpoints.client));
   WaitForNextReader();
 
   EXPECT_OK(gpio_interrupt_.trigger(0, zx::clock::get_boot()));
 
   WaitForTouchDataRead();
 
-  const auto response = reader->ReadInputReports();
-  ASSERT_TRUE(response.ok());
-  ASSERT_TRUE(response->is_ok());
+  bool got_report = false;
+  zx_status_t status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-  const auto& reports = response->value()->reports;
+        ASSERT_EQ(reports.size(), 1u);
+        ASSERT_TRUE(reports[0].has_touch());
+        ASSERT_TRUE(reports[0].touch().has_contacts());
+        ASSERT_EQ(reports[0].touch().contacts().size(), 4u);
 
-  ASSERT_EQ(reports.size(), 1);
-  ASSERT_TRUE(reports[0].has_touch());
-  ASSERT_TRUE(reports[0].touch().has_contacts());
-  ASSERT_EQ(reports[0].touch().contacts().size(), 4);
+        EXPECT_EQ(reports[0].touch().contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(reports[0].touch().contacts()[0].position_x(), 0x005a);
+        EXPECT_EQ(reports[0].touch().contacts()[0].position_y(), 0x03b9);
 
-  EXPECT_EQ(reports[0].touch().contacts()[0].contact_id(), 0);
-  EXPECT_EQ(reports[0].touch().contacts()[0].position_x(), 0x005a);
-  EXPECT_EQ(reports[0].touch().contacts()[0].position_y(), 0x03b9);
+        EXPECT_EQ(reports[0].touch().contacts()[1].contact_id(), 2u);
+        EXPECT_EQ(reports[0].touch().contacts()[1].position_x(), 0x01f2);
+        EXPECT_EQ(reports[0].touch().contacts()[1].position_y(), 0x0044);
 
-  EXPECT_EQ(reports[0].touch().contacts()[1].contact_id(), 2);
-  EXPECT_EQ(reports[0].touch().contacts()[1].position_x(), 0x01f2);
-  EXPECT_EQ(reports[0].touch().contacts()[1].position_y(), 0x0044);
+        EXPECT_EQ(reports[0].touch().contacts()[2].contact_id(), 1u);
+        EXPECT_EQ(reports[0].touch().contacts()[2].position_x(), 0x0072);
+        EXPECT_EQ(reports[0].touch().contacts()[2].position_y(), 0x0114);
 
-  EXPECT_EQ(reports[0].touch().contacts()[2].contact_id(), 1);
-  EXPECT_EQ(reports[0].touch().contacts()[2].position_x(), 0x0072);
-  EXPECT_EQ(reports[0].touch().contacts()[2].position_y(), 0x0114);
-
-  EXPECT_EQ(reports[0].touch().contacts()[3].contact_id(), 3);
-  EXPECT_EQ(reports[0].touch().contacts()[3].position_x(), 0x0138);
-  EXPECT_EQ(reports[0].touch().contacts()[3].position_y(), 0x00be);
+        EXPECT_EQ(reports[0].touch().contacts()[3].contact_id(), 3u);
+        EXPECT_EQ(reports[0].touch().contacts()[3].position_x(), 0x0138);
+        EXPECT_EQ(reports[0].touch().contacts()[3].position_y(), 0x00be);
+        got_report = true;
+      });
+  ASSERT_OK(status);
+  EXPECT_TRUE(got_report);
 
   EXPECT_TRUE(i2c().SyncCall(&FakeTouchDevice::ok));
 }
@@ -791,11 +837,12 @@ TEST_F(Gt6853Test, LatencyMeasurements) {
 
   fidl::WireSyncClient client(GetInputDeviceClient());
 
-  auto [reader_client, reader_server] =
-      fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
   // TODO(https://fxbug.dev/42180237) Consider handling the error instead of ignoring it.
-  (void)client->GetInputReportsReader(std::move(reader_server));
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader(std::move(reader_client));
+  (void)client->GetInputReportsReaderV2(std::move(endpoints.server), 10);
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(endpoints.client));
   WaitForNextReader();
 
   for (int i = 0; i < 5; i++) {
@@ -804,10 +851,12 @@ TEST_F(Gt6853Test, LatencyMeasurements) {
   }
 
   for (size_t reports = 0; reports < 5;) {
-    const auto response = reader->ReadInputReports();
-    if (response.ok() && response->is_ok()) {
-      reports += response->value()->reports.size();
-    }
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          reports += event->reports.size();
+        });
+    ASSERT_OK(status);
   }
 
   const zx::vmo& inspect_vmo = device_->GetInspectVmo();

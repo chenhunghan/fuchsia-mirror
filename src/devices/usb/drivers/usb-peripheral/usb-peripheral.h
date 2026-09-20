@@ -93,6 +93,8 @@ struct UsbConfiguration {
 
   // Map from interface number to function index.
   std::optional<size_t> interface_map[MAX_INTERFACES];
+  // Map from interface number to current alternate setting (USB 2.0 § 9.4.4).
+  uint8_t alternate_setting[MAX_INTERFACES] = {0};
   const uint8_t index;
 };
 

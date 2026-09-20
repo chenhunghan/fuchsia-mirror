@@ -5,8 +5,14 @@
 import("//build/bind/bind.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("pl031-rtc-dml") {
+  dml = "meta/pl031-rtc.dml"
+  driver_name = "pl031-rtc"
+}
+
 driver_bind_rules("pl031_rtc_bind") {
-  rules = "meta/pl031-rtc.bind"
+  bind_output = "pl031-rtc.bindbc"
+  dml_label = ":pl031-rtc-dml"
   tests = "meta/bind-tests.json"
   deps = [ "//src/devices/bind/fuchsia.platform" ]
 }
@@ -31,10 +37,10 @@ fuchsia_cc_driver("pl031-rtc-driver") {
 }
 
 fuchsia_driver_component("pl031-rtc") {
+  dml_label = ":pl031-rtc-dml"
   info = "meta/pl031-rtc-info.json"
   component_name = "pl031-rtc"
   deps = [ ":pl031-rtc-driver" ]
-  manifest = "meta/pl031-rtc.cml"
 }
 
 fuchsia_driver_package("package") {

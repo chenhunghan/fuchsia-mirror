@@ -7964,7 +7964,7 @@ bool VmCowPages::DebugIsParentContent(uint64_t offset) const {
   DEBUG_ASSERT(IsPageRounded(offset));
   Guard<CriticalMutex> guard{lock()};
   const VmPageOrMarker* p = page_list_.Lookup(offset);
-  return p || p->IsParentContent();
+  return p && p->IsParentContent();
 }
 
 bool VmCowPages::DebugIsEmpty(uint64_t offset) const {

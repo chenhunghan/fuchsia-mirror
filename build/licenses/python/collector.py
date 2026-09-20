@@ -9,7 +9,6 @@ import enum
 import logging
 import os
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
 
 from file_access import FileAccess
 from gn_label import GnLabel
@@ -30,7 +29,7 @@ class CollectedLicense:
     @staticmethod
     def create(
         public_name: str,
-        license_files: Tuple[GnLabel, ...],
+        license_files: tuple[GnLabel, ...],
     ) -> "CollectedLicense":
         assert type(public_name) is str
         assert type(license_files) is tuple
@@ -173,17 +172,17 @@ class Collector:
     include_host_tools: bool
     default_license_file: GnLabel | None = None
     generate_debug_hints: bool = False
-    scan_result_by_label: Dict[GnLabel, bool] = dataclasses.field(
+    scan_result_by_label: dict[GnLabel, bool] = dataclasses.field(
         default_factory=dict
     )
-    unique_licenses: Set[CollectedLicense] = dataclasses.field(
+    unique_licenses: set[CollectedLicense] = dataclasses.field(
         default_factory=set
     )
-    license_debug_hints: Dict[CollectedLicense, List[str]] = dataclasses.field(
+    license_debug_hints: dict[CollectedLicense, list[str]] = dataclasses.field(
         default_factory=dict
     )
-    unique_resources: Set[GnLabel] = dataclasses.field(default_factory=set)
-    errors: List[CollectorError] = dataclasses.field(default_factory=list)
+    unique_resources: set[GnLabel] = dataclasses.field(default_factory=set)
+    errors: list[CollectorError] = dataclasses.field(default_factory=list)
     stats: CollectorStats = dataclasses.field(default_factory=CollectorStats)
 
     def _add_error(self, error: CollectorError) -> None:
@@ -198,7 +197,7 @@ class Collector:
     def _add_license(
         self,
         public_name: str,
-        license_files: Tuple[GnLabel, ...],
+        license_files: tuple[GnLabel, ...],
         collection_hint: str,
     ) -> None:
         logging.debug(
@@ -319,7 +318,7 @@ class Collector:
             "//third_party/golibs/vendor/" + label.name
         )
 
-        license_files: List[GnLabel] = []
+        license_files: list[GnLabel] = []
 
         public_package_name = label.name.split("/")[-1]
 
@@ -510,8 +509,8 @@ class Collector:
             self._scan_label(target_metadata.target_label)
 
     def log_errors(self, log_level: int, is_full_report: bool) -> None:
-        errors_by_kind: Dict[
-            CollectorErrorKind, List[CollectorError]
+        errors_by_kind: dict[
+            CollectorErrorKind, list[CollectorError]
         ] = defaultdict(list)
 
         for error in self.errors:

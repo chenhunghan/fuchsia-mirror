@@ -21,8 +21,9 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence, Tuple
+from typing import Any
 
 import cl_utils
 import depfile
@@ -231,8 +232,8 @@ class RustRemoteAction(object):
     def __init__(
         self,
         argv: Sequence[str],
-        exec_root: Optional[Path] = None,
-        working_dir: Optional[Path] = None,
+        exec_root: Path | None = None,
+        working_dir: Path | None = None,
         host_platform: str | None = None,
         auto_reproxy: bool = True,  # Ok to disable during unit-tests
     ):
@@ -340,17 +341,17 @@ class RustRemoteAction(object):
         return self._main_args.determinism_attempts
 
     @property
-    def miscomparison_export_dir(self) -> Optional[Path]:
+    def miscomparison_export_dir(self) -> Path | None:
         if self._main_args.miscomparison_export_dir:
             return self.working_dir / self._main_args.miscomparison_export_dir
         return None
 
     @property
-    def clang_cxx_stdlibdir(self) -> Optional[Path]:
+    def clang_cxx_stdlibdir(self) -> Path | None:
         return self._main_args.cxx_stdlibdir
 
     @property
-    def clang_target(self) -> Optional[str]:
+    def clang_target(self) -> str | None:
         return self._main_args.clang_target
 
     @property
@@ -419,7 +420,7 @@ class RustRemoteAction(object):
         return self._rust_action.needs_linker
 
     @property
-    def target(self) -> Optional[str]:
+    def target(self) -> str | None:
         return self._rust_action.target
 
     @property
@@ -427,11 +428,11 @@ class RustRemoteAction(object):
         return self._rust_action.ensure_rust_sysroot
 
     @property
-    def c_sysroot(self) -> Optional[Path]:
+    def c_sysroot(self) -> Path | None:
         return self._rust_action.c_sysroot
 
     @property
-    def linker(self) -> Optional[Path]:
+    def linker(self) -> Path | None:
         return self._rust_action.linker
 
     @property
@@ -491,7 +492,7 @@ class RustRemoteAction(object):
         )
 
     @staticmethod
-    def _normalize_libcxx(tok: str) -> Optional[str]:
+    def _normalize_libcxx(tok: str) -> str | None:
         # A path like ".../bin/../lib/libc++a" needs to be normalized
         # so that the remote linker does not fail when looking for a
         # non-existent "bin" part of the path.
@@ -512,7 +513,7 @@ class RustRemoteAction(object):
     @property
     def dep_only_command_with_rspfiles(
         self,
-    ) -> Tuple[Sequence[str], Sequence[Path]]:
+    ) -> tuple[Sequence[str], Sequence[Path]]:
         command, aux_files = self._rust_action.dep_only_command_with_rspfiles(
             str(self.local_depfile)
         )
@@ -934,13 +935,13 @@ class RustRemoteAction(object):
         return self._remote_action
 
     @property
-    def remote_linker(self) -> Optional[Path]:
+    def remote_linker(self) -> Path | None:
         if not self.linker:
             return None
         return fuchsia.remote_executable(self.linker)
 
     @property
-    def target_linker_prefix(self) -> Optional[str]:
+    def target_linker_prefix(self) -> str | None:
         if not self.target:
             return None
         if "darwin" in self.target:
@@ -948,7 +949,7 @@ class RustRemoteAction(object):
         return "ld"  # most cases
 
     @property
-    def remote_ld_path(self) -> Optional[Path]:
+    def remote_ld_path(self) -> Path | None:
         ld = self._rust_action.use_ld  # e.g. "lld"
         if not ld:
             return None

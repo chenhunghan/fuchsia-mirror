@@ -61,7 +61,10 @@ void spin(uint32_t usecs);
 // the kernel itself.
 // LINT.IfChange
 #define KERNEL_OOPS(fmt, ...) printf("\nZIRCON KERNEL OOPS\n" fmt, ##__VA_ARGS__)
-// LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go)
+// LINT.ThenChange(
+//   //zircon/kernel/lib/debug/lib.rs,
+//   //tools/testing/tefmocheck/string_in_log_check.go,
+// )
 
 // Similar to KERNEL_OOPS, except used for egregious driver circumstances
 // detected by the kernel.

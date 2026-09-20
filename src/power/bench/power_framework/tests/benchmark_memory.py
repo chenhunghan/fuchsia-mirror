@@ -55,7 +55,6 @@ class PowerMemoryBenchmarkTest(fuchsia_base_test.FuchsiaBaseTest):
                 "--wait-for-memory-profiling",
             ],
             include_target=True,
-            include_target_name=True,
             machine=MachineFormat.RAW,
         )
         _LOGGER.info("Running command: %s", " ".join(cmd))

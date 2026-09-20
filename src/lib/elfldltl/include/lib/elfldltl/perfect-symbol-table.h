@@ -212,7 +212,7 @@ class PerfectSymbolMap {
 // conveniences for using it with the <lib/elfldltl/resolve.h> Module API.
 // Initialize it with pointers into a specific module's symbol table.  Then use
 // it as a symbol lookup function for the chosen subset of that module.
-template <const auto& Names, class ElfLayout = Elf<>, auto... SetArgs>
+template <const auto& Names, ElfApi ElfLayout = Elf<>, auto... SetArgs>
   requires SymbolNameArray<decltype(Names)>
 class PerfectSymbolFilter : public PerfectSymbolMap<const typename ElfLayout::Sym*, Names> {
  public:

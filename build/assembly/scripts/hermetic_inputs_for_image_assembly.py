@@ -9,7 +9,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Iterable
+from collections.abc import Iterable
 
 from assembly import FilePath, ImageAssemblyConfig, PackageManifest
 from depfile import DepFile

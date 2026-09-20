@@ -59,7 +59,6 @@ impl UsbConnector {
             input: Box::new(input),
             errors,
             main_task: None,
-            ssh_host_address: None,
         })
     }
 
@@ -75,7 +74,6 @@ impl UsbConnector {
             input: Box::new(input),
             errors,
             main_task: None,
-            ssh_host_address: None,
         })
     }
 }
@@ -149,6 +147,10 @@ fn daemon_autostart_cmd(
 
 /// Try to auto-start the daemon if it is appropriate to do so.
 pub fn try_daemon_autostart(path: &PathBuf, context: &EnvironmentContext) {
+    if std::os::unix::net::UnixStream::connect(path).is_ok() {
+        return;
+    }
+
     let mut cmd = match daemon_autostart_cmd(path, context, None) {
         Ok(Some(cmd)) => cmd,
         Ok(None) => return,
@@ -242,5 +244,23 @@ mod tests {
         let path = PathBuf::from("/tmp/usb.sock");
         let res = daemon_autostart_cmd(&path, &test_env.context, Some("ffx")).unwrap();
         assert!(res.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_try_daemon_autostart_socket_already_connected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test_usb.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        let context = EnvironmentContext::no_context(
+            ffx_config::environment::ExecutableKind::Test,
+            ffx_config::ConfigMap::new(),
+            None,
+            false,
+        )
+        .unwrap();
+
+        // If the socket is already open, try_daemon_autostart should return immediately without error
+        try_daemon_autostart(&socket_path, &context);
     }
 }

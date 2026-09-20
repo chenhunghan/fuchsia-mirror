@@ -7,10 +7,9 @@ import os
 import pty
 import subprocess
 import sys
-from typing import List
 
 
-def main(command: List[str]) -> int:
+def main(command: list[str]) -> int:
     # Workaround for https://github.com/bazel-contrib/rules_python/issues/3518
     # Clean up environment to avoid RUNFILES_DIR/RUNFILES_MANIFEST_FILE inheritance
     # which can confuse child Python processes.

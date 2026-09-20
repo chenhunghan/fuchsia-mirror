@@ -22,6 +22,12 @@
             to: "#bt-snoop",
         },
         {
+            protocol: "fuchsia.firmware.crash.Reporter",
+            from: "parent",
+            to: "#bt-snoop",
+            availability: "same_as_target",
+        },
+        {
             protocol: "fuchsia.bluetooth.snoop.Snoop",
             from: "#bt-snoop",
             to: "self/toolbox",

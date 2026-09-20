@@ -18,8 +18,6 @@ zx_library("pci") {
     "root_host.cc",
   ]
   deps = [
-    "//src/lib/ddk",
-    "//src/lib/ddktl",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/hwreg",
     "//zircon/system/ulib/zx",

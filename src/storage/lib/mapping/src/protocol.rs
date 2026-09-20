@@ -29,12 +29,18 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub const MAPPINGS_COMMAND: u32 = 1;
 pub const CLOSE_BLOB_COMMAND: u32 = 2;
 
+/// Flag indicating that the mapping payload contains an encryption key.
+pub const MAPPINGS_FLAG_ENCRYPTED: u32 = 1 << 16;
+
+/// Size of the encryption key in bytes (256 bits).
+pub const ENCRYPTION_KEY_SIZE: usize = 32;
+
 // The `vmo-fifo` divides the VMO into two regions: a fixed-size command slots region, and a
 // dynamically allocated payload region where the actual extents are written.
 //
 // The following is the layout for a 512KB VMO with 256 capacity:
-// [ Headers (64B) | Command Slots: 256 * 32B = 8,192B | .. Padding to 16KB .. | Payload (496KB) ]
-// Note: Each command slot takes 32 bytes for `RawMappingCommand`.
+// [ Headers (64B) | Command Slots: 256 * 40B = 10,240B | .. Padding to 16KB .. | Payload (496KB) ]
+// Note: Each command slot takes 40 bytes for `RawMappingCommand`.
 //
 // 496KB / 8-bytes per extent = 63,488 maximum extents bounded by the payload block.
 pub const MAPPING_VMO_SIZE: u64 = 512 * 1024;
@@ -54,31 +60,46 @@ pub struct RawMappingCommand {
     pub stored_size: u64,
     pub device_offset: u64,
     pub metadata_count: u32,
-    pub blob_count: u32,
+    pub extent_count: u32,
+}
+
+impl RawMappingCommand {
+    /// Returns the command opcode without flags.
+    pub fn opcode(&self) -> u32 {
+        self.opcode & 0xffff
+    }
+
+    /// Returns whether the command has the encrypted flag set.
+    pub fn is_encrypted(&self) -> bool {
+        (self.opcode & MAPPINGS_FLAG_ENCRYPTED) != 0
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MappingCommand {
-    /// Informs the driver of the extent mappings for a blob.
-    /// The VMO payload contains `blob_count` data extent mappings followed by `metadata_count`
-    /// Merkle extent mappings.
+    /// Informs the driver of the extent mappings for a file.
+    /// The VMO payload contains `extent_count` data extent mappings followed by `metadata_count`
+    /// Merkle extent mappings, and optionally a 32-byte encryption key if `encrypted` is true.
     Mappings {
-        /// Session-unique identifier for the blob.
+        /// Session-unique identifier for the file.
         key: u64,
         /// Byte offset within the shared VMO where the extent descriptors begin.
         offset: u32,
-        /// Total stored size of the blob's data (compressed size if compressed, or byte size).
+        /// Total stored size of the file's data (compressed size if compressed, or byte size).
         stored_size: u64,
         /// Base physical device byte offset on the underlying storage device.
         device_offset: u64,
         /// Number of Merkle tree metadata extent mappings.
         metadata_count: u32,
-        /// Number of Blob data extent mappings.
-        blob_count: u32,
+        /// Number of file data extent mappings.
+        extent_count: u32,
+        /// Whether the file is encrypted. If true, the payload contains a 32-byte key following
+        /// the extent descriptors.
+        encrypted: bool,
     },
-    /// Informs the driver that the blob session is closed and mappings can be discarded.
+    /// Informs the driver that the file session is closed and mappings can be discarded.
     CloseBlob {
-        /// Session-unique identifier for the blob.
+        /// Session-unique identifier for the file.
         key: u64,
     },
 }
@@ -92,15 +113,16 @@ impl From<MappingCommand> for RawMappingCommand {
                 stored_size,
                 device_offset,
                 metadata_count,
-                blob_count,
+                extent_count,
+                encrypted,
             } => RawMappingCommand {
-                opcode: MAPPINGS_COMMAND,
+                opcode: MAPPINGS_COMMAND | if encrypted { MAPPINGS_FLAG_ENCRYPTED } else { 0 },
                 offset,
                 key,
                 stored_size,
                 device_offset,
                 metadata_count,
-                blob_count,
+                extent_count,
             },
             MappingCommand::CloseBlob { key } => RawMappingCommand {
                 opcode: CLOSE_BLOB_COMMAND,
@@ -109,7 +131,7 @@ impl From<MappingCommand> for RawMappingCommand {
                 stored_size: 0,
                 device_offset: 0,
                 metadata_count: 0,
-                blob_count: 0,
+                extent_count: 0,
             },
         }
     }
@@ -119,16 +141,28 @@ impl TryFrom<RawMappingCommand> for MappingCommand {
     type Error = Error;
 
     fn try_from(cmd: RawMappingCommand) -> Result<Self, Self::Error> {
-        match cmd.opcode {
+        let opcode = cmd.opcode & 0xffff;
+        let encrypted = (cmd.opcode & MAPPINGS_FLAG_ENCRYPTED) != 0;
+        let unknown_flags = cmd.opcode & !(0xffff | MAPPINGS_FLAG_ENCRYPTED);
+        if unknown_flags != 0 {
+            return Err(anyhow!("Unknown flags in opcode: {:#x}", cmd.opcode));
+        }
+        match opcode {
             MAPPINGS_COMMAND => Ok(MappingCommand::Mappings {
                 key: cmd.key,
                 offset: cmd.offset,
                 stored_size: cmd.stored_size,
                 device_offset: cmd.device_offset,
                 metadata_count: cmd.metadata_count,
-                blob_count: cmd.blob_count,
+                extent_count: cmd.extent_count,
+                encrypted,
             }),
-            CLOSE_BLOB_COMMAND => Ok(MappingCommand::CloseBlob { key: cmd.key }),
+            CLOSE_BLOB_COMMAND => {
+                if encrypted {
+                    return Err(anyhow!("Encrypted flag not allowed for CloseBlob"));
+                }
+                Ok(MappingCommand::CloseBlob { key: cmd.key })
+            }
             _ => Err(anyhow!("Unknown opcode: {}", cmd.opcode)),
         }
     }
@@ -239,5 +273,95 @@ impl TryFrom<RawDeliveryCommand> for DeliveryCommand {
             }),
             _ => Err(anyhow!("Unknown opcode: {}", cmd.opcode)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mappings_command_round_trip() {
+        let cmd = MappingCommand::Mappings {
+            key: 123,
+            offset: 456,
+            stored_size: 789,
+            device_offset: 1011,
+            metadata_count: 2,
+            extent_count: 3,
+            encrypted: false,
+        };
+        let raw = RawMappingCommand::from(cmd);
+        assert_eq!(raw.opcode(), MAPPINGS_COMMAND);
+        assert!(!raw.is_encrypted());
+        assert_eq!(MappingCommand::try_from(raw).unwrap(), cmd);
+    }
+
+    #[test]
+    fn test_mappings_command_encrypted_round_trip() {
+        let cmd = MappingCommand::Mappings {
+            key: 123,
+            offset: 456,
+            stored_size: 789,
+            device_offset: 1011,
+            metadata_count: 2,
+            extent_count: 3,
+            encrypted: true,
+        };
+        let raw = RawMappingCommand::from(cmd);
+        assert_eq!(raw.opcode(), MAPPINGS_COMMAND);
+        assert!(raw.is_encrypted());
+        assert_eq!(MappingCommand::try_from(raw).unwrap(), cmd);
+    }
+
+    #[test]
+    fn test_close_blob_command_round_trip() {
+        let cmd = MappingCommand::CloseBlob { key: 42 };
+        let raw = RawMappingCommand::from(cmd);
+        assert_eq!(raw.opcode(), CLOSE_BLOB_COMMAND);
+        assert!(!raw.is_encrypted());
+        assert_eq!(MappingCommand::try_from(raw).unwrap(), cmd);
+    }
+
+    #[test]
+    fn test_close_blob_encrypted_flag_rejected() {
+        let raw = RawMappingCommand {
+            opcode: CLOSE_BLOB_COMMAND | MAPPINGS_FLAG_ENCRYPTED,
+            offset: 0,
+            key: 42,
+            stored_size: 0,
+            device_offset: 0,
+            metadata_count: 0,
+            extent_count: 0,
+        };
+        assert!(MappingCommand::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn test_unknown_opcode_rejected() {
+        let raw = RawMappingCommand {
+            opcode: 99,
+            offset: 0,
+            key: 42,
+            stored_size: 0,
+            device_offset: 0,
+            metadata_count: 0,
+            extent_count: 0,
+        };
+        assert!(MappingCommand::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn test_unknown_flags_rejected() {
+        let raw = RawMappingCommand {
+            opcode: MAPPINGS_COMMAND | (1 << 31),
+            offset: 0,
+            key: 42,
+            stored_size: 0,
+            device_offset: 0,
+            metadata_count: 0,
+            extent_count: 0,
+        };
+        assert!(MappingCommand::try_from(raw).is_err());
     }
 }

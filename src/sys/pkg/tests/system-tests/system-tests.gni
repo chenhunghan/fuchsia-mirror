@@ -400,10 +400,12 @@ template("system_test_upgrade_suite") {
       args = _args
       forward_variables_from(invoker, [ "timeout" ])
 
-      environments = []
-      foreach(env, invoker.environments) {
-        env.service_account = _service_account
-        environments += [ env ]
+      if (defined(invoker.environments)) {
+        environments = []
+        foreach(env, invoker.environments) {
+          env.service_account = _service_account
+          environments += [ env ]
+        }
       }
     }
   }
@@ -565,10 +567,12 @@ template("system_test_reboot_suite") {
       args = _args
       forward_variables_from(invoker, [ "timeout" ])
 
-      environments = []
-      foreach(env, invoker.environments) {
-        env.service_account = _service_account
-        environments += [ env ]
+      if (defined(invoker.environments)) {
+        environments = []
+        foreach(env, invoker.environments) {
+          env.service_account = _service_account
+          environments += [ env ]
+        }
       }
     }
   }
@@ -716,10 +720,12 @@ template("system_test_recovery_suite") {
       args = _args
       forward_variables_from(invoker, [ "timeout" ])
 
-      environments = []
-      foreach(env, invoker.environments) {
-        env.service_account = _service_account
-        environments += [ env ]
+      if (defined(invoker.environments)) {
+        environments = []
+        foreach(env, invoker.environments) {
+          env.service_account = _service_account
+          environments += [ env ]
+        }
       }
     }
   }

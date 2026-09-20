@@ -21,7 +21,6 @@ use starnix_types::time::SCHEDULER_CLOCK_HZ;
 use starnix_uapi::AT_PLATFORM;
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::errors::Errno;
-use starnix_uapi::file_mode::Access;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::user_address::{ArchSpecific, UserAddress};
 use starnix_uapi::{
@@ -205,20 +204,6 @@ fn elf_load_error_to_errno(err: elf_load::ElfLoadError) -> Errno {
     errno!(EINVAL)
 }
 
-fn access_from_vmar_flags(vmar_flags: zx::VmarFlags) -> Access {
-    let mut access = Access::empty();
-    if vmar_flags.contains(zx::VmarFlags::PERM_READ) {
-        access |= Access::READ;
-    }
-    if vmar_flags.contains(zx::VmarFlags::PERM_WRITE) {
-        access |= Access::WRITE;
-    }
-    if vmar_flags.contains(zx::VmarFlags::PERM_EXECUTE) {
-        access |= Access::EXEC;
-    }
-    access
-}
-
 struct Mapper {
     file: Arc<FileMapping>,
     mm: Arc<MemoryManager>,
@@ -251,7 +236,6 @@ impl elf_load::Mapper for Mapper {
                 vmo_offset,
                 length,
                 ProtectionFlags::from_vmar_flags(vmar_flags),
-                access_from_vmar_flags(vmar_flags),
                 MappingOptions::ELF_BINARY,
                 MappingName::File(self.file.clone()),
             )
@@ -323,34 +307,75 @@ fn load_elf(
     Ok(LoadedElf { arch_width, headers, file_base, vaddr_bias, length })
 }
 
-/// Holds a resolved ELF VMO and associated parameters necessary for an execve call.
-pub struct ResolvedElf {
-    /// A file handle to the resolved ELF executable.
+/// Program state and parameters staged during an `execve` call.
+pub struct ResolvedProgram {
+    /// Current executable file handle, updated by [`resolve_executable()`] if `#!` scripts are followed.
     pub file: Arc<FileMapping>,
-    /// A VMO to the resolved ELF executable.
-    pub memory: Arc<MemoryObject>,
-    /// Parsed ELF headers for the resolved executable.
-    pub headers: elf_parse::Elf64Headers,
-    /// An ELF interpreter, if specified in the ELF executable header.
-    pub interp: Option<ResolvedInterpElf>,
-    /// Arguments to be passed to the new process.
-    pub argv: Vec<CString>,
-    /// The environment to initialize for the new process.
-    pub environ: Vec<CString>,
-    /// Used to stage Credentials for the new process.
+    /// Path string passed to `execve()`.
+    path: CString,
+    /// Arguments for the new process (rewritten if `#!` scripts are resolved).
+    argv: Vec<CString>,
+    /// Environment variables for the new process.
+    environ: Vec<CString>,
+    /// Staged [`Credentials`] for the new process.
     pub creds: Credentials,
-    /// Set to true if credentials have changed, such that the task environment must be sanitized.
+    /// Whether secure execution mode (`AT_SECURE`) is required for the new process.
     pub secure_exec: bool,
-    /// Enum indicating the architecture width (32 or 64 bits).
-    pub arch_width: ArchWidth,
+    /// Parsed ELF binary details, populated by [`resolve_executable()`].
+    elf: Option<ResolvedElf>,
 }
 
-/// Holds a resolved ELF interpreter VMO.
-pub struct ResolvedInterpElf {
-    /// A file handle to the resolved ELF interpreter.
-    file: Arc<FileMapping>,
-    /// A VMO to the resolved ELF interpreter.
+impl ResolvedProgram {
+    /// Creates a new [`ResolvedProgram`] initialized with the caller's credentials.
+    pub fn new(
+        current_task: &CurrentTask,
+        file: Arc<FileMapping>,
+        path: CString,
+        argv: Vec<CString>,
+        environ: Vec<CString>,
+    ) -> Self {
+        Self {
+            file,
+            path,
+            argv,
+            environ,
+            creds: Credentials::clone(&current_task.current_creds()),
+            secure_exec: false,
+            elf: None,
+        }
+    }
+
+    /// Returns the path string passed to `execve()`.
+    pub fn path(&self) -> &CStr {
+        &self.path
+    }
+
+    /// Returns the [`ArchWidth`] of the resolved ELF executable, if resolved.
+    pub fn arch_width(&self) -> Option<ArchWidth> {
+        self.elf.as_ref().map(|elf| elf.arch_width)
+    }
+}
+
+/// Parsed ELF binary details for the main executable and optional dynamic linker.
+struct ResolvedElf {
+    /// Backing [`MemoryObject`] for the executable.
     memory: Arc<MemoryObject>,
+    /// Parsed [`elf_parse::Elf64Headers`] for the executable.
+    headers: elf_parse::Elf64Headers,
+    /// [`ArchWidth`] (32-bit or 64-bit) of the executable.
+    arch_width: ArchWidth,
+    /// Resolved dynamic linker (`PT_INTERP`), if specified in `headers`.
+    interp: Option<ResolvedElfInterp>,
+}
+
+/// Resolved ELF dynamic linker (`PT_INTERP`).
+struct ResolvedElfInterp {
+    /// Opened [`FileMapping`] for the interpreter.
+    file: Arc<FileMapping>,
+    /// Backing [`MemoryObject`] for the interpreter.
+    memory: Arc<MemoryObject>,
+    /// Parsed [`elf_parse::Elf64Headers`] for the interpreter.
+    headers: elf_parse::Elf64Headers,
 }
 
 // The magic bytes of a script file.
@@ -358,32 +383,36 @@ const HASH_BANG_SIZE: usize = 2;
 const HASH_BANG: &[u8; HASH_BANG_SIZE] = b"#!";
 const MAX_RECURSION_DEPTH: usize = 5;
 
-/// Resolves a file into a validated executable ELF, following script interpreters to a fixed
-/// recursion depth. `argv` may change due to script interpreter logic.
+/// Resolves [`ResolvedProgram::file`] into a validated ELF executable, following `#!` script
+/// interpreters up to [`MAX_RECURSION_DEPTH`].
+///
+/// Updates [`ResolvedProgram::file`] and `resolved_program.argv` if scripts are followed, and
+/// populates `resolved_program.elf`.
 pub fn resolve_executable(
     current_task: &CurrentTask,
-    file: Arc<FileMapping>,
-    path: CString,
-    argv: Vec<CString>,
-    environ: Vec<CString>,
-) -> Result<ResolvedElf, Errno> {
-    resolve_executable_impl(current_task, file, path, argv, environ, 0)
+    resolved_program: &mut ResolvedProgram,
+) -> Result<(), Errno> {
+    let script_path = resolved_program.path.clone();
+    resolve_executable_impl(
+        current_task,
+        resolved_program,
+        script_path,
+        /* recursion_depth = */ 0,
+    )
 }
 
-/// Resolves a file into a validated executable ELF, following script interpreters to a fixed
-/// recursion depth.
+/// Recursive helper for [`resolve_executable()`].
 fn resolve_executable_impl(
     current_task: &CurrentTask,
-    file: Arc<FileMapping>,
-    path: CString,
-    argv: Vec<CString>,
-    environ: Vec<CString>,
+    resolved_program: &mut ResolvedProgram,
+    script_path: CString,
     recursion_depth: usize,
-) -> Result<ResolvedElf, Errno> {
+) -> Result<(), Errno> {
     if recursion_depth > MAX_RECURSION_DEPTH {
         return error!(ELOOP);
     }
-    let memory = file
+    let memory = resolved_program
+        .file
         .file()
         .get_memory(current_task, None, ProtectionFlags::READ | ProtectionFlags::EXEC)
         .map_err(|e| if e.code.error_code() == ENODEV { errno!(ENOEXEC) } else { e })?;
@@ -396,9 +425,10 @@ fn resolve_executable_impl(
         Err(_) => return error!(EINVAL),
     }?;
     if &header == HASH_BANG {
-        resolve_script(current_task, memory, path, argv, environ, recursion_depth)
+        resolve_script(current_task, memory, resolved_program, script_path, recursion_depth)
     } else {
-        resolve_elf(current_task, file, memory, argv, environ)
+        resolved_program.elf = Some(resolve_elf(memory)?);
+        Ok(())
     }
 }
 
@@ -406,11 +436,10 @@ fn resolve_executable_impl(
 fn resolve_script(
     current_task: &CurrentTask,
     memory: Arc<MemoryObject>,
-    path: CString,
-    argv: Vec<CString>,
-    environ: Vec<CString>,
+    resolved_program: &mut ResolvedProgram,
+    script_path: CString,
     recursion_depth: usize,
-) -> Result<ResolvedElf, Errno> {
+) -> Result<(), Errno> {
     // All VMOs have sizes in multiple of the system page size, so as long as we only read a page or
     // less, we should never read past the end of the VMO.
     // Since Linux 5.1, the max length of the interpreter following the #! is 255.
@@ -427,21 +456,19 @@ fn resolve_script(
         OpenFlags::empty(),
     )?;
 
+    let next_script_path = args[0].clone();
+
     // Append the original script executable path as an argument.
-    args.push(path);
+    args.push(script_path);
 
     // Append the original arguments (minus argv[0]).
-    args.extend(argv.into_iter().skip(1));
+    args.extend(resolved_program.argv.drain(..).skip(1));
+
+    resolved_program.file = interpreter;
+    resolved_program.argv = args;
 
     // Recurse and resolve the interpreter executable
-    resolve_executable_impl(
-        current_task,
-        interpreter,
-        args[0].clone(),
-        args,
-        environ,
-        recursion_depth + 1,
-    )
+    resolve_executable_impl(current_task, resolved_program, next_script_path, recursion_depth + 1)
 }
 
 /// Parses a "#!" byte string and extracts CString arguments. The byte string must contain an
@@ -483,47 +510,40 @@ fn parse_interpreter_line(line: &[u8]) -> Result<Vec<CString>, Errno> {
     })
 }
 
-/// Resolves a file handle into a validated executable ELF.
-fn resolve_elf(
-    current_task: &CurrentTask,
-    file: Arc<FileMapping>,
-    memory: Arc<MemoryObject>,
-    argv: Vec<CString>,
-    environ: Vec<CString>,
-) -> Result<ResolvedElf, Errno> {
+/// Resolves a [`MemoryObject`] into a validated [`ResolvedElf`].
+fn resolve_elf(memory: Arc<MemoryObject>) -> Result<ResolvedElf, Errno> {
     let vmo = memory.as_vmo().ok_or_else(|| errno!(EINVAL))?;
     let headers = parse_elf_headers(vmo)?;
     let arch_width = get_arch_width(&headers);
-    let creds = Credentials::clone(&current_task.current_creds());
-    let secure_exec = false;
-    Ok(ResolvedElf {
-        file,
-        memory,
-        headers,
-        interp: None,
-        argv,
-        environ,
-        creds,
-        secure_exec,
-        arch_width,
-    })
+    Ok(ResolvedElf { memory, headers, arch_width, interp: None })
 }
 
-/// Resolves and loads the ELF dynamic linker (PT_INTERP) for a `ResolvedElf`, if present.
+/// Opens and validates the ELF dynamic linker (`PT_INTERP`) for a [`ResolvedProgram`], if present.
 pub fn resolve_elf_interpreter(
     current_task: &CurrentTask,
-    resolved_elf: &mut ResolvedElf,
+    resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
-    if let Some(interp_hdr) = resolved_elf
+    let elf = resolved_program.elf.as_mut().ok_or_else(|| errno!(EINVAL))?;
+    if let Some(interp_hdr) = elf
         .headers
         .program_header_with_type(elf_parse::SegmentType::Interp)
         .map_err(|_| errno!(EINVAL))?
     {
-        let interp = resolved_elf
+        // From <https://man7.org/linux/man-pages/man5/elf.5.html>:
+        //
+        //   PT_INTERP
+        //          The array element specifies the location and size of a
+        //          null-terminated path name to invoke as an interpreter.
+        //
+        // Reject segments smaller than 2 bytes (1 character plus NUL) or exceeding `PATH_MAX`.
+        if interp_hdr.filesz > starnix_uapi::PATH_MAX as u64 || interp_hdr.filesz < 2 {
+            return error!(ENOEXEC);
+        }
+        let interp = elf
             .memory
             .read_to_vec(interp_hdr.offset as u64, interp_hdr.filesz)
             .map_err(|status| from_status_like_fdio!(status))?;
-        let interp = CStr::from_bytes_until_nul(&interp).map_err(|_| errno!(EINVAL))?;
+        let interp = CStr::from_bytes_until_nul(&interp).map_err(|_| errno!(ENOEXEC))?;
 
         let interp_file = current_task.open_file_for_exec(
             FdNumber::AT_FDCWD,
@@ -535,25 +555,37 @@ pub fn resolve_elf_interpreter(
             .get_memory(current_task, None, ProtectionFlags::READ | ProtectionFlags::EXEC)
             .map_err(|e| if e.code.error_code() == ENODEV { errno!(ENOEXEC) } else { e })?;
 
-        resolved_elf.interp = Some(ResolvedInterpElf { file: interp_file, memory: interp_memory });
+        let vmo = interp_memory.as_vmo().ok_or_else(|| errno!(EINVAL))?;
+        let interp_headers = parse_elf_headers(vmo)?;
+        let interp_arch_width = get_arch_width(&interp_headers);
+        if elf.arch_width != interp_arch_width {
+            log_warn!("interpreter elf and main elf are different architectures!");
+            return error!(ENOEXEC);
+        }
+
+        elf.interp = Some(ResolvedElfInterp {
+            file: interp_file,
+            memory: interp_memory,
+            headers: interp_headers,
+        });
     }
 
     Ok(())
 }
 
-/// Loads a resolved ELF into memory, along with an interpreter if one is defined, and initializes
-/// the stack.
+/// Maps a [`ResolvedProgram`] and its optional `PT_INTERP` dynamic linker into memory, and
+/// initializes the stack.
 pub fn load_executable(
     current_task: &CurrentTask,
-    resolved_elf: ResolvedElf,
-    original_path: &CStr,
+    resolved_program: ResolvedProgram,
 ) -> Result<ThreadStartInfo, Errno> {
+    let elf = resolved_program.elf.ok_or_else(|| errno!(EINVAL))?;
     let mm = current_task.mm()?;
     let main_elf = load_elf(
         current_task,
-        resolved_elf.file,
-        resolved_elf.memory,
-        resolved_elf.headers,
+        resolved_program.file,
+        elf.memory,
+        elf.headers,
         &mm,
         LoadElfUsage::MainElf,
     )?;
@@ -563,16 +595,14 @@ pub fn load_executable(
             .checked_add(main_elf.length)
             .ok_or_else(|| errno!(EINVAL))?,
     )?;
-    let interp_elf = resolved_elf
+    let interp_elf = elf
         .interp
         .map(|interp| {
-            let vmo = interp.memory.as_vmo().ok_or_else(|| errno!(EINVAL))?;
-            let headers = parse_elf_headers(vmo)?;
             load_elf(
                 current_task,
                 interp.file,
                 interp.memory,
-                headers,
+                interp.headers,
                 &mm,
                 LoadElfUsage::Interpreter,
             )
@@ -580,12 +610,6 @@ pub fn load_executable(
         .transpose()?;
 
     let entry_elf = interp_elf.as_ref().unwrap_or(&main_elf);
-    // Do not allow mismatch of arch32 interpreter with a non-arch32 main elf,
-    // or vice versa.
-    if main_elf.arch_width != entry_elf.arch_width {
-        log_warn!("interpreter elf and main elf are different architectures!");
-        return error!(ENOEXEC);
-    }
     let entry_addr = entry_elf.headers.file_header().entry.wrapping_add(entry_elf.vaddr_bias);
     let main_elf_entry = main_elf.headers.file_header().entry.wrapping_add(main_elf.vaddr_bias);
     let main_phdr = main_elf.file_base.wrapping_add(main_elf.headers.file_header().phoff);
@@ -601,7 +625,6 @@ pub fn load_executable(
 
     let vdso_size = vdso_memory.get_size();
     const VVAR_PROT_FLAGS: ProtectionFlags = ProtectionFlags::READ;
-    const VVAR_MAX_ACCESS: Access = Access::READ;
 
     let utc_clock_handle = crate::time::utc::duplicate_real_utc_clock_handle()
         .expect("clock should always be readable");
@@ -617,7 +640,6 @@ pub fn load_executable(
         0,
         (time_values_size as usize) + (utc_clock_size as usize) + (vdso_size as usize),
         VVAR_PROT_FLAGS,
-        VVAR_MAX_ACCESS,
         MappingOptions::empty(),
         MappingName::Vvar,
     )?;
@@ -631,7 +653,6 @@ pub fn load_executable(
         /*memory_offset=*/ 0u64,
         utc_clock_size as usize,
         VVAR_PROT_FLAGS,
-        VVAR_MAX_ACCESS,
         MappingOptions::empty(),
         MappingName::Vvar,
     )?;
@@ -648,7 +669,6 @@ pub fn load_executable(
     );
 
     const VDSO_PROT_FLAGS: ProtectionFlags = ProtectionFlags::READ.union(ProtectionFlags::EXEC);
-    const VDSO_MAX_ACCESS: Access = Access::READ.union(Access::EXEC);
 
     // Overwrite the third part of the vvar mapping to contain the vDSO clone.
     let vdso_base_address = mm.map_memory(
@@ -659,14 +679,13 @@ pub fn load_executable(
         0,
         vdso_size as usize,
         VDSO_PROT_FLAGS,
-        VDSO_MAX_ACCESS,
         MappingOptions::DONT_SPLIT,
         MappingName::Vdso,
     )?;
 
     let auxv = {
         let creds = current_task.current_creds();
-        let secure = if resolved_elf.secure_exec { 1 } else { 0 };
+        let secure = if resolved_program.secure_exec { 1 } else { 0 };
 
         let hwcap = if main_elf.arch_width.is_arch32() {
             #[cfg(target_arch = "aarch64")]
@@ -703,9 +722,9 @@ pub fn load_executable(
     // this is based on adding 0x1000 each time a segfault appears.
     let stack_size: usize = round_up_to_system_page_size(
         get_initial_stack_size(
-            original_path,
-            &resolved_elf.argv,
-            &resolved_elf.environ,
+            &resolved_program.path,
+            &resolved_program.argv,
+            &resolved_program.environ,
             &auxv,
             main_elf.arch_width,
         ) + 0xf0000,
@@ -719,9 +738,9 @@ pub fn load_executable(
 
     let stack = populate_initial_stack(
         current_task.deref(),
-        original_path,
-        &resolved_elf.argv,
-        &resolved_elf.environ,
+        &resolved_program.path,
+        &resolved_program.argv,
+        &resolved_program.environ,
         auxv,
         stack,
         main_elf.arch_width,
@@ -742,7 +761,7 @@ pub fn load_executable(
     let ptr_size: usize =
         if main_elf.arch_width.is_arch32() { size_of::<u32>() } else { size_of::<*const u8>() };
     let envp = (stack.stack_pointer
-        + ((resolved_elf.argv.len() + 1 /* argc */ + 1/* NULL */) * ptr_size))?;
+        + ((resolved_program.argv.len() + 1 /* argc */ + 1/* NULL */) * ptr_size))?;
     Ok(ThreadStartInfo {
         entry,
         stack: stack.stack_pointer,

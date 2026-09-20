@@ -1923,16 +1923,8 @@ impl BinderDriver {
 
         // Map the VMO into the binder process' address space.
         let mm = current_task.mm()?;
-        let user_address = mm.map_memory(
-            addr,
-            user_memory,
-            0,
-            length,
-            prot_flags,
-            prot_flags.to_access(),
-            mapping_options,
-            mapping_name,
-        )?;
+        let user_address =
+            mm.map_memory(addr, user_memory, 0, length, prot_flags, mapping_options, mapping_name)?;
 
         // Map the VMO into the driver's address space.
         match SharedMemory::map(&memory, user_address, length) {

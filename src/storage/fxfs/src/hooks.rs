@@ -33,6 +33,7 @@ struct HooksTable {
     pre_commit: Option<Arc<PreCommitHookFn<'static>>>,
     before_commit: Option<Arc<SyncHookFn<'static>>>,
     unlock_resources_acquired: Option<Arc<SyncHookFn<'static>>>,
+    waiting_for_journal_space: Option<Arc<SyncHookFn<'static>>>,
 }
 
 struct SendOnDrop(mpsc::Sender<()>);
@@ -116,6 +117,19 @@ impl<'a> Hooks<'a> {
         }
     }
 
+    /// Sets the hook executed when a transaction or flush operation blocks waiting for journal
+    /// space.
+    pub fn set_waiting_for_journal_space(&mut self, hook: impl Fn() + Send + Sync + 'a) {
+        let boxed: Box<SyncHookFn<'a>> = Box::new(hook);
+        // SAFETY: `'a` is transmuted to `'static`. This is safe because `Hooks<'a>` owns the
+        // `Arc<HooksInner>` and its `detach` method (or `drop`) blocks until all `Arc<HooksInner>`
+        // references drop.
+        let static_hook: Box<SyncHookFn<'static>> = unsafe { std::mem::transmute(boxed) };
+        if let Some(inner) = &self.inner {
+            inner.table.lock().waiting_for_journal_space = Some(Arc::from(static_hook));
+        }
+    }
+
     fn detach(&mut self) {
         if let Some(inner) = self.inner.take() {
             drop(inner);
@@ -170,6 +184,17 @@ impl HooksHandle {
             }
         }
     }
+
+    /// Invokes the registered `waiting_for_journal_space` hook, if any.
+    pub fn on_waiting_for_journal_space(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            // The strong is held until after the hook is called.
+            let hook = inner.table.lock().waiting_for_journal_space.clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -219,6 +244,20 @@ mod tests {
         });
 
         handle.on_unlock_resources_acquired();
+        assert!(called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_hooks_waiting_for_journal_space() {
+        let called = AtomicBool::new(false);
+        let (mut hooks, handle) = Hooks::new();
+
+        let called_ref = &called;
+        hooks.set_waiting_for_journal_space(move || {
+            called_ref.store(true, Ordering::Relaxed);
+        });
+
+        handle.on_waiting_for_journal_space();
         assert!(called.load(Ordering::Relaxed));
     }
 }

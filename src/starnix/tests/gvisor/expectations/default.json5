@@ -10,7 +10,7 @@
             ],
         },
         {
-            include: "//third_party/gvisor_syscall_tests/expects/netstack3/all.json5",
+            include: "//third_party/gvisor_syscall_tests/expects/all.json5",
         },
         {
             type: "expect_pass",
@@ -155,6 +155,10 @@
                 "AffinityTest.NewThread",
                 "AffinityTest.Sanity",
 
+                // arch_prctl_test
+                // TODO(https://fxbug.dev/322874054): Implement ARCH_GET_FS.
+                "ArchPrctlTest.GetSetFS",
+
                 // cgroup_test
                 "CPUAcctCgroup.CPUAcctStat",
                 "CPUAcctCgroup.CPUAcctUsage",
@@ -291,9 +295,6 @@
                 "Cases/ElfInterpreterStaticTest.Test/0",
                 "Cases/ElfInterpreterStaticTest.Test/1",
                 "Cases/ElfInterpreterStaticTest.Test/2",
-                "Cases/ElfInterpreterBadPathTest.Test/1",
-                "Cases/ElfInterpreterBadPathTest.Test/2",
-                "Cases/ElfInterpreterBadPathTest.Test/3",
 
                 // TODO(https://fxbug.dev/528339136): Starnix does not support ARM64 memory tagging.
                 "TaggedAddressesTest.MemoryFault",
@@ -332,6 +333,10 @@
                 "CloneTest.CloneParentOrThreadWithExitSignalFails",
                 "CloneTest.CloneParentInitProcessFails",
 
+                // fpsig_mut_test
+                // TODO(https://fxbug.dev/302340440): Save XMM registers in signal handlers on x64.
+                "FPSigTest.StateInFrame",
+
                 // futex_test - https://fxbug.dev/297464655 Needs atomic ops on restricted memory.
                 "PrivateFutexTest.WakeOp0Set",
                 "PrivateFutexTest.WakeOp0Add",
@@ -354,7 +359,6 @@
                 "GetrusageTest.IgnoreZombie",
 
                 // inotify_test
-                "Inotify.UnmatchedEventsAreDiscarded",
                 "Inotify.ExcludeUnlinkDirectory",
                 "Inotify.ExcludeUnlink",
                 "Inotify.IncludeUnlinkedFile",
@@ -574,25 +578,8 @@
                 "PingSockets/Fixture.Bind/ICMPv6_socket_V6MulticastLinkLocalAllRouters",
 
                 // pivot_root_test
-                "PivotRootTest.WithoutCapability",
-                "PivotRootTest.OnSharedPutOldMountpoint",
-                "PivotRootTest.NotDir",
-                "PivotRootTest.NewRootNotAMountpoint",
-                "PivotRootTest.OnSharedNewRoot",
-                "PivotRootTest.Success",
-                "PivotRootTest.OnSharedNewRootParent",
-                "PivotRootTest.PutOldNotUnderNewRoot",
-                "PivotRootTest.CurrentRootNotAMountPoint",
-                "PivotRootTest.NotExist",
-                "PivotRootTest.NewRootOnRootMount",
-                "PivotRootTest.DotDot",
-                "PivotRootTest.CreatesNewRoot",
-                "PivotRootTest.OnRootFS",
-                "PivotRootTest.ChangesCwdForAllProcesses",
-                "PivotRootTest.MovesOldRoot",
                 "PivotRootTest.LockedNewRootFails",
                 "PivotRootTest.OldRootUnlocked",
-                "PivotRootTest.UnreachableNewRootFails",
 
                 // prctl_setuid_test
                 "PrctlKeepCapsSetuidTest.NoKeepCapsAfterNewUserNamespace",
@@ -709,11 +696,47 @@
                 // rlimits_test
                 "RlimitTest.RlimitNProc",
 
+                // shm_test
+                // TODO(https://fxbug.dev/322874143): Implement SysV shared memory.
+                "ShmDeathTest.ReadonlySegment",
+                "ShmDeathTest.SegmentNotAccessibleAfterDetach",
+                "ShmTest.AllowsAttachToRemovedSegmentWithRefs",
+                "ShmTest.AttachDetach",
+                "ShmTest.DetachedSegmentsPersist",
+                "ShmTest.GracefullyFailOnZeroLenSegmentCreation",
+                "ShmTest.IpcInfo",
+                "ShmTest.IpcStat",
+                "ShmTest.LookupByKey",
+                "ShmTest.MprotectWriteOnReadonlySegmentFails",
+                "ShmTest.MprotectWriteOnWritableSegmentSucceeds",
+                "ShmTest.MultipleDetachFails",
+                "ShmTest.NoDestructionOfAttachedSegmentWithMultipleRmid",
+                "ShmTest.NonExistentSegmentsAreNotFound",
+                "ShmTest.PartialUnmap",
+                "ShmTest.RemovedSegmentsAreDestroyed",
+                "ShmTest.RemovedSegmentsAreMarkedDeleted",
+                "ShmTest.RemovedSegmentsAreNotDiscoverable",
+                "ShmTest.RequestingDuplicateCreationFails",
+                "ShmTest.RequestingSegmentLargerThanSHMMAXFails",
+                "ShmTest.RequestingSegmentSmallerThanSHMMINFails",
+                "ShmTest.RequestingUnalignedSizeSucceeds",
+                "ShmTest.SegmentsSizeFixedOnCreation",
+                "ShmTest.ShmCtlSet",
+                "ShmTest.ShmInfo",
+                "ShmTest.ShmStat",
+
                 // signalfd_test
                 "Signalfd.RtQueueDeliversPayload",
 
                 // sigaltstack_test - https://fxbug.dev/42159586
                 "SigaltstackTest.ResetByExecve",
+
+                // sigreturn_test
+                // TODO(https://fxbug.dev/563127415): Deliver SIGSEGV when handler RIP is non-canonical.
+                "SigIretTest.BadHandler",
+
+                // TODO(https://fxbug.dev/322874521): Requires setitimer(ITIMER_VIRTUAL).
+                "SigIretTest.CheckRcxR11",
 
                 // socket_abstract_test - https://fxbug.dev/297460498
                 "AbstractUnixSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
@@ -1195,7 +1218,7 @@
                 "TraceExec/PtraceExecveTest.Execve_GetRegs_PeekUser_SIGKILL_TraceClone_TraceExit/0",
                 "TraceExec/PtraceExecveTest.Execve_GetRegs_PeekUser_SIGKILL_TraceClone_TraceExit/1",
 
-                // TODO(b/3023404 Save XMM registers in signal handlers on x64.
+                // TODO(https://fxbug.dev/302340440): Save XMM registers in signal handlers on x64.
                 "FPSigTest.NestedSignals",
 
                 // Depend on missing timer feature.

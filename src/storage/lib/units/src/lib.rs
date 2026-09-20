@@ -17,16 +17,18 @@ mod page;
 #[cfg(target_os = "fuchsia")]
 pub use crate::page::*;
 
-/// Defines the block size mask for use with [`GenericBlockSize`]. Only block sizes which are a
-/// power of 2 are supported.
-///
-/// Implementations must return a mask corresponding to `(size - 1)`. Alignment operations are the
-/// most common use of the block size which makes the mask the most efficient thing for block sizes
-/// to store.
+/// Defines the block size specification for use with [`GenericBlockSize`]. Only block sizes which
+/// are a power of 2 are supported.
 // TODO(https://github.com/rust-lang/rust/issues/143874): Make this a const trait.
 pub trait BlockSizeSpec: Copy + Clone + Debug + Eq + PartialEq {
+    /// Returns the block size in bytes (e.g. `4096` for 4096-byte blocks).
+    fn size(self) -> u64;
+
     /// Returns the bitmask corresponding to `size - 1` (e.g. `4095` for 4096-byte blocks).
     fn mask(self) -> u64;
+
+    /// Returns the power-of-two bit shift (e.g. `12` for 4096-byte blocks).
+    fn shift(self) -> u32;
 }
 
 /// Represents a block size that is a power of 2, parameterized by a [`BlockSizeSpec`].
@@ -34,13 +36,18 @@ pub trait BlockSizeSpec: Copy + Clone + Debug + Eq + PartialEq {
 /// Provides zero-cost bitwise operations for alignments, conversions, and arithmetic with
 /// integers.
 #[derive(Copy, Clone, Debug, Eq)]
-pub struct GenericBlockSize<T: BlockSizeSpec>(pub(crate) T);
+pub struct GenericBlockSize<T: BlockSizeSpec>(T);
 
 impl<T: BlockSizeSpec> GenericBlockSize<T> {
+    #[inline(always)]
+    pub fn from_spec(spec: T) -> Self {
+        Self(spec)
+    }
+
     /// Returns the block size in bytes.
     #[inline(always)]
     pub fn get(self) -> u64 {
-        self.0.mask() + 1
+        self.0.size()
     }
 
     /// Returns the alignment mask (`size - 1`).
@@ -52,7 +59,7 @@ impl<T: BlockSizeSpec> GenericBlockSize<T> {
     /// Returns the power-of-two bit shift (e.g. `12` for 4096-byte blocks).
     #[inline(always)]
     pub fn shift(self) -> u32 {
-        self.mask().trailing_ones()
+        self.0.shift()
     }
 
     /// Returns `true` if `value` is aligned to this block size.
@@ -94,19 +101,88 @@ impl<T: BlockSizeSpec> GenericBlockSize<T> {
     }
 }
 
-/// A [`BlockSizeSpec`] whose block size is stored as an explicit value.
+/// A [`BlockSizeSpec`] that packs the alignment mask in the upper 32 bits and the power-of-two bit
+/// shift in the lower 32 bits: `(mask << 32) | shift`.
+///
+/// This representation is an extremely efficient way to store a runtime power-of-two block size on
+/// modern 64-bit architectures (AArch64 and x86_64).
+///
+/// ### Why this representation was chosen:
+///
+/// 1. **Zero Dynamic Bit-Scanning Latency:** Representations that only store the size or the mask
+///    must dynamically compute `shift` via trailing-zero counting (`trailing_zeros` or
+///    `trailing_ones`).
+///    - On **ARM64**, computing trailing ones requires a dependent instruction chain: `mvn` +
+///      `rbit` + `clz`. On in-order efficiency cores, this 3-instruction dependency stalls the
+///      pipeline, making operations like `shift`, `div`, and `mul` more than 2x slower.
+///
+/// 2. **The 6-Bit Shift Rule (Zero-Instruction Unpacking for Shifts):** Variable shift instructions
+///    on both AArch64 (`lsr xd, xn, xm` / `lsl xd, xn, xm`) and x86_64 (`shrx r64, r64, r64`) only
+///    inspect the lowest 6 bits of the register operand (`shift_amount mod 64`). Because `shift`
+///    (which is between 0 and 32) is placed in the low 32 bits (`[31..0]`), the lowest 6 bits of
+///    the raw `u64` are *literally* the shift amount. Consequently, compilers do not need to mask,
+///    clear, or move `shift` into a temporary register before shifting. The raw 64-bit
+///    `MaskShiftSpec` register can be passed directly as the shift operand, executing in a **single
+///    instruction and single cycle** (`lsr x_val, x_val, x_bs`).
+///
+/// 3. **ARM64 Fused Barrel Shifter (`adds ..., lsr #32`):** ARM64 ALU instructions feature a
+///    hardware barrel shifter that can shift an input operand at zero extra cycle cost. To add the
+///    mask to an offset (such as during `align_up` or `align_up_to_blocks`), the compiler emits:
+///    ```text
+///    adds x_res, x_val, x_bs, lsr #32
+///    ```
+///    This shifts out the low 32 bits and adds the high 32-bit mask in a **single cycle**. In
+///    `align_up_to_blocks`, the compiler follows this immediately with `lsr x_res, x_res, x_bs`,
+///    performing the combined align-and-divide in just **two back-to-back single-cycle
+///    instructions**.
+///
+/// 4. **Packed `u64` vs. Two Separate `u32` Fields:** Storing a single packed `u64` is superior to
+///    a struct with two `u32`s (`{ shift: u32, mask: u32 }`):
+///    - **Register Pressure & ABI:** Under Rust's internal calling convention, small multi-field
+///      structs are scalarized across multiple registers when passed by value. A packed `u64`
+///      always consumes a single argument register, avoiding register pressure and spills in
+///      functions with many arguments.
+///    - **Register Reuse on ARM64:** With a single `u64`, the exact same register can be fed
+///      directly into both the barrel-shifted mask operation (`adds ..., x0, lsr #32`) and the
+///      shift (`lsr ..., x0`). Separate fields force values into different registers and require
+///      moving or zero-extending them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ValueBlockSize(u32);
+pub struct MaskShiftSpec(u64);
 
-impl BlockSizeSpec for ValueBlockSize {
+impl BlockSizeSpec for MaskShiftSpec {
+    #[inline(always)]
+    fn size(self) -> u64 {
+        self.mask() + 1
+    }
+
     #[inline(always)]
     fn mask(self) -> u64 {
-        self.0 as u64
+        self.0 >> 32
+    }
+
+    #[inline(always)]
+    fn shift(self) -> u32 {
+        self.0 as u32
     }
 }
 
-/// A [`GenericBlockSize`] configured with a block size stored as an explicit value.
-pub type BlockSize = GenericBlockSize<ValueBlockSize>;
+impl MaskShiftSpec {
+    /// Constructs a new MaskShiftSpec.
+    ///
+    /// #Panics
+    ///
+    /// Panics in debug mode if `block_size` is not a power of 2 or is greater than 4GiB.
+    #[inline(always)]
+    const fn new(block_size: u64) -> Self {
+        debug_assert!(block_size.is_power_of_two() && block_size <= (1 << 32));
+        let mask = (block_size - 1) as u32 as u64;
+        let shift = (block_size - 1).trailing_ones();
+        Self((mask << 32) | (shift as u64))
+    }
+}
+
+/// A [`GenericBlockSize`] configured with a block size stored as a [`MaskShiftSpec`].
+pub type BlockSize = GenericBlockSize<MaskShiftSpec>;
 
 impl BlockSize {
     pub const SIZE_512B: Self = Self::new(1 << 9).unwrap();
@@ -125,11 +201,7 @@ impl BlockSize {
     /// Constructs a `BlockSize` from a `u32` byte count if it is a power of 2 and not equal to 0.
     #[inline(always)]
     pub const fn new(block_size: u32) -> Option<Self> {
-        if block_size.is_power_of_two() {
-            Some(GenericBlockSize(ValueBlockSize(block_size - 1)))
-        } else {
-            None
-        }
+        Self::from_u64(block_size as u64)
     }
 
     /// Constructs a `BlockSize` from a `u64` if it is a power of 2, not equal to 0, and the mask
@@ -137,8 +209,8 @@ impl BlockSize {
     /// size.
     #[inline(always)]
     pub const fn from_u64(block_size: u64) -> Option<Self> {
-        if block_size.is_power_of_two() && block_size != 0 && (block_size - 1) <= u32::MAX as u64 {
-            Some(GenericBlockSize(ValueBlockSize((block_size - 1) as u32)))
+        if block_size.is_power_of_two() && block_size <= (1 << 32) {
+            Some(GenericBlockSize(MaskShiftSpec::new(block_size)))
         } else {
             None
         }
@@ -151,7 +223,7 @@ impl BlockSize {
     // const.
     #[inline(always)]
     pub const fn size(self) -> u64 {
-        self.0.0 as u64 + 1
+        (self.0.0 >> 32) + 1
     }
 }
 
@@ -544,8 +616,14 @@ mod tests {
         #[derive(Copy, Clone, Debug, Eq, PartialEq)]
         struct Custom4KiBSpec;
         impl BlockSizeSpec for Custom4KiBSpec {
+            fn size(self) -> u64 {
+                4096
+            }
             fn mask(self) -> u64 {
                 4095
+            }
+            fn shift(self) -> u32 {
+                12
             }
         }
         let custom_bs = GenericBlockSize(Custom4KiBSpec);

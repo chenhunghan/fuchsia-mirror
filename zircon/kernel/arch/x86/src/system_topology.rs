@@ -6,16 +6,8 @@
 
 use debug::dprintf;
 use zx_status::Status;
-use zx_types::zx_status_t;
 
 const LOCAL_TRACE: u32 = 0;
-
-unsafe extern "C" {
-    fn cpp_system_topology_initialize_system_topology(
-        nodes: *const zbi::TopologyNode,
-        count: usize,
-    ) -> zx_status_t;
-}
 
 // TODO(edcoyne): move to fbl::Vector::resize().
 fn grow_vector<T: Default>(vector: &mut fbl::Vector<T>, new_size: usize) -> Result<(), Status> {
@@ -471,11 +463,7 @@ pub fn generate_and_init_system_topology(
         return Err(status);
     }
 
-    // SAFETY: `topology.as_ptr()` points to `topology.len()` valid `TopologyNode` elements.
-    let raw_status = unsafe {
-        cpp_system_topology_initialize_system_topology(topology.as_ptr(), topology.len())
-    };
-    Status::ok(raw_status)
+    crate::topology::Graph::initialize_system_topology(&topology)
 }
 
 /// Entry point for initializing system topology at boot.
@@ -488,11 +476,10 @@ pub extern "C" fn topology_init() {
             "ERROR: Auto topology generation failed, falling back to only boot core! status: {:?}\n",
             status
         );
-        // SAFETY: &FALLBACK_TOPOLOGY points to 1 valid TopologyNode.
-        let raw_status = unsafe {
-            cpp_system_topology_initialize_system_topology(&FALLBACK_TOPOLOGY as *const _, 1)
-        };
-        assert_eq!(raw_status, zx_types::ZX_OK);
+        let status = crate::topology::Graph::initialize_system_topology(core::slice::from_ref(
+            &FALLBACK_TOPOLOGY,
+        ));
+        assert_eq!(status, Ok(()));
     }
 }
 
@@ -501,14 +488,6 @@ pub extern "C" fn topology_init() {
 #[unittest::suite(name = "x86_topology_rust")]
 mod tests {
     use super::generate_flat_topology;
-    use zx_types::zx_status_t;
-
-    unsafe extern "C" {
-        fn cpp_system_topology_validate_and_initialize(
-            nodes: *const zbi::TopologyNode,
-            count: usize,
-        ) -> zx_status_t;
-    }
 
     struct FakeCpuidRaw<'a> {
         entries: &'a [(u32, u32, u32, u32, u32, u32)],
@@ -707,11 +686,8 @@ mod tests {
         assert_eq!(56, thread_count);
 
         // Ensure the format can be parsed and validated by the system topology library.
-        // SAFETY: `flat_topology.as_ptr()` points to `flat_topology.len()` valid nodes.
-        let raw_status = unsafe {
-            cpp_system_topology_validate_and_initialize(flat_topology.as_ptr(), flat_topology.len())
-        };
-        assert_eq!(raw_status, zx_types::ZX_OK);
+        let mut graph = crate::topology::Graph::new();
+        assert_eq!(crate::topology::Graph::initialize(&mut graph, &flat_topology), Ok(()));
     }
 
     /// Enumerate CPUs using data from ThreadRipper 2970wx/X399.
@@ -770,11 +746,8 @@ mod tests {
         assert_eq!(48, thread_count);
 
         // Ensure the format can be parsed and validated by the system topology library.
-        // SAFETY: `flat_topology.as_ptr()` points to `flat_topology.len()` valid nodes.
-        let raw_status = unsafe {
-            cpp_system_topology_validate_and_initialize(flat_topology.as_ptr(), flat_topology.len())
-        };
-        assert_eq!(raw_status, zx_types::ZX_OK);
+        let mut graph = crate::topology::Graph::new();
+        assert_eq!(crate::topology::Graph::initialize(&mut graph, &flat_topology), Ok(()));
     }
 
     /// Enumerate CPUs using data triggering fallback.
@@ -828,10 +801,7 @@ mod tests {
         assert_eq!(4, thread_count);
 
         // Ensure the format can be parsed and validated by the system topology library.
-        // SAFETY: `flat_topology.as_ptr()` points to `flat_topology.len()` valid nodes.
-        let raw_status = unsafe {
-            cpp_system_topology_validate_and_initialize(flat_topology.as_ptr(), flat_topology.len())
-        };
-        assert_eq!(raw_status, zx_types::ZX_OK);
+        let mut graph = crate::topology::Graph::new();
+        assert_eq!(crate::topology::Graph::initialize(&mut graph, &flat_topology), Ok(()));
     }
 }

@@ -24,7 +24,7 @@
              path="third_party/acpica-migrating/src"
              remote="https://fuchsia.googlesource.com/third_party/acpica"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="087633dc3bdf106d1ae68c994e94c74d05fff863"/>
+             revision="e4c9c02f9cf999b57c26ccbec86440bc3ef94594"/>
     <project name="third_party/alacritty"
              path="third_party/alacritty-migrating/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/alacritty/alacritty"
@@ -95,11 +95,11 @@
     <project name="chromium-zucchini"
              path="third_party/chromium-zucchini/src"
              remote="https://fuchsia.googlesource.com/third_party/chromium.googlesource.com/chromium/src/components/zucchini"
-             revision="80ea313bbbd6bef179fdef47ea1fdd8ea3e61200"/>
+             revision="55780c6520e128e0cce2622a93b124f042b8aece"/>
     <project name="third_party/crashpad"
              path="third_party/crashpad/src"
              remote="https://fuchsia.googlesource.com/third_party/crashpad"
-             revision="0b3df29b5f331341b7687102a9c3026cf4d42e7f"
+             revision="8c9d9ef86a817e7bc4a0baa37f9cb8d3dd1d5584"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="chromium/mini_chromium"
              path="third_party/mini_chromium/src"
@@ -292,7 +292,7 @@
     <project name="llvm-project/libc"
              path="third_party/llvm-libc/src"
              remote="https://llvm.googlesource.com/llvm-project/libc"
-             revision="5dfd5555480d8b20b7505822a37ac5d916273864"/>
+             revision="ed61acfcfa275ad928eb65ea7c1724f5372c2d10"/>
     <project name="third_party/luci-go"
              path="third_party/luci-go"
              revision="897c3b0c38036908e016300c70509509b13001a0"
@@ -407,7 +407,7 @@
              path="third_party/perfetto"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/perfetto"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="d3b1841f171c17161cb4faa1489052a09d8545d9" />
+             revision="b23c67be1159e3f0b0657bd97be9e139e0d8ee2c" />
     <project name="third_party/pigweed"
              path="third_party/pigweed/src"
              remote="https://fuchsia.googlesource.com/third_party/pigweed.googlesource.com/pigweed/pigweed"
@@ -427,7 +427,7 @@
     <project name="protobuf-gn"
              path="build/secondary/third_party/protobuf"
              remote="https://fuchsia.googlesource.com/protobuf-gn"
-             revision="6486fcc7ef42bf35c877cdcaab17f69895076e73"
+             revision="0180f6498baf432fa61f6ef3bf8a9b21515ceefd"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="third_party/github.com/wolever/parameterized"
              path="third_party/parameterized/src"
@@ -514,7 +514,7 @@
              path="third_party/openssh-portable"
              remote="https://fuchsia.googlesource.com/third_party/openssh-portable"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="dee2266f9b83ccaaeafaaf35ad8986a2c2868ee2"/>
+             revision="4e56a004abbb07bf3172f58d221c913b0a9211ae"/>
     <project name="third_party/openthread"
              path="third_party/openthread"
              remote="https://fuchsia.googlesource.com/third_party/openthread"
@@ -590,7 +590,7 @@
              path="third_party/pyjson5/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/dpranke/pyjson5"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="2154e31bbae71b6a8ae69e5e5a3350528825f0fc"/>
+             revision="66429118dcebb1dda7a2ddb3e87f661b904c7f96"/>
     <project name="third_party/pypng"
              path="third_party/pypng/src"
              remote="https://fuchsia.googlesource.com/third_party/gitlab.com/drj11/pypng"

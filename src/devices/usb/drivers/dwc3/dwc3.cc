@@ -276,6 +276,16 @@ std::unique_ptr<QualcommExtension> QualcommExtension::Create(Dwc3* parent,
     return nullptr;
   }
 
+  // Verify that the regulator is reachable before creating the platform extension.
+  // A domain error (e.g. ZX_ERR_NOT_SUPPORTED from GDSC) indicates that the regulator
+  // driver is present and responded. Only a framework error (such as ZX_ERR_PEER_CLOSED)
+  // indicates the service is not present.
+  if (fidl::Result result = fidl::Call(*regulator_client)->GetVoltageStep();
+      result.is_error() && result.error_value().is_framework_error()) {
+    fdf::info("Failed to query regulator, assuming not qualcomm chipset: {}", result.error_value());
+    return nullptr;
+  }
+
   auto dispatcher =
       fdf::SynchronizedDispatcher::Create(fdf::SynchronizedDispatcher::Options::kAllowSyncCalls,
                                           "dwc3-interconnect", [](fdf_dispatcher_t*) {});
@@ -411,6 +421,101 @@ zx::result<> QualcommExtension::VoteClocks(bool on) {
   return zx::ok();
 }
 
+constexpr uint32_t BandwidthForSpeed(fdescriptor::UsbSpeed speed) {
+  switch (speed) {
+    case fdescriptor::UsbSpeed::kLow:
+    case fdescriptor::UsbSpeed::kFull:
+      return 2'000'000;
+    case fdescriptor::UsbSpeed::kHigh:
+      return 40'000'000;
+    case fdescriptor::UsbSpeed::kSuper:
+      return 400'000'000;
+    case fdescriptor::UsbSpeed::kEnhancedSuper:
+      return 1'000'000'000;
+    case fdescriptor::UsbSpeed::kUndefined:
+    default:
+      return 0;
+  }
+}
+
+class IrisExtension final : public PlatformExtension {
+ public:
+  // Phase 1 Iris default speed is High-Speed (40 MB/s).
+  static constexpr fdescriptor::UsbSpeed kDefaultSpeed = fdescriptor::UsbSpeed::kHigh;
+  static constexpr uint32_t kDefaultBandwidthBps = BandwidthForSpeed(kDefaultSpeed);
+
+  static std::unique_ptr<IrisExtension> Create(Dwc3* parent) {
+    auto interconnect_result =
+        parent->incoming()->Connect<fhi::PathService::Path>("usb-interconnect");
+    if (interconnect_result.is_error()) {
+      return nullptr;
+    }
+    fidl::SyncClient<fhi::Path> client(std::move(interconnect_result.value()));
+    // Probe interconnect path to ensure it is actually available before creating IrisExtension.
+    fhi::BandwidthRequest request{{
+        .average_bandwidth_bps = kDefaultBandwidthBps,
+        .peak_bandwidth_bps = kDefaultBandwidthBps,
+        .tag = 'USB ',
+    }};
+    if (auto result = client->SetBandwidth(request); result.is_error()) {
+      fdf::info("Failed to set bandwidth on usb-interconnect, assuming not Iris platform: {}",
+                result.error_value().FormatDescription());
+      return nullptr;
+    }
+    return std::make_unique<IrisExtension>(std::move(client));
+  }
+
+  explicit IrisExtension(fidl::SyncClient<fhi::Path> interconnect_client)
+      : interconnect_client_(std::move(interconnect_client)) {}
+
+  zx::result<> Start() override {
+    TRACE_DURATION("dwc3", "IrisExtension::Start");
+    return VoteBandwidth(BandwidthForSpeed(speed_));
+  }
+
+  zx::result<> Suspend() override {
+    TRACE_DURATION("dwc3", "IrisExtension::Suspend");
+    return VoteBandwidth(0);
+  }
+
+  zx::result<> Resume() override {
+    TRACE_DURATION("dwc3", "IrisExtension::Resume");
+    return VoteBandwidth(BandwidthForSpeed(speed_));
+  }
+
+  zx::result<> SetConnectionSpeed(fdescriptor::UsbSpeed speed) override {
+    TRACE_DURATION("dwc3", "IrisExtension::SetConnectionSpeed", "speed",
+                   static_cast<uint32_t>(speed));
+    speed_ = speed;
+    return VoteBandwidth(BandwidthForSpeed(speed_));
+  }
+
+  bool PowersDownCoreOnDisconnect() const override { return false; }
+
+ private:
+  zx::result<> VoteBandwidth(uint32_t bandwidth) {
+    if (!interconnect_client_.is_valid()) {
+      return zx::ok();
+    }
+    fhi::BandwidthRequest request{{
+        .average_bandwidth_bps = bandwidth,
+        .peak_bandwidth_bps = bandwidth,
+        .tag = 'USB ',
+    }};
+    if (auto result = interconnect_client_->SetBandwidth(request); result.is_error()) {
+      fdf::error("SetBandwidth ({} bps) failed on interconnect: {}", bandwidth,
+                 result.error_value().FormatDescription());
+      return zx::error(result.error_value().is_domain_error()
+                           ? result.error_value().domain_error()
+                           : result.error_value().framework_error().status());
+    }
+    return zx::ok();
+  }
+
+  fdescriptor::UsbSpeed speed_{kDefaultSpeed};
+  fidl::SyncClient<fhi::Path> interconnect_client_;
+};
+
 }  // namespace
 
 zx::eventpair Dwc3::AcquireWakeLease() {
@@ -480,28 +585,6 @@ zx::result<> Dwc3::Start(fdf::DriverContext context) {
     phy_ = fidl::SyncClient<fuchsia_hardware_usb_phy::UsbPhy>(std::move(phy_result.value()));
   }
 
-  auto interconnect_result =
-      incoming()->Connect<fuchsia_hardware_interconnect::PathService::Path>("usb-interconnect");
-  if (interconnect_result.is_ok()) {
-    interconnect_client_ = fidl::SyncClient<fuchsia_hardware_interconnect::Path>(
-        std::move(interconnect_result.value()));
-    // Note: Other bandwidth options based on connection speed:
-    // High Speed (HS): 40 MB/s (40'000'000 B/s)
-    // Super Speed (SS): 400 MB/s (400'000'000 B/s)
-    // Super Speed Plus (SSP): 1000 MB/s (1'000'000'000 B/s)
-    // We vote for the highest (SSP) by default.
-    fuchsia_hardware_interconnect::BandwidthRequest request{{
-        .average_bandwidth_bps = 1'000'000'000,
-        .peak_bandwidth_bps = 1'000'000'000,
-        .tag = 'USB ',
-    }};
-    auto result = interconnect_client_->SetBandwidth(request);
-    if (result.is_error()) {
-      fdf::error("SetBandwidth failed on interconnect: {}",
-                 result.error_value().FormatDescription());
-    }
-  }
-
   // Set up Inspect data.
   metrics_.Init();
   dwc3_root_ = inspector().root().CreateLazyNode("dwc3", [this] {
@@ -516,8 +599,12 @@ zx::result<> Dwc3::Start(fdf::DriverContext context) {
   // Platform extensions require platform-specific hardware mocks. Gating this on
   // bypass_platform_extension allows generic DWC3 tests to skip platform mocks.
   if (!config_->bypass_platform_extension()) {
-    if (std::unique_ptr extension = QualcommExtension::Create(this, get_mmio()->View(0));
-        extension) {
+    std::unique_ptr<PlatformExtension> extension =
+        QualcommExtension::Create(this, get_mmio()->View(0));
+    if (!extension) {
+      extension = IrisExtension::Create(this);
+    }
+    if (extension) {
       if (zx::result result = extension->Start(); result.is_error()) {
         fdf::error("Failed platform extension start: {}", result);
         return result.take_error();
@@ -1157,6 +1244,8 @@ void Dwc3::HandleResetEvent() {
   SetDeviceAddress(0);
   Ep0Start();
 
+  connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
+
   SetDeviceState(fpolicy::DeviceState::kDefault);
 
   if (dci_intf_.is_valid()) {
@@ -1215,6 +1304,13 @@ void Dwc3::HandleConnectionDoneEvent() {
       CmdEpSetConfig(*ep, true);
     }
     ep0_.cur_speed = new_speed;
+    connection_speed_ = new_speed;
+    if (platform_extension_) {
+      if (zx::result result = platform_extension_->SetConnectionSpeed(connection_speed_);
+          result.is_error()) {
+        fdf::error("platform_extension_->SetConnectionSpeed failed: {}", result.status_string());
+      }
+    }
   }
 
   std::ostringstream buf;
@@ -1255,6 +1351,14 @@ void Dwc3::HandleDisconnectedEvent() {
 
   ResetEndpoints();
 
+  connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
+  if (platform_extension_) {
+    if (zx::result result = platform_extension_->SetConnectionSpeed(connection_speed_);
+        result.is_error()) {
+      fdf::warn("Failed to set connection speed on disconnect event: {}", result.status_string());
+    }
+  }
+
   if (phy_.is_valid()) {
     if (fidl::Result result = phy_->ConnectStatusChanged({{.connected = false, .wake_lease = {}}});
         result.is_error()) {
@@ -1292,13 +1396,21 @@ void Dwc3::Stop(fdf::StopCompleter completer) {
 
 void Dwc3::Suspend(fdf_power::SuspendCompleter completer) {
   TRACE_DURATION("dwc3", "Dwc3::Suspend");
-  // no-op.
+  if (platform_extension_) {
+    if (zx::result result = platform_extension_->Suspend(); result.is_error()) {
+      fdf::error("platform_extension_->Suspend() failed: {}", result.status_string());
+    }
+  }
   completer();
 }
 
 void Dwc3::Resume(fdf_power::ResumeCompleter completer) {
   TRACE_DURATION("dwc3", "Dwc3::Resume");
-  // no-op.
+  if (platform_extension_) {
+    if (zx::result result = platform_extension_->Resume(); result.is_error()) {
+      fdf::error("platform_extension_->Resume() failed: {}", result.status_string());
+    }
+  }
   completer();
 }
 
@@ -1533,7 +1645,7 @@ void Dwc3::CancelAll(CancelAllRequest& request, CancelAllCompleter::Sync& comple
     return;
   }
 
-  uep->server->CancelAll(ZX_ERR_IO_NOT_PRESENT);
+  uep->server->CancelAll(ZX_ERR_IO_REFUSED);
   completer.Reply(zx::ok());
 }
 
@@ -1616,7 +1728,7 @@ void Dwc3::EpServer::QueueRequests(QueueRequestsRequest& request,
 
 void Dwc3::EpServer::CancelAll(CancelAllCompleter::Sync& completer) {
   TRACE_DURATION("dwc3", "Dwc3::EpServer::CancelAll");
-  CancelAll(ZX_ERR_IO_NOT_PRESENT);
+  CancelAll(ZX_ERR_CANCELED);
   if (!dwc3_->controller_started_ ||
       (uep_->ep.transfer_state == Endpoint::TransferState::kIdle && active_reqs.empty())) {
     completer.Reply(zx::ok());
@@ -1710,10 +1822,16 @@ void Dwc3::OnConnectStatusChanged(
       if (zx::result result = platform_extension_->Resume(); result.is_error()) {
         return;
       }
-    } else if (!power_on_) {
-      // For platforms without a platform extension, perform a software core reset (CSFTRST)
-      // when transitioning from powered-off to ensure the controller state machine and internal
-      // FIFOs start in a clean state.
+      if (zx::result result = platform_extension_->SetConnectionSpeed(fdescriptor::UsbSpeed::kHigh);
+          result.is_error()) {
+        fdf::warn("Failed to set provisional speed on connect: {}", result.status_string());
+      }
+    }
+    if (!power_on_ &&
+        (!platform_extension_ || !platform_extension_->PowersDownCoreOnDisconnect())) {
+      // For platforms that do not power down the core via external reset controller,
+      // perform a software core reset (CSFTRST) when transitioning from powered-off to
+      // ensure the controller state machine and internal FIFOs start in a clean state.
       if (zx_status_t status = ResetHw(); status != ZX_OK) {
         fdf::error("Failed to reset hardware on connect: {}", zx_status_get_string(status));
         return;
@@ -1740,6 +1858,14 @@ void Dwc3::OnConnectStatusChanged(
     // Cancel all pending requests.
     ResetEndpoints();
 
+    connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
+    if (platform_extension_) {
+      if (zx::result result = platform_extension_->SetConnectionSpeed(connection_speed_);
+          result.is_error()) {
+        fdf::warn("Failed to set connection speed on disconnect: {}", result.status_string());
+      }
+    }
+
     if (controller_started_) {
       StopEvents();
     }
@@ -1750,10 +1876,11 @@ void Dwc3::OnConnectStatusChanged(
       if (zx::result result = platform_extension_->Suspend(); result.is_error()) {
         return;
       }
-    } else if (power_on_) {
-      // For platforms without a platform extension, perform a software core reset on disconnect
-      // while still powered to safely halt active DMA transfers and deassert level-triggered
-      // interrupts.
+    }
+    if (power_on_ && (!platform_extension_ || !platform_extension_->PowersDownCoreOnDisconnect())) {
+      // For platforms that do not power down the core via external reset controller,
+      // perform a software core reset on disconnect while still powered to safely halt
+      // active DMA transfers and deassert level-triggered interrupts.
       if (zx_status_t status = ResetHw(); status != ZX_OK) {
         fdf::warn("Failed to reset hardware on disconnect: {}", zx_status_get_string(status));
       }

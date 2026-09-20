@@ -41,6 +41,7 @@ test_suite(
         "//tools/fidl/measure-tape/src:measure_tape_test",
         "//tools/fuzz:undercoat_tests",
         "//tools/go_test_parser:go_test_parser_lib_tests",
+        "//tools/gtest_test_parser:gtest_test_parser_lib_tests",
         "//tools/lib/agents:agents_tests",
         "//tools/lib/subprocess:tests",
         "//tools/orchestrate:tests",

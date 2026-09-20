@@ -7,14 +7,28 @@
 #ifndef ZIRCON_KERNEL_LIB_TOPOLOGY_INCLUDE_LIB_SYSTEM_TOPOLOGY_H_
 #define ZIRCON_KERNEL_LIB_TOPOLOGY_INCLUDE_LIB_SYSTEM_TOPOLOGY_H_
 
-#include <lib/lazy_init/lazy_init.h>
 #include <lib/zbi-format/cpu.h>
 #include <zircon/types.h>
 
-#include <fbl/vector.h>
 #include <kernel/cpu.h>
-#include <ktl/unique_ptr.h>
-#include <ktl/utility.h>
+#include <ktl/span.h>
+
+namespace system_topology {
+class Graph;
+}  // namespace system_topology
+
+extern "C" {
+
+zx_status_t rust_system_topology_initialize_system_topology(const zbi_topology_node_t* nodes,
+                                                            size_t count);
+zx_status_t rust_system_topology_graph_initialize(system_topology::Graph* graph,
+                                                  const zbi_topology_node_t* nodes, size_t count);
+void rust_system_topology_graph_destroy(system_topology::Graph* graph);
+const system_topology::Graph* rust_system_topology_get_system_topology();
+void rust_system_topology_graph_dump(const system_topology::Graph* graph);
+uint8_t rust_system_topology_get_performance_class(cpu_num_t cpu_id);
+
+}  // extern "C"
 
 /*
  * Captures the physical layout of the core system (processors, caches, etc..).
@@ -24,16 +38,17 @@
  */
 
 namespace system_topology {
+
 // A single node in the topology graph.
 struct Node {
   zbi_topology_entity_t entity;
   Node* parent;
-  fbl::Vector<Node*> children;
+  ktl::span<Node*> children;
 };
 
 // We define a typedef here as we may want to change this type as the design evolves. For example,
 // if we add run-time updateability we may want to hold a lock.
-typedef const fbl::Vector<Node*>& IterableProcessors;
+using IterableProcessors = ktl::span<Node* const>;
 
 // A view of the system topology that is defined in early boot and static during the run of the
 // system.
@@ -65,21 +80,17 @@ class Graph {
   // Graph instances are default constructible to empty.
   Graph() = default;
 
-  // Constructs a Graph instance from the given unflattened topology data.
-  Graph(ktl::unique_ptr<Node[]> nodes, fbl::Vector<Node*> processors,
-        size_t logical_processor_count, fbl::Vector<Node*> processors_by_logical_id)
-      : nodes_{ktl::move(nodes)},
-        processors_{ktl::move(processors)},
-        logical_processor_count_{logical_processor_count},
-        processors_by_logical_id_{ktl::move(processors_by_logical_id)} {}
+  ~Graph() {
+    if (backing_ != nullptr) {
+      rust_system_topology_graph_destroy(this);
+    }
+  }
 
-  // Graph instances are not copyable.
+  // Graph instances are neither copyable nor movable.
   Graph(const Graph&) = delete;
   Graph& operator=(const Graph&) = delete;
-
-  // Graph instances are movable.
-  Graph(Graph&&) = default;
-  Graph& operator=(Graph&&) = default;
+  Graph(Graph&&) = delete;
+  Graph& operator=(Graph&&) = delete;
 
   // Provides iterable container of pointers to all processor nodes.
   IterableProcessors processors() const { return processors_; }
@@ -95,7 +106,7 @@ class Graph {
   // Finds the processor node that is assigned the given logical id.
   // Sets processor to point to that node. If it wasn't found, returns ZX_ERR_NOT_FOUND.
   zx_status_t ProcessorByLogicalId(cpu_num_t id, Node** processor) const {
-    if (id >= processors_by_logical_id_.size()) {
+    if (id >= processors_by_logical_id_.size() || processors_by_logical_id_[id] == nullptr) {
       return ZX_ERR_NOT_FOUND;
     }
 
@@ -105,28 +116,19 @@ class Graph {
 
   // Returns an immutable reference to the system topology graph. This may be
   // called after the graph is initialized by Graph::InitializeSystemTopology.
-  static const Graph& GetSystemTopology() { return system_topology_.Get(); }
+  static const Graph& GetSystemTopology() { return *rust_system_topology_get_system_topology(); }
 
-  void Dump();
+  void Dump() const;
 
  private:
-  // Validates that in the provided flat topology:
-  //   - all processors are leaf nodes, and all leaf nodes are processors.
-  //   - there are no cycles.
-  //   - It is stored in a "depth first" ordering, with parents adjacent to
-  //   their children.
-  static bool Validate(const zbi_topology_node_t* nodes, size_t count);
-
-  ktl::unique_ptr<Node[]> nodes_;
-  fbl::Vector<Node*> processors_;
+  ktl::span<Node> nodes_;
+  ktl::span<Node*> processors_;
   size_t logical_processor_count_{0};
 
   // This is in essence a map with logical ID being the index in the vector.
   // It will contain duplicates for SMT processors so we need it in addition to processors_.
-  fbl::Vector<Node*> processors_by_logical_id_;
-
-  // The graph of the system topology. Initialized once during early boot.
-  static lazy_init::LazyInit<Graph, lazy_init::CheckType::Basic> system_topology_;
+  ktl::span<Node*> processors_by_logical_id_;
+  void* backing_{nullptr};
 };
 
 inline const Graph& GetSystemTopology() { return Graph::GetSystemTopology(); }

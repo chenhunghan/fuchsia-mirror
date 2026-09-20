@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-light-dml") {
+  dml = "meta/aml-light.dml"
+  driver_name = "aml-light"
+}
+
 driver_bind_rules("aml_light_bind") {
-  rules = "meta/aml-light.bind"
+  dml_label = ":aml-light-dml"
   bind_output = "aml-light.bindbc"
   tests = "meta/bind_tests.json"
   deps = [
@@ -53,10 +58,10 @@ fuchsia_cc_driver("aml-light-driver") {
 }
 
 fuchsia_driver_component("aml-light") {
+  dml_label = ":aml-light-dml"
   component_name = "aml-light"
   deps = [ ":aml-light-driver" ]
   info = "meta/aml-light-info.json"
-  manifest = "meta/aml-light.cml"
 }
 
 fuchsia_driver_package("package") {

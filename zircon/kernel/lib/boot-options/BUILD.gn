@@ -58,6 +58,7 @@ static_library("boot-options") {
 
   if (is_kernel) {
     deps += [
+      "//src/lib/lazy_init",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/libc",
     ]

@@ -39,6 +39,24 @@ macro_rules! declare_singleton_critical_mutex {
     };
 }
 
+/// Declares a singleton spinlock.
+#[macro_export]
+#[cfg(feature = "kernel")]
+macro_rules! declare_singleton_spinlock {
+    ($(#[$meta:meta])* $vis:vis $name:ident) => {
+        $crate::declare_singleton_lock!($(#[$meta])* $vis $name, $crate::RawSpinlock);
+    };
+}
+
+/// Declares a singleton monitored spinlock (integrated with the kernel lockup detector).
+#[macro_export]
+#[cfg(feature = "kernel")]
+macro_rules! declare_singleton_monitored_spinlock {
+    ($(#[$meta:meta])* $vis:vis $name:ident) => {
+        $crate::declare_singleton_lock!($(#[$meta])* $vis $name, $crate::RawMonitoredSpinlock);
+    };
+}
+
 #[cfg(not(feature = "kernel"))]
 #[cfg(test)]
 mod tests {

@@ -4,7 +4,6 @@
 
 use core::num::NonZeroU16;
 
-use either::Either;
 use ip_test_macro::ip_test;
 use net_types::ZonedAddr;
 
@@ -48,9 +47,7 @@ fn bindtodevice_send_to_loopback_addrs<I: IpExt + TestIpExt>() {
         Some(ZonedAddr::Unzoned(I::LOOPBACK_ADDRESS)),
         LOCAL_PORT.into(),
         Buf::new(HELLO.to_vec(), ..),
+        Default::default(),
     );
-    assert_eq!(
-        result,
-        Err(Either::Right(SendToError::Send(IpSockSendError::IllegalLoopbackAddress)))
-    );
+    assert_eq!(result, Err(SendToError::Send(IpSockSendError::IllegalLoopbackAddress)));
 }

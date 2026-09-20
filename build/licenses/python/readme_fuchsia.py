@@ -5,7 +5,7 @@
 
 import dataclasses
 import logging
-from typing import ClassVar, Dict, List, Set, Tuple
+from typing import ClassVar
 
 from file_access import FileAccess
 from gn_label import GnLabel
@@ -15,7 +15,7 @@ from gn_label import GnLabel
 class Readme:
     readme_label: GnLabel
     package_name: str | None
-    license_files: Tuple[GnLabel, ...]
+    license_files: tuple[GnLabel, ...]
 
     @staticmethod
     def from_text(
@@ -24,7 +24,7 @@ class Readme:
         package_name = None
         last_license_file_path = ""
         last_license_file_url = ""
-        license_files: List[GnLabel] = []
+        license_files: list[GnLabel] = []
         lines = file_text.split("\n")
         for l in lines:
             if ":" in l:
@@ -63,11 +63,11 @@ class Readme:
 @dataclasses.dataclass
 class ReadmesDB:
     file_access: FileAccess
-    cache: Dict[GnLabel, Readme | None] = dataclasses.field(
+    cache: dict[GnLabel, Readme | None] = dataclasses.field(
         default_factory=dict
     )
 
-    _barrier_dir_names: ClassVar[Set[str]] = set(
+    _barrier_dir_names: ClassVar[set[str]] = set(
         [
             "third_party",
             "thirdparty",

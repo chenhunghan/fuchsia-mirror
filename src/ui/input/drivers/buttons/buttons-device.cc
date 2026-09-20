@@ -215,16 +215,7 @@ int ButtonsDevice::Thread() {
 
 void ButtonsDevice::GetInputReportsReader(GetInputReportsReaderRequestView request,
                                           GetInputReportsReaderCompleter::Sync& completer) {
-  zx::result<ButtonsInputReport> initial_report = GetInputReportInternal();
-  if (initial_report.is_error()) {
-    fdf::error("Failed to get initial report {}", initial_report.status_string());
-  }
-  zx_status_t status = readers_.CreateReader(
-      dispatcher_, std::move(request->reader),
-      initial_report.is_ok() ? std::make_optional(initial_report.value()) : std::nullopt);
-  if (status != ZX_OK) {
-    fdf::error("Failed to create a reader {}", status);
-  }
+  ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
 }
 
 void ButtonsDevice::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,

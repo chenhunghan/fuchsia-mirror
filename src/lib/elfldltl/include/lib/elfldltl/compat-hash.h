@@ -14,6 +14,8 @@
 #include <span>
 #include <string_view>
 
+#include "layout.h"
+
 namespace elfldltl {
 
 // This handles the DT_HASH format, which is mostly obsolete but is the
@@ -39,10 +41,10 @@ constexpr uint32_t kCompatNoHash = ~uint32_t{};
 // the number of buckets and the number of chain entries (i.e. the number of
 // symbol table entries).  Then the bucket words follow, then the chain words.
 
-template <class Elf>
+template <ElfApi Elf>
 class CompatHash {
  public:
-  using Word = typename Elf::Word;
+  using Word = Elf::Word;
 
   constexpr explicit CompatHash(std::span<const Word> table)
       : buckets_(table.subspan(2, table[0])), chain_(table.subspan(2 + table[0], table[1])) {}

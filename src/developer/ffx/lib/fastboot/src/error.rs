@@ -182,6 +182,8 @@ pub enum FfxFastbootError {
     #[error("Upload prefix '{prefix}' is too large for the max command size ({max_len})")]
     InlineUploadOverflow { prefix: String, max_len: usize },
 
+    // TODO(b/563409803) Add more helpful fields or discriminants to
+    // FfxFastbootError::StreamingFlash
     #[error("Fastboot streaming flash error: {message}")]
     StreamingFlash { message: String },
 

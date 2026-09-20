@@ -51,10 +51,14 @@ pub struct PhantomMutex;
 pub struct PhantomMutexPolicy;
 
 impl LockPolicy<PhantomMutex> for PhantomMutexPolicy {
+    type AcquireArgs = ();
     type GuardState = ();
 
     #[inline]
-    unsafe fn acquire(_lock: &PhantomMutex, _entry: *mut ()) -> Self::GuardState {}
+    unsafe fn acquire(_lock: &PhantomMutex, _entry: *mut (), _args: ()) -> Self::GuardState {}
+
+    #[inline]
+    unsafe fn reacquire(_lock: &PhantomMutex, _entry: *mut (), _state: &mut Self::GuardState) {}
 
     #[inline]
     unsafe fn release(_lock: &PhantomMutex, _entry: *mut (), _state: Self::GuardState) {}

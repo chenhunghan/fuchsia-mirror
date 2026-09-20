@@ -10,6 +10,7 @@
 #include <type_traits>
 
 #include "abi-span.h"
+#include "layout.h"
 
 namespace elfldltl {
 
@@ -31,12 +32,12 @@ using InitFiniFunction = void() [[clang::cfi_unchecked_callee]];
 //
 // The CallInit and CallFini methods directly call each function in order, for
 // immediate in-process uses.
-template <class Elf = Elf<>,
+template <ElfApi Elf = Elf<>,
           AbiPtrTraitsApi<const typename Elf::Addr, Elf> AbiTraits = LocalAbiTraits>
 struct InitFiniInfo {
  public:
-  using Addr = typename Elf::Addr;
-  using size_type = typename Elf::size_type;
+  using Addr = Elf::Addr;
+  using size_type = Elf::size_type;
 
   constexpr InitFiniInfo() = default;
   constexpr InitFiniInfo(const InitFiniInfo&) = default;

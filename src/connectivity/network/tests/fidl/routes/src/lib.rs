@@ -13,7 +13,6 @@ use std::pin::pin;
 
 use anyhow::Context as _;
 use assert_matches::assert_matches;
-use either::Either;
 use fidl::endpoints::Proxy;
 use fidl_fuchsia_net_ext::IntoExt;
 use fuchsia_async::TimeoutExt;
@@ -24,8 +23,7 @@ use net_types::ip::{GenericOverIp, Ip, IpAddress, IpVersion, Ipv4, Ipv4Addr, Ipv
 use netemul::InterfaceConfig;
 use netstack_testing_common::interfaces::{self, TestInterfaceExt as _};
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, Netstack3, NetstackAndDhcpClient, NetstackVersion,
-    TestRealmExt as _, TestSandboxExt as _,
+    KnownServiceProvider, Netstack3, OutOfStack, TestRealmExt as _, TestSandboxExt as _,
 };
 use netstack_testing_macros::netstack_test;
 use packet_formats::icmp::ndp::options::{NdpOptionBuilder, PrefixInformation, RouteInformation};
@@ -53,10 +51,10 @@ async fn resolve(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn resolve_loopback_route<N: Netstack>(name: &str) {
+async fn resolve_loopback_route(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create realm");
     let routes = realm
         .connect_to_protocol::<fidl_fuchsia_net_routes::StateMarker>()
         .expect("failed to connect to routes/State");
@@ -80,8 +78,7 @@ async fn resolve_loopback_route<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn resolve_route<N: Netstack>(name: &str) {
+async fn resolve_route(name: &str) {
     const GATEWAY_IP_V4: fidl_fuchsia_net::Subnet = fidl_subnet!("192.168.0.1/24");
     const GATEWAY_IP_V6: fidl_fuchsia_net::Subnet = fidl_subnet!("3080::1/64");
     const GATEWAY_MAC: fidl_fuchsia_net::MacAddress = fidl_mac!("02:01:02:03:04:05");
@@ -93,7 +90,7 @@ async fn resolve_route<N: Netstack>(name: &str) {
 
     // Configure a host.
     let host = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_host", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_host", name))
         .expect("failed to create client realm");
 
     let host_ep = host.join_network(&net, "host").await.expect("host failed to join network");
@@ -111,7 +108,7 @@ async fn resolve_route<N: Netstack>(name: &str) {
 
     // Configure a gateway.
     let gateway = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_gateway", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_gateway", name))
         .expect("failed to create server realm");
 
     let gateway_ep = gateway
@@ -202,18 +199,17 @@ async fn resolve_route<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, NetstackAndDhcpClient)]
-async fn resolve_default_route_while_dhcp_is_running<N: NetstackAndDhcpClient>(name: &str) {
+async fn resolve_default_route_while_dhcp_is_running(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
     // Configure a host.
     let realm = sandbox
-        .create_netstack_realm_with::<N::Netstack, _, _>(name, [KnownServiceProvider::DhcpClient])
+        .create_netstack_realm_with::<Netstack3, _, _>(name, [KnownServiceProvider::DhcpClient])
         .expect("failed to create client realm");
 
     let ep = realm.join_network(&net, "host").await.expect("host failed to join network");
-    ep.start_dhcp::<N::DhcpClient>().await.expect("failed to start DHCP");
+    ep.start_dhcp::<OutOfStack>().await.expect("failed to start DHCP");
 
     let routes = realm
         .connect_to_protocol::<fidl_fuchsia_net_routes::StateMarker>()
@@ -276,14 +272,14 @@ async fn resolve_default_route_while_dhcp_is_running<N: NetstackAndDhcpClient>(n
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 // Resolve returns the preferred source address used when communicating with the
 // destination. Expect Resolve to fail on interfaces without any assigned
 // addresses, even if the destination is reachable and routable.
-async fn resolve_fails_with_no_src_address<N: Netstack, I: Ip>(name: &str) {
+async fn resolve_fails_with_no_src_address<I: Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
         .install_endpoint(device, InterfaceConfig::default())
@@ -407,64 +403,55 @@ fn assert_eq_unordered<T: Debug + Eq + Hash + PartialEq>(a: Vec<T>, b: Vec<T>) {
 }
 
 // Default metric values used by the netstack when creating implicit routes.
-// See `src/connectivity/network/netstack/netstack.go`.
 const DEFAULT_INTERFACE_METRIC: u32 = 100;
-
-fn loopback_metric<N: Netstack>() -> u32 {
-    match N::VERSION {
-        NetstackVersion::Netstack2 { .. } | NetstackVersion::ProdNetstack2 => 100,
-        NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => 1000,
-    }
-}
+const LOOPBACK_METRIC: u32 = 1000;
 
 // The initial IPv4 routes that are installed on the loopback interface.
-fn initial_loopback_routes_v4<N: Netstack>(
+fn initial_loopback_routes_v4(
     loopback_id: u64,
     table_id: u32,
 ) -> impl Iterator<Item = fnet_routes_ext::InstalledRoute<Ipv4>> {
-    let metric = loopback_metric::<N>();
-    [new_installed_route(net_subnet_v4!("127.0.0.0/8"), loopback_id, metric, true, table_id)]
-        .into_iter()
-        // TODO(https://fxbug.dev/42074061) Unify the loopback routes between
-        // Netstack2 and Netstack3
-        .chain(match N::VERSION {
-            NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => {
-                Either::Left(std::iter::once(new_installed_route(
-                    net_subnet_v4!("224.0.0.0/4"),
-                    loopback_id,
-                    metric,
-                    true,
-                    table_id,
-                )))
-            }
-            NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-            | NetstackVersion::ProdNetstack2 => Either::Right(std::iter::empty()),
-        })
+    [
+        new_installed_route(
+            net_subnet_v4!("127.0.0.0/8"),
+            loopback_id,
+            LOOPBACK_METRIC,
+            true,
+            table_id,
+        ),
+        new_installed_route(
+            net_subnet_v4!("224.0.0.0/4"),
+            loopback_id,
+            LOOPBACK_METRIC,
+            true,
+            table_id,
+        ),
+    ]
+    .into_iter()
 }
 
 // The initial IPv6 routes that are installed on the loopback interface.
-fn initial_loopback_routes_v6<N: Netstack>(
+fn initial_loopback_routes_v6(
     loopback_id: u64,
     table_id: u32,
 ) -> impl Iterator<Item = fnet_routes_ext::InstalledRoute<Ipv6>> {
-    let metric = loopback_metric::<N>();
-    [new_installed_route(net_subnet_v6!("::1/128"), loopback_id, metric, true, table_id)]
-        .into_iter()
-        // TODO(https://fxbug.dev/42074061) Unify the loopback routes between
-        // Netstack2 and Netstack3
-        .chain(match N::VERSION {
-            NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => {
-                Either::Left(std::iter::once(new_installed_route(
-                    net_subnet_v6!("ff00::/8"),
-                    loopback_id,
-                    metric,
-                    true,
-                    table_id,
-                )))
-            }
-            NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-            | NetstackVersion::ProdNetstack2 => Either::Right(std::iter::empty()),
-        })
+    [
+        new_installed_route(
+            net_subnet_v6!("::1/128"),
+            loopback_id,
+            LOOPBACK_METRIC,
+            true,
+            table_id,
+        ),
+        new_installed_route(
+            net_subnet_v6!("ff00::/8"),
+            loopback_id,
+            LOOPBACK_METRIC,
+            true,
+            table_id,
+        ),
+    ]
+    .into_iter()
 }
 
 // The initial IPv4 routes that are installed on an ethernet interface.
@@ -509,16 +496,14 @@ fn initial_ethernet_routes_v6(
 // Verifies the startup behavior of the watcher protocols; including the
 // expected preinstalled routes.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 async fn watcher_existing<
-    N: Netstack,
     I: fnet_routes_ext::FidlRouteIpExt + fnet_routes_ext::admin::FidlRouteAdminIpExt,
 >(
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let loopback_id = realm
         .loopback_properties()
@@ -528,9 +513,8 @@ async fn watcher_existing<
         .id;
 
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
-    // TODO(https://fxbug.dev/42074358) Netstack2 only installs certain routes
-    // after the interface is enabled. Using `install_endpoint` installs the
-    // interface, enables it, and waits for it to come online.
+    // Using `install_endpoint` installs the interface, enables it, and waits
+    // for it to come online.
     let interface = realm
         .install_endpoint(device, InterfaceConfig::default())
         .await
@@ -548,14 +532,14 @@ async fn watcher_existing<
         (loopback_id, interface_id),
         |(loopback_id, interface_id)| {
             RoutesHolder(
-                initial_loopback_routes_v4::<N>(loopback_id.get(), main_table_id)
+                initial_loopback_routes_v4(loopback_id.get(), main_table_id)
                     .chain(initial_ethernet_routes_v4(interface_id, main_table_id))
                     .collect::<Vec<_>>(),
             )
         },
         |(loopback_id, interface_id)| {
             RoutesHolder(
-                initial_loopback_routes_v6::<N>(loopback_id.get(), main_table_id)
+                initial_loopback_routes_v6(loopback_id.get(), main_table_id)
                     .chain(initial_ethernet_routes_v6(interface_id, main_table_id))
                     .collect::<Vec<_>>(),
             )
@@ -607,16 +591,14 @@ const TEST_SUBNET_V6: net_types::ip::Subnet<Ipv6Addr> = net_subnet_v6!("fd::/64"
 // Verifies that a client-installed route is observed as `existing` if added
 // before the watcher client connects.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 async fn watcher_add_before_watch<
-    N: Netstack,
     I: fnet_routes_ext::FidlRouteIpExt + fnet_routes_ext::admin::FidlRouteAdminIpExt,
 >(
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = device.into_interface_in_realm(&realm).await.expect("add endpoint to Netstack");
     let main_table_id = realm.main_table_id::<I>().await;
@@ -650,16 +632,14 @@ async fn watcher_add_before_watch<
 
 // Verifies the watcher protocols correctly report `added` and `removed` events.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 async fn watcher_add_remove<
-    N: Netstack,
     I: fnet_routes_ext::FidlRouteIpExt + fnet_routes_ext::admin::FidlRouteAdminIpExt,
 >(
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = device.into_interface_in_realm(&realm).await.expect("add endpoint to Netstack");
     let main_table_id = realm.main_table_id::<I>().await;
@@ -706,11 +686,10 @@ async fn watcher_add_remove<
 // Verifies the watcher protocols close if the client incorrectly calls `Watch()`
 // while there is already a pending `Watch()` call parked in the server.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn watcher_already_pending<N: Netstack, I: fnet_routes_ext::FidlRouteIpExt>(name: &str) {
+async fn watcher_already_pending<I: fnet_routes_ext::FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let state_proxy =
         realm.connect_to_protocol::<I::StateMarker>().expect("failed to connect to routes/State");
     let watcher_proxy = fnet_routes_ext::get_watcher::<I>(&state_proxy, Default::default())
@@ -751,11 +730,10 @@ async fn watcher_already_pending<N: Netstack, I: fnet_routes_ext::FidlRouteIpExt
 // Verifies the watcher protocol does not get torn down when the `State`
 // protocol is closed.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn watcher_outlives_state<N: Netstack, I: fnet_routes_ext::FidlRouteIpExt>(name: &str) {
+async fn watcher_outlives_state<I: fnet_routes_ext::FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     // Connect to the watcher protocol and consume all existing events.
     let state_proxy =
@@ -784,10 +762,8 @@ async fn watcher_outlives_state<N: Netstack, I: fnet_routes_ext::FidlRouteIpExt>
 /// Verifies several instantiations of the watcher protocol can exist independent
 /// of one another.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 async fn watcher_multiple_instances<
-    N: Netstack,
     I: fnet_routes_ext::FidlRouteIpExt + fnet_routes_ext::admin::FidlRouteAdminIpExt,
 >(
     name: &str,
@@ -795,7 +771,7 @@ async fn watcher_multiple_instances<
     const NUM_INSTANCES: u8 = 10;
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = device.into_interface_in_realm(&realm).await.expect("add endpoint to Netstack");
     let main_table_id = realm.main_table_id::<I>().await;
@@ -898,7 +874,6 @@ async fn route_watcher_in_specific_table<
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support multiple route tables in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -906,7 +881,7 @@ async fn route_watcher_in_specific_table<
         route_table: _,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let route_table_provider = realm
         .connect_to_protocol::<I::RouteTableProviderMarker>()
         .expect("connect to main route table");
@@ -1168,14 +1143,14 @@ async fn interface_local_route_table_initial_routes<
         (loopback_id, interface_id),
         |(loopback_id, interface_id)| {
             RoutesHolder(
-                initial_loopback_routes_v4::<Netstack3>(loopback_id.get(), main_table_id)
+                initial_loopback_routes_v4(loopback_id.get(), main_table_id)
                     .chain(initial_ethernet_routes_v4(interface_id, local_table_id))
                     .collect::<HashSet<_>>(),
             )
         },
         |(loopback_id, interface_id)| {
             RoutesHolder(
-                initial_loopback_routes_v6::<Netstack3>(loopback_id.get(), main_table_id)
+                initial_loopback_routes_v6(loopback_id.get(), main_table_id)
                     .chain(initial_ethernet_routes_v6(interface_id, local_table_id))
                     .collect::<HashSet<_>>(),
             )

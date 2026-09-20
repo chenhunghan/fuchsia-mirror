@@ -39,6 +39,9 @@ zx_status_t Message::TryInitializeParameters(
     switch (zx_param.Which()) {
       case fuchsia_tee::wire::Parameter::Tag::kNone:
         optee_param.attribute = MessageParam::kAttributeTypeNone;
+        // Zero-initialize the payload to prevent leaking stale data if the TEE
+        // later changes the attribute type to something else (e.g. Value).
+        optee_param.payload = {};
         break;
       case fuchsia_tee::wire::Parameter::Tag::kValue:
         status = TryInitializeValue(zx_param.value(), &optee_param);
@@ -173,24 +176,41 @@ zx_status_t Message::CreateOutputParameterSet(
     fidl::VectorView<fuchsia_tee::wire::Parameter>* out_parameter_set) {
   ZX_DEBUG_ASSERT(out_parameter_set != nullptr);
 
-  if (header()->num_params < starting_param_index) {
-    LOG(ERROR, "Message contained fewer parameters (%" PRIu32 ") than required %zd",
-        header()->num_params, starting_param_index);
+  // Copy to a local const variable to prevent TOCTOU attacks where the TEE
+  // might modify the header in shared memory between validation and use.
+  const uint32_t num_params = header()->num_params;
+
+  if (num_params < starting_param_index) {
+    LOG(ERROR, "Message contained fewer parameters (%" PRIu32 ") than required %zd", num_params,
+        starting_param_index);
     return ZX_ERR_INVALID_ARGS;
   }
 
   // Ensure that the number of parameters returned by the TEE does not exceed the parameter set
   // array of parameters.
-  const size_t count = header()->num_params - starting_param_index;
+  const size_t count = num_params - starting_param_index;
   if (count > fuchsia_tee::wire::kMaxParametersetCount) {
     LOG(ERROR, "Message contained more parameters (%zd) than allowed", count);
     return ZX_ERR_INVALID_ARGS;
   }
 
+  if (memory_->size() < CalculateSize(num_params)) {
+    LOG(ERROR, "TEE returned more parameters than allocated!");
+    return ZX_ERR_INVALID_ARGS;
+  }
+
+  // Copy parameters to local storage to prevent TOCTOU
+  fbl::Vector<MessageParam> local_params;
+  local_params.reserve(count);
+  MessageParam* shared_params = reinterpret_cast<MessageParam*>(header() + 1);
+  for (size_t i = 0; i < count; i++) {
+    local_params.push_back(shared_params[i + starting_param_index]);
+  }
+
   out_parameter_set->Allocate(allocator, count);
 
   for (size_t i = 0; i < count; i++) {
-    const MessageParam& optee_param = params()[i + starting_param_index];
+    const MessageParam& optee_param = local_params[i];
 
     switch (optee_param.attribute) {
       case MessageParam::kAttributeTypeNone: {
@@ -443,16 +463,37 @@ fpromise::result<RpcMessage, zx_status_t> RpcMessage::CreateFromSharedMemory(Sha
     return fpromise::error(ZX_ERR_INVALID_ARGS);
   }
 
-  // The header portion is at least valid, so create an `RpcMessage` in order to access and
-  // validate the header.
   RpcMessage message(memory);
 
-  if (memory_size < CalculateSize(message.header()->num_params)) {
+  // Read header from shared memory (once)
+  MessageHeader* shared_hdr = reinterpret_cast<MessageHeader*>(memory->vaddr());
+  message.local_header_ = *shared_hdr;
+
+  // Copy to a local variable and cap it to prevent large allocations if the
+  // shared memory is compromised.
+  uint32_t num_params = message.local_header_.num_params;
+  if (num_params > fuchsia_tee::wire::kMaxParametersetCount) {
+    LOG(ERROR, "RPC command received too many parameters! (%u)", num_params);
+    message.set_return_origin(TEEC_ORIGIN_COMMS);
+    message.set_return_code(TEEC_ERROR_BAD_PARAMETERS);
+    return fpromise::error(ZX_ERR_INVALID_ARGS);
+  }
+
+  if (memory_size < CalculateSize(num_params)) {
     LOG(ERROR,
         "shared memory region passed into RPC command could not be parsed into a valid message!");
-    message.header()->return_origin = TEEC_ORIGIN_COMMS;
-    message.header()->return_code = TEEC_ERROR_BAD_PARAMETERS;
+    message.set_return_origin(TEEC_ORIGIN_COMMS);
+    message.set_return_code(TEEC_ERROR_BAD_PARAMETERS);
     return fpromise::error(ZX_ERR_INVALID_ARGS);
+  }
+
+  // Copy parameters
+  if (num_params > 0) {
+    MessageParam* shared_params = reinterpret_cast<MessageParam*>(shared_hdr + 1);
+    message.local_params_.reserve(num_params);
+    for (uint32_t i = 0; i < num_params; ++i) {
+      message.local_params_.push_back(shared_params[i]);
+    }
   }
 
   return fpromise::ok(std::move(message));
@@ -494,7 +535,8 @@ fpromise::result<LoadTaRpcMessage, zx_status_t> LoadTaRpcMessage::CreateFromRpcM
       result_message.mem_id_ = temp_mem.shared_memory_reference;
       result_message.mem_size_ = static_cast<size_t>(temp_mem.size);
       result_message.mem_paddr_ = static_cast<zx_paddr_t>(temp_mem.buffer);
-      result_message.out_ta_size_ = &temp_mem.size;
+      MessageParam* shared_param = result_message.GetSharedParam(kMemoryReferenceParamIndex);
+      result_message.out_ta_size_ = &shared_param->payload.temporary_memory.size;
       break;
     }
     case MessageParam::kAttributeTypeRegMemOutput:
@@ -624,8 +666,9 @@ fpromise::result<GetTimeRpcMessage, zx_status_t> GetTimeRpcMessage::CreateFromRp
     return fpromise::error(ZX_ERR_INVALID_ARGS);
   }
 
-  result_message.out_secs_ = &time_param.payload.value.get_time_specs.seconds;
-  result_message.out_nanosecs_ = &time_param.payload.value.get_time_specs.nanoseconds;
+  MessageParam* shared_param = result_message.GetSharedParam(kTimeParamIndex);
+  result_message.out_secs_ = &shared_param->payload.value.get_time_specs.seconds;
+  result_message.out_nanosecs_ = &shared_param->payload.value.get_time_specs.nanoseconds;
 
   return fpromise::ok(std::move(result_message));
 }
@@ -672,12 +715,12 @@ AllocateMemoryRpcMessage::CreateFromRpcMessage(RpcMessage&& rpc_message) {
   result_message.memory_size_ = static_cast<size_t>(memory_specs_param.memory_size);
 
   // Set up the memory output parameter
-  MessageParam& out_param = result_message.params()[kOutputTemporaryMemoryParamIndex];
-  out_param.attribute = MessageParam::AttributeType::kAttributeTypeTempMemOutput;
-  MessageParam::TemporaryMemory& out_temp_mem_param = out_param.payload.temporary_memory;
-  result_message.out_memory_size_ = &out_temp_mem_param.size;
-  result_message.out_memory_buffer_ = &out_temp_mem_param.buffer;
-  result_message.out_memory_id_ = &out_temp_mem_param.shared_memory_reference;
+  MessageParam* shared_out_param = result_message.GetSharedParam(kOutputTemporaryMemoryParamIndex);
+  shared_out_param->attribute = MessageParam::AttributeType::kAttributeTypeTempMemOutput;
+  result_message.out_memory_size_ = &shared_out_param->payload.temporary_memory.size;
+  result_message.out_memory_buffer_ = &shared_out_param->payload.temporary_memory.buffer;
+  result_message.out_memory_id_ =
+      &shared_out_param->payload.temporary_memory.shared_memory_reference;
 
   return fpromise::ok(std::move(result_message));
 }
@@ -804,8 +847,8 @@ OpenFileFileSystemRpcMessage::CreateFromFsRpcMessage(FileSystemRpcMessage&& fs_m
     return fpromise::error(ZX_ERR_INVALID_ARGS);
   }
 
-  result_message.out_fs_object_id_ =
-      &out_fs_object_id_param.payload.value.file_system_object.identifier;
+  MessageParam* shared_out_param = result_message.GetSharedParam(kOutFileSystemObjectIdParamIndex);
+  result_message.out_fs_object_id_ = &shared_out_param->payload.value.file_system_object.identifier;
 
   return fpromise::ok(std::move(result_message));
 }
@@ -854,8 +897,8 @@ CreateFileFileSystemRpcMessage::CreateFromFsRpcMessage(FileSystemRpcMessage&& fs
     return fpromise::error(ZX_ERR_INVALID_ARGS);
   }
 
-  result_message.out_fs_object_id_ =
-      &out_fs_object_param.payload.value.file_system_object.identifier;
+  MessageParam* shared_out_param = result_message.GetSharedParam(kOutFileSystemObjectIdParamIndex);
+  result_message.out_fs_object_id_ = &shared_out_param->payload.value.file_system_object.identifier;
 
   return fpromise::ok(std::move(result_message));
 }
@@ -916,7 +959,9 @@ ReadFileFileSystemRpcMessage::CreateFromFsRpcMessage(FileSystemRpcMessage&& fs_m
       result_message.file_contents_mem_id_ = temp_mem.shared_memory_reference;
       result_message.file_contents_mem_size_ = static_cast<size_t>(temp_mem.size);
       result_message.file_contents_mem_paddr_ = static_cast<zx_paddr_t>(temp_mem.buffer);
-      result_message.out_file_contents_size_ = &temp_mem.size;
+      MessageParam* shared_out_param =
+          result_message.GetSharedParam(kOutReadBufferMemoryParamIndex);
+      result_message.out_file_contents_size_ = &shared_out_param->payload.temporary_memory.size;
       break;
     }
     case MessageParam::kAttributeTypeRegMemInput:

@@ -15,21 +15,21 @@ import (
 	"testing"
 	"time"
 
-	v2config "go.fuchsia.dev/fuchsia/tools/check-licenses/config"
-	v2pipeline "go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
-	v2boundary "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
-	v2classify "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/classify"
-	v2discover "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover"
-	v2prune "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/prune"
-	v2validate "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/config"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/classify"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/prune"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate"
 )
 
 type captureRenderer struct {
-	Projects []*v2pipeline.Project
-	Errors   []v2pipeline.ComplianceError
+	Projects []*pipeline.Project
+	Errors   []pipeline.ComplianceError
 }
 
-func (r *captureRenderer) Run(ctx context.Context, projects []*v2pipeline.Project, errors []v2pipeline.ComplianceError) error {
+func (r *captureRenderer) Run(ctx context.Context, projects []*pipeline.Project, errors []pipeline.ComplianceError) error {
 	r.Projects = projects
 	r.Errors = errors
 	return nil
@@ -186,22 +186,22 @@ func TestGoldenTree_EndToEnd(t *testing.T) {
 	// -------------------------------------------------------------
 	// 3. Assemble Config & Execute Pipeline
 	// -------------------------------------------------------------
-	builder := v2config.NewBuilder(fuchsiaDir)
+	builder := config.NewBuilder(fuchsiaDir)
 	if err := builder.Assemble(); err != nil {
 		t.Fatalf("Failed to assemble config: %v", err)
 	}
 
-	crawler := v2discover.NewCrawler(fuchsiaDir, builder.Config.Discover)
-	grouper := v2boundary.NewGrouper(fuchsiaDir, builder.Config.Boundary)
-	pruner := v2prune.NewPruner(nil)
-	classifier, err := v2classify.NewClassifier(builder.Config.Classify)
+	crawler := discover.NewCrawler(fuchsiaDir, builder.Config.Discover)
+	grouper := boundary.NewGrouper(fuchsiaDir, builder.Config.Boundary)
+	pruner := prune.NewPruner(nil)
+	classifier, err := classify.NewClassifier(builder.Config.Classify)
 	if err != nil {
 		t.Fatalf("Failed to create classifier: %v", err)
 	}
-	validator := v2validate.NewValidator(fuchsiaDir, builder.Config.Validate)
+	validator := validate.NewValidator(fuchsiaDir, builder.Config.Validate)
 	renderer := &captureRenderer{}
 
-	orchestrator := v2pipeline.NewOrchestrator(
+	orchestrator := pipeline.NewOrchestrator(
 		crawler,
 		grouper,
 		pruner,
@@ -220,7 +220,7 @@ func TestGoldenTree_EndToEnd(t *testing.T) {
 	// -------------------------------------------------------------
 	// 4. Assert Project Boundary Resolution
 	// -------------------------------------------------------------
-	projectsByRel := make(map[string]*v2pipeline.Project)
+	projectsByRel := make(map[string]*pipeline.Project)
 	for _, p := range renderer.Projects {
 		rel, _ := filepath.Rel(fuchsiaDir, p.RootPath)
 		projectsByRel[filepath.ToSlash(rel)] = p
@@ -308,8 +308,8 @@ func TestGoldenTree_EndToEnd(t *testing.T) {
 
 	// Error 1: Missing Fuchsia copyright header
 	err1 := renderer.Errors[0]
-	if err1.CheckName != v2validate.PolicyFuchsiaCopyright {
-		t.Errorf("Expected check %s, got: %s", v2validate.PolicyFuchsiaCopyright, err1.CheckName)
+	if err1.CheckName != validate.PolicyFuchsiaCopyright {
+		t.Errorf("Expected check %s, got: %s", validate.PolicyFuchsiaCopyright, err1.CheckName)
 	}
 	if !strings.HasSuffix(err1.FilePath, "src/bad.cc") {
 		t.Errorf("Expected copyright error on src/bad.cc, got: %s", err1.FilePath)
@@ -317,8 +317,8 @@ func TestGoldenTree_EndToEnd(t *testing.T) {
 
 	// Error 2: Missing README on orphan tool
 	err2 := renderer.Errors[1]
-	if err2.CheckName != v2validate.PolicyNoReadme {
-		t.Errorf("Expected check %s, got: %s", v2validate.PolicyNoReadme, err2.CheckName)
+	if err2.CheckName != validate.PolicyNoReadme {
+		t.Errorf("Expected check %s, got: %s", validate.PolicyNoReadme, err2.CheckName)
 	}
 	relOrphan, _ := filepath.Rel(fuchsiaDir, err2.Project)
 	if filepath.ToSlash(relOrphan) != "prebuilt/third_party/orphan_tool" {

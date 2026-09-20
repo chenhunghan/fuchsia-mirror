@@ -10,9 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
-	"time"
 
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/config"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
@@ -21,11 +19,11 @@ import (
 
 // Policy check names corresponding to compliance engine rules.
 const (
-	CheckNameReadmeFuchsiaNeedsUpdate                              = "ReadmeFuchsiaNeedsUpdate"
-	PolicyCheckAllFuchsiaAuthorSourceFilesMustHaveCopyrightHeaders = "AllFuchsiaAuthorSourceFilesMustHaveCopyrightHeaders"
-	PolicyCheckAllProjectsMustHaveALicense                         = "AllProjectsMustHaveALicense"
-	PolicyCheckAllLicenseTextsMustBeRecognized                     = "AllLicenseTextsMustBeRecognized"
-	CheckNameAllLicensePatternUsagesMustBeApproved                 = "AllLicensePatternUsagesMustBeApproved"
+	CheckNameReadmeFuchsiaNeedsUpdate                              = validate.CheckReadmeNeedsUpdate
+	PolicyCheckAllFuchsiaAuthorSourceFilesMustHaveCopyrightHeaders = validate.PolicyFuchsiaCopyright
+	PolicyCheckAllProjectsMustHaveALicense                         = validate.PolicyNoLicense
+	PolicyCheckAllLicenseTextsMustBeRecognized                     = validate.PolicyUnrecognizedLicense
+	CheckNameAllLicensePatternUsagesMustBeApproved                 = validate.CheckPatternApproval
 )
 
 // FixerRenderer is a Stage 6 renderer that mutates disk to automatically resolve
@@ -102,15 +100,6 @@ func (r *FixerRenderer) applyFix(e pipeline.ComplianceError) {
 	}
 }
 
-var commentPrefixes = map[string]string{
-	".c": "//", ".cc": "//", ".cpp": "//", ".h": "//", ".hh": "//", ".hpp": "//",
-	".inc": "//", ".go": "//", ".rs": "//", ".dart": "//", ".java": "//", ".js": "//",
-	".ts": "//", ".tsx": "//", ".css": "//", ".proto": "//", ".gn": "#", ".gni": "#",
-	".py": "#", ".sh": "#", ".bash": "#", ".zsh": "#", ".pl": "#", ".rb": "#",
-	".yaml": "#", ".yml": "#", ".toml": "#", ".mk": "#", ".S": "//", ".asm": "//",
-	".bat": "REM", ".cmd": "REM",
-}
-
 func (r *FixerRenderer) applyCopyrightFix(filePath string) error {
 	absPath := filePath
 	if !filepath.IsAbs(filePath) {
@@ -125,28 +114,9 @@ func (r *FixerRenderer) applyCopyrightFix(filePath string) error {
 		return nil
 	}
 
-	content, err := os.ReadFile(absPath)
+	newBytes, err := validate.AddCopyright(absPath)
 	if err != nil {
 		return err
-	}
-
-	ext := strings.ToLower(filepath.Ext(absPath))
-	prefix, ok := commentPrefixes[ext]
-	if !ok {
-		prefix = "//"
-	}
-
-	year := time.Now().Year()
-	header := fmt.Sprintf("%s Copyright %d The Fuchsia Authors. All rights reserved.\n%s Use of this source code is governed by a BSD-style license that can be\n%s found in the LICENSE file.\n\n", prefix, year, prefix, prefix)
-
-	var newBytes []byte
-	lines := strings.Split(string(content), "\n")
-	if len(lines) > 0 && strings.HasPrefix(lines[0], "#!") {
-		newBytes = append(newBytes, []byte(lines[0]+"\n"+header)...)
-		newBytes = append(newBytes, []byte(strings.Join(lines[1:], "\n"))...)
-	} else {
-		newBytes = append(newBytes, []byte(header)...)
-		newBytes = append(newBytes, content...)
 	}
 
 	if err := os.WriteFile(absPath, newBytes, 0644); err != nil {

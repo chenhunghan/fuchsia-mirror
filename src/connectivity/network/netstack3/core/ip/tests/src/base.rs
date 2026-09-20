@@ -46,7 +46,7 @@ use packet_formats::ipv6::{
 };
 use packet_formats::testutil::parse_icmp_packet_in_ip_packet_in_ethernet_frame;
 use packet_formats::udp::UdpPacketBuilder;
-use rand::Rng;
+use rand::RngExt as _;
 use test_case::test_case;
 
 use netstack3_base::testutil::{
@@ -2835,6 +2835,7 @@ fn conntrack_entry_retained_across_loopback<I: TestDualStackIpExt + IpExt>(
             Some(ZonedAddr::Unzoned(remote_ip)),
             LISTENER_PORT.into(),
             Buf::new(HELLO.to_vec(), ..),
+            Default::default(),
         )
         .unwrap();
     let local_port = match udp_api.get_info(&socket) {

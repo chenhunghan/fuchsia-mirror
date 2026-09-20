@@ -5,19 +5,25 @@
 import("//build/bind/bind.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("msd-virtio-gpu-dml") {
+  dml = "meta/msd-virtio-gpu.dml"
+  driver_name = "msd-virtio-gpu"
+}
+
 fuchsia_driver_package("msd-virtio-gpu") {
   driver_components = [ ":msd-virtio-driver-component" ]
 }
 
 fuchsia_driver_component("msd-virtio-driver-component") {
+  dml_label = ":msd-virtio-gpu-dml"
   component_name = "msd_virtio"
   deps = [ ":msd-virtio-gpu-driver" ]
   info = "meta/msd-virtio-info.json"
-  manifest = "meta/msd-virtio-gpu.cml"
 }
 
 driver_bind_rules("msd-virtio-bind") {
-  rules = "meta/msd-virtio-gpu.bind"
+  bind_output = "msd-virtio-gpu.bindbc"
+  dml_label = ":msd-virtio-gpu-dml"
   deps = [ "//src/devices/bind/fuchsia" ]
 }
 

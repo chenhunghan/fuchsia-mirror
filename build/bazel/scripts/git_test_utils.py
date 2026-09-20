@@ -24,7 +24,7 @@ def git_cmd(git_dir: Path, args: T.Sequence[str | Path]) -> str:
         raise e
 
 
-def git_init(git_dir: Path, branch: T.Optional[str] = None) -> None:
+def git_init(git_dir: Path, branch: str | None = None) -> None:
     """Initialize a git repository forcing files ref-format and configuring standard test settings."""
     git_dir.mkdir(parents=True, exist_ok=True)
     # Force the traditional files backend (`-c init.defaultRefFormat=files`) to ensure

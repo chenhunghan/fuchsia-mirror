@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("parent-driver-dml") {
+  dml = "meta/parent-driver.dml"
+  driver_name = "zircon_transport_parent"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/parent-driver.bind"
+  dml_label = ":parent-driver-dml"
   bind_output = "parent-driver.bindbc"
   deps = [
     "//examples/drivers/bind/bindlib:gizmo.example",
@@ -46,8 +51,7 @@ fuchsia_rust_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
-  component_name = "zircon_transport_parent"
-  manifest = "meta/parent-driver.cml"
+  dml_label = ":parent-driver-dml"
   deps = [
     ":bind",
     ":driver",

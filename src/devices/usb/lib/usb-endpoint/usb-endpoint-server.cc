@@ -37,6 +37,40 @@ io_buffer::PhysIter phys_iter(uint64_t* phys_list, size_t phys_count, zx_off_t l
   return io_buffer::PhysIter(buf, max_length);
 }
 
+// Maximum number of completions sent in a single FIDL event to avoid exceeding channel message
+// size limits and reduce serialization latency.
+constexpr size_t kMaxBatchSize = fendpoint::kMaxCompletionsPerEvent;
+
+template <typename Target>
+void SendCompletionsBatch(const Target& target, std::vector<fendpoint::Completion> completions) {
+  if (completions.empty()) {
+    return;
+  }
+
+  // Fast path: send directly without vector chunking allocations if within limit.
+  if (completions.size() <= kMaxBatchSize) {
+    auto status = fidl::SendEvent(target)->OnCompletion(std::move(completions));
+    if (status.is_error()) {
+      zxlogf(ERROR, "Error sending event: %s", status.error_value().status_string());
+    }
+    return;
+  }
+
+  auto iter = completions.begin();
+  while (iter != completions.end()) {
+    size_t chunk_size =
+        std::min(static_cast<size_t>(std::distance(iter, completions.end())), kMaxBatchSize);
+    std::vector<fendpoint::Completion> batch(std::make_move_iterator(iter),
+                                             std::make_move_iterator(iter + chunk_size));
+    iter += chunk_size;
+    auto status = fidl::SendEvent(target)->OnCompletion(std::move(batch));
+    if (status.is_error()) {
+      zxlogf(ERROR, "Error sending event: %s", status.error_value().status_string());
+      break;
+    }
+  }
+}
+
 }  // namespace
 
 zx::result<std::vector<io_buffer::PhysIter>> EndpointServer::get_iter(RequestVariant& req,
@@ -132,13 +166,7 @@ void EndpointServer::OnUnbound(fidl::UnbindInfo info,
     binding_ref_.reset();
   }
 
-  if (!completions.empty()) {
-    // Return all already completed events.
-    auto status = fidl::SendEvent(server_end)->OnCompletion(std::move(completions));
-    if (status.is_error()) {
-      zxlogf(ERROR, "Error sending event: %s", status.error_value().status_string());
-    }
-  }
+  SendCompletionsBatch(server_end, std::move(completions));
 
   // Unregister VMOs
   auto result = UnpinVmos(registered_vmos);
@@ -264,10 +292,7 @@ void EndpointServer::RequestComplete(zx_status_t status, size_t actual, RequestV
   }
 
   if (binding) {
-    auto status = fidl::SendEvent(*binding)->OnCompletion(std::move(completions));
-    if (status.is_error()) {
-      zxlogf(ERROR, "Error sending event: %s", status.error_value().status_string());
-    }
+    SendCompletionsBatch(*binding, std::move(completions));
   }
 }
 

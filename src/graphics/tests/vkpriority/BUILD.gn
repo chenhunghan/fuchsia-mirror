@@ -39,7 +39,7 @@ fuchsia_test_package("vkpriority-pkg") {
 
   # Test could flake due to bad luck, so only enable for manual runs.
   test_specs = {
-    environments = []
+    build_only = true
   }
 }
 

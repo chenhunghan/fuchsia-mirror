@@ -82,16 +82,52 @@ class Gt92xxTest : public ::testing::Test {
     ASSERT_EQ(fake_gpio::ReadSubState{}, intr_states[1].sub_state);
   }
 
-  fidl::WireClient<fuchsia_input_report::InputReportsReader> GetReader() {
-    auto endpoints = fidl::Endpoints<fuchsia_input_report::InputDevice>::Create();
-    fidl::BindServer(input_report_loop_.dispatcher(), std::move(endpoints.server), &*device_);
-    fidl::WireSyncClient<fuchsia_input_report::InputDevice> client(std::move(endpoints.client));
+  class ReaderV2EventHandler
+      : public fidl::WireAsyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+   public:
+    explicit ReaderV2EventHandler(
+        fit::function<
+            void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+            callback)
+        : callback_(std::move(callback)) {}
 
-    auto reader_endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-    auto result = client->GetInputReportsReader(std::move(reader_endpoints.server));
-    EXPECT_TRUE(result.ok());
-    auto reader = fidl::WireClient<fuchsia_input_report::InputReportsReader>(
-        std::move(reader_endpoints.client), input_report_loop_.dispatcher());
+    void OnInputReports(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*
+                            event) override {
+      if (callback_) {
+        callback_(event);
+      }
+    }
+
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+   private:
+    fit::function<void(
+        fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+        callback_;
+  };
+
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> GetReader(
+      std::shared_ptr<ReaderV2EventHandler> event_handler) {
+    fidl::Endpoints<fuchsia_input_report::InputDevice> endpoints =
+        fidl::Endpoints<fuchsia_input_report::InputDevice>::Create();
+    fidl::BindServer(input_report_loop_.dispatcher(), std::move(endpoints.server), &*device_);
+    input_device_client_.emplace(std::move(endpoints.client), input_report_loop_.dispatcher());
+
+    fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> reader_endpoints =
+        fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+    (*input_device_client_)
+        ->GetInputReportsReaderV2(std::move(reader_endpoints.server), 10)
+        .ThenExactlyOnce(
+            [](fidl::WireUnownedResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2>&
+                   result) {
+              zx_status_t status = result.status();
+              EXPECT_OK(status);
+            });
+    EXPECT_OK(input_report_loop_.RunUntilIdle());
+
+    fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader(
+        std::move(reader_endpoints.client), input_report_loop_.dispatcher(), event_handler.get());
     EXPECT_OK(input_report_loop_.RunUntilIdle());
 
     return reader;
@@ -105,6 +141,7 @@ class Gt92xxTest : public ::testing::Test {
   mock_i2c::MockI2cGtest mock_i2c_;
   std::optional<Gt92xxTestDevice> device_;
   std::shared_ptr<MockDevice> fake_parent_;
+  std::optional<fidl::WireClient<fuchsia_input_report::InputDevice>> input_device_client_;
 
   async::Loop input_report_loop_{&kAsyncLoopConfigNoAttachToCurrentThread};
 };
@@ -223,43 +260,43 @@ TEST_F(Gt92xxTest, TestReport) {
   EXPECT_OK(device_->StartThread());
   zx_nanosleep(zx_deadline_after(ZX_MSEC(10)));
 
-  auto reader = GetReader();
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  std::shared_ptr<ReaderV2EventHandler> event_handler = std::make_shared<ReaderV2EventHandler>(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1u);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_touch());
-    auto& touch_report = report.touch();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
 
-    ASSERT_TRUE(touch_report.has_contacts());
-    ASSERT_EQ(touch_report.contacts().size(), 5u);
-    EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
-    EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x110);
-    EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x100);
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), 5u);
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x110);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x100);
 
-    EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1u);
-    EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x220);
-    EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x200);
+        EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1u);
+        EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x220);
+        EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x200);
 
-    EXPECT_EQ(touch_report.contacts()[2].contact_id(), 2u);
-    EXPECT_EQ(touch_report.contacts()[2].position_x(), 0x330);
-    EXPECT_EQ(touch_report.contacts()[2].position_y(), 0x300);
+        EXPECT_EQ(touch_report.contacts()[2].contact_id(), 2u);
+        EXPECT_EQ(touch_report.contacts()[2].position_x(), 0x330);
+        EXPECT_EQ(touch_report.contacts()[2].position_y(), 0x300);
 
-    EXPECT_EQ(touch_report.contacts()[3].contact_id(), 3u);
-    EXPECT_EQ(touch_report.contacts()[3].position_x(), 0x440);
-    EXPECT_EQ(touch_report.contacts()[3].position_y(), 0x400);
+        EXPECT_EQ(touch_report.contacts()[3].contact_id(), 3u);
+        EXPECT_EQ(touch_report.contacts()[3].position_x(), 0x440);
+        EXPECT_EQ(touch_report.contacts()[3].position_y(), 0x400);
 
-    EXPECT_EQ(touch_report.contacts()[4].contact_id(), 4u);
-    EXPECT_EQ(touch_report.contacts()[4].position_x(), 0x550);
-    EXPECT_EQ(touch_report.contacts()[4].position_y(), 0x500);
+        EXPECT_EQ(touch_report.contacts()[4].contact_id(), 4u);
+        EXPECT_EQ(touch_report.contacts()[4].position_x(), 0x550);
+        EXPECT_EQ(touch_report.contacts()[4].position_y(), 0x500);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
+
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader = GetReader(event_handler);
 
   device_->Trigger();
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -283,43 +320,43 @@ TEST_F(Gt92xxTest, TestReportMoreContacts) {
   EXPECT_OK(device_->StartThread());
   zx_nanosleep(zx_deadline_after(ZX_MSEC(10)));
 
-  auto reader = GetReader();
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  std::shared_ptr<ReaderV2EventHandler> event_handler = std::make_shared<ReaderV2EventHandler>(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1u);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_touch());
-    auto& touch_report = report.touch();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
 
-    ASSERT_TRUE(touch_report.has_contacts());
-    ASSERT_EQ(touch_report.contacts().size(), 5u);
-    EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
-    EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x110);
-    EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x100);
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), 5u);
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x110);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x100);
 
-    EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1u);
-    EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x220);
-    EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x200);
+        EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1u);
+        EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x220);
+        EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x200);
 
-    EXPECT_EQ(touch_report.contacts()[2].contact_id(), 2u);
-    EXPECT_EQ(touch_report.contacts()[2].position_x(), 0x330);
-    EXPECT_EQ(touch_report.contacts()[2].position_y(), 0x300);
+        EXPECT_EQ(touch_report.contacts()[2].contact_id(), 2u);
+        EXPECT_EQ(touch_report.contacts()[2].position_x(), 0x330);
+        EXPECT_EQ(touch_report.contacts()[2].position_y(), 0x300);
 
-    EXPECT_EQ(touch_report.contacts()[3].contact_id(), 3u);
-    EXPECT_EQ(touch_report.contacts()[3].position_x(), 0x440);
-    EXPECT_EQ(touch_report.contacts()[3].position_y(), 0x400);
+        EXPECT_EQ(touch_report.contacts()[3].contact_id(), 3u);
+        EXPECT_EQ(touch_report.contacts()[3].position_x(), 0x440);
+        EXPECT_EQ(touch_report.contacts()[3].position_y(), 0x400);
 
-    EXPECT_EQ(touch_report.contacts()[4].contact_id(), 4u);
-    EXPECT_EQ(touch_report.contacts()[4].position_x(), 0x550);
-    EXPECT_EQ(touch_report.contacts()[4].position_y(), 0x500);
+        EXPECT_EQ(touch_report.contacts()[4].contact_id(), 4u);
+        EXPECT_EQ(touch_report.contacts()[4].position_x(), 0x550);
+        EXPECT_EQ(touch_report.contacts()[4].position_y(), 0x500);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
+
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader = GetReader(event_handler);
 
   device_->Trigger();
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -343,35 +380,35 @@ TEST_F(Gt92xxTest, TestReportLessContacts) {
   EXPECT_OK(device_->StartThread());
   zx_nanosleep(zx_deadline_after(ZX_MSEC(10)));
 
-  auto reader = GetReader();
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  std::shared_ptr<ReaderV2EventHandler> event_handler = std::make_shared<ReaderV2EventHandler>(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1u);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_touch());
-    auto& touch_report = report.touch();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
 
-    ASSERT_TRUE(touch_report.has_contacts());
-    ASSERT_EQ(touch_report.contacts().size(), 3u);
-    EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
-    EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x110);
-    EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x100);
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), 3u);
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x110);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x100);
 
-    EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1u);
-    EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x220);
-    EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x200);
+        EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1u);
+        EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x220);
+        EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x200);
 
-    EXPECT_EQ(touch_report.contacts()[2].contact_id(), 2u);
-    EXPECT_EQ(touch_report.contacts()[2].position_x(), 0x330);
-    EXPECT_EQ(touch_report.contacts()[2].position_y(), 0x300);
+        EXPECT_EQ(touch_report.contacts()[2].contact_id(), 2u);
+        EXPECT_EQ(touch_report.contacts()[2].position_x(), 0x330);
+        EXPECT_EQ(touch_report.contacts()[2].position_y(), 0x300);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
+
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader = GetReader(event_handler);
 
   device_->Trigger();
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);

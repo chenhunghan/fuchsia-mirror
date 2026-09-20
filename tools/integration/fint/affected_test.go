@@ -218,4 +218,14 @@ func TestAffectedImplDualRun(t *testing.T) {
 	if report["legacy_affected_tests"] == nil {
 		t.Errorf("expected legacy_affected_tests in report")
 	}
+	if report["legacy_duration_seconds"] == nil {
+		t.Errorf("expected legacy_duration_seconds in report")
+	} else if dur, ok := report["legacy_duration_seconds"].(float64); !ok || dur < 0 {
+		t.Errorf("expected legacy_duration_seconds to be non-negative float, got %v", report["legacy_duration_seconds"])
+	}
+	if report["new_duration_seconds"] == nil {
+		t.Errorf("expected new_duration_seconds in report")
+	} else if dur, ok := report["new_duration_seconds"].(float64); !ok || dur < 0 {
+		t.Errorf("expected new_duration_seconds to be non-negative float, got %v", report["new_duration_seconds"])
+	}
 }

@@ -63,7 +63,7 @@ fuchsia_unittest_package("httpdate-hyper-tests") {
   if (current_cpu == "riscv64") {
     # TODO(https://fxbug.dev/298470623): Make this target pass on RISC-V and remove this.
     test_specs = {
-      environments = []
+      build_only = true
     }
   }
 }

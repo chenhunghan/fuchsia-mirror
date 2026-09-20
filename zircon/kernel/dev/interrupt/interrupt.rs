@@ -78,6 +78,14 @@ impl InterruptHandler {
     }
 }
 
+// SAFETY: `InterruptHandler` represents an opaque C-ABI callback
+// `(cookie, fn)`. Callers registering a handler guarantee that the callback
+// and its cookie context are safe to transfer and invoke from interrupt
+// context across any CPU. Synchronization of the storage slot itself is
+// managed by the enclosing interrupt manager.
+unsafe impl Send for InterruptHandler {}
+unsafe impl Sync for InterruptHandler {}
+
 /// The trigger mode of an interrupt.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

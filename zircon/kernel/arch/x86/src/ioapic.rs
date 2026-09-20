@@ -19,13 +19,13 @@ use crate::vm::vm_aspace::VmAspace;
 #[allow(unused_imports)]
 use core::ffi::c_int;
 use core::fmt::Write;
-use core::mem::MaybeUninit;
+use core::pin::Pin;
 use debug::ltrace::KernelConsoleWriter;
 use debug::ltracef;
 use fbl::Array;
 use kalloc::Box;
 use ksync::{KMutex, RawSpinlock, guarded, lock};
-use pin_init::PinInit;
+use lazy_init::LazyInit;
 use zx_status::Status;
 use zx_types::zx_status_t;
 
@@ -102,16 +102,7 @@ pub struct IoApicState {
 unsafe impl Send for IoApicState {}
 unsafe impl Sync for IoApicState {}
 
-static mut IO_APIC_STATE: MaybeUninit<IoApicState> = MaybeUninit::<IoApicState>::uninit();
-
-fn get_state() -> &'static IoApicState {
-    // SAFETY: Accessing the static variable `IO_APIC_STATE` is safe because it has been
-    // initialized during boot (single-threaded context).
-    #[allow(static_mut_refs)]
-    unsafe {
-        IO_APIC_STATE.assume_init_ref()
-    }
-}
+static IO_APIC_STATE: LazyInit<IoApicState> = LazyInit::uninit();
 
 unsafe extern "C" {
     fn root_resource_filter_add_deny_region(paddr: usize, len: usize, kind: u32);
@@ -214,7 +205,7 @@ fn write_redirection_entry(
 }
 
 fn resolve_global_irq_no_panic(irq: u32) -> Option<&'static IoApic> {
-    for apic in get_state().io_apics.iter() {
+    for apic in IO_APIC_STATE.io_apics.iter() {
         let start = apic.desc.global_irq_base;
         let end = start + apic.max_redirection_entry as u32;
         if start <= irq && irq <= end {
@@ -358,16 +349,13 @@ pub fn apic_io_init_safe(io_apic_descs: &[IoApicDescriptor], overrides: &[IoApic
 
     let io_apics = Array::from_box(io_apics_slice);
 
-    // SAFETY: This function is called during single threaded init and so we know there are no other
-    // references.
-    #[allow(static_mut_refs)]
+    // SAFETY: Called once during boot, serialized with respect to any other access.
     let _ = unsafe {
-        pin_init::pin_init!(IoApicState {
+        Pin::static_ref(&IO_APIC_STATE).init_pin(pin_init::pin_init!(IoApicState {
             io_apics: io_apics,
             isa_overrides: isa_overrides,
             lock <- KMutex::init(),
-        })
-        .__pinned_init(IO_APIC_STATE.as_mut_ptr())
+        }))
     };
 }
 
@@ -378,19 +366,12 @@ pub unsafe extern "C" fn apic_io_init(
     overrides: *const IoApicIsaOverride,
     num_overrides: usize,
 ) {
-    let io_apic_descs = if num_io_apic_descs > 0 {
-        // SAFETY: `io_apic_descs` points to a valid array of size `num_io_apic_descs` provided by
-        // early boot.
-        unsafe { core::slice::from_raw_parts(io_apic_descs, num_io_apic_descs) }
-    } else {
-        &[]
-    };
-    let overrides = if num_overrides > 0 {
-        // SAFETY: `overrides` points to a valid array of size `num_overrides` provided by early boot.
-        unsafe { core::slice::from_raw_parts(overrides, num_overrides) }
-    } else {
-        &[]
-    };
+    // SAFETY: The caller guarantees `io_apic_descs` points to `num_io_apic_descs` initialized
+    // descriptors whenever `num_io_apic_descs > 0`.
+    let io_apic_descs = unsafe { zr::slice_from_raw_parts(io_apic_descs, num_io_apic_descs) };
+    // SAFETY: The caller guarantees `overrides` points to `num_overrides` initialized entries
+    // whenever `num_overrides > 0`.
+    let overrides = unsafe { zr::slice_from_raw_parts(overrides, num_overrides) };
     apic_io_init_safe(io_apic_descs, overrides);
 }
 
@@ -402,8 +383,7 @@ pub extern "C" fn apic_io_is_valid_irq(global_irq: u32) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_io_mask_irq(global_irq: u32, mask: bool) {
     let io_apic = resolve_global_irq(global_irq);
-    let state = get_state();
-    lock!(let _guard = state.lock_lock());
+    lock!(let _guard = IO_APIC_STATE.lock_lock());
     let bank = io_apic.bank();
     let mut reg = read_redirection_entry(&bank, io_apic, global_irq);
     if mask {
@@ -430,10 +410,9 @@ pub extern "C" fn apic_io_configure_irq(
     dst: u8,
     vector: u8,
 ) {
-    let state = get_state();
     let io_apic = resolve_global_irq(global_irq);
 
-    lock!(state.lock_lock());
+    lock!(IO_APIC_STATE.lock_lock());
 
     let mut mask = mask;
 
@@ -463,11 +442,9 @@ pub extern "C" fn apic_io_configure_irq(
 pub fn apic_io_fetch_irq_config_safe(
     global_irq: u32,
 ) -> Result<(InterruptTriggerMode, InterruptPolarity), Status> {
-    let state = get_state();
-
     let io_apic = resolve_global_irq_no_panic(global_irq).ok_or(Status::INVALID_ARGS)?;
 
-    lock!(let _guard = state.lock_lock());
+    lock!(let _guard = IO_APIC_STATE.lock_lock());
     let bank = io_apic.bank();
     let reg = read_redirection_entry(&bank, io_apic, global_irq);
 
@@ -502,10 +479,9 @@ pub extern "C" fn apic_io_fetch_irq_config(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_io_configure_irq_vector(global_irq: u32, vector: u8) {
-    let state = get_state();
     let io_apic = resolve_global_irq(global_irq);
 
-    lock!(let _guard = state.lock_lock());
+    lock!(let _guard = IO_APIC_STATE.lock_lock());
     let bank = io_apic.bank();
     let mut reg = read_redirection_entry(&bank, io_apic, global_irq);
 
@@ -523,10 +499,9 @@ pub extern "C" fn apic_io_configure_irq_vector(global_irq: u32, vector: u8) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_io_fetch_irq_vector(global_irq: u32) -> u8 {
-    let state = get_state();
     let io_apic = resolve_global_irq(global_irq);
 
-    lock!(let _guard = state.lock_lock());
+    lock!(let _guard = IO_APIC_STATE.lock_lock());
     let bank = io_apic.bank();
     let reg = read_redirection_entry(&bank, io_apic, global_irq);
     io_apic_rte_get_vector(reg)
@@ -535,11 +510,10 @@ pub extern "C" fn apic_io_fetch_irq_vector(global_irq: u32) -> u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_io_mask_isa_irq(isa_irq: u8, mask: bool) {
     assert!(isa_irq < NUM_ISA_IRQS as u8);
-    let state = get_state();
 
     let mut global_irq = isa_irq as u32;
-    if state.isa_overrides[isa_irq as usize].remapped {
-        global_irq = state.isa_overrides[isa_irq as usize].global_irq;
+    if IO_APIC_STATE.isa_overrides[isa_irq as usize].remapped {
+        global_irq = IO_APIC_STATE.isa_overrides[isa_irq as usize].global_irq;
     }
     apic_io_mask_irq(global_irq, mask);
 }
@@ -557,15 +531,14 @@ pub extern "C" fn apic_io_configure_isa_irq(
     vector: u8,
 ) {
     assert!(isa_irq < NUM_ISA_IRQS as u8);
-    let state = get_state();
 
     let mut global_irq = isa_irq as u32;
     let mut trig_mode = InterruptTriggerMode::Edge;
     let mut polarity = InterruptPolarity::High;
-    if state.isa_overrides[isa_irq as usize].remapped {
-        global_irq = state.isa_overrides[isa_irq as usize].global_irq;
-        trig_mode = state.isa_overrides[isa_irq as usize].tm;
-        polarity = state.isa_overrides[isa_irq as usize].pol;
+    if IO_APIC_STATE.isa_overrides[isa_irq as usize].remapped {
+        global_irq = IO_APIC_STATE.isa_overrides[isa_irq as usize].global_irq;
+        trig_mode = IO_APIC_STATE.isa_overrides[isa_irq as usize].tm;
+        polarity = IO_APIC_STATE.isa_overrides[isa_irq as usize].pol;
     }
 
     apic_io_configure_irq(global_irq, trig_mode, polarity, del_mode, mask, dst_mode, dst, vector);
@@ -584,12 +557,11 @@ pub extern "C" fn apic_io_configure_isa_irq(
 // interrupt.
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_io_issue_eoi(global_irq: u32, vec: u8) {
-    let state = get_state();
     let io_apic = resolve_global_irq(global_irq);
 
     assert!(io_apic.version >= IO_APIC_EOIR_MIN_VERSION);
     let bank = io_apic.bank();
-    lock!(let _guard = state.lock_lock());
+    lock!(let _guard = IO_APIC_STATE.lock_lock());
     // SAFETY: Writing to the write-only IO_APIC_EOIR register is safe for a mapped window.
     unsafe {
         bank.at(IO_APIC_EOIR).write(vec as u32);
@@ -601,10 +573,9 @@ pub extern "C" fn apic_io_issue_eoi(global_irq: u32, vec: u8) {
 pub extern "C" fn apic_io_isa_to_global(isa_irq: u8) -> u32 {
     // It is a programming bug for this to be invoked with an invalid value.
     assert!(isa_irq < NUM_ISA_IRQS as u8);
-    let state = get_state();
 
-    if state.isa_overrides[isa_irq as usize].remapped {
-        state.isa_overrides[isa_irq as usize].global_irq
+    if IO_APIC_STATE.isa_overrides[isa_irq as usize].remapped {
+        IO_APIC_STATE.isa_overrides[isa_irq as usize].global_irq
     } else {
         isa_irq as u32
     }
@@ -614,15 +585,14 @@ pub extern "C" fn apic_io_isa_to_global(isa_irq: u8) -> u32 {
 /// global system interrupts provided to us by ACPI.
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_io_get_gsi_range() -> GsiRange {
-    let state = get_state();
-    assert!(!state.io_apics.is_empty());
+    assert!(!IO_APIC_STATE.io_apics.is_empty());
 
     let mut range = GsiRange { start: u32::MAX, end: 0 };
 
     // If we could be certain the MADT tables were always in increasing order this
     // could be a constant time operation, but since no such guarantee exists we
     // need to walk the descriptors.
-    for apic in state.io_apics.iter() {
+    for apic in IO_APIC_STATE.io_apics.iter() {
         range.start = core::cmp::min(range.start, apic.desc.global_irq_base);
         // max_redirection_entry is the offset of the last entry, not the number of entries.
         range.end = core::cmp::max(
@@ -643,10 +613,9 @@ pub extern "C" fn apic_io_save() {
     unsafe {
         assert!(cpp_arch_ints_disabled());
     }
-    let state = get_state();
 
-    lock!(state.lock_lock());
-    for apic in state.io_apics.iter() {
+    lock!(IO_APIC_STATE.lock_lock());
+    for apic in IO_APIC_STATE.io_apics.iter() {
         let bank = apic.bank();
         for j in 0..=apic.max_redirection_entry {
             let global_irq = apic.desc.global_irq_base + j as u32;
@@ -666,10 +635,9 @@ pub extern "C" fn apic_io_restore() {
     unsafe {
         assert!(cpp_arch_ints_disabled());
     }
-    let state = get_state();
 
-    lock!(state.lock_lock());
-    for apic in state.io_apics.iter() {
+    lock!(IO_APIC_STATE.lock_lock());
+    for apic in IO_APIC_STATE.io_apics.iter() {
         let bank = apic.bank();
         for j in 0..=apic.max_redirection_entry {
             let global_irq = apic.desc.global_irq_base + j as u32;
@@ -683,7 +651,7 @@ pub extern "C" fn apic_io_restore() {
 
 fn apic_io_debug_nolock() {
     let mut w = KernelConsoleWriter;
-    for (i, apic) in get_state().io_apics.iter().enumerate() {
+    for (i, apic) in IO_APIC_STATE.io_apics.iter().enumerate() {
         let _ = writeln!(w, "IO APIC idx {}:", i);
         let _ = writeln!(w, "  id: {:08x}", apic.desc.apic_id);
         let _ = writeln!(w, "  version: {:08x}", apic.version);
@@ -721,7 +689,7 @@ fn apic_io_debug_nolock() {
         }
     }
     let _ = writeln!(w, "ISA Overrides:");
-    for o in get_state().isa_overrides.iter() {
+    for o in IO_APIC_STATE.isa_overrides.iter() {
         if o.remapped {
             let _ = writeln!(w, "  isa_irq {} global_irq {}", o.isa_irq, o.global_irq);
         }
@@ -730,7 +698,7 @@ fn apic_io_debug_nolock() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_io_debug() {
-    lock!(get_state().lock_lock());
+    lock!(IO_APIC_STATE.lock_lock());
     apic_io_debug_nolock();
 }
 

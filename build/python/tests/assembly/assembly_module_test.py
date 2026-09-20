@@ -7,7 +7,6 @@ import io
 import os
 import tempfile
 import unittest
-from typing import List, Optional
 
 import assembly
 import serialization
@@ -444,9 +443,9 @@ class PackageManifestBuilder:
     """
 
     def __init__(self, name: str) -> None:
-        self._manifest_path: Optional[FilePath] = None
+        self._manifest_path: FilePath | None = None
         self._name = name
-        self._blobs: List[BlobEntry] = []
+        self._blobs: list[BlobEntry] = []
         self._name_counter = 0
 
     def _make_blob_name(self, pattern: str = "blob_") -> str:
@@ -454,7 +453,7 @@ class PackageManifestBuilder:
         self._name_counter += 1
         return name
 
-    def _make_merkle(self, idx: Optional[int] = None) -> str:
+    def _make_merkle(self, idx: int | None = None) -> str:
         if idx is None:
             idx = self._name_counter
             self._name_counter += 1
@@ -467,10 +466,10 @@ class PackageManifestBuilder:
 
     def blob(
         self,
-        path: Optional[str] = None,
-        merkle: Optional[str] = None,
-        size: Optional[int] = None,
-        source: Optional[FilePath] = None,
+        path: str | None = None,
+        merkle: str | None = None,
+        size: int | None = None,
+        source: FilePath | None = None,
     ) -> "PackageManifestBuilder":
         """Add a blob to the package, creating fake data for any fields that
         aren't given.

@@ -85,6 +85,8 @@ template("kernel_switchset") {
 
   assert(defined(invoker.unit_tests_enabled),
          "kernel_switchset($target_name) must define unit_tests_enabled")
+  assert(!invoker.unit_tests_enabled || _lk_debug_level > 0,
+         "unit_tests_enabled cannot be true when lk_debug_level is 0")
 
   if (defined(invoker.optimization_mode)) {
     switchset_optimize = invoker.optimization_mode

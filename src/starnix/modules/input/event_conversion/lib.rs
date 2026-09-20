@@ -4,11 +4,10 @@
 
 #![recursion_limit = "512"]
 
-mod keymap;
-
 pub mod button_fuchsia_to_linux;
 pub mod key_fuchsia_to_linux;
 pub mod key_linux_to_fuchsia;
+pub mod keymap;
 pub mod mouse_fuchsia_to_linux;
 pub mod touch_fuchsia_to_linux;
 pub mod touch_linux_to_fuchsia;

@@ -18,7 +18,10 @@ rustc_library("refaults_vmo") {
 
   test_deps = []
 
-  sources = [ "src/lib.rs" ]
+  sources = [
+    "src/atomic_vec.rs",
+    "src/lib.rs",
+  ]
 }
 
 fuchsia_unittest_package("tests") {

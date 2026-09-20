@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::pin::pin;
 
 use assert_matches::assert_matches;
-use fidl::endpoints::{ProtocolMarker, Proxy as _};
+use fidl::endpoints::ProtocolMarker;
 use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_net_matchers_ext as fnet_matchers_ext;
 use fidl_fuchsia_net_routes_admin as fnet_routes_admin;
@@ -21,7 +21,7 @@ use net_declare::fidl_subnet;
 use net_types::ip::{GenericOverIp, Ip, IpInvariant, IpVersion};
 use netemul::{RealmTcpListener as _, RealmTcpStream as _};
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
-use netstack_testing_common::realms::{Netstack2, Netstack3, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 use routes_common::{TestSetup, add_default_route_for_mark};
 
@@ -51,7 +51,6 @@ async fn add_remove_rules<I: FidlRuleAdminIpExt + FidlRouteAdminIpExt + FidlRout
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support route rules in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -59,7 +58,7 @@ async fn add_remove_rules<I: FidlRuleAdminIpExt + FidlRouteAdminIpExt + FidlRout
         route_table,
         global_route_table: _,
         state: _,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let rule_table =
         realm.connect_to_protocol::<I::RuleTableMarker>().expect("connect to rule table");
     let priority = fnet_routes_ext::rules::RuleSetPriority::from(0);
@@ -204,7 +203,6 @@ async fn bad_route_table_authentication<
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support route rules in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -212,7 +210,7 @@ async fn bad_route_table_authentication<
         route_table,
         global_route_table: _,
         state: _,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let rule_table =
         realm.connect_to_protocol::<I::RuleTableMarker>().expect("connect to rule table");
     let rule_set = fnet_routes_ext::rules::new_rule_set::<I>(
@@ -264,7 +262,6 @@ async fn table_removal_removes_rules<
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support multiple route tables in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -272,7 +269,7 @@ async fn table_removal_removes_rules<
         route_table,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let main_table_id =
         fnet_routes_ext::admin::get_table_id::<I>(&route_table).await.expect("get table id");
     let route_table_provider = realm
@@ -550,26 +547,4 @@ async fn multi_network<I: FidlRuleAdminIpExt + FidlRouteAdminIpExt + FidlRouteIp
 
         futures::join!(client, server);
     }
-}
-
-// Netstack2 does not support fuchsia.net.routes.admin.RuleTableV{4, 6}, so it closes the
-// channel as soon as a request comes in.
-#[netstack_test]
-#[variant(I, Ip)]
-async fn rule_table_netstack2_closes_channel<
-    I: FidlRouteAdminIpExt + FidlRouteIpExt + FidlRuleIpExt + FidlRuleAdminIpExt,
->(
-    name: &str,
-) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox
-        .create_netstack_realm::<Netstack2, _>(format!("routes-admin-{name}"))
-        .expect("create realm");
-    let rule_table =
-        realm.connect_to_protocol::<I::RuleTableMarker>().expect("connect to rule table");
-    let _table = fnet_routes_ext::rules::new_rule_set::<I>(&rule_table, 42.into())
-        .expect("create new route table");
-
-    let signals = rule_table.on_closed().await.expect("should await closure successfully");
-    assert!(signals.contains(zx::Signals::CHANNEL_PEER_CLOSED));
 }

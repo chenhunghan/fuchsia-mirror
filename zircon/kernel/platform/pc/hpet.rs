@@ -8,10 +8,11 @@ use crate::platform_pc::acpi::global_acpi_lite_parser;
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE,
 };
-use core::mem::MaybeUninit;
+use core::pin::Pin;
 use debug::dprintf;
 use ksync::{KMutex, RawSpinlock, guarded, lock};
-use pin_init::{PinInit, pin_init};
+use lazy_init::LazyInit;
+use pin_init::pin_init;
 use zx_status::Status;
 
 #[cfg(console_enabled)]
@@ -61,6 +62,7 @@ zr::static_assert!(core::mem::align_of::<HpetTimerRegisters>() == 8);
 zr::static_assert!(core::mem::size_of::<HpetRegisters>() == 256);
 zr::static_assert!(core::mem::align_of::<HpetRegisters>() == 8);
 
+/// Driver state for the High Precision Event Timer.
 #[guarded]
 struct HpetState {
     present: bool,
@@ -75,7 +77,7 @@ struct HpetState {
 // during boot and read-only afterwards, and register access is synchronized via `mu`.
 unsafe impl Sync for HpetState {}
 
-static mut HPET_STATE: MaybeUninit<HpetState> = MaybeUninit::uninit();
+static HPET_STATE: LazyInit<HpetState> = LazyInit::uninit();
 
 const MAX_PERIOD_IN_FS: u64 = 0x05F5E100;
 /// Bit masks for the general_config register
@@ -88,10 +90,51 @@ unsafe extern "C" {
     fn cpp_hpet_set_ticks_to_clock_monotonic(n: u32, d: u32);
 }
 
-fn try_platform_hpet_init_with_regs(
-    regs_addr: *mut HpetRegisters,
-    hpet_address: u64,
-) -> Result<(), Status> {
+struct Hpet {
+    registers: *mut HpetRegisters,
+    ticks_per_ms: u64,
+    num_timers: u8,
+}
+
+fn probe_hpet() -> Option<Hpet> {
+    // Look up the HPET table.
+    let hpet_desc = acpi_lite::get_table_by_type::<acpi_lite::structures::AcpiHpetTable>(
+        global_acpi_lite_parser(),
+    )?;
+
+    let hpet_address = hpet_desc.address.address;
+
+    // Ensure the HPET table uses MMIO.
+    if hpet_desc.address.address_space_id != acpi_lite::structures::ACPI_ADDR_SPACE_MEMORY {
+        dprintf!(INFO, "HPET unsupported: require MMIO-based HPET.\n");
+        return None;
+    }
+
+    let mut regs_addr: *mut HpetRegisters = core::ptr::null_mut();
+    // SAFETY: FFI call with correct pointers is safe.
+    let res = unsafe {
+        crate::vm::vm_aspace::VmAspace::kernel_aspace().alloc_physical(
+            c"hpet",
+            page::SIZE,
+            &mut regs_addr as *mut *mut HpetRegisters as *mut *mut core::ffi::c_void,
+            page::SHIFT as u8,
+            hpet_address.into(),
+            0,
+            ARCH_MMU_FLAG_UNCACHED_DEVICE | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
+        )
+    };
+    if res.is_err() {
+        return None;
+    }
+
+    let cleanup_and_fail = || {
+        // SAFETY: Free the allocated region on failure.
+        unsafe {
+            let _ = crate::vm::vm_aspace::VmAspace::kernel_aspace().free_region(regs_addr as usize);
+        }
+        None
+    };
+
     // SAFETY: regs_addr is validly mapped MMIO.
     let general_caps =
         unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*regs_addr).general_caps)) };
@@ -99,13 +142,13 @@ fn try_platform_hpet_init_with_regs(
     let tick_period_in_fs = general_caps >> 32;
 
     if tick_period_in_fs == 0 || tick_period_in_fs > MAX_PERIOD_IN_FS {
-        return Err(Status::INVALID_ARGS);
+        return cleanup_and_fail();
     }
 
     // We only support HPETs that are 64-bit and have at least two timers.
     let num_timers_val = (((general_caps >> 8) & 0x1f) + 1) as u8;
     if !has_64bit_count || num_timers_val < 2 {
-        return Err(Status::NOT_SUPPORTED);
+        return cleanup_and_fail();
     }
 
     // Make sure all timers have interrupts disabled.
@@ -157,7 +200,7 @@ fn try_platform_hpet_init_with_regs(
             n,
             d,
         );
-        return Err(Status::OUT_OF_RANGE);
+        return cleanup_and_fail();
     }
 
     // SAFETY: FFI call to set global ratio in timer.cc.
@@ -165,23 +208,17 @@ fn try_platform_hpet_init_with_regs(
         cpp_hpet_set_ticks_to_clock_monotonic(n as u32, d as u32);
     }
 
-    // SAFETY: Early boot, single-threaded.
-    #[allow(static_mut_refs)]
-    let state = unsafe { HPET_STATE.assume_init_mut() };
-    state.present = true;
-    state.registers = regs_addr;
-    state.ticks_per_ms = hpet_nominal_frequency / 1000;
-    state.num_timers = num_timers_val;
+    let ticks_per_ms = hpet_nominal_frequency / 1000;
 
     dprintf!(
         INFO,
         "HPET: detected at {:#x} ticks per ms {} num timers {}\n",
         hpet_address,
-        hpet_nominal_frequency / 1000,
+        ticks_per_ms,
         num_timers_val,
     );
 
-    Ok(())
+    Some(Hpet { registers: regs_addr, ticks_per_ms, num_timers: num_timers_val })
 }
 
 /// Initializes the HPET driver by locating the ACPI table, mapping the MMIO registers,
@@ -190,60 +227,21 @@ fn try_platform_hpet_init_with_regs(
 /// # Safety
 /// This function must be called exactly once during early boot (at LK_INIT).
 fn platform_hpet_init(_level: init::LkInitLevel) {
-    // SAFETY: Called during early boot when single threaded.
-    #[allow(static_mut_refs)]
+    let (present, registers, ticks_per_ms, num_timers) = match probe_hpet() {
+        Some(hpet) => (true, hpet.registers, hpet.ticks_per_ms, hpet.num_timers),
+        None => (false, core::ptr::null_mut(), 0, 0),
+    };
+
+    // SAFETY: Called once during boot, serialized with respect to any other access.
     let _ = unsafe {
-        pin_init!(HpetState {
-            present: false,
-            registers: core::ptr::null_mut(),
-            ticks_per_ms: 0,
-            num_timers: 0,
+        Pin::static_ref(&HPET_STATE).init_pin(pin_init!(HpetState {
+            present,
+            registers,
+            ticks_per_ms,
+            num_timers,
             mu <- KMutex::init(),
-        })
-        .__pinned_init(HPET_STATE.as_mut_ptr())
+        }))
     };
-
-    // Look up the HPET table.
-    let hpet_desc = match acpi_lite::get_table_by_type::<acpi_lite::structures::AcpiHpetTable>(
-        global_acpi_lite_parser(),
-    ) {
-        Some(desc) => desc,
-        None => {
-            dprintf!(INFO, "No HPET ACPI table found.\n");
-            return;
-        }
-    };
-
-    let hpet_address = hpet_desc.address.address;
-
-    // Ensure the HPET table uses MMIO.
-    if hpet_desc.address.address_space_id != acpi_lite::structures::ACPI_ADDR_SPACE_MEMORY {
-        dprintf!(INFO, "HPET unsupported: require MMIO-based HPET.\n");
-        return;
-    }
-
-    let mut regs_addr: *mut HpetRegisters = core::ptr::null_mut();
-    // SAFETY: FFI call with correct pointers is safe.
-    let res = unsafe {
-        crate::vm::vm_aspace::VmAspace::kernel_aspace().alloc_physical(
-            c"hpet",
-            page::SIZE,
-            &mut regs_addr as *mut *mut HpetRegisters as *mut *mut core::ffi::c_void,
-            page::SHIFT as u8,
-            hpet_address.into(),
-            0,
-            ARCH_MMU_FLAG_UNCACHED_DEVICE | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-        )
-    };
-    if res.is_err() {
-        return;
-    }
-
-    if let Err(_err) = try_platform_hpet_init_with_regs(regs_addr, hpet_address) {
-        unsafe {
-            let _ = crate::vm::vm_aspace::VmAspace::kernel_aspace().free_region(regs_addr as usize);
-        }
-    }
 }
 
 /// Returns the current main counter value of the HPET.
@@ -254,9 +252,7 @@ fn platform_hpet_init(_level: init::LkInitLevel) {
 /// MMIO reads from mapped HPET registers.
 #[unsafe(no_mangle)]
 pub extern "C" fn hpet_get_value() -> u64 {
-    // SAFETY: HPET_STATE is initialized during boot.
-    #[allow(static_mut_refs)]
-    let state = unsafe { HPET_STATE.assume_init_ref() };
+    let state = &*HPET_STATE;
     if !state.present {
         return 0;
     }
@@ -285,9 +281,7 @@ pub extern "C" fn hpet_get_value() -> u64 {
 /// volatile MMIO writes.
 #[unsafe(no_mangle)]
 pub extern "C" fn hpet_set_value(v: u64) -> zx_types::zx_status_t {
-    // SAFETY: HPET_STATE is initialized during boot.
-    #[allow(static_mut_refs)]
-    let state = unsafe { HPET_STATE.assume_init_ref() };
+    let state = &*HPET_STATE;
     if !state.present {
         return Status::BAD_STATE.into_raw();
     }
@@ -312,11 +306,7 @@ pub extern "C" fn hpet_set_value(v: u64) -> zx_types::zx_status_t {
 /// Returns true if the HPET is present and initialized.
 #[unsafe(no_mangle)]
 pub extern "C" fn hpet_is_present() -> bool {
-    // SAFETY: HPET_STATE is initialized during boot.
-    #[allow(static_mut_refs)]
-    unsafe {
-        HPET_STATE.assume_init_ref().present
-    }
+    HPET_STATE.present
 }
 
 /// Enables the HPET main counter.
@@ -327,9 +317,7 @@ pub extern "C" fn hpet_is_present() -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn hpet_enable() {
     debug_assert!(hpet_is_present());
-    // SAFETY: HPET_STATE is initialized.
-    #[allow(static_mut_refs)]
-    let state = unsafe { HPET_STATE.assume_init_ref() };
+    let state = &*HPET_STATE;
     let regs = state.registers;
     if regs.is_null() {
         return;
@@ -353,9 +341,7 @@ pub extern "C" fn hpet_enable() {
 #[unsafe(no_mangle)]
 pub extern "C" fn hpet_disable() {
     debug_assert!(hpet_is_present());
-    // SAFETY: HPET_STATE is initialized.
-    #[allow(static_mut_refs)]
-    let state = unsafe { HPET_STATE.assume_init_ref() };
+    let state = &*HPET_STATE;
     let regs = state.registers;
     if regs.is_null() {
         return;
@@ -377,9 +363,7 @@ pub extern "C" fn hpet_disable() {
 /// Safe to call after driver initialization. Performs volatile MMIO reads.
 #[unsafe(no_mangle)]
 pub extern "C" fn hpet_wait_ms(ms: u16) {
-    // SAFETY: HPET_STATE is initialized.
-    #[allow(static_mut_refs)]
-    let state = unsafe { HPET_STATE.assume_init_ref() };
+    let state = &*HPET_STATE;
     let regs = state.registers;
     if regs.is_null() {
         return;
@@ -401,11 +385,7 @@ pub extern "C" fn hpet_wait_ms(ms: u16) {
 /// Returns the nominal frequency of the HPET in ticks per millisecond.
 #[unsafe(no_mangle)]
 pub extern "C" fn hpet_ticks_per_ms() -> u64 {
-    // SAFETY: HPET_STATE is initialized.
-    #[allow(static_mut_refs)]
-    unsafe {
-        HPET_STATE.assume_init_ref().ticks_per_ms
-    }
+    HPET_STATE.ticks_per_ms
 }
 
 #[cfg(console_enabled)]
@@ -414,9 +394,7 @@ fn cmd_show_hpet_regs() -> i32 {
         dprintf!(ALWAYS, "HPET is not present.\n");
         return -1;
     }
-    // SAFETY: HPET_STATE is initialized.
-    #[allow(static_mut_refs)]
-    let state = unsafe { HPET_STATE.assume_init_ref() };
+    let state = &*HPET_STATE;
     let regs = state.registers;
     if regs.is_null() {
         dprintf!(ALWAYS, "HPET registers are NULL.\n");

@@ -290,6 +290,12 @@ pub trait IcmpEchoBindingsTypes: DatagramBindingsTypes + Sized + 'static {
     type ExternalData<I: Ip>: Debug + Send + Sync + 'static;
     /// The listener notified when sockets' writable state changes.
     type SocketWritableListener: SocketWritableListener + Debug + Send + Sync + 'static;
+    /// A token representing resources allocated for an in-flight send operation.
+    ///
+    /// Core holds this token until the packet is either transmitted by the
+    /// device or dropped along the egress path. This allows bindings to track
+    /// send buffer capacity or other per-packet resources.
+    type SendToken: Debug + Send + Sync + 'static;
 }
 
 /// Resolve coherence issues by requiring a trait implementation with no type
@@ -422,6 +428,7 @@ impl<BT: IcmpEchoBindingsTypes> DatagramSocketSpec for Icmp<BT> {
     // NB: At present, there's no need to track per-socket ICMP counters.
     type Counters<I: Ip> = ();
     type SocketWritableListener = BT::SocketWritableListener;
+    type SendToken = BT::SendToken;
 
     // NB: `make_packet` does not add any extra bytes because applications send
     // the ICMP header alongside the message which gets parsed and then rebuilt.
@@ -1025,8 +1032,9 @@ where
         &mut self,
         id: &IcmpApiSocketId<I, C>,
         body: B,
+        send_token: <C::BindingsContext as IcmpEchoBindingsTypes>::SendToken,
     ) -> Result<(), datagram::SendError<packet_formats::error::ParseError>> {
-        self.datagram().send_conn(id, body)
+        self.datagram().send_conn(id, body, send_token)
     }
 
     /// Sends an ICMP packet with an remote address.
@@ -1042,11 +1050,9 @@ where
             >,
         >,
         body: B,
-    ) -> Result<
-        (),
-        either::Either<LocalAddressError, datagram::SendToError<packet_formats::error::ParseError>>,
-    > {
-        self.datagram().send_to(id, remote_ip, (), body)
+        send_token: <C::BindingsContext as IcmpEchoBindingsTypes>::SendToken,
+    ) -> Result<(), datagram::SendToError<packet_formats::error::ParseError>> {
+        self.datagram().send_to(id, remote_ip, (), body, send_token)
     }
 
     /// Collects all currently opened sockets, returning a cloned reference for
@@ -1292,8 +1298,8 @@ mod tests {
     use net_types::ip::Ipv6;
     use netstack3_base::socket::StrictlyZonedAddr;
     use netstack3_base::testutil::{
-        FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeSocketWritableListener, FakeWeakDeviceId,
-        TestIpExt,
+        FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeSendToken, FakeSocketWritableListener,
+        FakeWeakDeviceId, TestIpExt,
     };
     use netstack3_base::{CtxPair, Icmpv4ErrorCode, Icmpv6ErrorCode, NetworkSerializationContext};
     use netstack3_ip::socket::testutil::{FakeDeviceConfig, FakeIpSocketCtx, InnerFakeIpSocketCtx};
@@ -1511,6 +1517,7 @@ mod tests {
     impl<I: IpExt> IcmpEchoBindingsTypes for FakeIcmpBindingsCtx<I> {
         type ExternalData<II: Ip> = ();
         type SocketWritableListener = FakeSocketWritableListener;
+        type SendToken = FakeSendToken;
     }
 
     #[test]
@@ -1551,7 +1558,7 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_matches!(
-            api.send(&conn, buf),
+            api.send(&conn, buf, FakeSendToken::default()),
             Err(datagram::SendError::SerializeError(
                 packet_formats::error::ParseError::NotExpected
             ))
@@ -1607,7 +1614,7 @@ mod tests {
             .serialize_vec_outer(&mut NetworkSerializationContext::default())
             .unwrap()
             .unwrap_b();
-        api.send(&sock, Buf::new(packet, ..)).unwrap();
+        api.send(&sock, Buf::new(packet, ..), FakeSendToken::default()).unwrap();
         let frames = ctx.core_ctx.frames.take_frames();
         let (SendIpPacketMeta { device: _, src_ip, dst_ip, .. }, body) =
             assert_matches!(&frames[..], [f] => f);

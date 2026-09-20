@@ -4,11 +4,16 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
+
+#include <array>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 
 #include "src/lib/files/file.h"
 #include "src/starnix/tests/selinux/userspace/util.h"
@@ -37,8 +42,7 @@ std::string PathForExec(std::string_view binary_name) {
 
 // Try to execute a binary in a situation where the post-exec domain does not
 // have the `use` permission for file descriptors opened in the pre-exec domain.
-// On Linux, the executed program segfaults.
-// TODO: https://fxbug.dev/322843830 - On Starnix, the executed program exits normally.
+// On Linux and Starnix, the executed program segfaults.
 TEST(InheritTest, ExecutableFdRemappedToNull) {
   constexpr char kParentSecurityContext[] = "test_u:test_r:test_inherit_parent_t:s0";
   constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_child_no_use_fd_t:s0";
@@ -603,6 +607,36 @@ TEST(InheritTest, NoAtSecureDenied) {
   }));
 }
 
+// When `noatsecure` is denied on a domain transition, `AT_SECURE` is set in the auxiliary vector,
+// but ambient capabilities are preserved across `execve`.
+TEST(InheritTest, NoAtSecureDeniedPreservesAmbientCapabilities) {
+  constexpr char kParentSecurityContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_child_deny_noatsecure_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&] {
+    __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+    std::array<__user_cap_data_struct, _LINUX_CAPABILITY_U32S_3> caps = {};
+    SAFE_SYSCALL(syscall(SYS_capget, &header, caps.data()));
+    caps[CAP_TO_INDEX(CAP_CHOWN)].inheritable |= CAP_TO_MASK(CAP_CHOWN);
+    SAFE_SYSCALL(syscall(SYS_capset, &header, caps.data()));
+    SAFE_SYSCALL(prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_CHOWN, 0, 0));
+    ASSERT_EQ(SAFE_SYSCALL(prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_CHOWN, 0, 0)), 1);
+
+    ASSERT_TRUE(WriteTaskAttr("current", kParentSecurityContext).is_ok());
+    ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
+
+    std::string binary_name = "has_ambient_capabilities_bin";
+    std::string path_for_exec = PathForExec(binary_name);
+    std::string expected_cap = std::to_string(CAP_CHOWN);
+    char* const args[] = {binary_name.data(), expected_cap.data(), nullptr};
+    SAFE_SYSCALL(execv(path_for_exec.data(), args));
+  });
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+}
+
 // When the security domain does not change during exec, the `noatsecure` permission is not
 // checked and the `AT_SECURE` entry is not set in the executable's auxiliary vector.
 TEST(InheritTest, NoAtSecureDeniedSameDomain) {
@@ -638,33 +672,37 @@ TEST(InheritTest, NoAtSecureAllowed) {
   }));
 }
 
-/// Verifies that the script's domain determines the target domain of the task post-`exec()`, rather
-/// that the domain of the interpreter that is used to run it.
-TEST(InheritTest, ExecveScriptTransition) {
-  constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
-  constexpr char kExpectedPostExecContext[] = "test_u:test_r:test_inherit_script_target_t:s0";
+// Creates a temporary `#!` script and ELF interpreter labeled for script transition testing.
+void PrepareScriptTest(const test_helper::ScopedTempDir& temp_dir, std::string* script_path) {
+  constexpr char kInterpreterFileLabel[] = "test_u:object_r:test_inherit_interp_file_t:s0";
+  constexpr char kScriptLabel[] = "test_u:object_r:test_inherit_script_file_t:s0";
 
-  auto enforce = ScopedEnforcement::SetEnforcing();
-
-  test_helper::ScopedTempDir temp_dir;
-
-  // Create a copy of the is_current_domain helper and label it as the interpreter.
   const std::string is_current_domain_bin_path = PathForExec("is_current_domain_bin");
   const std::string interpreter_path = temp_dir.path() + "/interpreter";
   std::string interpreter_content;
   ASSERT_TRUE(files::ReadFileToString(is_current_domain_bin_path, &interpreter_content));
   ASSERT_TRUE(files::WriteFile(interpreter_path, interpreter_content));
   ASSERT_THAT(chmod(interpreter_path.c_str(), 0755), SyscallSucceeds());
-  constexpr char kInterpreterFileLabel[] = "test_u:object_r:test_inherit_interp_file_t:s0";
   ASSERT_TRUE(SetLabel(interpreter_path, kInterpreterFileLabel).is_ok());
 
-  // Create a script file that will use our custom "interpreter", and label it as the script.
-  std::string script_path = temp_dir.path() + "/script.sh";
-  std::string script_context = "#!" + interpreter_path + "\n";
-  ASSERT_TRUE(files::WriteFile(script_path, script_context));
-  ASSERT_THAT(chmod(script_path.c_str(), 0755), SyscallSucceeds());
-  constexpr char kScriptLabel[] = "test_u:object_r:test_inherit_script_file_t:s0";
-  ASSERT_TRUE(SetLabel(script_path, kScriptLabel).is_ok());
+  *script_path = temp_dir.path() + "/script.sh";
+  std::string script_content = "#!" + interpreter_path + "\n";
+  ASSERT_TRUE(files::WriteFile(*script_path, script_content));
+  ASSERT_THAT(chmod(script_path->c_str(), 0755), SyscallSucceeds());
+  ASSERT_TRUE(SetLabel(*script_path, kScriptLabel).is_ok());
+}
+
+// Verifies that executing a `#!` script transitions to the domain determined by the script's
+// label rather than the interpreter's label.
+TEST(InheritTest, ExecveScriptTransition) {
+  constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kExpectedPostExecContext[] = "test_u:test_r:test_inherit_script_target_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string script_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareScriptTest(temp_dir, &script_path));
 
   ASSERT_TRUE(RunSubprocessAs(kInitialTaskContext, [&] {
     char* const argv[] = {const_cast<char*>(script_path.c_str()),
@@ -675,30 +713,17 @@ TEST(InheritTest, ExecveScriptTransition) {
   }));
 }
 
-/// Verifies that executing a script when the target domain is denied `file { execute }`
-/// on the interpreter causes execution to fail with SIGSEGV.
+// Verifies that denying the target domain `file { execute }` on the script interpreter terminates
+// the process with `SIGSEGV`.
 TEST(InheritTest, ExecveScriptInterpreterExecuteDenied) {
   constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
   constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_script_no_interp_exec_t:s0";
-  constexpr char kInterpreterFileLabel[] = "test_u:object_r:test_inherit_interp_file_t:s0";
-  constexpr char kScriptLabel[] = "test_u:object_r:test_inherit_script_file_t:s0";
 
   auto enforce = ScopedEnforcement::SetEnforcing();
   test_helper::ScopedTempDir temp_dir;
 
-  const std::string is_current_domain_bin_path = PathForExec("is_current_domain_bin");
-  const std::string interpreter_path = temp_dir.path() + "/interpreter";
-  std::string interpreter_content;
-  ASSERT_TRUE(files::ReadFileToString(is_current_domain_bin_path, &interpreter_content));
-  ASSERT_TRUE(files::WriteFile(interpreter_path, interpreter_content));
-  ASSERT_THAT(chmod(interpreter_path.c_str(), 0755), SyscallSucceeds());
-  ASSERT_TRUE(SetLabel(interpreter_path, kInterpreterFileLabel).is_ok());
-
-  std::string script_path = temp_dir.path() + "/script.sh";
-  std::string script_context = "#!" + interpreter_path + "\n";
-  ASSERT_TRUE(files::WriteFile(script_path, script_context));
-  ASSERT_THAT(chmod(script_path.c_str(), 0755), SyscallSucceeds());
-  ASSERT_TRUE(SetLabel(script_path, kScriptLabel).is_ok());
+  std::string script_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareScriptTest(temp_dir, &script_path));
 
   test_helper::ForkHelper fork_helper;
   fork_helper.ExpectSignal(SIGSEGV);
@@ -714,30 +739,17 @@ TEST(InheritTest, ExecveScriptInterpreterExecuteDenied) {
   ASSERT_TRUE(fork_helper.WaitForChildren());
 }
 
-/// Verifies that executing a script when the target domain is denied `file { read }`
-/// on the interpreter causes execution to fail with SIGSEGV.
+// Verifies that denying the target domain `file { read }` on the script interpreter terminates
+// the process with `SIGSEGV`.
 TEST(InheritTest, ExecveScriptInterpreterReadDenied) {
   constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
   constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_script_no_interp_read_t:s0";
-  constexpr char kInterpreterFileLabel[] = "test_u:object_r:test_inherit_interp_file_t:s0";
-  constexpr char kScriptLabel[] = "test_u:object_r:test_inherit_script_file_t:s0";
 
   auto enforce = ScopedEnforcement::SetEnforcing();
   test_helper::ScopedTempDir temp_dir;
 
-  const std::string is_current_domain_bin_path = PathForExec("is_current_domain_bin");
-  const std::string interpreter_path = temp_dir.path() + "/interpreter";
-  std::string interpreter_content;
-  ASSERT_TRUE(files::ReadFileToString(is_current_domain_bin_path, &interpreter_content));
-  ASSERT_TRUE(files::WriteFile(interpreter_path, interpreter_content));
-  ASSERT_THAT(chmod(interpreter_path.c_str(), 0755), SyscallSucceeds());
-  ASSERT_TRUE(SetLabel(interpreter_path, kInterpreterFileLabel).is_ok());
-
-  std::string script_path = temp_dir.path() + "/script.sh";
-  std::string script_context = "#!" + interpreter_path + "\n";
-  ASSERT_TRUE(files::WriteFile(script_path, script_context));
-  ASSERT_THAT(chmod(script_path.c_str(), 0755), SyscallSucceeds());
-  ASSERT_TRUE(SetLabel(script_path, kScriptLabel).is_ok());
+  std::string script_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareScriptTest(temp_dir, &script_path));
 
   test_helper::ForkHelper fork_helper;
   fork_helper.ExpectSignal(SIGSEGV);
@@ -748,6 +760,201 @@ TEST(InheritTest, ExecveScriptInterpreterReadDenied) {
     char* const envp[] = {nullptr};
 
     SAFE_SYSCALL(execve(script_path.c_str(), argv, envp));
+  });
+
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+}
+
+// Verifies that denying the target domain `file { map }` on the script interpreter terminates
+// the process with `SIGSEGV`.
+TEST(InheritTest, ExecveScriptInterpreterMapDenied) {
+  constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_script_no_interp_map_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string script_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareScriptTest(temp_dir, &script_path));
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.ExpectSignal(SIGSEGV);
+
+  RunInForkedProcessWithLabel(fork_helper, kInitialTaskContext, [&] {
+    ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
+    char* const argv[] = {const_cast<char*>(script_path.c_str()), nullptr};
+    char* const envp[] = {nullptr};
+
+    SAFE_SYSCALL(execve(script_path.c_str(), argv, envp));
+  });
+
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+}
+
+// Verifies that denying the calling domain `file { execute }` on the script interpreter causes
+// `execve` to fail with `EACCES` before credentials commit.
+TEST(InheritTest, ExecveScriptCallerExecuteDenied) {
+  constexpr char kCallerTaskContext[] = "test_u:test_r:test_inherit_parent_no_interp_exec_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string script_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareScriptTest(temp_dir, &script_path));
+
+  ASSERT_TRUE(RunSubprocessAs(kCallerTaskContext, [&] {
+    char* const argv[] = {const_cast<char*>(script_path.c_str()), nullptr};
+    char* const envp[] = {nullptr};
+
+    EXPECT_THAT(execve(script_path.c_str(), argv, envp), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+// Creates a temporary ELF executable and custom PT_INTERP linker labeled for testing.
+void PrepareCustomPtInterpTest(const test_helper::ScopedTempDir& temp_dir,
+                               std::string* executable_path) {
+  constexpr char kInterpreterFileLabel[] = "test_u:object_r:test_inherit_interp_file_t:s0";
+  constexpr char kExecutableLabel[] = "test_u:object_r:test_inherit_custom_interp_exec_file_t:s0";
+
+  const std::string dynamic_linker_path = test_helper::GetSystemDynamicLinkerPath();
+  ASSERT_FALSE(dynamic_linker_path.empty());
+  std::string dynamic_linker_content;
+  ASSERT_TRUE(files::ReadFileToString(dynamic_linker_path, &dynamic_linker_content))
+      << dynamic_linker_path;
+
+  const std::string interp_path = temp_dir.path() + "/test_interp";
+  ASSERT_TRUE(files::WriteFile(interp_path, dynamic_linker_content));
+  ASSERT_THAT(chmod(interp_path.c_str(), 0755), SyscallSucceeds());
+  ASSERT_TRUE(SetLabel(interp_path, kInterpreterFileLabel).is_ok());
+
+  const std::string custom_bin_src = PathForExec("is_current_domain_custom_interp_bin");
+  std::string custom_bin_content;
+  ASSERT_TRUE(files::ReadFileToString(custom_bin_src, &custom_bin_content)) << custom_bin_src;
+
+  *executable_path = temp_dir.path() + "/custom_bin";
+  ASSERT_TRUE(files::WriteFile(*executable_path, custom_bin_content));
+  ASSERT_THAT(chmod(executable_path->c_str(), 0755), SyscallSucceeds());
+  ASSERT_TRUE(SetLabel(*executable_path, kExecutableLabel).is_ok());
+}
+
+// Verifies that executing an ELF binary with a custom `PT_INTERP` transitions to the domain
+// determined by the main executable's label rather than the interpreter's label.
+TEST(InheritTest, ExecvePtInterpTransition) {
+  constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kExpectedPostExecContext[] = "test_u:test_r:test_inherit_script_target_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string executable_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareCustomPtInterpTest(temp_dir, &executable_path));
+
+  ASSERT_TRUE(RunSubprocessAs(kInitialTaskContext, [&] {
+    SAFE_SYSCALL(chdir(temp_dir.path().c_str()));
+    char* const argv[] = {const_cast<char*>(executable_path.c_str()),
+                          const_cast<char*>(kExpectedPostExecContext), nullptr};
+    char* const envp[] = {nullptr};
+
+    SAFE_SYSCALL(execve(executable_path.c_str(), argv, envp));
+  }));
+}
+
+// Verifies that denying the calling domain `file { execute }` on `PT_INTERP` causes `execve` to
+// fail with `EACCES` before credentials commit.
+TEST(InheritTest, ExecvePtInterpCallerExecuteDenied) {
+  constexpr char kCallerTaskContext[] = "test_u:test_r:test_inherit_parent_no_interp_exec_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string executable_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareCustomPtInterpTest(temp_dir, &executable_path));
+
+  ASSERT_TRUE(RunSubprocessAs(kCallerTaskContext, [&] {
+    SAFE_SYSCALL(chdir(temp_dir.path().c_str()));
+    char* const argv[] = {const_cast<char*>(executable_path.c_str()), nullptr};
+    char* const envp[] = {nullptr};
+
+    EXPECT_THAT(execve(executable_path.c_str(), argv, envp), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+// Verifies that denying the target domain `file { execute }` on `PT_INTERP` terminates the
+// process with `SIGSEGV`.
+TEST(InheritTest, ExecvePtInterpTargetExecuteDenied) {
+  constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_script_no_interp_exec_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string executable_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareCustomPtInterpTest(temp_dir, &executable_path));
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.ExpectSignal(SIGSEGV);
+
+  RunInForkedProcessWithLabel(fork_helper, kInitialTaskContext, [&] {
+    SAFE_SYSCALL(chdir(temp_dir.path().c_str()));
+    ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
+    char* const argv[] = {const_cast<char*>(executable_path.c_str()), nullptr};
+    char* const envp[] = {nullptr};
+
+    SAFE_SYSCALL(execve(executable_path.c_str(), argv, envp));
+  });
+
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+}
+
+// Verifies that denying the target domain `file { read }` on `PT_INTERP` terminates the
+// process with `SIGSEGV`.
+TEST(InheritTest, ExecvePtInterpTargetReadDenied) {
+  constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_script_no_interp_read_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string executable_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareCustomPtInterpTest(temp_dir, &executable_path));
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.ExpectSignal(SIGSEGV);
+
+  RunInForkedProcessWithLabel(fork_helper, kInitialTaskContext, [&] {
+    SAFE_SYSCALL(chdir(temp_dir.path().c_str()));
+    ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
+    char* const argv[] = {const_cast<char*>(executable_path.c_str()), nullptr};
+    char* const envp[] = {nullptr};
+
+    SAFE_SYSCALL(execve(executable_path.c_str(), argv, envp));
+  });
+
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+}
+
+// Verifies that denying the target domain `file { map }` on `PT_INTERP` terminates the
+// process with `SIGSEGV`.
+TEST(InheritTest, ExecvePtInterpTargetMapDenied) {
+  constexpr char kInitialTaskContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_script_no_interp_map_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  test_helper::ScopedTempDir temp_dir;
+
+  std::string executable_path;
+  ASSERT_NO_FATAL_FAILURE(PrepareCustomPtInterpTest(temp_dir, &executable_path));
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.ExpectSignal(SIGSEGV);
+
+  RunInForkedProcessWithLabel(fork_helper, kInitialTaskContext, [&] {
+    SAFE_SYSCALL(chdir(temp_dir.path().c_str()));
+    ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
+    char* const argv[] = {const_cast<char*>(executable_path.c_str()), nullptr};
+    char* const envp[] = {nullptr};
+
+    SAFE_SYSCALL(execve(executable_path.c_str(), argv, envp));
   });
 
   ASSERT_TRUE(fork_helper.WaitForChildren());

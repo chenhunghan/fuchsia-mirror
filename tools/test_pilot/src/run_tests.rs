@@ -77,15 +77,19 @@ async fn run_test_inner(
             );
         }
 
-        if !exit_status.success() && is_fail_exit_status(exit_status) {
+        main_summary.exit_code = Some(exit_status.code().unwrap_or(-1));
+
+        if !exit_status.success() && !is_fail_exit_status(exit_status) {
+            main_summary.setup_succeeded = Some(false);
+
             eprintln!(
                 "host test binary {0} returned bad exit status {1}",
                 test_config.host_test_binary.display(),
                 exit_status
             );
             eprintln!("see {0} for execution details", outdir.execution_log().display());
-
-            return Ok(exit_status);
+        } else {
+            main_summary.setup_succeeded = Some(true);
         }
 
         // stdout_writer and stderr_writer are dropped here, closing and maybe deleting their
@@ -95,6 +99,7 @@ async fn run_test_inner(
 
     let _merged = main_summary.maybe_merge_file(&outdir.test_summary())?;
 
+    // We write the summary here, because post-processors may want to read it.
     main_summary.write(&outdir.main_summary())?;
 
     for output_processor in &test_config.output_processors {
@@ -136,12 +141,6 @@ async fn run_test_inner(
                 stderr_writer.path_if_wrote().and_then(|p| outdir.make_relative(&p)),
             );
 
-            if main_summary
-                .maybe_merge_file(&outdir.postprocessor_summary(&output_processor.binary))?
-            {
-                main_summary.write(&outdir.main_summary())?;
-            }
-
             if !exit_status.success() && is_fail_exit_status(exit_status) {
                 eprintln!(
                     "output processor {0:?} returned bad exit status {1}",
@@ -150,12 +149,32 @@ async fn run_test_inner(
                 );
                 eprintln!("see {0:?} for execution details", outdir.execution_log());
 
+                if main_summary.teardown_succeeded != Some(false) {
+                    main_summary.teardown_succeeded = Some(false);
+                    main_summary.write(&outdir.main_summary())?;
+                }
+
                 return Ok(exit_status);
+            }
+
+            if main_summary
+                .maybe_merge_file(&outdir.postprocessor_summary(&output_processor.binary))?
+            {
+                // We write the summary here, because subsequent post-processors may want to read
+                // it with all the changes made so far.
+                main_summary.write(&outdir.main_summary())?;
             }
 
             // stdout_writer and stderr_writer are dropped here, closing and maybe deleting their
             // respective output files.
         }
+    }
+
+    // If setup succeeded and neither the test nor any post-processors had an opinion about
+    // teardown, assume it succeeded.
+    if main_summary.setup_succeeded == Some(true) && main_summary.teardown_succeeded.is_none() {
+        main_summary.teardown_succeeded = Some(true);
+        main_summary.write(&outdir.main_summary())?;
     }
 
     Ok(exit_status)
@@ -287,7 +306,7 @@ async fn run_command<W1: io::Write + Send, W2: io::Write + Send>(
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
-    use rand::Rng;
+    use rand::RngExt as _;
     use rand::distr::Alphanumeric;
     use serde_json::{Value, from_reader, json};
     use std::collections::HashMap;
@@ -428,6 +447,15 @@ mod tests {
                 .expect("read from post-processor stdout succeeds")
         );
 
+        let mut summary_reader = std::io::BufReader::new(
+            fs::File::open(output_directory.main_summary()).expect("can open main summary"),
+        );
+        let summary: Summary =
+            serde_json::from_reader(&mut summary_reader).expect("can parse main summary");
+        assert_eq!(summary.setup_succeeded, Some(true));
+        assert_eq!(summary.teardown_succeeded, Some(true));
+        assert_eq!(summary.exit_code, Some(0));
+
         let mut log_reader = std::io::BufReader::new(
             fs::File::open(&output_directory.execution_log()).expect("can open invocation log"),
         );
@@ -513,6 +541,92 @@ mod tests {
                 }
             }),
             log
+        );
+
+        temp_dir.close().expect("temp directory successfully closed");
+    }
+
+    #[fuchsia::test]
+    async fn test_run_test_failure_exit_status() {
+        let temp_dir = tempdir().expect("to create temporary directory");
+
+        let config = TestConfig {
+            host_test_binary: PathBuf::from("sh"),
+            host_test_args: vec![String::from("-c"), String::from("exit 86")],
+            output_directory: temp_dir.path().to_path_buf(),
+            output_processors: vec![OutputProcessor {
+                binary: PathBuf::from("echo"),
+                args: vec![String::from("runs_on_failure")],
+                use_on_success: false,
+                use_on_failure: true,
+                use_if_defined: vec![],
+            }],
+            unknown: HashMap::new(),
+        };
+
+        let output_directory = OutputDirectory::new(&config.output_directory);
+        let path_env = std::env::var(ENV_PATH).unwrap_or_else(|_| String::from("/bin:/usr/bin"));
+        let exit_status =
+            run_test(&config, &output_directory, &path_env).await.expect("run_test should succeed");
+
+        assert_eq!(exit_status.code(), Some(86));
+
+        let mut summary_reader = std::io::BufReader::new(
+            fs::File::open(output_directory.main_summary()).expect("can open main summary"),
+        );
+        let summary: Summary =
+            serde_json::from_reader(&mut summary_reader).expect("can parse main summary");
+        assert_eq!(summary.setup_succeeded, Some(true));
+        assert_eq!(summary.teardown_succeeded, Some(true));
+        assert_eq!(summary.exit_code, Some(86));
+
+        assert_eq!(
+            b"runs_on_failure\n".to_vec(),
+            fs::read(output_directory.postprocessor_invocation_stdout(&PathBuf::from("echo")))
+                .expect("read from post-processor stdout succeeds")
+        );
+
+        temp_dir.close().expect("temp directory successfully closed");
+    }
+
+    #[fuchsia::test]
+    async fn test_run_test_bad_exit_status() {
+        let temp_dir = tempdir().expect("to create temporary directory");
+
+        let config = TestConfig {
+            host_test_binary: PathBuf::from("sh"),
+            host_test_args: vec![String::from("-c"), String::from("exit 1")],
+            output_directory: temp_dir.path().to_path_buf(),
+            output_processors: vec![OutputProcessor {
+                binary: PathBuf::from("echo"),
+                args: vec![String::from("runs_on_failure")],
+                use_on_success: false,
+                use_on_failure: true,
+                use_if_defined: vec![],
+            }],
+            unknown: HashMap::new(),
+        };
+
+        let output_directory = OutputDirectory::new(&config.output_directory);
+        let path_env = std::env::var(ENV_PATH).unwrap_or_else(|_| String::from("/bin:/usr/bin"));
+        let exit_status =
+            run_test(&config, &output_directory, &path_env).await.expect("run_test should succeed");
+
+        assert_eq!(exit_status.code(), Some(1));
+
+        let mut summary_reader = std::io::BufReader::new(
+            fs::File::open(output_directory.main_summary()).expect("can open main summary"),
+        );
+        let summary: Summary =
+            serde_json::from_reader(&mut summary_reader).expect("can parse main summary");
+        assert_eq!(summary.setup_succeeded, Some(false));
+        assert_eq!(summary.teardown_succeeded, None);
+        assert_eq!(summary.exit_code, Some(1));
+
+        assert_eq!(
+            b"runs_on_failure\n".to_vec(),
+            fs::read(output_directory.postprocessor_invocation_stdout(&PathBuf::from("echo")))
+                .expect("read from post-processor stdout succeeds")
         );
 
         temp_dir.close().expect("temp directory successfully closed");

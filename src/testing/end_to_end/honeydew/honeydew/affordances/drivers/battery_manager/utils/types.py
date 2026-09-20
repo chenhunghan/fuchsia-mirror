@@ -103,59 +103,30 @@ class PowerSourceStatus:
 
 
 @dataclass(frozen=True)
-class BatterySpec:
-    """Static hardware characteristics of the battery pack."""
-
-    source_spec: PowerSourceSpec | None = None
-    design_capacity_uah: int | None = None
-    design_voltage_uv: int | None = None
-    chemistry: str | None = None
-
-    @classmethod
-    def from_fidl(cls, fidl: f_battery.Spec) -> BatterySpec:
-        source_spec = (
-            PowerSourceSpec.from_fidl(fidl.source_spec)
-            if fidl.source_spec is not None
-            else None
-        )
-        return cls(
-            source_spec=source_spec,
-            design_capacity_uah=fidl.design_capacity_uah,
-            design_voltage_uv=fidl.design_voltage_uv,
-            chemistry=fidl.chemistry,
-        )
-
-    def to_fidl(self) -> f_battery.Spec:
-        source_spec = self.source_spec.to_fidl() if self.source_spec else None
-        return f_battery.Spec(
-            source_spec=source_spec,
-            design_capacity_uah=self.design_capacity_uah,
-            design_voltage_uv=self.design_voltage_uv,
-            chemistry=self.chemistry,
-        )
-
-
-@dataclass(frozen=True)
 class BatteryStatus:
     """Dynamic status of the battery pack telemetry."""
 
-    source_status: PowerSourceStatus | None = None
+    present: bool | None = None
+    voltage_uv: int | None = None
+    current_ua: int | None = None
     charge_status: ChargeStatus | None = None
     level_percent: float | None = None
     remaining_capacity_uah: int | None = None
     full_charge_capacity_uah: int | None = None
     health: HealthStatus | None = None
-    temperature_mc: int | None = None
+    temp_celsius: float | None = None
     cycle_count: int | None = None
     time_remaining: timedelta | None = None
 
+    @property
+    def temperature_mc(self) -> int | None:
+        """Battery temperature in millidegrees Celsius for backwards compatibility."""
+        if self.temp_celsius is None:
+            return None
+        return round(self.temp_celsius * 1000)
+
     @classmethod
     def from_fidl(cls, fidl: f_battery.Status) -> BatteryStatus:
-        source_status = (
-            PowerSourceStatus.from_fidl(fidl.source_status)
-            if fidl.source_status is not None
-            else None
-        )
         charge_status = (
             ChargeStatus(fidl.charge_status)
             if fidl.charge_status is not None
@@ -168,21 +139,20 @@ class BatteryStatus:
             else None
         )
         return cls(
-            source_status=source_status,
+            present=fidl.present,
+            voltage_uv=fidl.voltage_uv,
+            current_ua=fidl.current_ua,
             charge_status=charge_status,
             level_percent=fidl.level_percent,
             remaining_capacity_uah=fidl.remaining_capacity_uah,
             full_charge_capacity_uah=fidl.full_charge_capacity_uah,
             health=health,
-            temperature_mc=fidl.temperature_mc,
+            temp_celsius=fidl.temp_celsius,
             cycle_count=fidl.cycle_count,
             time_remaining=time_rem,
         )
 
     def to_fidl(self) -> f_battery.Status:
-        source_status = (
-            self.source_status.to_fidl() if self.source_status else None
-        )
         charge_status = (
             f_battery.ChargeStatus(self.charge_status.value)
             if self.charge_status is not None
@@ -199,13 +169,86 @@ class BatteryStatus:
             else None
         )
         return f_battery.Status(
-            source_status=source_status,
+            present=self.present,
+            voltage_uv=self.voltage_uv,
+            current_ua=self.current_ua,
             charge_status=charge_status,
             level_percent=self.level_percent,
             remaining_capacity_uah=self.remaining_capacity_uah,
             full_charge_capacity_uah=self.full_charge_capacity_uah,
             health=health,
-            temperature_mc=self.temperature_mc,
+            temp_celsius=self.temp_celsius,
             cycle_count=self.cycle_count,
             time_remaining=time_rem_ns,
+        )
+
+
+@dataclass(frozen=True)
+class WatchOptions:
+    """Configuration options for battery state watching."""
+
+    interest: BatteryStatus | None = None
+    wake_on: BatteryStatus | None = None
+
+    @classmethod
+    def from_fidl(cls, fidl: f_battery.WatchOptions) -> WatchOptions:
+        interest = (
+            BatteryStatus.from_fidl(fidl.interest)
+            if fidl.interest is not None
+            else None
+        )
+        wake_on = (
+            BatteryStatus.from_fidl(fidl.wake_on)
+            if fidl.wake_on is not None
+            else None
+        )
+        return cls(
+            interest=interest,
+            wake_on=wake_on,
+        )
+
+    def to_fidl(self) -> f_battery.WatchOptions:
+        interest = self.interest.to_fidl() if self.interest else None
+        wake_on = self.wake_on.to_fidl() if self.wake_on else None
+        return f_battery.WatchOptions(
+            interest=interest,
+            wake_on=wake_on,
+        )
+
+
+@dataclass(frozen=True)
+class BatterySpec:
+    """Static hardware characteristics of the battery pack."""
+
+    design_capacity_uah: int | None = None
+    design_voltage_uv: int | None = None
+    chemistry: str | None = None
+    model: str | None = None
+    supported_options: WatchOptions | None = None
+
+    @classmethod
+    def from_fidl(cls, fidl: f_battery.Spec) -> BatterySpec:
+        supported_options = (
+            WatchOptions.from_fidl(fidl.supported_options)
+            if fidl.supported_options is not None
+            else None
+        )
+        return cls(
+            design_capacity_uah=fidl.design_capacity_uah,
+            design_voltage_uv=fidl.design_voltage_uv,
+            chemistry=fidl.chemistry,
+            model=fidl.model,
+            supported_options=supported_options,
+        )
+
+    def to_fidl(self) -> f_battery.Spec:
+        supported_options = (
+            self.supported_options.to_fidl() if self.supported_options else None
+        )
+        return f_battery.Spec(
+            design_capacity_uah=self.design_capacity_uah,
+            design_voltage_uv=self.design_voltage_uv,
+            chemistry=self.chemistry,
+            model=self.model,
+            supported_options=supported_options,
         )

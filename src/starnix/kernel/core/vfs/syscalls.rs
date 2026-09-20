@@ -15,12 +15,13 @@ use crate::vfs::pidfd::new_pidfd;
 use crate::vfs::pipe::{PipeFileObject, new_pipe};
 use crate::vfs::timer::TimerFile;
 use crate::vfs::{
-    AccessCheck, DirentSink64, EpollFileObject, FallocMode, FdFlags, FdNumber, FileAsyncOwner,
-    FileHandle, FileSystemOptions, FlockOperation, FsStr, FsString, LookupContext, Mount,
-    NamespaceNode, PathWithReachability, RecordLockCommand, RenameFlags, SeekTarget, StatxFlags,
-    SymlinkMode, SymlinkTarget, TargetFdNumber, TimeUpdateType, UnlinkKind, ValueOrSize,
-    WhatToMount, XattrOp, checked_add_offset_and_length, new_memfd, splice,
+    AccessCheck, DirectoryMode, DirentSink64, EpollFileObject, FallocMode, FdFlags, FdNumber,
+    FileAsyncOwner, FileHandle, FileSystemOptions, FlockOperation, FsContext, FsStr, FsString,
+    LookupContext, Mount, NamespaceNode, PathWithReachability, RecordLockCommand, RenameFlags,
+    SeekTarget, StatxFlags, SymlinkMode, SymlinkTarget, TargetFdNumber, TimeUpdateType, UnlinkKind,
+    ValueOrSize, WhatToMount, XattrOp, checked_add_offset_and_length, new_memfd, splice,
 };
+use fuchsia_rcu::RcuReadScope;
 use starnix_logging::{log_trace, track_stub};
 use starnix_sync::{EventHandlerReadyQueueLock, LockDepMutex};
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
@@ -28,6 +29,7 @@ use starnix_types::time::{
     duration_from_poll_timeout, duration_from_timespec, time_from_timespec, timespec_from_duration,
 };
 use starnix_types::user_buffer::UserBuffer;
+use starnix_uapi::arc_key::PtrKey;
 use starnix_uapi::auth::{
     CAP_BLOCK_SUSPEND, CAP_DAC_READ_SEARCH, CAP_LEASE, CAP_SYS_ADMIN, CAP_WAKE_ALARM, Capabilities,
     Credentials, PTRACE_MODE_ATTACH_REALCREDS,
@@ -66,7 +68,7 @@ use starnix_uapi::{
     aio_context_t, errno, error, io_event, iocb, off_t, pid_t, pollfd, pselect6_sigmask, sigset_t,
     statx, timespec, uapi, uid_t,
 };
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use zerocopy::{Immutable, IntoBytes};
@@ -661,11 +663,18 @@ pub struct LookupFlags {
     // TODO(https://fxbug.dev/297370602): Support the `AT_NO_AUTOMOUNT` flag.
     #[allow(dead_code)]
     automount: bool,
+
+    /// Whether the lookup requires the target to be a directory.
+    directory_mode: DirectoryMode,
 }
 
 impl LookupFlags {
     pub fn no_follow() -> Self {
         Self { symlink_mode: SymlinkMode::NoFollow, ..Default::default() }
+    }
+
+    pub fn directory() -> Self {
+        Self { directory_mode: DirectoryMode::MustBeDirectory, ..Default::default() }
     }
 
     fn from_bits(flags: u32, allowed_flags: u32) -> Result<Self, Errno> {
@@ -687,6 +696,7 @@ impl LookupFlags {
                 || (flags & O_PATH != 0 && flags & O_NOFOLLOW != 0),
             symlink_mode: if follow_symlinks { SymlinkMode::Follow } else { SymlinkMode::NoFollow },
             automount,
+            directory_mode: DirectoryMode::AllowAny,
         })
     }
 }
@@ -721,14 +731,22 @@ pub fn lookup_at(
     let (parent, basename) =
         current_task.lookup_parent_at(&mut parent_context, dir_fd, path.as_ref())?;
 
-    let mut child_context = if parent_context.must_be_directory {
-        // The child must resolve to a directory. This is because a trailing slash
-        // was found in the path. If the child is a symlink, we should follow it.
-        // See https://pubs.opengroup.org/onlinepubs/9699919799/xrat/V4_xbd_chap03.html#tag_21_03_00_75
-        parent_context.with(SymlinkMode::Follow)
-    } else {
-        parent_context.with(options.symlink_mode)
+    let directory_mode = match (parent_context.directory_mode, options.directory_mode) {
+        (DirectoryMode::MustBeDirectory, _) | (_, DirectoryMode::MustBeDirectory) => {
+            DirectoryMode::MustBeDirectory
+        }
+        _ => DirectoryMode::AllowAny,
     };
+    let symlink_mode = if directory_mode == DirectoryMode::MustBeDirectory {
+        // The child must resolve to a directory. This is because a trailing slash
+        // was found in the path or the caller specified that the lookup must be a directory.
+        // If the child is a symlink, we should follow it.
+        // See https://pubs.opengroup.org/onlinepubs/9699919799/xrat/V4_xbd_chap03.html#tag_21_03_00_75
+        SymlinkMode::Follow
+    } else {
+        options.symlink_mode
+    };
+    let mut child_context = parent_context.with(symlink_mode, directory_mode);
 
     parent.lookup_child(current_task, &mut child_context, basename)
 }
@@ -866,20 +884,13 @@ pub fn sys_getdents64(
 }
 
 pub fn sys_chroot(current_task: &CurrentTask, user_path: UserCString) -> Result<(), Errno> {
-    let name = lookup_at(current_task, FdNumber::AT_FDCWD, user_path, LookupFlags::default())?;
-    if !name.entry.node.is_dir() {
-        return error!(ENOTDIR);
-    }
-
+    let name = lookup_at(current_task, FdNumber::AT_FDCWD, user_path, LookupFlags::directory())?;
     current_task.fs().chroot(current_task, name)?;
     Ok(())
 }
 
 pub fn sys_chdir(current_task: &CurrentTask, user_path: UserCString) -> Result<(), Errno> {
-    let name = lookup_at(current_task, FdNumber::AT_FDCWD, user_path, LookupFlags::default())?;
-    if !name.entry.node.is_dir() {
-        return error!(ENOTDIR);
-    }
+    let name = lookup_at(current_task, FdNumber::AT_FDCWD, user_path, LookupFlags::directory())?;
     current_task.fs().chdir(current_task, name)
 }
 
@@ -1115,7 +1126,7 @@ pub fn sys_linkat(
     lookup_parent_at(current_task, new_dir_fd, new_user_path, |context, parent, basename| {
         // The path to a new link cannot end in `/`. That would imply that we are dereferencing
         // the link to a directory.
-        if context.must_be_directory {
+        if context.directory_mode == DirectoryMode::MustBeDirectory {
             return error!(ENOENT);
         }
         if target.mount != parent.mount {
@@ -1139,7 +1150,7 @@ pub fn sys_unlinkat(
     let kind =
         if flags & AT_REMOVEDIR != 0 { UnlinkKind::Directory } else { UnlinkKind::NonDirectory };
     lookup_parent_at(current_task, dir_fd, user_path, |context, parent, basename| {
-        parent.unlink(current_task, basename, kind, context.must_be_directory)
+        parent.unlink(current_task, basename, kind, context.directory_mode)
     })?;
     Ok(())
 }
@@ -1591,7 +1602,7 @@ pub fn sys_symlinkat(
         // the symlink to a directory.
         //
         // See https://pubs.opengroup.org/onlinepubs/9699919799/xrat/V4_xbd_chap03.html#tag_21_03_00_75
-        if context.must_be_directory {
+        if context.directory_mode == DirectoryMode::MustBeDirectory {
             return error!(ENOENT);
         }
         parent.create_symlink(current_task, basename, target.as_ref())
@@ -1887,6 +1898,55 @@ pub fn sys_umount2(
     target.unmount(unmount_flags)
 }
 
+pub fn sys_pivot_root(
+    current_task: &CurrentTask,
+    new_root_addr: UserCString,
+    put_old_addr: UserCString,
+) -> Result<(), Errno> {
+    security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
+
+    let new_root =
+        lookup_at(current_task, FdNumber::AT_FDCWD, new_root_addr, LookupFlags::directory())?;
+    let put_old =
+        lookup_at(current_task, FdNumber::AT_FDCWD, put_old_addr, LookupFlags::directory())?;
+
+    let old_root = current_task.fs().root();
+    let namespace = current_task.fs().namespace();
+
+    namespace.pivot_root(&old_root, &new_root, &put_old)?;
+
+    let mut seen_fs = HashSet::<PtrKey<FsContext>>::new();
+    let current_fs = current_task.fs();
+    current_fs.update_root_after_pivot(&old_root, &new_root);
+    seen_fs.insert(PtrKey::from(&*current_fs));
+
+    let mut target_fs = Vec::new();
+    let scope = RcuReadScope::new();
+    let thread_groups = current_task.kernel().pids.get_thread_groups(&scope);
+    // Note: There is a race condition here if another task forks without CLONE_FS
+    // concurrently with pivot_root. The child's FsContext may be initialized with
+    // `old_root` before being registered in `pids`, and if this loop does not observe
+    // the new task, its root will not be updated. Linux has a similar race condition
+    // when tasks are created concurrently with pivot_root.
+    for tg in thread_groups {
+        for task in tg.read().tasks() {
+            if let Ok(task_fs) = task.fs() {
+                if Arc::ptr_eq(&task_fs.namespace(), &namespace) {
+                    if seen_fs.insert(PtrKey::from(&*task_fs)) {
+                        target_fs.push(task_fs);
+                    }
+                }
+            }
+        }
+    }
+
+    for fs in target_fs {
+        fs.update_root_after_pivot(&old_root, &new_root);
+    }
+
+    Ok(())
+}
+
 pub fn sys_eventfd2(current_task: &CurrentTask, value: u32, flags: u32) -> Result<FdNumber, Errno> {
     if flags & !(EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE) != 0 {
         return error!(EINVAL);
@@ -1937,6 +1997,7 @@ pub fn sys_pidfd_getfd(
     current_task.check_ptrace_access_mode(PTRACE_MODE_ATTACH_REALCREDS, &task)?;
 
     let target_file = task.files()?.get(targetfd)?;
+    security::file_receive(current_task, &target_file)?;
     current_task.add_file(target_file, FdFlags::CLOEXEC)
 }
 
@@ -3637,6 +3698,59 @@ mod tests {
             },
             features,
         )
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_lookup_at_directory() {
+        spawn_kernel_and_run(async |current_task| {
+            let dir_path = b"testdir\0";
+            let dir_path_addr = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+            current_task.write_memory(dir_path_addr, dir_path).expect("failed to write path");
+            let dir_user_path = UserCString::new(current_task, dir_path_addr);
+            sys_mkdirat(
+                &current_task,
+                FdNumber::AT_FDCWD,
+                dir_user_path,
+                FileMode::ALLOW_ALL.with_type(FileMode::IFDIR),
+            )
+            .unwrap();
+
+            let file_path = b"testfile\0";
+            let file_path_addr = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+            current_task.write_memory(file_path_addr, file_path).expect("failed to write path");
+            let file_user_path = UserCString::new(current_task, file_path_addr);
+            current_task
+                .open_file_at(
+                    FdNumber::AT_FDCWD,
+                    "testfile".into(),
+                    OpenFlags::CREAT | OpenFlags::RDWR,
+                    FileMode::ALLOW_ALL,
+                    ResolveFlags::empty(),
+                )
+                .unwrap();
+
+            // Directory lookup on directory succeeds.
+            assert!(
+                lookup_at(
+                    &current_task,
+                    FdNumber::AT_FDCWD,
+                    dir_user_path,
+                    LookupFlags::directory()
+                )
+                .is_ok()
+            );
+
+            // Directory lookup on regular file fails with ENOTDIR.
+            let error = lookup_at(
+                &current_task,
+                FdNumber::AT_FDCWD,
+                file_user_path,
+                LookupFlags::directory(),
+            )
+            .unwrap_err();
+            assert_eq!(error, errno!(ENOTDIR));
+        })
         .await;
     }
 }

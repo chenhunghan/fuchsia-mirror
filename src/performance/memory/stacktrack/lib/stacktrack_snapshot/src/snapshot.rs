@@ -5,6 +5,7 @@
 use crate::Error;
 use flex_fuchsia_memory_stacktrack_client as fstacktrack_client;
 use futures::stream::StreamExt;
+use std::collections::HashMap;
 
 /// Contains all the data received over a `SnapshotReceiver` channel.
 #[derive(Debug, Default)]
@@ -12,11 +13,11 @@ pub struct Snapshot {
     /// The page size of the system, if reported.
     pub page_size: u64,
 
-    /// All the stack traces collected, one per thread.
-    pub stack_traces: Vec<StackTrace>,
+    /// All the stack traces collected, one per thread, indexed by thread koid.
+    pub stack_traces: HashMap<u64, StackTrace>,
 
     /// All the executable memory regions in the analyzed process.
-    pub executable_regions: Vec<ExecutableRegion>,
+    pub executable_regions: HashMap<u64, ExecutableRegion>,
 }
 
 /// A memory region containing code loaded from an ELF file.
@@ -24,9 +25,6 @@ pub struct Snapshot {
 pub struct ExecutableRegion {
     /// Region name for human consumption (usually either the ELF soname or the VMO name), if known.
     pub name: String,
-
-    /// The start address of this region.
-    pub address: u64,
 
     /// Region size, in bytes.
     pub size: u64,
@@ -38,12 +36,9 @@ pub struct ExecutableRegion {
     pub build_id: Vec<u8>,
 }
 
-/// A stack trace.
+/// A stack trace collected from a thread.
 #[derive(Debug)]
 pub struct StackTrace {
-    /// The koid of the thread with this stack trace.
-    pub thread_koid: u64,
-
     /// The stack frames, listed bottom-to-top.
     pub frames: Vec<CallFrame>,
 }
@@ -87,8 +82,8 @@ impl Snapshot {
         mut stream: fstacktrack_client::SnapshotReceiverRequestStream,
     ) -> Result<Snapshot, Error> {
         let mut page_size = None;
-        let mut stack_traces = Vec::new();
-        let mut executable_regions = Vec::new();
+        let mut stack_traces = HashMap::new();
+        let mut executable_regions = HashMap::new();
 
         loop {
             // Wait for the next batch of elements.
@@ -129,22 +124,17 @@ impl Snapshot {
                             })
                             .collect();
 
-                        stack_traces.push(StackTrace { thread_koid, frames });
+                        stack_traces.insert(thread_koid, StackTrace { frames });
                     }
                     fstacktrack_client::SnapshotElement::ExecutableRegion(region) => {
                         let address = read_field!(region => ExecutableRegion, address)?;
-                        let size = read_field!(region => ExecutableRegion, size)?;
                         let name = region.name.unwrap_or_default();
+                        let size = read_field!(region => ExecutableRegion, size)?;
                         let vaddr = read_field!(region => ExecutableRegion, vaddr)?;
                         let build_id = read_field!(region => ExecutableRegion, build_id)?.value;
 
-                        executable_regions.push(ExecutableRegion {
-                            name,
-                            address,
-                            size,
-                            vaddr,
-                            build_id,
-                        });
+                        executable_regions
+                            .insert(address, ExecutableRegion { name, size, vaddr, build_id });
                     }
                     _ => return Err(Error::UnexpectedElementType),
                 }
@@ -199,15 +189,15 @@ mod tests {
         assert_eq!(snapshot.executable_regions.len(), 1);
         assert_eq!(snapshot.stack_traces.len(), 1);
 
-        let region = &snapshot.executable_regions[0];
-        assert_eq!(region.address, 0x10000);
+        let (address, region) = snapshot.executable_regions.iter().next().unwrap();
+        assert_eq!(*address, 0x10000);
         assert_eq!(region.size, 0x2000);
         assert_eq!(region.name, "test");
         assert_eq!(region.vaddr, 0x5000);
         assert_eq!(region.build_id, vec![0xAA, 0xBB]);
 
-        let trace = &snapshot.stack_traces[0];
-        assert_eq!(trace.thread_koid, 8888);
+        let (thread_koid, trace) = snapshot.stack_traces.iter().next().unwrap();
+        assert_eq!(*thread_koid, 8888);
         assert_eq!(trace.frames.len(), 1);
         assert_eq!(trace.frames[0].program_address, 0x1234);
         assert_eq!(trace.frames[0].frame_pointer, 0x5678);

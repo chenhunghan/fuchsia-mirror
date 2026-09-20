@@ -98,4 +98,5 @@ kernel_rust_mod("platform-rs") {
     "power.rs",
     "timer.rs",
   ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }

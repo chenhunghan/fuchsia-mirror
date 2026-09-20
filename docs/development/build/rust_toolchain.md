@@ -20,11 +20,16 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
    git clone --recurse-submodules https://github.com/rust-lang/rust.git $DEV_ROOT/rust
    ```
 
-1. Run the following command to install cmake and ninja:
+1. Run the following command to install cmake, ninja, and optionally sccache:
 
    ```posix-terminal
-   sudo apt-get install cmake ninja-build
+   sudo apt-get install cmake ninja-build sccache
    ```
+
+   Note: `sccache` is optional but helpful. It caches both C/C++ and Rust
+   compilations, significantly speeding up clean and rebuild times. If you
+   choose not to use it, omit `sccache` from the command above and omit all
+   lines in follow-up steps that use `sccache`.
 
 1. Run the following command to obtain the infra sources:
 
@@ -129,6 +134,8 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
      -S $ZLIB_DIR \
      -B $ZLIB_BUILD_DIR \
      -G Ninja \
+     -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+     -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
      -DCMAKE_BUILD_TYPE=Release \
      -DCMAKE_MAKE_PROGRAM=${CIPD_DIR}/bin/ninja \
      -DCMAKE_INSTALL_PREFIX= \
@@ -187,6 +194,8 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
      -S ${ZSTD_DIR}/build/cmake \
      -B $ZSTD_BUILD_DIR \
      -G Ninja \
+     -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+     -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
      -DCMAKE_BUILD_TYPE=Release \
      -DCMAKE_MAKE_PROGRAM=$CIPD_DIR/bin/ninja \
      -DCMAKE_INSTALL_PREFIX= \
@@ -232,6 +241,9 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
    ZSTD_INSTALL_DIR="${DEV_ROOT}/install/zstd"
    HOST_SYSROOT="${CIPD_DIR}/linux"
    STAGE0_DIR="${CIPD_DIR}/stage0"
+   WRAPPERS_DIR="${DEV_ROOT}/wrappers"
+
+   mkdir -p "${WRAPPERS_DIR}"
 
    ( \
      export PATH="${DEV_ROOT}/infra/fuchsia/prebuilt/tools:$PATH" && \
@@ -248,6 +260,9 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
          --zlib-path="${ZLIB_INSTALL_DIR}" \
          --zstd-path="${ZSTD_INSTALL_DIR}" \
          --llvm-is-vanilla \
+         --ccache=sccache \
+         --temp-dir="${WRAPPERS_DIR}" \
+         --override-windows-rc=false \
         | tee "${DEV_ROOT}/fuchsia-config.toml" && \
      \
      $DEV_ROOT/infra/fuchsia/prebuilt/tools/vpython3 \
@@ -260,10 +275,17 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
            --sdk-dir="${CIPD_DIR}/sdk" \
            --linux-sysroot="${HOST_SYSROOT}" \
            --linux-riscv64-sysroot="${CIPD_DIR}/ubuntu20.04" \
+           --temp-dir="${WRAPPERS_DIR}" \
+           --override-windows-rc=false \
            --eval \
         | tee "${DEV_ROOT}/fuchsia-env.sh" \
    )
    ```
+
+   Note: Passing `--temp-dir="${WRAPPERS_DIR}"` ensures compiler wrapper script
+   paths remain deterministic across builds, preventing `sccache` cache misses.
+   Passing `--ccache=sccache` enables caching for in-tree LLVM C/C++ builds. If
+   you choose not to use `sccache`, omit `--ccache=sccache`.
 
 1. (Optional) Run the following command to tell git to ignore the generated files:
 
@@ -289,6 +311,8 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
    # Copy and paste the following subshell to build and install Rust, as needed.
    # The subshell avoids polluting your environment with fuchsia-specific rust settings.
    ( \
+     export RUSTC_WRAPPER="sccache" && \
+     export SCCACHE_CACHE_SIZE="50G" && \
      export CFLAGS="-I${DEV_ROOT}/install/zlib/include -I${DEV_ROOT}/install/zstd/include" && \
      export CXXFLAGS="-I${DEV_ROOT}/install/zlib/include -I${DEV_ROOT}/install/zstd/include" && \
      export LDFLAGS="-L${DEV_ROOT}/install/zlib/lib -L${DEV_ROOT}/install/zstd/lib" && \
@@ -314,15 +338,23 @@ Prior to building a custom Rust toolchain for Fuchsia, you need to do the follow
      > "${DEV_ROOT}/install/fuchsia-rust/lib/runtime.json"
    ```
 
+   Note: Incremental compilation (`-i`) is omitted because it is incompatible
+   with `sccache`. If you choose not to use `sccache`, omit `RUSTC_WRAPPER` and
+   `SCCACHE_CACHE_SIZE`, and you may optionally pass `-i` to enable incremental
+   compilation.
+
 ### Build only (optional)
 
 If you want to skip the install step, for instance during development of Rust
-itself, you can do so with the following command.
+itself, you can do so with the following command (omit `RUSTC_WRAPPER` and
+`SCCACHE_CACHE_SIZE` if not using `sccache`).
 
 ```posix-terminal
 DEV_ROOT={{ '<var>' }}DEV_ROOT{{ '</var>' }}
 
 ( \
+  export RUSTC_WRAPPER="sccache" && \
+  export SCCACHE_CACHE_SIZE="50G" && \
   export CFLAGS="-I${DEV_ROOT}/install/zlib/include -I${DEV_ROOT}/install/zstd/include" && \
   export CXXFLAGS="-I${DEV_ROOT}/install/zlib/include -I${DEV_ROOT}/install/zstd/include" && \
   export LDFLAGS="-L${DEV_ROOT}/install/zlib/lib -L${DEV_ROOT}/install/zstd/lib" && \

@@ -82,7 +82,7 @@ template("graphics_compute_test_rule") {
       target = get_label_info(":${invoker.target_name}", "label_with_toolchain")
       path = "${root_out_dir}/${invoker.target_name}"
       if (defined(invoker.needs_vulkan) && invoker.needs_vulkan) {
-        environments = []  # There are no host environments with Vulkan
+        build_only = true  # There are no host environments with Vulkan
       }
     }
 

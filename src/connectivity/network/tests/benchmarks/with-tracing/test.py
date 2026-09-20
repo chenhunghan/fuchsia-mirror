@@ -17,41 +17,10 @@ from mobly import asserts, test_runner
 # making the trace available that way, but in the future that could be done
 # by using "ffx test" to run the test on Infra (see https://fxbug.dev/42076004).
 class NetstackBenchmarksWithTracingTest(fuchsia_base_test.FuchsiaBaseTest):
-    async def setup_test(self) -> None:
-        await super().setup_test()
-        self.skip_netstack2 = self.user_params["skip_netstack2"]
-
-    def test_loopback_socket_benchmarks_with_tracing(self) -> None:
-        asserts.skip_if(
-            self.skip_netstack2, "Skipping netstack2 tests per user params"
-        )
-        self._run_test(
-            "loopback-socket-benchmarks-with-tracing-pkg-netstack2",
-            "loopback-socket-benchmarks-with-tracing",
-        )
-
-    def test_loopback_socket_benchmarks_with_fast_udp_tracing(self) -> None:
-        asserts.skip_if(
-            self.skip_netstack2, "Skipping netstack2 tests per user params"
-        )
-        self._run_test(
-            "loopback-socket-benchmarks-with-tracing-pkg-netstack2",
-            "loopback-socket-benchmarks-with-fast-udp-tracing",
-        )
-
     def test_loopback_socket_benchmarks_with_netstack3_tracing(self) -> None:
         self._run_test(
             "loopback-socket-benchmarks-with-tracing-pkg-netstack3",
             "loopback-socket-benchmarks-with-netstack3-tracing",
-        )
-
-    def test_tun_socket_benchmarks_with_tracing(self) -> None:
-        asserts.skip_if(
-            self.skip_netstack2, "Skipping netstack2 tests per user params"
-        )
-        self._run_test(
-            "tun-socket-benchmarks-tests-netstack2",
-            "tun-socket-benchmarks-netstack2-with-tracing",
         )
 
     def test_tun_socket_benchmarks_with_netstack3_tracing(self) -> None:

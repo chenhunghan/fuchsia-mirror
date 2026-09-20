@@ -7,8 +7,18 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("fake-usb-cdc-acm-dml") {
+  dml = "meta/fake-usb-cdc-acm.dml"
+  driver_name = "fake-usb-cdc-acm"
+}
+
+fuchsia_driver_dml("usb-cdc-acm-dml") {
+  dml = "meta/usb-cdc-acm.dml"
+  driver_name = "usb-cdc-acm"
+}
+
 driver_bind_rules("cdc_acm_bind") {
-  rules = "meta/cdc_acm.bind"
+  dml_label = ":usb-cdc-acm-dml"
   bind_output = "usb-cdc-acm.bindbc"
   tests = "meta/bind_tests.json"
   deps = [
@@ -53,7 +63,7 @@ fuchsia_driver_component("usb-cdc-acm") {
   info = "meta/usb-cdc-acm-info.json"
   component_name = "usb-cdc-acm"
   deps = [ ":usb-cdc-acm-driver" ]
-  manifest = "meta/usb-cdc-acm.cml"
+  dml_label = ":usb-cdc-acm-dml"
 }
 
 fuchsia_driver_package("package") {
@@ -62,7 +72,8 @@ fuchsia_driver_package("package") {
 }
 
 driver_bind_rules("usb_cdc_acm_function_bind") {
-  rules = "meta/usb_cdc_acm_function.bind"
+  dml_label = ":fake-usb-cdc-acm-dml"
+  bind_output = "fake-usb-cdc-acm.bindbc"
   tests = "meta/function_bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia.usb",
@@ -101,7 +112,7 @@ fuchsia_driver_component("fake-usb-cdc-acm") {
   info = "meta/fake-usb-cdc-acm-info.json"
   component_name = "fake-usb-cdc-acm"
   deps = [ ":fake-usb-cdc-acm-driver" ]
-  manifest = "meta/fake-usb-cdc-acm.cml"
+  dml_label = ":fake-usb-cdc-acm-dml"
 }
 
 test("usb-cdc-acm-integration") {

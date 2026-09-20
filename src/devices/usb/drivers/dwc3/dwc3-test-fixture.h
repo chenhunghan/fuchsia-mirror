@@ -68,6 +68,12 @@ class Dwc3TestHelper {
     return drv.device_state_;
   }
   static void SetPowerOn(Dwc3& drv, bool power_on) { drv.power_on_ = power_on; }
+  static fuchsia_hardware_usb_descriptor::UsbSpeed GetConnectionSpeed(const Dwc3& drv) {
+    return drv.connection_speed_;
+  }
+  static void SetConnectionSpeed(Dwc3& drv, fuchsia_hardware_usb_descriptor::UsbSpeed speed) {
+    drv.connection_speed_ = speed;
+  }
   static void SetDriverStopping(Dwc3& drv, bool driver_stopping) {
     // Stubbed out: driver_stopping_ is not in production yet.
     (void)drv;
@@ -420,13 +426,23 @@ class FakePath final : public fidl::Server<fhi::Path> {
   }
 
   void SetBandwidth(SetBandwidthRequest& request, SetBandwidthCompleter::Sync& completer) override {
+    last_average_bandwidth_bps_ = request.average_bandwidth_bps().value_or(0);
+    last_peak_bandwidth_bps_ = request.peak_bandwidth_bps().value_or(0);
+    set_bandwidth_count_++;
     completer.Reply(zx::ok());
   }
   void handle_unknown_method(fidl::UnknownMethodMetadata<fhi::Path> metadata,
                              fidl::UnknownMethodCompleter::Sync& completer) override {}
 
+  uint64_t last_average_bandwidth_bps() const { return last_average_bandwidth_bps_; }
+  uint64_t last_peak_bandwidth_bps() const { return last_peak_bandwidth_bps_; }
+  uint32_t set_bandwidth_count() const { return set_bandwidth_count_; }
+
  private:
   fidl::ServerBindingGroup<fhi::Path> bindings_;
+  uint64_t last_average_bandwidth_bps_ = 0;
+  uint64_t last_peak_bandwidth_bps_ = 0;
+  uint32_t set_bandwidth_count_ = 0;
 };
 
 class Environment : public fdf_testing::Environment {
@@ -493,6 +509,10 @@ class Environment : public fdf_testing::Environment {
         directory.AddService<fhi::PathService>(path_.GetInstanceHandler(dispatcher), "ddr-usb");
     EXPECT_TRUE(result.is_ok());
 
+    result = directory.AddService<fhi::PathService>(path_.GetInstanceHandler(dispatcher),
+                                                    "usb-interconnect");
+    EXPECT_TRUE(result.is_ok());
+
     result = directory.AddService<fphy::Service>(usb_phy_.GetUsbPhyInstanceHandler(dispatcher),
                                                  "dwc3-phy");
     EXPECT_TRUE(result.is_ok());
@@ -529,6 +549,8 @@ class Environment : public fdf_testing::Environment {
       result = directory.AddService<freset::Service>(reset_.CreateInstanceHandler(), "core_reset");
       EXPECT_TRUE(result.is_ok());
 
+      // Mimic Qualcomm GDSC regulator behavior where voltage stepping is unsupported.
+      vreg_.set_get_voltage_step_result(zx::error(ZX_ERR_NOT_SUPPORTED));
       result =
           directory.AddService<fvreg::Service>(vreg_.CreateInstanceHandler(), "dwc3-regulator");
       EXPECT_TRUE(result.is_ok());
@@ -548,6 +570,7 @@ class Environment : public fdf_testing::Environment {
 
   ddk_fake::FakeMmioRegRegion& reg_region() { return reg_region_; }
 
+  FakePath& path() { return path_; }
   FakeUsbPhy& usb_phy() { return usb_phy_; }
   const fdf_fake::FakeClock& clock_xo() const { return clock_xo_; }
   const fdf_fake::FakeClock& clock_sleep() const { return clock_sleep_; }

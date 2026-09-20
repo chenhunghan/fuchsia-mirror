@@ -4,19 +4,16 @@
 
 mod legacy;
 
-pub use legacy::*;
-
 // TODO(https://fxbug.dev/42178223): need validation after deserialization.
 use crate::checksum::Checksums;
 use crate::log::error;
 use crate::lsm_tree::types::{
-    FuzzyHash, Item, ItemRef, LayerKey, LegacyItem, MergeType, OrdLowerBound, OrdUpperBound,
-    SortByU64, Value,
+    FuzzyHash, Item, ItemRef, LayerKey, MergeType, OrdLowerBound, OrdUpperBound, SortByU64, Value,
 };
 use crate::object_store::ProjectId;
 use crate::object_store::extent::{Extent, ExtentPartitionIterator};
 use crate::object_store::extent_record::{ExtentValue, ExtentValueV38};
-use crate::serialized_types::{Migrate, Versioned, migrate_nodefault, migrate_to_version};
+use crate::serialized_types::Versioned;
 use fprint::TypeFingerprint;
 use fxfs_crypto::{WrappedKey, WrappingKeyId};
 use fxfs_macros::SerializeKey;
@@ -879,41 +876,6 @@ pub enum ObjectValueV56 {
     VerifiedAttribute { size: u64, fsverity_metadata: FsverityMetadataV50 },
 }
 
-#[derive(Migrate, Clone, Debug, Serialize, Deserialize, PartialEq, TypeFingerprint, Versioned)]
-#[migrate_to_version(ObjectValueV54)]
-#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum ObjectValueV50 {
-    /// Some keys have no value (this often indicates a tombstone of some sort).  Records with this
-    /// value are always filtered when a major compaction is performed, so the meaning must be the
-    /// same as if the item was not present.
-    None,
-    /// Some keys have no value but need to differentiate between a present value and no value
-    /// (None) i.e. their value is really a boolean: None => false, Some => true.
-    Some,
-    /// The value for an ObjectKey::Object record.
-    Object { kind: ObjectKindV49, attributes: ObjectAttributesV49 },
-    /// Specifies encryption keys to use for an object.
-    Keys(EncryptionKeysV49),
-    /// An attribute associated with a file object. |size| is the size of the attribute in bytes.
-    Attribute { size: u64, has_overwrite_extents: bool },
-    /// An extent associated with an object.
-    Extent(ExtentValueV38),
-    /// A child of an object.
-    Child(ChildValueV32),
-    /// Graveyard entries can contain these entries which will cause a file that has extents beyond
-    /// EOF to be trimmed at mount time.  This is used in cases where shrinking a file can exceed
-    /// the bounds of a single transaction.
-    Trim,
-    /// Added to support tracking Project ID usage and limits.
-    BytesAndNodes { bytes: i64, nodes: i64 },
-    /// A value for an extended attribute. Either inline or a redirection to an attribute with
-    /// extents.
-    ExtendedAttribute(ExtendedAttributeValueV32),
-    /// An attribute associated with a verified file object. |size| is the size of the attribute
-    /// in bytes.
-    VerifiedAttribute { size: u64, fsverity_metadata: FsverityMetadataV50 },
-}
-
 impl ObjectValue {
     /// Creates an ObjectValue for a file object.
     pub fn file(
@@ -1016,8 +978,6 @@ pub type ObjectItem = ObjectItemV56;
 
 pub type ObjectItemV56 = Item<ObjectKeyV54, ObjectValueV56>;
 
-pub type ObjectItemV50 = LegacyItem<ObjectKeyV43, ObjectValueV50>;
-
 impl ObjectItem {
     pub fn is_tombstone(&self) -> bool {
         matches!(
@@ -1091,6 +1051,9 @@ impl AttributeId {
     /// For fsverity files in Fxfs, we store the merkle tree of the verified file at a well-known
     /// attribute.
     pub const FSVERITY_MERKLE: Self = Self(2);
+
+    /// For storing an associated profile of paging activity.
+    pub const PROFILE_RECORDING: Self = Self(4);
 
     /// The range of fxfs attribute IDs which are reserved for extended attribute values. Whenever a
     /// new attribute is needed, the first unused ID will be chosen from this range. It's

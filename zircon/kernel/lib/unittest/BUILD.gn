@@ -40,11 +40,11 @@ source_set("unittest") {
   deps = [ "//zircon/system/ulib/pretty" ]
   if (toolchain_environment == "kernel") {
     sources += [
-      "console.cc",
       "user_memory.cc",
       "user_memory_tests.cc",
     ]
     deps += [
+      ":unittest_console",
       ":user-memory-rs",
       "//zircon/kernel/lib/console",
       "//zircon/kernel/lib/page",
@@ -56,6 +56,21 @@ source_set("unittest") {
       "//zircon/kernel/lib/libc",
     ]
   }
+}
+
+kernel_rust_mod("unittest_console") {
+  source_root = "console.rs"
+  sources = [ "console.rs" ]
+  deps = [
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/kalloc",
+    "//src/lib/kprint",
+    "//src/lib/ksync",
+    "//src/lib/zr",
+    "//zircon/kernel/lib/debug",
+  ]
+  test_deps = [ ":unittest-rs" ]
 }
 
 kernel_rust_mod("user-memory-rs") {
@@ -71,7 +86,7 @@ kernel_rust_mod("user-memory-rs") {
     "//zircon/system/ulib/fbl/rust:fbl",
   ]
   if (current_cpu == "arm64") {
-    deps += [ "//zircon/kernel/arch/arm64:arch-arm64-vm-bindings" ]
+    test_deps = [ "//zircon/kernel/arch/arm64:arch-arm64-vm-bindings" ]
   }
 }
 

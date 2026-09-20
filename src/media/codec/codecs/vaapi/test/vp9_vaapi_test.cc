@@ -417,6 +417,80 @@ class Vp9VaapiTestFixture : public ::testing::Test {
     decoder_->CoreCodecConfigureBuffers(CodecPort::kOutputPort, test_packets_);
   }
 
+  class StubAcceleratedVideoDecoder : public media::AcceleratedVideoDecoder {
+   public:
+    explicit StubAcceleratedVideoDecoder(const gfx::Size& pic_size) : pic_size_(pic_size) {}
+    void SetStream(int32_t id, scoped_refptr<media::DecoderBuffer> decoder_buffer) override {}
+    bool Flush() override { return true; }
+    void Reset() override {}
+    DecodeResult Decode() override { return kRanOutOfStreamData; }
+    gfx::Size GetPicSize() const override { return pic_size_; }
+    gfx::Rect GetVisibleRect() const override { return gfx::Rect(pic_size_); }
+    media::VideoCodecProfile GetProfile() const override { return media::VP9PROFILE_PROFILE0; }
+    uint8_t GetBitDepth() const override { return 8; }
+    media::VideoChromaSampling GetChromaSampling() const override {
+      return media::VideoChromaSampling::k420;
+    }
+    media::VideoColorSpace GetVideoColorSpace() const override { return media::VideoColorSpace(); }
+    size_t GetRequiredNumOfPictures() const override { return 4; }
+    size_t GetNumReferenceFrames() const override { return 3; }
+    bool IsCurrentFrameKeyframe() const override { return true; }
+
+   private:
+    gfx::Size pic_size_;
+  };
+
+  class StubSurfaceBufferManager : public SurfaceBufferManager {
+   public:
+    explicit StubSurfaceBufferManager(std::mutex& codec_lock)
+        : SurfaceBufferManager(codec_lock, [](const std::string&) {}) {}
+    void AddBuffer(const CodecBuffer* buffer) override {}
+    void RecycleBuffer(const CodecBuffer* buffer) override {}
+    void DeconfigureBuffers() override {}
+    scoped_refptr<VASurface> GetDPBSurface() override { return nullptr; }
+    std::optional<std::pair<const CodecBuffer*, uint32_t>> ProcessOutputSurface(
+        scoped_refptr<VASurface> dpb_surface) override {
+      return std::nullopt;
+    }
+    void Reset() override {}
+    void StopAllWaits() override {}
+    gfx::Size GetRequiredSurfaceSize(const gfx::Size& picture_size) override {
+      return picture_size;
+    }
+    bool NeedsKeyframeForBufferAllocation() const override { return false; }
+
+   protected:
+    void OnSurfaceGenerationUpdatedLocked(size_t num_of_surfaces) override {}
+  };
+
+  fit::result<std::string, bool> CallIsBufferReconfigurationNeededForTest(
+      const gfx::Size& pic_size, uint32_t max_picture_width, uint32_t max_picture_height,
+      uint32_t allocated_buffer_size_bytes) {
+    decoder_->max_picture_width_ = max_picture_width;
+    decoder_->max_picture_height_ = max_picture_height;
+    decoder_->media_decoder_ = std::make_unique<StubAcceleratedVideoDecoder>(pic_size);
+    decoder_->surface_buffer_manager_ = std::make_unique<StubSurfaceBufferManager>(lock_);
+
+    fuchsia_sysmem2::SingleBufferSettings settings;
+    settings.buffer_settings().emplace().size_bytes() = allocated_buffer_size_bytes;
+    auto& image_constraints = settings.image_format_constraints().emplace();
+    image_constraints.display_rect_alignment().emplace().width() = 1;
+    image_constraints.display_rect_alignment()->height() = 1;
+    image_constraints.max_width_times_height() = std::numeric_limits<uint32_t>::max();
+    image_constraints.max_size().emplace().width() = max_picture_width;
+    image_constraints.max_size()->height() = max_picture_height;
+    image_constraints.min_size().emplace().width() = 1;
+    image_constraints.min_size()->height() = 1;
+    image_constraints.size_alignment().emplace().width() = 1;
+    image_constraints.size_alignment()->height() = 1;
+    image_constraints.bytes_per_row_divisor() = 1;
+    image_constraints.min_bytes_per_row() = 1;
+    image_constraints.max_bytes_per_row() = max_picture_width;
+    decoder_->buffer_settings_[CodecPort::kOutputPort] = std::move(settings);
+
+    return decoder_->IsBufferReconfigurationNeeded();
+  }
+
   std::mutex lock_;
   FakeCodecAdapterEvents events_;
   std::vector<uint8_t> ivf_file_data_;
@@ -806,6 +880,27 @@ TEST(Vp9VaapiTest, Init) {
   codec_factory.Unbind();
 
   codec_thread.join();
+}
+
+TEST_F(Vp9VaapiTestFixture, IsBufferReconfigurationNeededPlaneSizeOverflow) {
+  // 1. Surface size 65536 x 46340:
+  // Area64() = 3,036,938,240 (fits in uint32_t).
+  // However, NV12 byte size (Area64() * 3) / 2 = 4,555,407,360 > UINT32_MAX (4,294,967,295).
+  // Verify that Cast<uint32_t>() detects this overflow and returns fit::error rather than
+  // silently wrapping around uint32_t to 260,440,064 bytes.
+  auto overflow_result = CallIsBufferReconfigurationNeededForTest(
+      gfx::Size(65536, 46340), /*max_picture_width=*/65536, /*max_picture_height=*/65536,
+      /*allocated_buffer_size_bytes=*/1920 * 1080 * 3 / 2);
+  ASSERT_TRUE(overflow_result.is_error());
+  EXPECT_EQ("Surface size exceeds the max hardware supported size", overflow_result.error_value());
+
+  // 2. Valid 1080p surface size within allocated buffer size requires no reconfiguration.
+  constexpr uint32_t k1080pNv12Bytes = 1920 * 1080 * 3 / 2;
+  auto valid_result = CallIsBufferReconfigurationNeededForTest(
+      gfx::Size(1920, 1080), /*max_picture_width=*/3840, /*max_picture_height=*/2160,
+      /*allocated_buffer_size_bytes=*/k1080pNv12Bytes);
+  ASSERT_TRUE(valid_result.is_ok());
+  EXPECT_FALSE(valid_result.value());
 }
 
 }  // namespace test

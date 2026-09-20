@@ -5,8 +5,13 @@
 import("//build/bind/bind.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("ftdi-dml") {
+  dml = "meta/ftdi.dml"
+  driver_name = "ftdi"
+}
+
 driver_bind_rules("ftdi_bind") {
-  rules = "meta/ftdi.bind"
+  dml_label = ":ftdi-dml"
   bind_output = "ftdi.bindbc"
   tests = "meta/tests.json"
   deps = [ "//src/devices/bind/fuchsia.usb" ]
@@ -63,6 +68,7 @@ fuchsia_cc_driver("ftdi-driver") {
 }
 
 fuchsia_driver_component("ftdi") {
+  dml_label = ":ftdi-dml"
   visibility = [
     ":*",
     "//src/devices/serial:drivers",
@@ -71,7 +77,6 @@ fuchsia_driver_component("ftdi") {
   info = "meta/ftdi-info.json"
   component_name = "ftdi"
   deps = [ ":ftdi-driver" ]
-  manifest = "meta/ftdi.cml"
 }
 
 fuchsia_driver_package("package") {
@@ -82,7 +87,10 @@ fuchsia_driver_package("package") {
 driver_bind_rules("ftdi_function_bind") {
   rules = "meta/ftdi_function.bind"
   tests = "meta/ftdi_function_tests.json"
-  deps = [ "//src/devices/bind/fuchsia.usb" ]
+  deps = [
+    "//src/devices/bind/fuchsia",
+    "//src/devices/bind/fuchsia.usb",
+  ]
 }
 
 fuchsia_cc_driver("ftdi-fake-usb-driver") {

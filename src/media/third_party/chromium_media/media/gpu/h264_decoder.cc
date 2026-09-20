@@ -1362,8 +1362,15 @@ bool H264Decoder::ProcessPPSAndSPS(int pps_id, bool* need_new_buffers) {
   }
 
   gfx::Size new_pic_size = sps->GetCodedSize().value_or(gfx::Size());
-  if (new_pic_size.IsEmpty()) {
+  if (new_pic_size.IsEmpty() || !gfx::Rect(new_pic_size).IsValid()) {
     FX_LOGS(DEBUG) << "Invalid picture size";
+    return false;
+  }
+
+  gfx::Rect new_visible_rect =
+      sps->GetVisibleRect().value_or(gfx::Rect(new_pic_size));
+  if (!new_visible_rect.IsValid()) {
+    FX_LOGS(DEBUG) << "Invalid visible rect";
     return false;
   }
 
@@ -1484,8 +1491,8 @@ bool H264Decoder::ProcessPPSAndSPS(int pps_id, bool* need_new_buffers) {
     dpb_.set_max_num_pics(max_dpb_size);
   }
 
-  gfx::Rect new_visible_rect =
-      sps->GetVisibleRect().value_or(gfx::Rect(new_pic_size));
+  ZX_ASSERT(gfx::Rect(new_pic_size).IsValid());
+  ZX_ASSERT(new_visible_rect.IsValid());
   if (!gfx::Rect(new_pic_size).Contains(new_visible_rect)) {
     DVLOG(1) << "Visible rect " << new_visible_rect.ToString()
              << " exceeds pic size " << new_pic_size.ToString()

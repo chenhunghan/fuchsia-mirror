@@ -1,18 +1,18 @@
 // Copyright 2019 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-use anyhow::{format_err, Error};
+use anyhow::{Error, format_err};
 use bt_test_harness::emulator;
 use bt_test_harness::low_energy_peripheral::PeripheralHarness;
-use fidl::endpoints::{create_endpoints, Proxy, ServerEnd};
+use fidl::endpoints::{Proxy, ServerEnd, create_endpoints};
 use fidl_fuchsia_bluetooth::{ConnectionRole, Uuid};
 use fidl_fuchsia_bluetooth_le::{
     AdvertisingData as LEAdvertisingData, AdvertisingHandleMarker, AdvertisingModeHint,
-    AdvertisingParameters, PeripheralError, PeripheralStartAdvertisingResult as AdvertisingResult,
+    AdvertisingParameters, PeripheralStartAdvertisingResult as AdvertisingResult,
 };
 use fidl_fuchsia_hardware_bluetooth::{
     AdvertisingData, ConnectionState, EmulatorProxy, LegacyAdvertisingType, PeerParameters,
-    PeerProxy, MAX_LEGACY_ADVERTISING_DATA_LENGTH,
+    PeerProxy,
 };
 use fuchsia_async::{self as fasync, DurationExt, TimeoutExt};
 use fuchsia_bluetooth::constants::INTEGRATION_TIMEOUT;
@@ -21,7 +21,6 @@ use fuchsia_bluetooth::expectation::asynchronous::{
 };
 use fuchsia_bluetooth::types::Address;
 use futures::TryFutureExt;
-use std::iter::repeat;
 use std::ops::Deref;
 
 mod expectation {
@@ -147,40 +146,6 @@ async fn test_advertising_handle_closed_while_pending(harness: PeripheralHarness
         )
         .await
         .unwrap();
-}
-
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-le-integration-tests#meta/bt-le-integration-tests-component.cm"
-)]
-async fn test_advertising_data_too_long(harness: PeripheralHarness) {
-    const LENGTH: usize = (MAX_LEGACY_ADVERTISING_DATA_LENGTH + 1) as usize;
-    let (_handle, handle_remote) = create_endpoints::<AdvertisingHandleMarker>();
-
-    // Assign a very long name.
-    let mut params = default_parameters();
-    params.data = Some(LEAdvertisingData {
-        name: Some(repeat("x").take(LENGTH).collect::<String>()),
-        ..empty_advertising_data()
-    });
-    let result = start_advertising(&harness, params, handle_remote).await.unwrap();
-    assert_eq!(Err(PeripheralError::AdvertisingDataTooLong), result);
-}
-
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-le-integration-tests#meta/bt-le-integration-tests-component.cm"
-)]
-async fn test_scan_response_data_too_long(harness: PeripheralHarness) {
-    const LENGTH: usize = (MAX_LEGACY_ADVERTISING_DATA_LENGTH + 1) as usize;
-    let (_handle, handle_remote) = create_endpoints::<AdvertisingHandleMarker>();
-
-    // Assign a very long name.
-    let mut params = default_parameters();
-    params.scan_response = Some(LEAdvertisingData {
-        name: Some(repeat("x").take(LENGTH).collect::<String>()),
-        ..empty_advertising_data()
-    });
-    let result = start_advertising(&harness, params, handle_remote).await.unwrap();
-    assert_eq!(Err(PeripheralError::ScanResponseDataTooLong), result);
 }
 
 #[test_harness::run_singlethreaded_test(

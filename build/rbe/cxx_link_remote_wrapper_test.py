@@ -9,8 +9,9 @@ import os
 import sys
 import tempfile
 import unittest
+from collections.abc import Collection, Iterable
 from pathlib import Path
-from typing import Any, Collection, Iterable
+from typing import Any
 from unittest import mock
 
 import cl_utils

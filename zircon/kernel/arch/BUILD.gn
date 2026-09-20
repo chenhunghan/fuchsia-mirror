@@ -57,5 +57,8 @@ kernel_rust_mod("arch-rs") {
 
 source_set("ffi") {
   sources = [ "arch_ffi.cc" ]
-  deps = [ "//zircon/kernel/lib/ktl" ]
+  deps = [
+    "//zircon/kernel/lib/arch:headers",
+    "//zircon/kernel/lib/ktl",
+  ]
 }

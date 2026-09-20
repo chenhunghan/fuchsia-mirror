@@ -21,10 +21,6 @@ tests = [
     label = "device"
   },
   {
-    label = "bridge"
-    err_logs = true
-  },
-  {
     label = "dhcp"
     err_logs = true
     package_deps = [
@@ -283,21 +279,10 @@ foreach(test, tests) {
   }
 }
 
-# We keep tests that involve the virtualization stack (and especially guest
-# images) restricted to a separate builder.  See https://fxbug.dev/42073933 for
-# more details.
-group("tests-involving-guests") {
-  testonly = true
-  deps = [ "guest:netstack-guest-integration-tests" ]
-}
-
 group("tests") {
   testonly = true
 
-  # See comment above about tests-involving-guests
-  assert_no_deps = [ "guest:netstack-guest-integration-tests" ]
   deps = [
-           "guest:build-only",
            "inspect:tests",
            "macros:tests",
          ] + all_test_packages

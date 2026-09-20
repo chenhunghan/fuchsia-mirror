@@ -8,8 +8,13 @@ import("//build/drivers.gni")
 import("//build/test.gni")
 import("//build/testing/environments.gni")
 
+fuchsia_driver_dml("ufs-pci-dml") {
+  dml = "meta/ufs-pci.dml"
+  driver_name = "ufs-pci"
+}
+
 driver_bind_rules("ufs-pci-bind") {
-  rules = "meta/ufs-pci.bind"
+  dml_label = ":ufs-pci-dml"
   tests = "meta/bind_tests_pci.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -69,6 +74,7 @@ _common_deps = [
   "//zircon/system/ulib/hwreg",
   "//zircon/system/ulib/inspect",
   "//zircon/system/ulib/sync",
+  "//zircon/system/ulib/trace",
   "//zircon/system/ulib/zircon-internal",
   "//zircon/system/ulib/zx",
   "//zircon/third_party/ulib/safemath",
@@ -117,11 +123,6 @@ fuchsia_cc_driver("ufs-pdev-driver") {
   ]
 }
 
-fuchsia_component_manifest("ufs-pci-manifest") {
-  component_name = "ufs-pci"
-  manifest = "meta/ufs-pci.cml"
-}
-
 fuchsia_component_manifest("ufs-pdev-manifest") {
   component_name = "ufs-pdev"
   manifest = "meta/ufs-pdev.cml"
@@ -129,7 +130,7 @@ fuchsia_component_manifest("ufs-pdev-manifest") {
 
 fuchsia_driver_component("ufs-pci") {
   component_name = "ufs-pci"
-  cm_label = ":ufs-pci-manifest"
+  dml_label = ":ufs-pci-dml"
   deps = [ ":ufs-pci-driver" ]
   info = "meta/ufs-info.json"
 }
@@ -142,11 +143,11 @@ fuchsia_driver_component("ufs-pdev") {
 }
 
 fuchsia_structured_config_cpp_elf_lib("ufs-config") {
-  cm_label = ":ufs-pci-manifest"
+  cm_label = ":ufs-pci-dml_manifest"
 }
 
 fuchsia_structured_config_values("sc-pci-values") {
-  cm_label = ":ufs-pci-manifest"
+  cm_label = ":ufs-pci-dml_manifest"
   values = {
     enable_suspend = false
     enable_auto_hibernate = true

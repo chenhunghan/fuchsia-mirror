@@ -13,5 +13,6 @@ pub use hexdump::{
     hexdump_very_ex_raw, hexdump_very_ex_rs, hexdump8_very_ex_raw, hexdump8_very_ex_rs,
 };
 pub use sizes::{
-    MAX_FORMAT_SIZE_LEN, SizeUnit, format_size_fixed_rs, format_size_rs, parse_size_bytes,
+    FormattedBytes, MAX_FORMAT_SIZE_LEN, SizeUnit, format_size_fixed_rs, format_size_rs,
+    parse_size_bytes,
 };

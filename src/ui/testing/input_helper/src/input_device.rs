@@ -2,25 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::input_reports_reader::InputReportsReader;
+use crate::input_reports_reader::InputReportsReaderV2;
 use anyhow::{Context as _, Error};
 use async_utils::event::Event as AsyncEvent;
 use fidl::Error as FidlError;
 use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_input_report::{
     DeviceDescriptor, FeatureReport, InputDeviceRequest, InputDeviceRequestStream, InputReport,
-    InputReportsReaderMarker, InputReportsReaderV2Marker,
+    InputReportsReaderV2Marker,
 };
 use fuchsia_async as fasync;
 use futures::channel::mpsc;
 use futures::{StreamExt, TryFutureExt, future, pin_mut};
 
 pub type DeviceId = u32;
-
-pub(super) enum ReaderServerEnd {
-    V1(ServerEnd<InputReportsReaderMarker>),
-    V2(ServerEnd<InputReportsReaderV2Marker>, u16),
-}
 
 /// Implements the server side of the
 /// `fuchsia.input.report.InputDevice` FIDL protocol. This struct also enables users to inject
@@ -31,12 +26,12 @@ pub(super) enum ReaderServerEnd {
 ///   input injection, so this implemnentation does not support them:
 ///   * `SendOutputReport` provides a way to change keyboard LED state.
 ///   If these FIDL methods are invoked, `InputDevice::flush()` will resolve to Err.
-/// * This implementation does not support multiple calls to `GetInputReportsReader`,
+/// * This implementation does not support multiple calls to `GetInputReportsReaderV2`,
 ///   since:
 ///   * The ideal semantics for multiple calls are not obvious, and
 ///   * Each `InputDevice` has a single FIDL client (an input pipeline implementation),
 ///     and the current input pipeline implementation is happy to use a single
-///     `InputReportsReader` for the lifetime of the `InputDevice`.
+///     `InputReportsReaderV2` for the lifetime of the `InputDevice`.
 pub(crate) struct InputDevice {
     /// FIFO queue of reports to be consumed by calls to
     /// `fuchsia.input.report.InputReportsReader.ReadInputReports()`.
@@ -104,19 +99,19 @@ impl InputDevice {
     }
 
     /// Returns a `Future` which resolves when all `InputReport`s for this device
-    /// have been sent to a `fuchsia.input.InputReportsReader` client.
+    /// have been sent to a `fuchsia.input.report.InputReportsReaderV2` client.
     ///
     /// # Notes
     /// * This function `panic()`s on error, to ensure that the error is reported
     ///   synchronously. Otherwise, the original error might lead to additional errors, and
     ///   make the integration tests that use this library harder to debug.
     /// * When the `Future` resolves, `InputReports` may still be sitting unread in the
-    ///   channel to the `fuchsia.input.InputReportsReader` client. (The client will
+    ///   channel to the `fuchsia.input.report.InputReportsReaderV2` client. (The client will
     ///   typically be an input pipeline implementation.)
     ///
     /// # Corner cases
-    /// Resolves to `Err` if the `fuchsia.input.InputDevice` client did not call
-    /// `GetInputReportsReader()`, even if no `InputReport`s were queued.
+    /// Resolves to `Err` if the `fuchsia.input.report.InputDevice` client did not call
+    /// `GetInputReportsReaderV2()`, even if no `InputReport`s were queued.
     async fn serve_reports(
         request_stream: InputDeviceRequestStream,
         descriptor: DeviceDescriptor,
@@ -124,11 +119,11 @@ impl InputDevice {
         got_input_reports_reader: AsyncEvent,
     ) {
         // Process `fuchsia.input.report.InputDevice` requests, waiting for the `InputDevice`
-        // client to provide a `ServerEnd<InputReportsReader>` by calling `GetInputReportsReader()`.
+        // client to provide a `ServerEnd<InputReportsReaderV2Marker>` by calling `GetInputReportsReaderV2()`.
         //
         // `filter_map` creates a new stream `input_reports_reader_server_end_stream` for
-        // `request_stream` baesd on the result of `handle_device_request`, only
-        // `GetInputReportsReader` requests enter `input_reports_reader_server_end_stream`
+        // `request_stream` based on the result of `handle_device_request`, only
+        // `GetInputReportsReaderV2` requests enter `input_reports_reader_server_end_stream`
         // for following process.
         let mut input_reports_reader_server_end_stream = request_stream.filter_map(|r| {
             future::ready(Self::handle_device_request(
@@ -138,43 +133,32 @@ impl InputDevice {
             ))
         });
 
-        // Create a `Future` to serve `GetInputReportsReader()` and extract the inpur reader
+        // Create a `Future` to serve `GetInputReportsReaderV2()` and extract the input reader
         // server_end from the request.
         let input_reports_reader_fut = {
-            let reader_server_end = input_reports_reader_server_end_stream
-                .next()
-                .await
-                .unwrap_or_else(|| panic!("stream ended without a call to GetInputReportsReader"));
-            match reader_server_end {
-                ReaderServerEnd::V1(server_end) => {
-                    InputReportsReader::V1(crate::input_reports_reader::InputReportsReaderV1 {
-                        request_stream: server_end.into_stream(),
-                        report_receiver,
-                    })
-                    .into_future()
-                }
-                ReaderServerEnd::V2(server_end, max_unacknowledged_reports) => {
-                    InputReportsReader::V2(crate::input_reports_reader::InputReportsReaderV2 {
-                        request_stream: server_end.into_stream(),
-                        report_receiver,
-                        max_unacknowledged_reports,
-                    })
-                    .into_future()
-                }
+            let (reader_server_end, max_unacknowledged_reports) =
+                input_reports_reader_server_end_stream.next().await.unwrap_or_else(|| {
+                    panic!("stream ended without a call to GetInputReportsReaderV2")
+                });
+            InputReportsReaderV2 {
+                request_stream: reader_server_end.into_stream(),
+                report_receiver,
+                max_unacknowledged_reports,
             }
+            .into_future()
         };
         pin_mut!(input_reports_reader_fut);
 
         // Create a `Future` to keep serving the `fuchsia.input.report.InputDevice` protocol.
-        // This time, receiving a `ServerEnd<InputReportsReaderMarker>` will be an `Err`.
+        // This time, receiving a `ServerEnd<InputReportsReaderV2Marker>` will be an `Err`.
         let input_device_server_fut = async {
             match input_reports_reader_server_end_stream.next().await {
                 Some(_server_end) => {
                     // There are no obvious "best" semantics for how to handle multiple
-                    // `GetInputReportsReader` calls, and there is no current need to
+                    // `GetInputReportsReaderV2` calls, and there is no current need to
                     // do so. Instead of taking a guess at what the client might want
                     // in such a case, just `panic()`.
-                    panic!("InputDevice does not support multiple GetInputReportsReader calls")
+                    panic!("InputDevice does not support multiple GetInputReportsReaderV2 calls")
                 }
                 None => Ok(()),
             }
@@ -182,8 +166,8 @@ impl InputDevice {
         pin_mut!(input_device_server_fut);
 
         // Now, process both `fuchsia.input.report.InputDevice` requests, and
-        // `fuchsia.input.report.InputReportsReader` requests. And keep processing
-        // `InputReportsReader` requests even if the `InputDevice` connection
+        // `fuchsia.input.report.InputReportsReaderV2` requests. And keep processing
+        // `InputReportsReaderV2` requests even if the `InputDevice` connection
         // is severed.
         future::select(
             input_device_server_fut.and_then(|_: ()| future::pending()),
@@ -198,7 +182,7 @@ impl InputDevice {
     /// Processes a single request from an `InputDeviceRequestStream`
     ///
     /// # Returns
-    /// * Some(ReaderServerEnd) if the request yielded an `InputReportsReader` or `InputReportsReaderV2`.
+    /// * Some((ServerEnd<InputReportsReaderV2Marker>, u16)) if the request yielded an `InputReportsReaderV2`.
     /// * None if the request was fully processed by `handle_device_request()`
     ///
     /// # Note
@@ -207,12 +191,8 @@ impl InputDevice {
         request: Result<InputDeviceRequest, FidlError>,
         descriptor: &DeviceDescriptor,
         got_input_reports_reader: AsyncEvent,
-    ) -> Option<ReaderServerEnd> {
+    ) -> Option<(ServerEnd<InputReportsReaderV2Marker>, u16)> {
         match request {
-            Ok(InputDeviceRequest::GetInputReportsReader { reader: reader_server_end, .. }) => {
-                let _ = got_input_reports_reader.signal();
-                Some(ReaderServerEnd::V1(reader_server_end))
-            }
             Ok(InputDeviceRequest::GetInputReportsReaderV2 {
                 reader: reader_server_end,
                 max_unacknowledged_reports_limit,
@@ -223,7 +203,7 @@ impl InputDevice {
                 if let Err(e) = responder.send(max_unacknowledged_reports) {
                     panic!("failed to send GetInputReportsReaderV2 response: {e}");
                 }
-                Some(ReaderServerEnd::V2(reader_server_end, max_unacknowledged_reports))
+                Some((reader_server_end, max_unacknowledged_reports))
             }
             Ok(InputDeviceRequest::GetDescriptor { responder }) => {
                 match responder.send(descriptor) {
@@ -238,7 +218,7 @@ impl InputDevice {
                 }
             }
             Err(e) => {
-                panic!("failed to read `InputReportsReader` request: {:?}", e);
+                panic!("failed to read `InputDevice` request: {:?}", e);
             }
             _ => {
                 panic!(

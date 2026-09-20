@@ -426,7 +426,6 @@ TEST(RemoteBlockDeviceTest, TransactionSanitizesPaddingAndReqids) {
       EXPECT_EQ(server_request.command.padding_to_satisfy_zerocopy[1], 0u);
       EXPECT_EQ(server_request.command.padding_to_satisfy_zerocopy[2], 0u);
       EXPECT_EQ(server_request.padding, 0u);
-      EXPECT_EQ(server_request.padding2, 0u);
       // Ensure reqid does not contain junk despite maybe being zero.
       EXPECT_NE(server_request.reqid, 0xABABABABu);
     }

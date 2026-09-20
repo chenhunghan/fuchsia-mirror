@@ -102,7 +102,6 @@ test("ftl-integration") {
   deps += [
     "//src/devices/block/bin/blktest",
     "//src/devices/block/bin/iochk",
-    "//src/devices/block/drivers/core",
     "//src/devices/block/drivers/ftl",
     "//src/devices/bus/drivers/platform",
     "//src/devices/misc/drivers/test",

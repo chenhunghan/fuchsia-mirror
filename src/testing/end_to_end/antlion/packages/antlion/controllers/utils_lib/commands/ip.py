@@ -7,7 +7,7 @@ import re
 import subprocess
 from typing import Iterator
 
-from antlion.controllers.utils_lib.commands.command import LinuxCommand
+from libs.commands.command import LinuxCommand
 from libs.proc.runner import Runner
 from mobly import signals
 

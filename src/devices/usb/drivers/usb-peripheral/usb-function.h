@@ -71,6 +71,12 @@ class UsbFunction : public fidl::Server<fuchsia_hardware_usb_function::UsbFuncti
 
   inline uint8_t GetNumInterfaces() const { return num_interfaces_; }
 
+  // Returns all endpoint addresses associated with the given interface and alternate setting
+  // by parsing the function's descriptors. Returns std::nullopt if the function has no descriptors
+  // (e.g. mock test functions).
+  std::optional<std::vector<uint8_t>> GetEndpointsForInterface(uint8_t interface_num,
+                                                               uint8_t alt_setting) const;
+
   zx_status_t UsbFunctionCancelAll(uint8_t ep_address);
 
   // fuchsia_hardware_usb_function.UsbFunction protocol implementation.

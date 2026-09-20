@@ -26,7 +26,6 @@ async fn rule_watcher_add_remove<
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // Rules are not supported in netstack2.
     let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     // Connect to the watcher protocol and consume all existing events.
@@ -145,7 +144,6 @@ async fn resolve_with_marks<
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // Rules are not supported in netstack2.
     let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let table_provider = realm

@@ -9,7 +9,7 @@
 
 # Enable gcert authentication, which will automatically refresh OAuth
 # tokens while gcert certificate (unrestricted) is still valid.
-# Use build/rbe/check_loas_restrictions.sh to determine certificate type.
+# Use build/auth/check_loas_restrictions.sh to determine certificate type.
 #
 # Note: --config=gcertauth is appended by build/bazel/wrapper.bazel.sh when
 # FX_BUILD_LOAS_TYPE is "unrestricted". When running on GCE bots or other

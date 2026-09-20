@@ -13,7 +13,6 @@ rustc_test("battery_manager_integration_test") {
     "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_rust",
     "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
     "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
-    "//sdk/fidl/fuchsia.hardware.power.source:fuchsia.hardware.power.source_rust",
     "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
     "//sdk/fidl/fuchsia.power.battery.test:fuchsia.power.battery.test_rust",
     "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",

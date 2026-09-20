@@ -15,7 +15,7 @@ import (
 
 	"github.com/google/subcommands"
 
-	"go.fuchsia.dev/fuchsia/tools/check-licenses/config"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate"
 )
 
 type PolicyCommand struct {
@@ -92,11 +92,8 @@ func (p *PolicyAddCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...in
 	}
 
 	checkName := f.Arg(0)
-	if !config.ValidPolicyChecks[checkName] {
-		var validChecks []string
-		for k := range config.ValidPolicyChecks {
-			validChecks = append(validChecks, k)
-		}
+	if !validate.IsValidPolicy(checkName) {
+		validChecks := validate.ValidPolicies()
 		sort.Strings(validChecks)
 		fmt.Fprintf(os.Stderr, "Error: invalid check name %q. Must be one of: %s\n", checkName, strings.Join(validChecks, ", "))
 		return subcommands.ExitUsageError
@@ -119,7 +116,7 @@ func AddPolicyException(fuchsiaDir, checkName, targetPath, bug, description stri
 	}
 
 	resolvedTarget := targetPath
-	if checkName == config.PolicyCheckAllProjectsMustHaveALicense {
+	if validate.IsProjectScopePolicy(checkName) {
 		if projectRoot, err := ic.ResolveProjectRoot(targetPath); err == nil {
 			resolvedTarget = projectRoot
 		}
@@ -129,6 +126,7 @@ func AddPolicyException(fuchsiaDir, checkName, targetPath, bug, description stri
 	if err != nil {
 		relTarget = resolvedTarget
 	}
+	relTarget = filepath.ToSlash(filepath.Clean(relTarget))
 
 	// Check if this target already has an exception
 	if list, ok := ic.Config.Validate.PolicyExceptions[checkName]; ok {

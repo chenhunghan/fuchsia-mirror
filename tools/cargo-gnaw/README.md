@@ -19,6 +19,7 @@ $ cargo gnaw --manifest-path ~/fuchsia/third_party/rust_crates/Cargo.toml -o ~/f
 ### Options
 * --skip-root - Skip the root package in the Cargo.toml and treat it's dependencies as the top-level targets
 * --gn-bin - Path to GN binary for formatting the output
+* --min-publish-age - Minimum age (in days) of published packages to resolve (e.g. 14)
 
 ## How it works
 
@@ -153,4 +154,24 @@ rustflags = [ "--cfg=feature" ]
 
 [gn.package.my-cargo-package."1.2.3".binary.my-cargo-target.platform."cfg(unix)"]
 configs = [ "//some:unix_specific_config" ]
+```
+
+### Global configuration
+Global configuration affecting all packages can be specified in `[gn.config]`:
+
+* `min_publish_age` - Minimum age (in days) of published crates (e.g. `14`), passing `-Zmin-publish-age` and
+  `--config=registry.global-min-publish-age="<days> days"` to Cargo resolution.
+* `require_licenses` - Whether crates must have license files.
+* `add_cfgs` - Global GN configs to add to all generated targets.
+* `remove_cfgs` - Global GN configs to remove from all generated targets.
+
+#### Example
+```toml
+[gn.config]
+min_publish_age = 14
+require_licenses = true
+
+# Allow specific emergency security patch before publish cooldown:
+[gn.package.hotfix-crate."1.2.3"]
+allow_recent_publish = true
 ```

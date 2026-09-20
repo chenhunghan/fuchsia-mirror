@@ -228,9 +228,9 @@ mod tests {
     use core::num::NonZeroU16;
 
     use ip_test_macro::ip_test;
+    use net_types::ZonedAddr;
     use net_types::ip::Subnet;
-    use net_types::{ZonedAddr};
-    use netstack3_base::testutil::{FakeDeviceId, set_logger_for_test};
+    use netstack3_base::testutil::{FakeDeviceId, FakeSendToken, set_logger_for_test};
     use netstack3_base::{
         AddressMatcher, AddressMatcherEither, AddressMatcherType, BoundAddressMatcherEither,
         BoundInterfaceMatcher, BoundPortMatcher, InterfaceMatcher, IpSocketMatcher, Mark,
@@ -1082,6 +1082,7 @@ mod tests {
             Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)),
             REMOTE_PORT_1.into(),
             packet::Buf::new(vec![], ..),
+            FakeSendToken::default(),
         )
         .expect("send failed");
         assert_matches!(api.get_info(&socket), SocketInfo::Listener(ListenerInfo { .. }));

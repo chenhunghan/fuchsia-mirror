@@ -9,7 +9,7 @@ use fidl_fuchsia_net_interfaces_ext as fnet_interfaces_ext;
 use fuchsiaperf::{Direction, Unit};
 use humansize::{BINARY, format_size};
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, ProdNetstack2, ProdNetstack3, TestSandboxExt as _,
+    KnownServiceProvider, Netstack, ProdNetstack3, TestSandboxExt as _,
 };
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -22,10 +22,6 @@ mod sockets;
 #[derive(FromArgs)]
 /// Benchmark the resource usage of the netstack.
 struct Args {
-    /// whether to benchmark against Netstack3
-    #[argh(switch)]
-    netstack3: bool,
-
     /// whether to run in perftest mode instead of unit test mode
     #[argh(switch, short = 'p')]
     perftest_mode: bool,
@@ -40,34 +36,16 @@ const PERF_TEST_MODE_RUNS: NonZeroUsize = NonZeroUsize::new(5).unwrap();
 
 #[fuchsia::main]
 async fn main() {
-    let Args { netstack3, perftest_mode, output_path } = argh::from_env();
+    let Args { perftest_mode, output_path } = argh::from_env();
 
-    const BENCHMARK_NAME: &str = "fuchsia.netstack.resource_usage";
-    let metrics = if netstack3 {
-        let benchmark_name = format!("{BENCHMARK_NAME}.netstack3");
-        vec![
-            run_benchmark::<sockets::UdpSockets, ProdNetstack3>(&benchmark_name, perftest_mode)
-                .await,
-            run_benchmark::<sockets::TcpSockets, ProdNetstack3>(&benchmark_name, perftest_mode)
-                .await,
-            run_benchmark::<interfaces::Interfaces, ProdNetstack3>(&benchmark_name, perftest_mode)
-                .await,
-            run_benchmark::<paced_traffic::PacedTraffic, ProdNetstack3>(
-                &benchmark_name,
-                perftest_mode,
-            )
+    const BENCHMARK_NAME: &str = "fuchsia.netstack.resource_usage.netstack3";
+    let metrics = [
+        run_benchmark::<sockets::UdpSockets, ProdNetstack3>(BENCHMARK_NAME, perftest_mode).await,
+        run_benchmark::<sockets::TcpSockets, ProdNetstack3>(BENCHMARK_NAME, perftest_mode).await,
+        run_benchmark::<interfaces::Interfaces, ProdNetstack3>(BENCHMARK_NAME, perftest_mode).await,
+        run_benchmark::<paced_traffic::PacedTraffic, ProdNetstack3>(BENCHMARK_NAME, perftest_mode)
             .await,
-        ]
-    } else {
-        vec![
-            run_benchmark::<sockets::UdpSockets, ProdNetstack2>(BENCHMARK_NAME, perftest_mode)
-                .await,
-            run_benchmark::<sockets::TcpSockets, ProdNetstack2>(BENCHMARK_NAME, perftest_mode)
-                .await,
-            run_benchmark::<interfaces::Interfaces, ProdNetstack2>(BENCHMARK_NAME, perftest_mode)
-                .await,
-        ]
-    }
+    ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();

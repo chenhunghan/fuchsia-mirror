@@ -24,7 +24,8 @@ namespace elfldltl {
 // this file, and with only a concrete Phdr allocator rather than a template
 // for allocators of various types.
 template <class File, class Elf, typename PhdrAllocator>
-concept FileApiForLoad = CanReadFromFile<File, typename Elf::Ehdr> &&
+concept FileApiForLoad = ElfApi<Elf> &&  //
+                         CanReadFromFile<File, typename Elf::Ehdr> &&
                          CanReadArrayFromFile<File, typename Elf::Phdr, PhdrAllocator, uint32_t>;
 
 // Read the ELF file header (Ehdr) from an ELF file using the File API (see
@@ -38,14 +39,14 @@ concept FileApiForLoad = CanReadFromFile<File, typename Elf::Ehdr> &&
 // This returns the return value of calling file.ReadFromFile<Ehdr>,
 // i.e. some type std::optional<E> where `const Ehdr& ehdr = <E object>;`
 // works and the E object owns the storage ehdr points into.
-template <class Elf, class Diagnostics>
+template <ElfApi Elf, class Diagnostics>
 constexpr auto LoadEhdrFromFile(Diagnostics& diagnostics,
                                 CanReadFromFile<typename Elf::Ehdr, decltype(0)> auto& file,
                                 std::optional<ElfMachine> machine = ElfMachine::kNative)
     -> decltype(file.template ReadFromFile<typename Elf::Ehdr>(0)) {
   using namespace std::literals::string_view_literals;
 
-  using Ehdr = typename Elf::Ehdr;
+  using Ehdr = Elf::Ehdr;
 
   if (auto read_ehdr = file.template ReadFromFile<Ehdr>(0)) [[likely]] {
     const Ehdr& ehdr = *read_ehdr;
@@ -74,7 +75,7 @@ constexpr auto LoadEhdrFromFile(Diagnostics& diagnostics,
 //     ...
 //   }
 // ```
-template <class Elf, class Diagnostics, class File,
+template <ElfApi Elf, class Diagnostics, class File,
           ReadArrayFromFileAllocator<typename Elf::Phdr, uint32_t> PhdrAllocator>
   requires FileApiForLoad<File, Elf, PhdrAllocator>
 constexpr auto LoadHeadersFromFile(Diagnostics& diagnostics, File& file,
@@ -114,14 +115,14 @@ constexpr bool WithLoadHeadersFromFile(Diagnostics& diagnostics, File& file,
                                        std::optional<ElfMachine> machine = ElfMachine::kNative) {
   using namespace std::literals::string_view_literals;
 
-  using Ehdr64Lsb = typename Elf64<ElfData::k2Lsb>::Ehdr;
-  using Ehdr64Msb = typename Elf64<ElfData::k2Msb>::Ehdr;
+  using Ehdr64Lsb = Elf64<ElfData::k2Lsb>::Ehdr;
+  using Ehdr64Msb = Elf64<ElfData::k2Msb>::Ehdr;
 
   // Below we'll call this with Elf<...>::Ehdr depending on the format.
   auto load_headers = [&](const auto& ehdr) -> bool {
     using Ehdr = std::decay_t<decltype(ehdr)>;
-    using Elf = typename Ehdr::ElfLayout;
-    using Phdr = typename Elf::Phdr;
+    using Elf = Ehdr::ElfLayout;
+    using Phdr = Elf::Phdr;
     if (!ehdr.Loadable(diagnostics, machine)) [[unlikely]] {
       return false;
     }
@@ -139,8 +140,8 @@ constexpr bool WithLoadHeadersFromFile(Diagnostics& diagnostics, File& file,
   // Below we'll call this with Elf64<...>::Ehdr depending on the byte order.
   auto check_class = [&](const auto& probe_ehdr) -> bool {
     using ProbeEhdr = std::decay_t<decltype(probe_ehdr)>;
-    using ProbeElf = typename ProbeEhdr::ElfLayout;
-    using Ehdr32 = typename Elf32<ProbeElf::kData>::Ehdr;
+    using ProbeElf = ProbeEhdr::ElfLayout;
+    using Ehdr32 = Elf32<ProbeElf::kData>::Ehdr;
     // If the EI_CLASS field is invalid, it doesn't matter which one we use
     // because it won't get past Valid() either way.
     return probe_ehdr.elfclass == ElfClass::k64
@@ -256,7 +257,7 @@ using NoSegmentWrapper = SegmentType;
 // After adjustment, VisitSegments can be used to iterate over segments()
 // using std::visit.
 //
-template <class ElfLayout, template <typename> class Container,
+template <ElfApi ElfLayout, template <typename> class Container,
           PhdrLoadPolicy Policy = PhdrLoadPolicy::kBasic,
           template <class SegmentType> class SegmentWrapper = NoSegmentWrapper>
 class LoadInfo {
@@ -265,9 +266,9 @@ class LoadInfo {
 
  public:
   using Elf = ElfLayout;
-  using size_type = typename Elf::size_type;
-  using Region = typename Types::Region;
-  using Phdr = typename Elf::Phdr;
+  using size_type = Elf::size_type;
+  using Region = Types::Region;
+  using Phdr = Elf::Phdr;
 
   using ConstantSegment = SegmentWrapper<typename Types::template ConstantSegment<Policy>>;
   using DataSegment = SegmentWrapper<typename Types::template DataSegment<Policy>>;
@@ -415,7 +416,7 @@ class LoadInfo {
     return internal::Visit(visitor, segment);
   }
 
-  constexpr typename Container<Segment>::const_iterator FindSegment(size_type vaddr) const {
+  constexpr Container<Segment>::const_iterator FindSegment(size_type vaddr) const {
     auto within_bounds = [vaddr](const auto& segment) {
       return segment.vaddr() <= vaddr && vaddr < segment.vaddr() + segment.memsz();
     };
@@ -573,7 +574,7 @@ class LoadInfo {
   // This is used by Copy.
   template <class Other, class OtherSegment>
   using SegmentTypeFromOther =
-      typename SegmentTypeFromOtherHelper<typename Other::Segment, OtherSegment, 0>::Type;
+      SegmentTypeFromOtherHelper<typename Other::Segment, OtherSegment, 0>::Type;
 
   // Making this static with a universal reference parameter avoids having to
   // repeat the actual body in the const and non-const methods that call it.
@@ -664,7 +665,7 @@ class LoadInfo {
       // This iterator points to (the std::variant containing) this segment,
       // but segment's type provides the deduced template parameter and saves
       // repeating the iterator dereference and the std::get from the variant.
-      typename Container<Segment>::iterator it, const SegmentType& segment,  //
+      Container<Segment>::iterator it, const SegmentType& segment,  //
       size_type relro_size, bool merge_ro) {
     if (!segment.CanReplace()) {
       return diagnostics.FormatError("Cannot split segment to apply PT_GNU_RELRO protections");

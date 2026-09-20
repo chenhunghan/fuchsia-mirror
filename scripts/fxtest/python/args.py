@@ -28,6 +28,7 @@ class PrevOption(enum.StrEnum):
     FAILED_TESTS = "failed-tests"
     HELP = "help"
     STATS = "stats"
+    STATS_ANALYTICS = "stats-analytics"
 
     def help(self) -> str:
         """Get the help string for this option.
@@ -52,6 +53,8 @@ class PrevOption(enum.StrEnum):
             return "Print this help output."
         elif self is PrevOption.STATS:
             return "Print statistics from the previous run"
+        elif self is PrevOption.STATS_ANALYTICS:
+            return "Print statistics from the previous run formatted for analytics (minified JSON)."
         else:
             raise RuntimeError("BUG: Invalid prev option")
 
@@ -138,6 +141,7 @@ class Flags:
     summary_json: str | None
     summary_to_stdout: bool
     agent_output: bool
+    save_log_path_to_file: str | None = None
 
     def validate(self) -> None:
         """Validate incoming flags, raising an exception on failure.
@@ -763,6 +767,11 @@ def parse_args(
     output.add_argument(
         "--logpath",
         help="If passed and --log is enabled, customizes the destination of the target log.",
+        default=None,
+    )
+    output.add_argument(
+        "--save-log-path-to-file",
+        help="Write the path of the log file to this file. Used for scripting so a script will know where the log path is without needing to intercept output.",
         default=None,
     )
     output.add_argument(

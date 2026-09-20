@@ -5,12 +5,9 @@
 source_set("math") {
   include_dirs = [ "//zircon/third_party/ulib/musl/third_party/include" ]
   sources = [
-    "__expo2.c",
-    "__expo2f.c",
     "__fpclassify.c",
     "__fpclassifyf.c",
     "__fpclassifyl.c",
-    "__invtrigl.c",
     "__signbit.c",
     "__signbitf.c",
     "__signbitl.c",
@@ -59,9 +56,6 @@ source_set("math") {
     "ilogb.c",
     "ilogbf.c",
     "ilogbl.c",
-    "ldexp.c",
-    "ldexpf.c",
-    "ldexpl.c",
     "lgamma.c",
     "lgammaf.c",
     "llround.c",
@@ -98,12 +92,6 @@ source_set("math") {
     "round.c",
     "roundf.c",
     "roundl.c",
-    "scalbln.c",
-    "scalblnf.c",
-    "scalblnl.c",
-    "scalbn.c",
-    "scalbnf.c",
-    "scalbnl.c",
     "signgam.c",
     "significand.c",
     "significandf.c",
@@ -169,6 +157,7 @@ source_set("math") {
     ]
   }
   deps = [
+    ":internal",
     "//zircon/third_party/ulib/musl:musl_internal",
     "//zircon/third_party/ulib/musl/third_party/math",
   ]
@@ -177,4 +166,15 @@ source_set("math") {
 
   # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
   configs += [ "//build/config:Wno-conversion" ]
+}
+
+source_set("internal") {
+  visibility = [ ":*" ]
+  sources = [
+    "__expo2.c",
+    "__expo2f.c",
+    "__invtrigl.c",
+  ]
+  include_dirs = [ "//zircon/third_party/ulib/musl/third_party/include" ]
+  deps = [ "//zircon/third_party/ulib/musl:musl_internal" ]
 }

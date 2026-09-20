@@ -9,7 +9,7 @@ use crate::ptrace::{PtraceCoreState, PtraceEvent, PtraceEventData, PtraceOptions
 use crate::security;
 use crate::signals::{SignalDetail, SignalInfo, send_signal_first, send_standard_signal};
 use crate::task::loader::{
-    ResolvedElf, load_executable, resolve_elf_interpreter, resolve_executable,
+    ResolvedProgram, load_executable, resolve_elf_interpreter, resolve_executable,
 };
 use crate::task::waiter::WaiterOptions;
 use crate::task::{
@@ -18,9 +18,9 @@ use crate::task::{
     TaskFlags, TaskRunningState, ThreadState, Waiter,
 };
 use crate::vfs::{
-    AccessCheck, FdFlags, FdNumber, FdTable, FileHandle, FileMapping, FileWriteGuardMode,
-    FsContext, FsStr, LookupContext, LookupVec, MAX_SYMLINK_FOLLOWS, NamespaceNode,
-    OpenAccessCheck, ResolveBase, SymlinkMode, SymlinkTarget, new_pidfd,
+    AccessCheck, DirectoryMode, FdFlags, FdNumber, FdTable, FileHandle, FileMapping,
+    FileWriteGuardMode, FsContext, FsStr, LookupContext, LookupVec, MAX_SYMLINK_FOLLOWS,
+    NamespaceNode, OpenAccessCheck, ResolveBase, SymlinkMode, SymlinkTarget, new_pidfd,
 };
 use futures::FutureExt;
 use linux_uapi::CLONE_PIDFD;
@@ -669,9 +669,6 @@ impl CurrentTask {
         if !(flags & !(OpenFlags::RDONLY | OpenFlags::NOFOLLOW)).is_empty() {
             return error!(EINVAL);
         }
-        if path.is_empty() {
-            return error!(ENOENT);
-        }
 
         let (dir, path) = self.resolve_dir_fd(dir_fd, path, ResolveFlags::empty())?;
         let nofollow = flags.contains(OpenFlags::NOFOLLOW);
@@ -724,15 +721,14 @@ impl CurrentTask {
         flags: OpenFlags,
     ) -> Result<(NamespaceNode, bool), Errno> {
         context.update_for_path(path);
-        let mut parent_content = context.with(SymlinkMode::Follow);
+        let mut parent_content = context.with(SymlinkMode::Follow, context.directory_mode);
         let (parent, basename) = self.lookup_parent(&mut parent_content, dir, path)?;
         context.remaining_follows = parent_content.remaining_follows;
 
         let must_create = flags.contains(OpenFlags::CREAT) && flags.contains(OpenFlags::EXCL);
 
         // Lookup the child, without following a symlink or expecting it to be a directory.
-        let mut child_context = context.with(SymlinkMode::NoFollow);
-        child_context.must_be_directory = false;
+        let mut child_context = context.with(SymlinkMode::NoFollow, DirectoryMode::AllowAny);
 
         match parent.lookup_child(self, &mut child_context, basename) {
             Ok(name) => {
@@ -796,7 +792,7 @@ impl CurrentTask {
                 }
             }
             Err(e) if e == errno!(ENOENT) && flags.contains(OpenFlags::CREAT) => {
-                if context.must_be_directory {
+                if context.directory_mode == DirectoryMode::MustBeDirectory {
                     return error!(EISDIR);
                 }
                 Ok((
@@ -893,7 +889,11 @@ impl CurrentTask {
         let mut context = LookupContext {
             symlink_mode,
             remaining_follows: MAX_SYMLINK_FOLLOWS,
-            must_be_directory: flags.contains(OpenFlags::DIRECTORY),
+            directory_mode: if flags.contains(OpenFlags::DIRECTORY) {
+                DirectoryMode::MustBeDirectory
+            } else {
+                DirectoryMode::AllowAny
+            },
             resolve_flags,
             resolve_base,
         };
@@ -941,7 +941,7 @@ impl CurrentTask {
                 if flags.contains(OpenFlags::DIRECT) {
                     return error!(EINVAL);
                 }
-            } else if context.must_be_directory {
+            } else if context.directory_mode == DirectoryMode::MustBeDirectory {
                 return error!(ENOTDIR);
             }
 
@@ -1057,32 +1057,19 @@ impl CurrentTask {
         argv: Vec<CString>,
         environ: Vec<CString>,
     ) -> Result<(), Errno> {
-        // Resolve the executable (and any script interpreter) into a [`ResolvedElf`].
-        let mut resolved_elf =
-            resolve_executable(self, executable.clone(), path.clone(), argv, environ)?;
-
         // Serialize against ptrace_attach by holding the credentials write lock.
         let writable_creds = self.write_creds();
 
-        // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
-        //
-        //   The aforementioned transformations of the effective IDs are not
-        //   performed (i.e., the set-user-ID and set-group-ID bits are
-        //   ignored) if any of the following is true:
-        //
-        //   * the calling thread is being ptraced (see ptrace(2));
-        //
-        //   * the calling thread has a non-zero "no-new-privs" attribute
-        //     (see prctl(2));
-
-        // LSM hook: Update credentials based on the executable file.
-        security::bprm_creds_from_file(self, &mut resolved_elf)?;
-
-        // LSM hook: Perform access checks and allow LSM to update credentials.
-        security::bprm_creds_for_exec(self, executable.name(), &mut resolved_elf)?;
-
-        // Resolve the ELF interpreter.
-        resolve_elf_interpreter(self, &mut resolved_elf)?;
+        // Evaluate LSM access checks and domain transitions (`bprm_creds_for_exec`) against the
+        // initial executable before resolving `#!` scripts, so that script execution transitions
+        // to the domain determined by the script file rather than its interpreter. Once `#!`
+        // scripts are resolved to the target ELF binary, apply SUID/SGID and file capabilities
+        // (`bprm_creds_from_file`) and validate `PT_INTERP` before committing the exec.
+        let mut resolved_program = ResolvedProgram::new(self, executable, path, argv, environ);
+        security::bprm_creds_for_exec(self, &mut resolved_program)?;
+        resolve_executable(self, &mut resolved_program)?;
+        security::bprm_creds_from_file(self, &mut resolved_program)?;
+        resolve_elf_interpreter(self, &mut resolved_program)?;
 
         if self.thread_group().read().tasks_count() > 1 {
             track_stub!(TODO("https://fxbug.dev/297434895"), "exec on multithread process");
@@ -1090,7 +1077,7 @@ impl CurrentTask {
         }
 
         // Commit the exec. Failures after this point are unrecoverable.
-        if let Err(err) = self.finish_exec(path, resolved_elf, writable_creds) {
+        if let Err(err) = self.finish_exec(resolved_program, writable_creds) {
             log_warn!("unrecoverable error in exec: {err:?}");
 
             send_standard_signal(self, SignalInfo::forced(SIGSEGV));
@@ -1109,10 +1096,11 @@ impl CurrentTask {
     /// function will be considered unrecoverable.
     fn finish_exec(
         &mut self,
-        path: CString,
-        resolved_elf: ResolvedElf,
+        resolved_program: ResolvedProgram,
         writable_creds: CurrentTaskCredentialsWriteGuard,
     ) -> Result<(), Errno> {
+        let elf_arch_width = resolved_program.arch_width().ok_or_else(|| errno!(EINVAL))?;
+
         // Now that the exec will definitely finish (or crash), notify owners of
         // locked futexes for the current process, which will be impossible to
         // update after process image is replaced.  See get_robust_list(2).
@@ -1123,8 +1111,8 @@ impl CurrentTask {
             let new_mm = MemoryManager::exec(
                 self.thread_group().root_vmar.unowned(),
                 self.mm().ok(),
-                resolved_elf.file.name().to_passive(),
-                resolved_elf.arch_width,
+                resolved_program.file.name().to_passive(),
+                elf_arch_width,
             )?;
             self.running_state().mm.update(Some(new_mm.clone()));
             new_mm
@@ -1164,7 +1152,7 @@ impl CurrentTask {
             //   /proc/sys/fs/suid_dumpable, in the circumstances described
             //   under PR_SET_DUMPABLE in prctl(2).
             let dumpable =
-                if resolved_elf.secure_exec { DumpPolicy::Disable } else { DumpPolicy::User };
+                if resolved_program.secure_exec { DumpPolicy::Disable } else { DumpPolicy::User };
             *mm.dumpable.lock() = dumpable;
 
             state.set_sigaltstack(None);
@@ -1179,15 +1167,16 @@ impl CurrentTask {
             // the PR_SET_PDEATHSIG flag.
         }
 
-        security::bprm_committing_creds(self, &resolved_elf)?;
+        security::bprm_committing_creds(self, &resolved_program)?;
 
-        let new_creds = Arc::new(resolved_elf.creds.clone());
+        let new_creds = Arc::new(resolved_program.creds.clone());
         writable_creds.update(self, new_creds);
 
         self.thread_group().signal_actions.reset_for_exec();
         security::bprm_committed_creds(self)?;
 
-        let start_info = load_executable(self, resolved_elf, &path)?;
+        let command_name = TaskCommand::from_path_bytes(resolved_program.path().to_bytes());
+        let start_info = load_executable(self, resolved_program)?;
 
         let regs: zx_restricted_state_t = start_info.into();
         self.thread_state.registers.load(regs);
@@ -1211,7 +1200,7 @@ impl CurrentTask {
 
         self.thread_group().write().did_exec = true;
 
-        self.set_command_name(TaskCommand::from_path_bytes(path.to_bytes()));
+        self.set_command_name(command_name);
 
         Ok(())
     }

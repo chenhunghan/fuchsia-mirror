@@ -199,17 +199,17 @@ class RemoteAbiHeapLayout {
 template <class RemoteModule, class AbiTraits>
 class RemoteAbiHeap {
  public:
-  using Elf = typename RemoteModule::Elf;
-  using size_type = typename Elf::size_type;
-  using Addr = typename Elf::Addr;
-  using Phdr = typename Elf::Phdr;
+  using Elf = RemoteModule::Elf;
+  using size_type = Elf::size_type;
+  using Addr = Elf::Addr;
+  using Phdr = Elf::Phdr;
   using AbiStringView = elfldltl::AbiStringView<Elf, AbiTraits>;
   template <typename T>
   using AbiPtr = elfldltl::AbiPtr<T, Elf, AbiTraits>;
   template <typename T>
   using AbiSpan = elfldltl::AbiSpan<T, std::dynamic_extent, Elf, AbiTraits>;
-  using LoadInfo = typename RemoteModule::LoadInfo;
-  using StubConstantSegment = typename LoadInfo::ConstantSegment;
+  using LoadInfo = RemoteModule::LoadInfo;
+  using StubConstantSegment = LoadInfo::ConstantSegment;
 
   RemoteAbiHeap(RemoteAbiHeap&&) = default;
   RemoteAbiHeap& operator=(RemoteAbiHeap&&) = default;

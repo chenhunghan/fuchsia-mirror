@@ -35,21 +35,14 @@ use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, JournalCheckpointV32};
-use crate::object_store::object_record::{
-    ObjectItem, ObjectItemV40, ObjectItemV41, ObjectItemV43, ObjectItemV46, ObjectItemV47,
-    ObjectItemV49, ObjectItemV50, ObjectItemV55, ObjectItemV56,
-};
+use crate::object_store::object_record::{ObjectItem, ObjectItemV56};
 use crate::object_store::transaction::{AssocObj, Options};
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{
     DataObjectHandle, HandleOptions, HandleOwner, Mutation, ObjectKey, ObjectStore, ObjectValue,
 };
 use crate::range::RangeExt;
-use crate::serialized_types::{
-    EARLIEST_SUPPORTED_VERSION, FIRST_EXTENT_IN_SUPERBLOCK_VERSION, Migrate,
-    SMALL_SUPERBLOCK_VERSION, Version, Versioned, VersionedLatest, migrate_nodefault,
-    migrate_to_version,
-};
+use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, Version, Versioned, VersionedLatest};
 use anyhow::{Context, Error, bail, ensure};
 use fprint::TypeFingerprint;
 use fuchsia_inspect::{Property as _, UintProperty};
@@ -76,8 +69,6 @@ pub const SUPER_BLOCK_CHUNK_SIZE: u64 = 65536;
 
 /// Each superblock is one block but may contain records that extend its own length.
 pub(crate) const MIN_SUPER_BLOCK_SIZE: u64 = 4096;
-/// The first 2 * 512 KiB on the disk used to be reserved for two A/B super-blocks.
-const LEGACY_MIN_SUPER_BLOCK_SIZE: u64 = 524_288;
 
 /// All superblocks start with the magic bytes "FxfsSupr".
 const SUPER_BLOCK_MAGIC: &[u8; 8] = b"FxfsSupr";
@@ -114,14 +105,6 @@ impl SuperBlockInstance {
         match self {
             SuperBlockInstance::A => 0..MIN_SUPER_BLOCK_SIZE,
             SuperBlockInstance::B => 524288..524288 + MIN_SUPER_BLOCK_SIZE,
-        }
-    }
-
-    /// We used to allocate 512kB to superblocks but this was almost always more than needed.
-    pub fn legacy_first_extent(&self) -> Range<u64> {
-        match self {
-            SuperBlockInstance::A => 0..LEGACY_MIN_SUPER_BLOCK_SIZE,
-            SuperBlockInstance::B => LEGACY_MIN_SUPER_BLOCK_SIZE..2 * LEGACY_MIN_SUPER_BLOCK_SIZE,
         }
     }
 }
@@ -236,88 +219,6 @@ pub enum SuperBlockRecordV56 {
     ObjectItem(ObjectItemV56),
 
     // Marks the end of the full super-block.
-    End,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV56)]
-#[migrate_nodefault]
-pub enum SuperBlockRecordV55 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV55),
-    End,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV55)]
-#[migrate_nodefault]
-pub enum SuperBlockRecordV54 {
-    Extent(Range<u64>),
-    ObjectItem(crate::object_store::object_record::ObjectItemV54),
-    End,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV54)]
-#[migrate_nodefault]
-pub enum SuperBlockRecordV50 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV50),
-    End,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV50)]
-pub enum SuperBlockRecordV49 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV49),
-    End,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV49)]
-pub enum SuperBlockRecordV47 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV47),
-    End,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV47)]
-pub enum SuperBlockRecordV46 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV46),
-    End,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV46)]
-pub enum SuperBlockRecordV43 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV43),
-    End,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV43)]
-pub enum SuperBlockRecordV41 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV41),
-    End,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(SuperBlockRecordV41)]
-pub enum SuperBlockRecordV40 {
-    Extent(Range<u64>),
-    ObjectItem(ObjectItemV40),
     End,
 }
 
@@ -625,15 +526,6 @@ impl SuperBlockHeader {
 
             cursor.position() as usize
         });
-
-        // From version 45 superblocks describe their own extents (a noop here).
-        // At version 44, superblocks assume a 4kb first extent.
-        // Prior to version 44, superblocks assume a 512kb first extent.
-        if super_block_version < SMALL_SUPERBLOCK_VERSION {
-            reader.handle().push_extent(0, target_super_block.legacy_first_extent());
-        } else if super_block_version < FIRST_EXTENT_IN_SUPERBLOCK_VERSION {
-            reader.handle().push_extent(0, target_super_block.first_extent())
-        }
 
         // If guid is zeroed (e.g. in a newly imaged system), assign one randomly.
         if super_block_header.guid.0.is_nil() {
@@ -962,7 +854,7 @@ mod tests {
             transaction.commit().await.expect("commit failed");
             fs.object_manager()
                 .root_parent_store()
-                .tombstone_object(object_id, Options::default())
+                .tombstone_object(object_id, Options::default(), None)
                 .await
                 .expect("tombstone failed");
         }
@@ -1320,7 +1212,7 @@ mod tests {
         transaction.commit().await.expect("commit failed");
 
         store
-            .tombstone_object(handle.object_id(), Options::default())
+            .tombstone_object(handle.object_id(), Options::default(), None)
             .await
             .expect("tombstone failed");
 

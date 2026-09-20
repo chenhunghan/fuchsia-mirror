@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("goldfish_sync-dml") {
+  dml = "meta/goldfish_sync.dml"
+  driver_name = "goldfish_sync"
+}
+
 driver_bind_rules("goldfish-sync-bind") {
-  rules = "meta/goldfish_sync.bind"
+  bind_output = "goldfish_sync.bindbc"
+  dml_label = ":goldfish_sync-dml"
   tests = "meta/tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -54,10 +60,10 @@ fuchsia_cc_driver("goldfish_sync_driver-driver") {
 }
 
 fuchsia_driver_component("goldfish_sync_driver") {
+  dml_label = ":goldfish_sync-dml"
   component_name = "goldfish_sync"
   deps = [ ":goldfish_sync_driver-driver" ]
   info = "meta/goldfish_sync_driver-info.json"
-  manifest = "meta/goldfish_sync.cml"
 }
 
 test("goldfish-sync-device-test") {

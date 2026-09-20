@@ -10,6 +10,36 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct PciBind {
+    pub vid: Option<Value>,
+    pub did: Option<Value>,
+    pub class: Option<Value>,
+    pub subclass: Option<Value>,
+    pub interface: Option<Value>,
+    pub revision: Option<Value>,
+    pub topo: Option<Value>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct UsbBind {
+    pub vid: Option<Value>,
+    pub pid: Option<Value>,
+    pub class: Option<Value>,
+    pub subclass: Option<Value>,
+    pub protocol: Option<Value>,
+    #[serde(alias = "interface")]
+    pub interface_number: Option<Value>,
+    pub bind_protocol: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct AcpiBind {
+    pub hid: Option<Value>,
+    pub first_cid: Option<Value>,
+    pub bus_type: Option<Value>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct BindPrimary {
     pub node: String,
     pub compat: Option<Value>,
@@ -20,14 +50,13 @@ pub struct BindPrimary {
     pub service: Option<String>,
     pub banjo: Option<String>,
     pub transport: Option<String>,
+    pub pci: Option<PciBind>,
+    pub usb: Option<UsbBind>,
+    pub acpi: Option<AcpiBind>,
+    pub node_name: Option<Value>,
+    pub match_name: Option<bool>,
     pub one_of: Option<Vec<DmlBind>>,
     pub rules: Option<HashMap<String, Value>>,
-    #[serde(rename = "pci_class")]
-    pub pci_class: Option<String>,
-    #[serde(rename = "pci_subclass")]
-    pub pci_subclass: Option<String>,
-    #[serde(rename = "pci_interface")]
-    pub pci_interface: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
@@ -40,15 +69,14 @@ pub struct DmlBind {
     pub pid: Option<Value>,
     pub did: Option<Value>,
     pub compat: Option<Value>,
+    pub pci: Option<PciBind>,
+    pub usb: Option<UsbBind>,
+    pub acpi: Option<AcpiBind>,
+    pub node_name: Option<Value>,
+    pub match_name: Option<bool>,
     pub primary: Option<BindPrimary>,
     pub one_of: Option<Vec<DmlBind>>,
     pub rules: Option<HashMap<String, Value>>,
-    #[serde(rename = "pci_class")]
-    pub pci_class: Option<String>,
-    #[serde(rename = "pci_subclass")]
-    pub pci_subclass: Option<String>,
-    #[serde(rename = "pci_interface")]
-    pub pci_interface: Option<String>,
     #[serde(alias = "name")]
     pub composite_name: Option<String>,
 }
@@ -72,8 +100,8 @@ pub struct DmlInput {
     pub include: Vec<String>,
     #[serde(default)]
     pub children: Vec<DmlChild>,
-    #[serde(default)]
-    pub offers: Vec<DmlOffer>,
+    #[serde(default, alias = "offers")]
+    pub offer: Vec<DmlOffer>,
     #[serde(default)]
     pub metadata_mappings: Vec<MetadataMapping>,
     #[serde(default, rename = "use")]
@@ -266,7 +294,7 @@ pub fn load_dml_file(
         let include_path = parent_dir.join(include);
         let include_input = load_dml_file(&include_path, visiting, processed)?;
         all_children.extend(include_input.children);
-        all_offers.extend(include_input.offers);
+        all_offers.extend(include_input.offer);
         all_mappings.extend(include_input.metadata_mappings);
         all_use_entries.extend(include_input.use_entries);
         all_capabilities.extend(include_input.capabilities);
@@ -274,14 +302,14 @@ pub fn load_dml_file(
     }
 
     all_children.extend(input.children);
-    all_offers.extend(input.offers);
+    all_offers.extend(input.offer);
     all_mappings.extend(input.metadata_mappings);
     all_use_entries.extend(input.use_entries);
     all_capabilities.extend(input.capabilities);
     all_expose.extend(input.expose);
 
     input.children = all_children;
-    input.offers = all_offers;
+    input.offer = all_offers;
     input.metadata_mappings = all_mappings;
     input.use_entries = all_use_entries;
     input.capabilities = all_capabilities;
@@ -500,5 +528,135 @@ mod tests {
         // child_d should be included exactly once because of the processed cache
         let child_names: Vec<String> = input.children.iter().map(|c| c.name.clone()).collect();
         assert_eq!(child_names, vec!["child_d"]);
+    }
+
+    #[test]
+    fn test_dml_schema_is_valid_json() {
+        let schema_str = include_str!("../dml.schema.json");
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(schema_str);
+        assert!(parsed.is_ok(), "dml.schema.json is not valid JSON: {:?}", parsed.err());
+        let val = parsed.unwrap();
+        assert_eq!(
+            val.get("$schema").and_then(|v| v.as_str()),
+            Some("http://json-schema.org/draft-07/schema#")
+        );
+        let defs = val
+            .get("definitions")
+            .and_then(|v| v.as_object())
+            .expect("missing definitions in schema");
+        for key in [
+            "PciBind",
+            "UsbBind",
+            "AcpiBind",
+            "DmlBind",
+            "Program",
+            "UseEntry",
+            "BoardChild",
+            "BoardOffer",
+            "MetadataMapping",
+        ] {
+            assert!(defs.contains_key(key), "Missing key definition '{}' in dml.schema.json", key);
+        }
+    }
+
+    #[test]
+    fn test_board_dml_offer_and_offers_alias() {
+        let json_offer = r##"{
+            "offer": [
+                {
+                    "from": "parent",
+                    "to": "#child",
+                    "service": "fuchsia.hardware.gpio.Service"
+                }
+            ]
+        }"##;
+        let parsed_offer: DmlInput = serde_json5::from_str(json_offer).unwrap();
+        assert_eq!(parsed_offer.offer.len(), 1);
+        assert_eq!(parsed_offer.offer[0].to, "#child");
+
+        let json_offers = r##"{
+            "offers": [
+                {
+                    "from": "parent",
+                    "to": "#child2",
+                    "service": "fuchsia.hardware.gpio.Service"
+                }
+            ]
+        }"##;
+        let parsed_offers: DmlInput = serde_json5::from_str(json_offers).unwrap();
+        assert_eq!(parsed_offers.offer.len(), 1);
+        assert_eq!(parsed_offers.offer[0].to, "#child2");
+    }
+
+    #[test]
+    fn test_board_dml_include_offer_merging() {
+        let temp_dir = std::env::temp_dir().join("test_temp_offer_merging");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let shard_offer = temp_dir.join("shard_offer.dml");
+        let shard_offers = temp_dir.join("shard_offers.dml");
+        let root_file = temp_dir.join("root.dml");
+
+        // shard_offer.dml uses modern "offer"
+        fs::write(
+            &shard_offer,
+            r##"{
+                "offer": [
+                    {
+                        "from": "parent",
+                        "to": "#child1",
+                        "service": "fuchsia.hardware.gpio.Service"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        // shard_offers.dml uses legacy "offers"
+        fs::write(
+            &shard_offers,
+            r##"{
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "#child2",
+                        "service": "fuchsia.hardware.i2c.Service"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        // root.dml includes both shards and defines its own "offer"
+        fs::write(
+            &root_file,
+            r##"{
+                "include": ["shard_offer.dml", "shard_offers.dml"],
+                "offer": [
+                    {
+                        "from": "parent",
+                        "to": "#child3",
+                        "service": "fuchsia.hardware.clock.Service"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let res = load_dml_file_root(&root_file);
+
+        // Clean up
+        let _ = fs::remove_file(&shard_offer);
+        let _ = fs::remove_file(&shard_offers);
+        let _ = fs::remove_file(&root_file);
+        let _ = fs::remove_dir(&temp_dir);
+
+        assert!(res.is_ok(), "Failed to load root file with included offers: {:?}", res.err());
+        let input = res.unwrap();
+        assert_eq!(input.offer.len(), 3);
+        assert_eq!(input.offer[0].to, "#child1");
+        assert_eq!(input.offer[1].to, "#child2");
+        assert_eq!(input.offer[2].to, "#child3");
     }
 }

@@ -24,11 +24,12 @@ pub fn init_vmex_resource(vmex: zx::Resource) -> Result<(), Error> {
 /// Fxfs. Clients will use this library to read and execute blobs.
 pub struct VmoBlob {
     vmo: zx::Vmo,
+    root_hash: [u8; 32],
 }
 
 impl VmoBlob {
-    pub fn new(vmo: zx::Vmo) -> Arc<Self> {
-        Arc::new(Self { vmo })
+    pub fn new(vmo: zx::Vmo, root_hash: [u8; 32]) -> Arc<Self> {
+        Arc::new(Self { vmo, root_hash })
     }
 }
 
@@ -60,6 +61,7 @@ impl vfs::node::Node for VmoBlob {
                 content_size: content_size,
                 // TODO(https://fxbug.dev/295550170): Get storage_size from fxblob.
                 storage_size: content_size.div_ceil(BLOCK_SIZE) * BLOCK_SIZE,
+                root_hash: self.root_hash.to_vec(),
             }
         ))
     }

@@ -40,6 +40,6 @@ fuchsia_test_package("msd_virtio_gpu_integration_tests") {
     log_settings = {
       max_severity = "ERROR"
     }
-    environments = []
+    build_only = true
   }
 }

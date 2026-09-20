@@ -6,8 +6,13 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("component-dml") {
+  dml = "meta/component.dml"
+  driver_name = "simple_dfv1"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/simple_driver.bind"
+  dml_label = ":component-dml"
   bind_output = "simple_driver.bindbc"
   deps = [ "//examples/drivers/bind/bindlib:gizmo.example" ]
 }
@@ -24,10 +29,9 @@ fuchsia_cc_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
-  component_name = "simple_dfv1"
   deps = [ ":driver" ]
   info = "meta/simple-info.json"
-  manifest = "meta/component.cml"
+  dml_label = ":component-dml"
 }
 
 fuchsia_driver_package("pkg") {

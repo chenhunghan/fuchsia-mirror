@@ -200,9 +200,6 @@ class IdlePowerThread final {
   // update after the monotonic clock is resumed.
   static void UpdateMonotonicClock(cpu_num_t current_cpu, const StateMachine& current_state);
 
-  // Called by the scheduler when updating per-CPU and per-thread stats.
-  static zx_duration_mono_t TakeProcessorIdleTime();
-
   // See |TransitionLock|.
   // TODO(https://fxbug.dev/542143859): Explicit initialization of state_ is a workaround for a
   // compiler front-end issue regarding nested structures
@@ -212,10 +209,6 @@ class IdlePowerThread final {
 
   Thread thread_;
   cpu_num_t this_cpu_{INVALID_CPU};
-
-  // Accumulates the time spent in a lower-power idle state since the last reschedule. This value is
-  // reset to zero on each reschedule and when a CPU goes offline.
-  zx_duration_mono_t processor_idle_time_ns_{0};
 
   // The TransitionLock guards the |state_| of the subset of secondary (non-boot) CPUs that are
   // actively transitioning in and out of suspension. Modifications to this participating secondary

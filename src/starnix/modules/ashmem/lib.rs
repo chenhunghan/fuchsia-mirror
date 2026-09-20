@@ -156,7 +156,7 @@ impl FileOps for Ashmem {
 
     fn mmap(
         &self,
-        file: &FileObject,
+        _file: &FileObject,
         current_task: &CurrentTask,
         addr: DesiredAddress,
         memory_offset: u64,
@@ -195,7 +195,6 @@ impl FileOps for Ashmem {
             memory_offset,
             length,
             prot_flags,
-            file.max_access_for_memory_mapping(),
             mapping_options,
             MappingName::Ashmem(state.name.clone().into()),
         )?;

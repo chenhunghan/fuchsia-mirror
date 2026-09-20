@@ -5,6 +5,12 @@
 library fuchsia.net.reachability;
 
 /// Provides snapshots of reachability state.
+///
+/// On multi-network systems, [`Snapshot`] reflects the reachability and
+/// validation state of the system's active default network, through which
+/// ambient, unbound network traffic is routed. Applications requiring
+/// visibility into specific or non-default networks should use
+/// `fuchsia.net.policy.properties/Networks`.
 @discoverable
 closed protocol Monitor {
     /// Controls verbosity of results returned from calls to [`Watch`]. If

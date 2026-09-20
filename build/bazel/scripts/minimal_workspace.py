@@ -23,8 +23,9 @@ The workspace/ sub-directory will be populated with:
 
 import argparse
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import build_utils
 import remote_services_utils

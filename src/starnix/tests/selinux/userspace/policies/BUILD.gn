@@ -123,6 +123,10 @@ userspace_policy("perf_event_policy") {
   sources = [ "perf_event_policy.conf" ]
 }
 
+userspace_policy("pidfd_policy") {
+  sources = [ "pidfd_policy.conf" ]
+}
+
 userspace_policy("pipe_policy") {
   sources = [ "pipe_policy.conf" ]
 }
@@ -196,6 +200,7 @@ group("policies") {
     ":open_perms_policy",
     ":overlayfs_policy",
     ":perf_event_policy",
+    ":pidfd_policy",
     ":pipe_policy",
     ":ptrace_policy",
     ":sched_policy",

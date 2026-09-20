@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("nvme-dml") {
+  dml = "meta/nvme.dml"
+  driver_name = "nvme"
+}
+
 driver_bind_rules("nvme_bind") {
-  rules = "meta/nvme.bind"
+  dml_label = ":nvme-dml"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -66,7 +71,7 @@ fuchsia_driver_component("nvme") {
   component_name = "nvme"
   deps = [ ":nvme-driver" ]
   info = "meta/nvme-info.json"
-  manifest = "meta/nvme.cml"
+  dml_label = ":nvme-dml"
 }
 
 fuchsia_driver_package("package") {

@@ -156,7 +156,6 @@ group("bootstrap") {
     "//bundles/assembly/bazel_inputs/src/bringup/bin/kernel-args-forwarder:package",
     "//bundles/assembly/bazel_inputs/src/bringup/bin/sysinfo:package",
     "//bundles/assembly/bazel_inputs/src/devices/adc/drivers/adc:package",
-    "//bundles/assembly/bazel_inputs/src/devices/block/drivers/core:package",
     "//bundles/assembly/bazel_inputs/src/devices/block/drivers/sdmmc:package",
     "//bundles/assembly/bazel_inputs/src/devices/clock/drivers/clock:package",
     "//bundles/assembly/bazel_inputs/src/devices/gpio/drivers/gpio:package",

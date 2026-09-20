@@ -59,15 +59,15 @@ class RemoteAbiStub : public fbl::RefCounted<RemoteAbiStub<Elf>> {
   // Once created, the RemoteAbiStub only needs to be used as const.
   using Ptr = fbl::RefPtr<const RemoteAbiStub>;
 
-  using size_type = typename Elf::size_type;
-  using Addr = typename Elf::Addr;
-  using Phdr = typename Elf::Phdr;
-  using Sym = typename Elf::Sym;
+  using size_type = Elf::size_type;
+  using Addr = Elf::Addr;
+  using Phdr = Elf::Phdr;
+  using Sym = Elf::Sym;
   using RemoteModule = RemoteDecodedModule<Elf>;
-  using RemoteModulePtr = typename RemoteModule::Ptr;
+  using RemoteModulePtr = RemoteModule::Ptr;
   using LocalAbi = abi::Abi<Elf>;
   using TlsDescResolver = ld::StaticTlsDescResolver<Elf, Machine>;
-  using TlsdescRuntimeHooks = typename TlsDescResolver::RuntimeHooks;
+  using TlsdescRuntimeHooks = TlsDescResolver::RuntimeHooks;
 
   RemoteAbiStub() = default;
   RemoteAbiStub(const RemoteAbiStub&) = default;
@@ -156,7 +156,7 @@ class RemoteAbiStub : public fbl::RefCounted<RemoteAbiStub<Elf>> {
 
  private:
   using Abi = abi::Abi<Elf, elfldltl::RemoteAbiTraits>;
-  using RDebug = typename Elf::template RDebug<elfldltl::RemoteAbiTraits>;
+  using RDebug = Elf::template RDebug<elfldltl::RemoteAbiTraits>;
 
   using EhFrameHdr = elfldltl::dwarf::EhFrameHdr<Elf>;
 

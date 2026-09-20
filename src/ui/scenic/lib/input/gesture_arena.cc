@@ -80,8 +80,13 @@ bool WinsOver(GestureResponse high_priority, GestureResponse low_priority) {
                 GestureResponse::kMaybeSuppress == 4 &&
                 GestureResponse::kMaybePrioritizeSuppress == 5);
 
+  // Only kYes..kMaybePrioritizeSuppress take part in the comparison; kHold, kNo and kUndefined
+  // can never win a contest unless they're the only contender. The static_assert above pins
+  // those six to indices 0-5.
+  static constexpr int kNumComparableResponses = 6;
+
   // clang-format off
-  static constexpr bool kComparison[6][6] {
+  static constexpr bool kComparison[kNumComparableResponses][kNumComparableResponses] {
     // Higher priority              Lower priority ->
     //  V            Yes,  YesP,  Maybe, MaybeP, MaybeS, MaybePS
     /* Yes */     { false, false, true,  true,   true,   true },
@@ -93,7 +98,13 @@ bool WinsOver(GestureResponse high_priority, GestureResponse low_priority) {
   };
   // clang-format on
 
-  FX_DCHECK(high_priority >= 0 && high_priority < 6 && low_priority >= 0 && low_priority < 6);
+  // These indices are ultimately derived from values supplied by a client over FIDL, so the bounds
+  // check must survive into release builds; an out-of-range value would otherwise read out of
+  // bounds of |kComparison|.
+  FX_CHECK(high_priority >= 0 && high_priority < kNumComparableResponses && low_priority >= 0 &&
+           low_priority < kNumComparableResponses)
+      << "GestureResponse out of range: high_priority=" << high_priority
+      << " low_priority=" << low_priority;
   return kComparison[high_priority][low_priority];
 }
 

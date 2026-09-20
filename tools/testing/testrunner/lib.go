@@ -845,7 +845,9 @@ func runTestOnce(
 		if err != nil {
 			result.Status = runtests.TestFailure
 			logger.Errorf(ctx, "Failed to parse test cases: %s", err)
-			result.FailureReason = runtests.FailureReasonFromMessage(fmt.Sprintf("failed to parse test cases: %s", err))
+			if result.FailureReason == nil {
+				result.FailureReason = runtests.FailureReasonFromMessage(fmt.Sprintf("failed to parse test cases: %s", err))
+			}
 		} else {
 			result.Cases = cases
 		}
@@ -856,7 +858,9 @@ func runTestOnce(
 		if err != nil && len(result.Cases) == 0 {
 			result.Status = runtests.TestFailure
 			logger.Errorf(ctx, "Failed to parse test cases: %s", err)
-			result.FailureReason = runtests.FailureReasonFromMessage(fmt.Sprintf("failed to parse test cases: %s", err))
+			if result.FailureReason == nil {
+				result.FailureReason = runtests.FailureReasonFromMessage(fmt.Sprintf("failed to parse test cases: %s", err))
+			}
 		} else if err == nil {
 			caseToTags := make(map[string][]build.TestTag)
 			for _, tc := range cases {

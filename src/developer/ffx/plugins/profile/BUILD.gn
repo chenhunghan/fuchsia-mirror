@@ -17,6 +17,7 @@ if (is_host) {
       "memory:ffx_profile_memory",
       "network:ffx_profile_network",
       "power:ffx_profile_power",
+      "stacktrack:ffx_profile_stacktrack",
       "temperature:ffx_profile_temperature",
     ]
 
@@ -42,7 +43,10 @@ if (is_host) {
 
   group("host_tests") {
     testonly = true
-    deps = [ "heapdump:host_tests" ]
+    deps = [
+      "heapdump:host_tests",
+      "stacktrack:host_tests",
+    ]
   }
 
   group("profile") {

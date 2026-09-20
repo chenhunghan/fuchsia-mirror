@@ -13,7 +13,7 @@ use super::{
 use crate::mm::{Mapping, MappingOptions, ProtectionFlags};
 use crate::perf::PerfEventFile;
 use crate::security::selinux_hooks::current_task_state;
-use crate::task::loader::ResolvedElf;
+use crate::task::loader::ResolvedProgram;
 use crate::task::{CurrentTask, Kernel, Task};
 use crate::vfs::fs_args::MountParams;
 use crate::vfs::socket::{
@@ -1368,7 +1368,7 @@ pub fn check_tun_dev_create_access(current_task: &CurrentTask) -> Result<(), Err
 /// Corresponds to the `bprm_creds_from_file` LSM hook.
 pub fn bprm_creds_from_file(
     current_task: &CurrentTask,
-    elf_state: &mut ResolvedElf,
+    resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.bprm_creds_from_file");
 
@@ -1379,43 +1379,33 @@ pub fn bprm_creds_from_file(
 
     let enable_suid = current_task.kernel().features.enable_suid && !no_new_privs && !is_ptraced;
     if enable_suid {
-        elf_state.file.name().apply_suid_and_sgid(&mut elf_state.creds);
+        resolved_program.file.name().apply_suid_and_sgid(&mut resolved_program.creds);
     }
 
     // On exec, the filesystem UIDs are always reset to the effective UIDs.
-    elf_state.creds.fsuid = elf_state.creds.euid;
-    elf_state.creds.fsgid = elf_state.creds.egid;
+    resolved_program.creds.fsuid = resolved_program.creds.euid;
+    resolved_program.creds.fsgid = resolved_program.creds.egid;
 
     // The effective user ID of the process is copied to the saved set-
     // user-ID; similarly, the effective group ID is copied to the saved
     // set-group-ID. This copying takes place after any effective ID
     // changes that occur because of the set-user-ID and set-group-ID
     // mode bits.
-    elf_state.creds.saved_uid = elf_state.creds.euid;
-    elf_state.creds.saved_gid = elf_state.creds.egid;
+    resolved_program.creds.saved_uid = resolved_program.creds.euid;
+    resolved_program.creds.saved_gid = resolved_program.creds.egid;
 
-    let prev = current_task.current_creds();
-    let file_is_privileged = elf_state.creds.euid != prev.euid || elf_state.creds.egid != prev.egid;
-    let is_secure_exec = file_is_privileged
-        || elf_state.creds.uid != elf_state.creds.euid
-        || elf_state.creds.gid != elf_state.creds.egid;
-
-    elf_state.secure_exec |= is_secure_exec;
-
-    common_cap::bprm_creds_from_file(current_task, elf_state)?;
+    common_cap::bprm_creds_from_file(current_task, resolved_program)?;
 
     Ok(())
 }
 
-/// Checks if exec is allowed and if so, checks permissions related to the transition
-/// (if any) from the pre-exec security context to the post-exec context. Updates the `Credentials`
-/// in the `elf_state` with the appropriate security state.
+/// Checks permissions for `execve`, updating [`ResolvedProgram`] with the post-exec
+/// security state if allowed.
 ///
 /// Corresponds to the `bprm_creds_for_exec()` LSM hook.
 pub fn bprm_creds_for_exec(
     current_task: &CurrentTask,
-    executable: &NamespaceNode,
-    elf_state: &mut ResolvedElf,
+    resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.bprm_creds_for_exec");
     if let Some(state) = &current_task.kernel().security_state.state {
@@ -1423,31 +1413,29 @@ pub fn bprm_creds_for_exec(
             return selinux_hooks::task::bprm_creds_for_exec(
                 &state.server,
                 current_task,
-                executable,
-                elf_state,
+                resolved_program,
             );
         } else {
             // SELinux is enabled but not yet configured, so apply the "init" SID.
             let previous_sid = current_task.current_creds().security_state.current_sid;
-            elf_state.creds.security_state =
+            resolved_program.creds.security_state =
                 TaskAttrs::for_transition(InitialSid::Init.into(), previous_sid);
         }
     }
     Ok(())
 }
 
-/// Called during `exec()`, immediately before the `elf_state.creds` are applied to the calling
-/// process.  This is typically used to apply restrictions on the calling process, such as closing
-/// file descriptors to which the new security domain will not have access.
+/// Applies pre-commit security restrictions (such as revoking inaccessible file descriptors)
+/// immediately before [`ResolvedProgram::creds`] are committed to the calling task.
 ///
 /// Corresponds to the `bprm_committing_creds()` LSM hook.
 pub fn bprm_committing_creds(
     current_task: &CurrentTask,
-    elf_state: &ResolvedElf,
+    resolved_program: &ResolvedProgram,
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.bprm_committing_creds");
     if_selinux_else_default_ok(current_task, |security_server| {
-        selinux_hooks::task::bprm_committing_creds(security_server, current_task, elf_state);
+        selinux_hooks::task::bprm_committing_creds(security_server, current_task, resolved_program);
         Ok(())
     })
 }
@@ -2274,8 +2262,8 @@ mod tests {
             assert!(current_task.kernel().security_state.state.is_none());
             let executable = testing::create_test_file(current_task);
             let file = testing::open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
-            assert_eq!(bprm_creds_for_exec(current_task, &executable, &mut resolved_elf), Ok(()));
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
+            assert_eq!(bprm_creds_for_exec(current_task, &mut resolved_program), Ok(()));
         })
         .await;
     }
@@ -2286,9 +2274,9 @@ mod tests {
             security_server.set_enforcing(false);
             let executable = testing::create_test_file(current_task);
             let file = testing::open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
             // Expect that access is granted.
-            let result = bprm_creds_for_exec(current_task, &executable, &mut resolved_elf);
+            let result = bprm_creds_for_exec(current_task, &mut resolved_program);
             assert!(result.is_ok());
         })
         .await;
@@ -2308,12 +2296,12 @@ mod tests {
 
             let executable = testing::create_test_file(current_task);
             let file = testing::open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
 
             let before_hook_sid = selinux_hooks::current_task_state(current_task).current_sid;
 
-            bprm_creds_for_exec(current_task, &executable, &mut resolved_elf).unwrap();
-            assert_eq!(resolved_elf.creds.security_state.current_sid, before_hook_sid);
+            bprm_creds_for_exec(current_task, &mut resolved_program).unwrap();
+            assert_eq!(resolved_program.creds.security_state.current_sid, before_hook_sid);
         })
         .await;
     }
@@ -2335,11 +2323,11 @@ mod tests {
 
             let executable = testing::create_test_file(current_task);
             let file = testing::open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
 
-            bprm_creds_for_exec(current_task, &executable, &mut resolved_elf).unwrap();
+            bprm_creds_for_exec(current_task, &mut resolved_program).unwrap();
 
-            assert_eq!(resolved_elf.creds.security_state.current_sid, InitialSid::Init.into());
+            assert_eq!(resolved_program.creds.security_state.current_sid, InitialSid::Init.into());
         })
         .await;
     }
@@ -2361,10 +2349,10 @@ mod tests {
 
             let executable = testing::create_test_file(current_task);
             let file = testing::open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
 
-            bprm_creds_for_exec(current_task, &executable, &mut resolved_elf).unwrap();
-            assert_eq!(resolved_elf.creds.security_state.current_sid, elf_sid);
+            bprm_creds_for_exec(current_task, &mut resolved_program).unwrap();
+            assert_eq!(resolved_program.creds.security_state.current_sid, elf_sid);
         })
         .await;
     }

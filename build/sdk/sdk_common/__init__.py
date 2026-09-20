@@ -7,7 +7,8 @@ import difflib
 import functools
 import json
 import pathlib
-from typing import Any, Iterator, Sequence
+from collections.abc import Iterator, Sequence
+from typing import Any
 
 
 class File:

@@ -129,20 +129,67 @@ class AdcButtonsDeviceTest : public ::testing::Test {
         [sample](TestEnv& env) { env.FakeAdcSetSample(sample); });
   }
 
-  void DrainInitialReport(fidl::WireSyncClient<fuchsia_input_report::InputReportsReader>& reader) {
-    auto result = reader->ReadInputReports();
-    EXPECT_EQ(ZX_OK, result.status());
-    ASSERT_FALSE(result.value().is_error());
-    auto& reports = result.value().value()->reports;
+  class SyncReaderV2EventHandler
+      : public fidl::WireSyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+   public:
+    explicit SyncReaderV2EventHandler(
+        fit::function<
+            void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+            callback)
+        : callback_(std::move(callback)) {}
 
-    ASSERT_EQ(1, reports.size());
-    auto report = reports[0];
+    void OnInputReports(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*
+                            event) override {
+      last_report_stamp = event->last_report_stamp;
+      if (callback_) {
+        callback_(event);
+      }
+    }
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_consumer_control());
-    auto& consumer_control = report.consumer_control();
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
 
-    ASSERT_TRUE(consumer_control.has_pressed_buttons());
+    uint64_t last_report_stamp = 0;
+
+   private:
+    fit::function<void(
+        fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+        callback_;
+  };
+
+  static zx_status_t ReadAndAcknowledgeOneEvent(
+      fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader,
+      fit::function<
+          void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+          callback) {
+    SyncReaderV2EventHandler handler(std::move(callback));
+    fidl::Status result = reader.HandleOneEvent(handler);
+    if (!result.ok()) {
+      return result.status();
+    }
+    return reader->AcknowledgeReports(handler.last_report_stamp).status();
+  }
+
+  void DrainInitialReport(
+      fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader) {
+    bool got_report = false;
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+          ASSERT_EQ(1u, reports.size());
+          const fuchsia_input_report::wire::InputReport& report = reports[0];
+
+          ASSERT_TRUE(report.has_event_time());
+          ASSERT_TRUE(report.has_consumer_control());
+          const fuchsia_input_report::wire::ConsumerControlInputReport& consumer_control =
+              report.consumer_control();
+
+          ASSERT_TRUE(consumer_control.has_pressed_buttons());
+          got_report = true;
+        });
+    EXPECT_EQ(ZX_OK, status);
+    EXPECT_TRUE(got_report);
   }
 
   fidl::WireSyncClient<fuchsia_input_report::InputDevice>& client() { return client_; }
@@ -168,7 +215,8 @@ TEST_F(AdcButtonsDeviceTest, GetDescriptorTest) {
             static_cast<uint32_t>(fuchsia_input_report::wire::VendorId::kGoogle));
   EXPECT_EQ(result->descriptor.device_information().product_id(),
             static_cast<uint32_t>(fuchsia_input_report::wire::VendorGoogleProductId::kAdcButtons));
-  EXPECT_EQ(result->descriptor.device_information().polling_rate(), zx::usec(kPollingRateUsec).get());
+  EXPECT_EQ(result->descriptor.device_information().polling_rate(),
+            zx::usec(kPollingRateUsec).get());
 
   ASSERT_TRUE(result->descriptor.has_consumer_control());
   ASSERT_TRUE(result->descriptor.consumer_control().has_input());
@@ -179,13 +227,17 @@ TEST_F(AdcButtonsDeviceTest, GetDescriptorTest) {
 }
 
 TEST_F(AdcButtonsDeviceTest, ReadInputReportsTest) {
-  auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-  auto result = client()->GetInputReportsReader(std::move(endpoints.server));
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+      client()->GetInputReportsReaderV2(std::move(endpoints.server), 10);
   ASSERT_TRUE(result.ok());
   // Ensure that the reader has been registered with the client before moving on.
-  ASSERT_TRUE(client()->GetDescriptor().ok());
-  auto reader =
-      fidl::WireSyncClient<fuchsia_input_report::InputReportsReader>(std::move(endpoints.client));
+  fidl::WireResult<fuchsia_input_report::InputDevice::GetDescriptor> descriptor_result =
+      client()->GetDescriptor();
+  ASSERT_TRUE(descriptor_result.ok());
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(endpoints.client));
   EXPECT_TRUE(reader.is_valid());
   DrainInitialReport(reader);
 
@@ -194,22 +246,27 @@ TEST_F(AdcButtonsDeviceTest, ReadInputReportsTest) {
   usleep(2 * kPollingRateUsec);
 
   {
-    auto result = reader->ReadInputReports();
-    EXPECT_EQ(ZX_OK, result.status());
-    ASSERT_FALSE(result.value().is_error());
-    auto& reports = result.value().value()->reports;
+    bool got_report = false;
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+          ASSERT_EQ(1u, reports.size());
+          const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_EQ(1, reports.size());
-    auto report = reports[0];
+          ASSERT_TRUE(report.has_event_time());
+          ASSERT_TRUE(report.has_consumer_control());
+          const fuchsia_input_report::wire::ConsumerControlInputReport& consumer_control =
+              report.consumer_control();
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_consumer_control());
-    auto& consumer_control = report.consumer_control();
-
-    ASSERT_TRUE(consumer_control.has_pressed_buttons());
-    EXPECT_EQ(consumer_control.pressed_buttons().size(), 1);
-    EXPECT_EQ(consumer_control.pressed_buttons()[0],
-              fuchsia_input_report::wire::ConsumerControlButton::kFunction);
+          ASSERT_TRUE(consumer_control.has_pressed_buttons());
+          EXPECT_EQ(consumer_control.pressed_buttons().size(), 1u);
+          EXPECT_EQ(consumer_control.pressed_buttons()[0],
+                    fuchsia_input_report::wire::ConsumerControlButton::kFunction);
+          got_report = true;
+        });
+    EXPECT_EQ(ZX_OK, status);
+    EXPECT_TRUE(got_report);
   };
 
   FakeAdcSetSample(40);
@@ -217,20 +274,25 @@ TEST_F(AdcButtonsDeviceTest, ReadInputReportsTest) {
   usleep(2 * kPollingRateUsec);
 
   {
-    auto result = reader->ReadInputReports();
-    EXPECT_EQ(ZX_OK, result.status());
-    ASSERT_FALSE(result.value().is_error());
-    auto& reports = result.value().value()->reports;
+    bool got_report = false;
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+          ASSERT_EQ(1u, reports.size());
+          const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_EQ(1, reports.size());
-    auto report = reports[0];
+          ASSERT_TRUE(report.has_event_time());
+          ASSERT_TRUE(report.has_consumer_control());
+          const fuchsia_input_report::wire::ConsumerControlInputReport& consumer_control =
+              report.consumer_control();
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_consumer_control());
-    auto& consumer_control = report.consumer_control();
-
-    ASSERT_TRUE(consumer_control.has_pressed_buttons());
-    EXPECT_EQ(consumer_control.pressed_buttons().size(), 0);
+          ASSERT_TRUE(consumer_control.has_pressed_buttons());
+          EXPECT_EQ(consumer_control.pressed_buttons().size(), 0u);
+          got_report = true;
+        });
+    EXPECT_EQ(ZX_OK, status);
+    EXPECT_TRUE(got_report);
   };
 }
 

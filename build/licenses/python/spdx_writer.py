@@ -8,7 +8,6 @@ import dataclasses
 import hashlib
 import json
 import os
-from typing import List, Tuple, Union
 
 from file_access import FileAccess
 from gn_label import GnLabel
@@ -43,11 +42,11 @@ class SpdxWriter:
     def add_package_with_licenses(
         self,
         public_package_name: str,
-        license_labels: Tuple[GnLabel, ...],
-        collection_hints: Union[List[str], None],
+        license_labels: tuple[GnLabel, ...],
+        collection_hints: list[str] | None,
     ) -> None:
-        license_ids: List[str] = []
-        nested_doc_paths: List[GnLabel] = []
+        license_ids: list[str] = []
+        nested_doc_paths: list[GnLabel] = []
 
         for license_label in license_labels:
             if license_label.is_spdx_json_document():
@@ -100,7 +99,7 @@ class SpdxWriter:
         return json.dumps(self.builder.build().to_json_dict(), indent=4)
 
     def _spdx_package_id(
-        self, public_package_name: str, license_labels: Tuple[GnLabel, ...]
+        self, public_package_name: str, license_labels: tuple[GnLabel, ...]
     ) -> str:
         md5 = hashlib.md5()
         md5.update(public_package_name.strip().encode("utf-8"))

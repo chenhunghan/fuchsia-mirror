@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-ram-dml") {
+  dml = "meta/aml-ram.dml"
+  driver_name = "aml-ram"
+}
+
 driver_bind_rules("aml_ram_bind") {
-  rules = "meta/aml-ram.bind"
+  dml_label = ":aml-ram-dml"
   bind_output = "aml-ram.bindbc"
   tests = "meta/bind_tests.json"
   deps = [
@@ -38,10 +43,10 @@ fuchsia_cc_driver("aml-ram-driver") {
 }
 
 fuchsia_driver_component("aml-ram") {
+  dml_label = ":aml-ram-dml"
   info = "meta/aml-ram-info.json"
   component_name = "aml-ram"
   deps = [ ":aml-ram-driver" ]
-  manifest = "meta/aml-ram.cml"
 }
 
 fuchsia_driver_package("package") {

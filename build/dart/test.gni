@@ -191,6 +191,7 @@ template("dart_test") {
 
     forward_variables_from(invoker,
                            [
+                             "build_only",
                              "environments",
                              "isolated",
                              "package_deps",

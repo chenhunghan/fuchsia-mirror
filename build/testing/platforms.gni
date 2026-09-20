@@ -186,6 +186,11 @@ test_platforms = [
     cpu = "arm64"
   },
   {
+    device_type = "Iris"
+    cpu = "arm64"
+    host_device_type = "LATTEPANDA_SIGMA_CELL"
+  },
+  {
     device_type = "Kola"
     cpu = "arm64"
   },

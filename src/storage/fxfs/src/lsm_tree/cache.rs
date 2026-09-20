@@ -53,4 +53,12 @@ pub trait ObjectCache<K: Key, V: Value>: Send + Sync {
     /// not been resolved. When `value` is provided then the value may be inserted, and may replace
     /// an existing value.
     fn invalidate(&self, key: &K, value: Option<V>);
+
+    /// Clears all entries from the cache.
+    fn clear(&self);
+
+    /// Returns the number of cached entries (for testing/diagnostics).
+    fn len(&self) -> usize {
+        0
+    }
 }

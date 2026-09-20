@@ -27,9 +27,12 @@ URL_REGEX = re.compile(r"https?://[^\s]+")
 FOOTER_REGEX = re.compile(
     r"^(Bug|Fixed|Test|Change-Id|Cq-Include-Trybots|Fuchsia-Auto-Submit|Multiply|Depends-on|Run-All-Tests|Exempt|No-Tree-Checks|No-Presubmit|No-Try|TAG|CONV)[:=]"
 )
-# Reverts and relands take the original subject and prepend "Revert " or "Reland ".
-# These are exempt from the length check to avoid manual rewrites of auto-generated subjects.
-REVERT_RELAND_REGEX = re.compile(r"^(?:Revert(?:\^\d+)?|Reland) ")
+# Reverts, relands, and autosquash commits take the original subject and prepend
+# a prefix. These are exempt from the length check to avoid manual rewrites of
+# auto-generated subjects.
+EXEMPT_SUBJECT_PREFIX_REGEX = re.compile(
+    r"^(?:Revert(?:\^\d+)?|Reland|fixup!|squash!|amend!) "
+)
 
 
 class MetadataRule(TypedDict):
@@ -80,9 +83,9 @@ def check_commit_message(
     subject = lines[0]
 
     # Check subject line length
-    if len(subject) > SUBJECT_WARN_MAX_LEN and not REVERT_RELAND_REGEX.match(
+    if len(
         subject
-    ):
+    ) > SUBJECT_WARN_MAX_LEN and not EXEMPT_SUBJECT_PREFIX_REGEX.match(subject):
         findings.append(
             {
                 "level": "warning",
@@ -102,8 +105,8 @@ def check_commit_message(
         # Allow standard footers (e.g. Change-Id, Bug, etc.)
         if FOOTER_REGEX.match(line):
             continue
-        # Allow indented code block / stack trace lines or quoted revert lines
-        if line.startswith(("    ", "\t", ">")):
+        # Allow indented code block / stack trace lines, quoted revert lines, or comments
+        if line.startswith(("    ", "\t", ">", "#")):
             continue
         findings.append(
             {

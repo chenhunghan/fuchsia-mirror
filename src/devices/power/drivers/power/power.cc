@@ -392,7 +392,11 @@ zx_status_t PowerDomain::Create(void* ctx, zx_device_t* parent,
   }
   std::vector<zx_device_str_prop_t> props = {
       {bind_fuchsia_power::POWER_DOMAIN, str_prop_int_val(index)},
+      {bind_fuchsia::SERVICE, str_prop_str_val(fuchsia_hardware_power::Service::Name)},
   };
+  if (domain_info.id().has_value()) {
+    props.push_back({bind_fuchsia::ID, str_prop_int_val(*domain_info.id())});
+  }
   if (domain_info.global_id().has_value()) {
     props.push_back({bind_fuchsia::ID, str_prop_int_val(*domain_info.global_id())});
   }

@@ -32,8 +32,8 @@ use std::fs::File;
 use std::io::Read;
 use std::num::{NonZeroU64, ParseIntError};
 use std::path::PathBuf;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::spawn_blocking;
 use zerocopy::IntoBytes;
 
@@ -225,29 +225,6 @@ async fn flash_partition_sparse<F: FastbootInterface>(
     Ok(())
 }
 
-pub async fn flash_partition<F: FileResolver + Sync, T: FastbootInterface>(
-    messenger: Sender<Event>,
-    file_resolver: &mut F,
-    name: &str,
-    file: &str,
-    fastboot_interface: &mut T,
-    min_timeout_secs: u64,
-    flash_timeout_rate_mb_per_second: f64,
-) -> Result<()> {
-    let file_to_upload = file_resolver.get_file(file).await?;
-    log::debug!("Preparing to upload {}", file_to_upload);
-    flash_partition_impl(
-        messenger,
-        name,
-        &file_to_upload,
-        fastboot_interface,
-        min_timeout_secs,
-        flash_timeout_rate_mb_per_second,
-        None,
-    )
-    .await
-}
-
 async fn flash_basic_impl<T: FastbootInterface>(
     messenger: &Sender<Event>,
     name: &str,
@@ -402,27 +379,18 @@ async fn get_hex_int<T: FromHexStr>(
 }
 
 fn streaming_err_helper(message: String) -> FfxFastbootError {
-    let err = FfxFastbootError::StreamingFlash { message };
-    log::error!("{err}");
-    err
+    // TODO(b/563409803) Add more helpful fields or discriminants to
+    // FfxFastbootError::StreamingFlash
+    FfxFastbootError::StreamingFlash { message }
 }
 
-async fn streaming_flash_impl<T: FastbootInterface>(
-    messenger: &Sender<Event>,
-    name: &str,
+fn create_streaming_iter(
     filepath: &str,
-    fastboot_interface: &mut T,
+    max_download_bytes: u64,
     segment_size_bytes: u64,
     partition_start_byte: u64,
     partition_size_bytes: u64,
-    timeout: Duration,
-) -> Result<bool> {
-    let max_download_bytes: u64 = NonZeroU64::new(
-        get_hex_int::<u32>(MAX_DOWNLOAD_SIZE_VAR, fastboot_interface).await?.into(),
-    )
-    .ok_or_else(|| streaming_err_helper(format!("Max download size of 0")))?
-    .into();
-
+) -> Result<(Box<dyn Iterator<Item = StreamCommand> + Send>, u64)> {
     log::info!(
         "Fastboot streaming download segment limit: {} bytes ({:.2} MiB)",
         max_download_bytes,
@@ -451,7 +419,7 @@ async fn streaming_flash_impl<T: FastbootInterface>(
 
     let mut file_handle = File::open(&filepath)
         .map_err(|e| FfxFastbootError::FileOpen { path: PathBuf::from(&filepath), source: e })?;
-    let (commands, expanded_size): (Box<dyn Iterator<Item = StreamCommand> + Send>, u64) =
+    let (commands, expanded_file_size): (Box<dyn Iterator<Item = StreamCommand> + Send>, u64) =
         if let Ok(sparse_reader) = SparseReader::new(file_handle.try_clone()?) {
             let iter = SparseStreamIterator::new(max_download_bytes, sparse_reader);
             let expanded_size = iter.get_expanded_size();
@@ -467,42 +435,101 @@ async fn streaming_flash_impl<T: FastbootInterface>(
                 .len();
 
             if expected % U32_SIZE != 0 {
-                // Possibly an error, but basic flash should handle it correctly anyway.
                 log::debug!("Un-streamable file size: {expected}");
-                return Ok(false);
+                return Err(streaming_err_helper(format!(
+                    "File size is not a multiple of {U32_SIZE}: {expected}"
+                )));
             }
             // The file contents is a Vec<u32> because 'fill' value checks compare u32 values,
             // and it's easier to start with a stricter alignment and loosen it when required.
             let mut file_contents = vec![0u32; convert_log_err(expected / U32_SIZE)?];
-            let bytes_read = file_handle
-                .read(file_contents.as_mut_slice().as_mut_bytes())
-                .inspect_err(|e| log::error!("{e}"))?;
-
-            if bytes_read != usize::try_from(expected)? {
-                let err = FfxFastbootError::FileRead { actual: bytes_read.try_into()?, expected };
-                log::error!("{err}");
-                return Err(err);
-            }
+            file_handle.read_exact(file_contents.as_mut_slice().as_mut_bytes())?;
 
             let commands = generate_command_list(
                 file_contents.into_boxed_slice(),
-                max_download_bytes.into(),
-                segment_size_bytes.into(),
-                partition_start_byte.into(),
+                max_download_bytes,
+                segment_size_bytes,
+                partition_start_byte,
             );
 
             (Box::new(commands.into_iter()), expected)
         };
 
     // Must complete check host side because device never knows the full image size.
-    if partition_size_bytes < expanded_size {
+    if partition_size_bytes < expanded_file_size {
         return Err(streaming_err_helper(format!(
-            "Tried to stream a {expanded_size} byte image to a {partition_size_bytes} byte partition"
+            "Tried to stream a {expanded_file_size} byte image to a {partition_size_bytes} byte partition"
         )));
     }
 
-    let start_time = Utc::now();
-    let (prog_client, prog_server) = mpsc::channel(5);
+    Ok((commands, expanded_file_size))
+}
+
+struct StreamerTask<'a> {
+    partition_name: &'a str,
+    init_rx: Option<oneshot::Receiver<Result<u64>>>,
+    cmd_rx: Receiver<StreamCommand>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl<'a> StreamerTask<'a> {
+    fn spawn(
+        partition_name: &'a str,
+        filepath: String,
+        max_download_bytes: u64,
+        segment_size_bytes: u64,
+        partition_start_byte: u64,
+        partition_size_bytes: u64,
+    ) -> Self {
+        let (init_tx, init_rx) = oneshot::channel();
+        // Handwavy constant: good enough for some concurrency,
+        // not so much as to bloat memory.
+        let (cmd_tx, cmd_rx) = mpsc::channel(3);
+        let handle = spawn_blocking(move || {
+            let (commands, expanded_file_size) = match create_streaming_iter(
+                &filepath,
+                max_download_bytes,
+                segment_size_bytes,
+                partition_start_byte,
+                partition_size_bytes,
+            ) {
+                Ok(streamer) => streamer,
+                Err(e) => {
+                    let _ = init_tx.send(Err(e));
+                    return;
+                }
+            };
+
+            if init_tx.send(Ok(expanded_file_size)).is_err() {
+                return;
+            };
+            let _ = commands.into_iter().try_for_each(|cmd| cmd_tx.blocking_send(cmd));
+        });
+
+        Self { partition_name, init_rx: Some(init_rx), cmd_rx, handle }
+    }
+
+    async fn wait_initialized(&mut self) -> Result<u64> {
+        let init_rx = self
+            .init_rx
+            .take()
+            .ok_or_else(|| streaming_err_helper("StreamerTask already initialized".to_string()))?;
+        init_rx
+            .await
+            .map_err(|e| streaming_err_helper(format!("Streamer init task failed: {e}")))?
+    }
+}
+
+async fn stream_partition_task<'a, T: FastbootInterface>(
+    messenger: &Sender<Event>,
+    mut streamer_task: StreamerTask<'a>,
+    fastboot_interface: &mut T,
+    timeout: Duration,
+) -> Result<()> {
+    let expanded_file_size = streamer_task.wait_initialized().await?;
+    let StreamerTask { partition_name, cmd_rx, handle, .. } = streamer_task;
+
+    let (prog_client, prog_server) = mpsc::channel(3);
     let server_task = async |mut prog_server: Receiver<UploadProgress>| -> Result<()> {
         while let Some(upload) = prog_server.recv().await {
             messenger.send(Event::Upload(upload)).await?;
@@ -510,33 +537,24 @@ async fn streaming_flash_impl<T: FastbootInterface>(
         Ok(())
     };
 
-    // Use a bounded channel for double-buffering: prefetch/prepare the next command (disk read + CRC32)
-    // concurrently while the previous command is being transmitted to and flashed on the device.
-    // Offload the command generation (disk I/O and CRC32 hashing) to a blocking thread so it does
-    // not stall the async runtime while commands are streamed to the device.
-    let (cmd_client, cmd_server) = mpsc::channel(2);
     let producer_task = async move {
-        spawn_blocking(move || {
-            for command in commands {
-                if cmd_client.blocking_send(command).is_err() {
-                    break;
-                }
-            }
-        })
-        .await
-        .map_err(|e| streaming_err_helper(format!("Producer task failed: {e}")))
+        handle.await.map_err(|e| streaming_err_helper(format!("Producer task failed: {e}")))
     };
 
     let mut stream_task = async |prog_client: Sender<UploadProgress>,
                                  mut cmd_server: Receiver<StreamCommand>|
            -> Result<()> {
-        // TODO: map the damn error
-        let _ = prog_client.send(UploadProgress::OnStarted { size: expanded_size }).await;
+        prog_client
+            .send(UploadProgress::OnStarted { size: expanded_file_size })
+            .await
+            .map_err(|e| FfxFastbootError::StreamingFlash { message: e.to_string() })?;
         while let Some(command) = cmd_server.recv().await {
-            fastboot_interface.stream(name, command, &prog_client, timeout).await?;
+            fastboot_interface.stream(partition_name, command, &prog_client, timeout).await?;
         }
-        // TODO: map the damn error
-        let _ = prog_client.send(UploadProgress::OnFinished).await;
+        prog_client
+            .send(UploadProgress::OnFinished)
+            .await
+            .map_err(|e| FfxFastbootError::StreamingFlash { message: e.to_string() })?;
         Ok(())
     };
 
@@ -546,16 +564,53 @@ async fn streaming_flash_impl<T: FastbootInterface>(
     // the streaming commands into a single task and then log that progress on a best
     // effort basis.
     messenger
-        .send(Event::Upload(UploadProgress::OnReady { partition: name.to_owned(), files: 1 }))
+        .send(Event::Upload(UploadProgress::OnReady {
+            partition: partition_name.to_owned(),
+            files: 1,
+        }))
         .await?;
-    try_join!(producer_task, stream_task(prog_client, cmd_server), server_task(prog_server))?;
 
+    let start_time = Utc::now();
+    try_join!(producer_task, stream_task(prog_client, cmd_rx), server_task(prog_server))?;
     let duration = Utc::now().signed_duration_since(start_time);
     messenger
-        .send(Event::FlashPartitionFinished { partition_name: name.to_owned(), duration })
+        .send(Event::FlashPartitionFinished { partition_name: partition_name.to_owned(), duration })
         .await?;
 
-    Ok(true)
+    Ok(())
+}
+
+async fn streaming_flash_impl<T: FastbootInterface>(
+    messenger: &Sender<Event>,
+    name: &str,
+    filepath: &str,
+    fastboot_interface: &mut T,
+    segment_size_bytes: u64,
+    partition_start_byte: u64,
+    partition_size_bytes: u64,
+    timeout: Duration,
+) -> Result<()> {
+    let max_download_bytes: u64 = NonZeroU64::new(
+        get_hex_int::<u32>(MAX_DOWNLOAD_SIZE_VAR, fastboot_interface).await?.into(),
+    )
+    .ok_or_else(|| streaming_err_helper(format!("Max download size of 0")))?
+    .into();
+
+    // Offload both Streamer::create (disk read + command list generation) and command iteration
+    // (disk I/O + CRC32 hashing) to a blocking thread so neither stalls the async runtime.
+    let streamer_task = StreamerTask::spawn(
+        name,
+        filepath.to_owned(),
+        max_download_bytes,
+        segment_size_bytes,
+        partition_start_byte,
+        partition_size_bytes,
+    );
+    stream_partition_task(messenger, streamer_task, fastboot_interface, timeout).await
+}
+
+fn parameterized_var(base: &str, parameter: &str) -> String {
+    format!("{}:{}", base, parameter)
 }
 
 pub async fn flash_partition_impl<T: FastbootInterface>(
@@ -567,10 +622,6 @@ pub async fn flash_partition_impl<T: FastbootInterface>(
     flash_timeout_rate_mb_per_second: f64,
     override_max_download_size: Option<NonZeroU64>,
 ) -> Result<()> {
-    fn parameterized_var(base: &str, parameter: &str) -> String {
-        format!("{}:{}", base, parameter)
-    }
-
     let mut try_flash_stream = async || {
         if let Ok(segment_size) = get_hex_int::<u32>(STREAM_SEGMENT_SIZE, fb_intf).await
             && let Ok(partition_start) =
@@ -590,6 +641,7 @@ pub async fn flash_partition_impl<T: FastbootInterface>(
             )
             .await
             .inspect_err(|e| log::error!("Streaming flash error: {e}"))
+            .map(|_| true)
         } else {
             Ok(false)
         }
@@ -809,6 +861,45 @@ pub async fn flash_partitions<F: FileResolver + Sync, P: Partition, T: FastbootI
     min_timeout_secs: u64,
     flash_timeout_rate_mb_per_second: f64,
 ) -> Result<()> {
+    if let Ok(segment_size) =
+        get_hex_int::<u32>(STREAM_SEGMENT_SIZE, fastboot_interface).await.map(u64::from)
+    {
+        flash_partitions_stream(
+            messenger,
+            file_resolver,
+            partitions,
+            fastboot_interface,
+            segment_size,
+            min_timeout_secs,
+        )
+        .await
+    } else {
+        let resolved_partitions =
+            resolve_partitions(partitions, file_resolver, fastboot_interface).await?;
+
+        // Flash all pre-resolved partitions
+        for (name, file_to_upload) in resolved_partitions {
+            flash_partition_impl(
+                messenger.clone(),
+                &name,
+                &file_to_upload,
+                fastboot_interface,
+                min_timeout_secs,
+                flash_timeout_rate_mb_per_second,
+                None,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+}
+
+async fn resolve_partitions<'a, F: FileResolver, P: Partition, T: FastbootInterface>(
+    partitions: &'a [P],
+    file_resolver: &mut F,
+    fastboot_interface: &mut T,
+) -> Result<Vec<(&'a str, String)>> {
     // Pre-evaluate conditions and pre-resolve all partition files up-front
     let mut resolved_partitions = Vec::new();
     for partition in partitions {
@@ -821,23 +912,63 @@ pub async fn flash_partitions<F: FileResolver + Sync, P: Partition, T: FastbootI
 
         if should_flash {
             let file_to_upload = file_resolver.get_file(partition.file()).await?;
-            resolved_partitions.push((partition.name().to_string(), file_to_upload));
+            resolved_partitions.push((partition.name(), file_to_upload));
         }
     }
+    Ok(resolved_partitions)
+}
 
-    // Flash all pre-resolved partitions
+pub async fn flash_partitions_stream<F: FileResolver + Sync, P: Partition, T: FastbootInterface>(
+    messenger: &Sender<Event>,
+    file_resolver: &mut F,
+    partitions: &[P],
+    fastboot_interface: &mut T,
+    stream_segment_size: u64,
+    min_timeout_secs: u64,
+) -> Result<()> {
+    let max_download_bytes: u64 = NonZeroU64::new(
+        get_hex_int::<u32>(MAX_DOWNLOAD_SIZE_VAR, fastboot_interface).await?.into(),
+    )
+    .ok_or_else(|| streaming_err_helper(format!("Max download size of 0")))?
+    .into();
+    let timeout = Duration::seconds(min_timeout_secs.try_into().unwrap());
+
+    let mut streamers = Vec::new();
+    let resolved_partitions =
+        resolve_partitions(partitions, file_resolver, fastboot_interface).await?;
     for (name, file_to_upload) in resolved_partitions {
-        flash_partition_impl(
-            messenger.clone(),
-            &name,
-            &file_to_upload,
+        let partition_size = get_hex_int::<u64>(
+            parameterized_var(PARTITION_SIZE, name).as_str(),
             fastboot_interface,
-            min_timeout_secs,
-            flash_timeout_rate_mb_per_second,
-            None,
         )
         .await?;
+        let partition_start = get_hex_int::<u64>(
+            parameterized_var(PARTITION_START, name).as_str(),
+            fastboot_interface,
+        )
+        .await?;
+
+        // TODO(b/563034381): This is mildly problematic right now because raw image
+        // stream iterators read the entire file into memory and then chunk it out.
+        // Constructing raw stream iterators incrementally is part of a followup,
+        // which will bound the size of a raw image stream iterator to the
+        // max of the sizes of all its flash segments.
+        let streamer_task = StreamerTask::spawn(
+            name,
+            file_to_upload,
+            max_download_bytes,
+            stream_segment_size,
+            partition_start,
+            partition_size,
+        );
+
+        streamers.push(streamer_task);
     }
+
+    for streamer_task in streamers {
+        stream_partition_task(messenger, streamer_task, fastboot_interface, timeout).await?;
+    }
+
     Ok(())
 }
 
@@ -1099,6 +1230,29 @@ mod test {
 
     impl InterfaceFactory<TestTransport> for TestTransportFactory {}
 
+    async fn flash_partition<F: FileResolver + Sync, T: FastbootInterface>(
+        messenger: Sender<Event>,
+        file_resolver: &mut F,
+        name: &str,
+        file: &str,
+        fastboot_interface: &mut T,
+        min_timeout_secs: u64,
+        flash_timeout_rate_mb_per_second: f64,
+    ) -> Result<()> {
+        let file_to_upload = file_resolver.get_file(file).await?;
+        log::debug!("Preparing to upload {}", file_to_upload);
+        flash_partition_impl(
+            messenger,
+            name,
+            &file_to_upload,
+            fastboot_interface,
+            min_timeout_secs,
+            flash_timeout_rate_mb_per_second,
+            None,
+        )
+        .await
+    }
+
     /// Runs a fastboot sequence of uploading a file via inline upload.
     ///
     /// # Arguments
@@ -1295,7 +1449,7 @@ mod test {
         )
         .await?;
         // There are four partitions, and it's easier to check for each one.
-        assert_eq!(state.lock().unwrap().get_var_call_count(STREAM_SEGMENT_SIZE), (false, 4));
+        assert_eq!(state.lock().unwrap().get_var_call_count(STREAM_SEGMENT_SIZE), (false, 6));
         server.close();
         let mut messages = vec![];
         while let Some(m) = server.recv().await {
@@ -1565,6 +1719,118 @@ mod test {
         .await;
 
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[fuchsia::test(logging = true)]
+    async fn test_flash_partitions_stream() -> Result<()> {
+        struct TestPartition {
+            name: String,
+            file: String,
+        }
+        impl Partition for TestPartition {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn file(&self) -> &str {
+                &self.file
+            }
+            fn variable(&self) -> Option<&str> {
+                None
+            }
+            fn variable_value(&self) -> Option<&str> {
+                None
+            }
+        }
+
+        let buf = (0u8..=255).cycle().take(0x2000).collect::<Vec<_>>();
+        let (mut file_a, path_a) = NamedTempFile::new().unwrap().into_parts();
+        file_a.write_all(&buf).unwrap();
+        file_a.flush().unwrap();
+
+        let (mut file_b, path_b) = NamedTempFile::new().unwrap().into_parts();
+        file_b.write_all(&buf).unwrap();
+        file_b.flush().unwrap();
+
+        let partitions = vec![
+            TestPartition {
+                name: "zircon_a".to_owned(),
+                file: path_a.to_str().unwrap().to_owned(),
+            },
+            TestPartition {
+                name: "zircon_b".to_owned(),
+                file: path_b.to_str().unwrap().to_owned(),
+            },
+        ];
+
+        let mut test_transport = TestTransport::new();
+        test_transport.extend([
+            Reply::Okay("0x2000".to_owned()),    // Max download size
+            Reply::Okay("0x1000000".to_owned()), // Partition zircon_a size
+            Reply::Okay("0x2000".to_owned()),    // Partition zircon_a start
+            Reply::Okay("0x1000000".to_owned()), // Partition zircon_b size
+            Reply::Okay("0x4000".to_owned()),    // Partition zircon_b start
+            // Stream commands for zircon_a
+            Reply::Data(0x2000),
+            Reply::Okay("".to_owned()),
+            Reply::Okay("".to_owned()),
+            // Stream commands for zircon_b
+            Reply::Data(0x2000),
+            Reply::Okay("".to_owned()),
+            Reply::Okay("".to_owned()),
+        ]);
+
+        let mut fastboot_client = FastbootProxy::<TestTransport>::new(
+            "stream".to_string(),
+            test_transport,
+            TestTransportFactory {},
+        );
+
+        let (var_client, mut var_server): (Sender<Event>, Receiver<Event>) = mpsc::channel(20);
+        let mut resolver = TestResolver::new();
+
+        flash_partitions_stream(
+            &var_client,
+            &mut resolver,
+            &partitions,
+            &mut fastboot_client,
+            4096,
+            360,
+        )
+        .await?;
+        drop(var_client);
+
+        let mut events = vec![];
+        while let Some(m) = var_server.recv().await {
+            let m = if let Event::FlashPartitionFinished { partition_name, duration: _ } = m {
+                Event::FlashPartitionFinished { partition_name, duration: Duration::seconds(0) }
+            } else {
+                m
+            };
+            events.push(m);
+        }
+
+        use Event::*;
+        use UploadProgress::*;
+        let expected = vec![
+            Upload(OnReady { partition: "zircon_a".to_owned(), files: 1 }),
+            Upload(OnStarted { size: 0x2000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
+            Upload(OnFinished),
+            FlashPartitionFinished {
+                partition_name: "zircon_a".to_owned(),
+                duration: Duration::seconds(0),
+            },
+            Upload(OnReady { partition: "zircon_b".to_owned(), files: 1 }),
+            Upload(OnStarted { size: 0x2000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
+            Upload(OnFinished),
+            FlashPartitionFinished {
+                partition_name: "zircon_b".to_owned(),
+                duration: Duration::seconds(0),
+            },
+        ];
+        assert_eq!(events, expected);
         Ok(())
     }
 }

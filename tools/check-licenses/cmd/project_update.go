@@ -17,7 +17,6 @@ import (
 	"github.com/google/subcommands"
 
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
-	"go.fuchsia.dev/fuchsia/tools/check-licenses/readme"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/classify"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover"
@@ -75,6 +74,7 @@ func (c *ProjectUpdateCommand) Execute(ctx context.Context, f *flag.FlagSet, _ .
 
 	boundaryCfg := inputCtx.Config.Boundary
 	boundaryCfg.FilesInReadmeOnly = false
+	grouper := boundary.NewGrouper(inputCtx.FuchsiaDir, boundaryCfg)
 	validator := validate.NewValidator(inputCtx.FuchsiaDir, inputCtx.Config.Validate)
 
 	// Step 3: Group input targets by project root and execute Orchestrator with Stage 6 ReadmeWriter.
@@ -104,7 +104,7 @@ func (c *ProjectUpdateCommand) Execute(ctx context.Context, f *flag.FlagSet, _ .
 		targets := projectTargets[projectRoot]
 
 		// First-party projects are governed by virtual READMEs and do not require in-tree manifests.
-		r, _, err := readme.FindProjectReadme(projectRoot, inputCtx.FuchsiaDir, inputCtx.Config.Boundary.OutOfTreeReadmes)
+		r, bestReadmePath, err := grouper.FindProjectReadme(projectRoot)
 		if err == nil && r != nil && r.FirstParty == "yes" {
 			if !c.printStdout {
 				fmt.Printf("ℹ️  Skipping 1st-party project %s (governed by virtual README)\n", projectRoot)
@@ -124,8 +124,6 @@ func (c *ProjectUpdateCommand) Execute(ctx context.Context, f *flag.FlagSet, _ .
 		}
 
 		disc := discover.NewCrawler(inputCtx.FuchsiaDir, inputCtx.Config.Discover)
-		grouper := boundary.NewGrouper(inputCtx.FuchsiaDir, boundaryCfg)
-
 		// When fast mode is requested, configure the pruner to keep only the files explicitly
 		// declared in the governing README or explicitly targeted, skipping unnecessary files.
 		iterPruner := prune.NewPruner(nil)
@@ -136,7 +134,7 @@ func (c *ProjectUpdateCommand) Execute(ctx context.Context, f *flag.FlagSet, _ .
 		// If the target path points to a subdirectory of the project, widen crawlRoot to the directory
 		// containing the governing README so that the README and its notices can be found and updated.
 		crawlRoot := projectRoot
-		if _, bestReadmePath, err := readme.FindProjectReadme(projectRoot, inputCtx.FuchsiaDir, inputCtx.Config.Boundary.OutOfTreeReadmes); err == nil && bestReadmePath != "" && strings.HasPrefix(bestReadmePath, inputCtx.FuchsiaDir) {
+		if err == nil && bestReadmePath != "" && strings.HasPrefix(bestReadmePath, inputCtx.FuchsiaDir) {
 			readmeDir := filepath.Dir(bestReadmePath)
 			if strings.HasPrefix(projectRoot, readmeDir) {
 				crawlRoot = readmeDir

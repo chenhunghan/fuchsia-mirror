@@ -1238,6 +1238,18 @@ impl Task {
         self.running_state()?.files()
     }
 
+    /// Returns the file system context of the task, if it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err(errno)`] where `errno` is:
+    ///
+    ///   - `ESRCH`: the task is dead and its live resources have been dropped.
+    #[track_caller]
+    pub fn fs(&self) -> Result<Arc<FsContext>, Errno> {
+        Ok(self.running_state()?.fs())
+    }
+
     /// Returns the memory manager of the task, if it exists.
     ///
     /// # Errors

@@ -6,7 +6,7 @@
 import io
 import os
 import struct
-from typing import Callable, Optional, Tuple
+from collections.abc import Callable
 
 # Standard ELF constants.
 ELFMAG = b"\x7fELF"
@@ -41,8 +41,8 @@ class ElfInput(object):
         self,
         input: io.IOBase,
         input_size: int,
-        input_name: Optional[str] = None,
-        log_func: Optional[Callable[[str], None]] = None,
+        input_name: str | None = None,
+        log_func: Callable[[str], None] | None = None,
     ):
         self._input = input
         self._input_size = input_size
@@ -119,7 +119,7 @@ class ElfInput(object):
         if self._log_func:
             self._log_func(msg)
 
-    def _try_read(self, size: int) -> Optional[bytes]:
+    def _try_read(self, size: int) -> bytes | None:
         return self._input.read(size)
 
     def _read(self, size: int) -> bytes:
@@ -143,7 +143,7 @@ class ElfInput(object):
         e_shoff, e_shentsize, e_shnum = self._get_elf64_sections_info()
         return e_shoff > 0 and e_shentsize == 64 and e_shnum > 0
 
-    def _get_elf64_sections_info(self) -> Tuple[int, int, int]:
+    def _get_elf64_sections_info(self) -> tuple[int, int, int]:
         """Return true if an ELF64 file has sections."""
         e_shoff = self._unpack_from("Q", 0x28)[0]
         e_shentsize, e_shnum = self._unpack_from("HH", 0x3A)

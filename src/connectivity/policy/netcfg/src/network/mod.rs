@@ -16,14 +16,18 @@ use policy_properties::NetworkTokenExt as _;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
+mod reachability;
 mod token_registry;
 
 use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_net_name as fnet_name;
 use fidl_fuchsia_net_policy_properties as fnp_properties;
 use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
+use fidl_fuchsia_net_reachability as freachability;
 use fidl_fuchsia_posix_socket as fposix_socket;
 use fuchsia_inspect_derive::{IValue, Inspect, Unit, WithInspect as _};
+pub use reachability::ReachabilityWatcherConnectionId;
+use reachability::{ReachabilityHandler, ReachabilityStream};
 
 // The id for each network, separated by network source.
 //
@@ -398,6 +402,75 @@ impl RegisteredNetworks {
                 .collect()
         }
     }
+
+    fn update_inspect(&self, node: &fuchsia_inspect::Node) {
+        node.clear_recorded();
+
+        if let Some(default_network) = &self.default_network {
+            node.record_string("default_network", default_network.to_string());
+        }
+
+        if let Some(starnix_default) = &self.starnix_default {
+            node.record_string("starnix_default", starnix_default.to_string());
+        }
+
+        let mut sorted_networks: Vec<_> = self.networks.iter().collect();
+        sorted_networks.sort_by_key(|(id, _)| *id);
+
+        for (network_id, properties) in sorted_networks {
+            let network_node_name = match network_id {
+                NetworkId::Fuchsia(InterfaceId(id)) => format!("fuchsia_{id}"),
+                NetworkId::Delegated(InterfaceId(id)) => {
+                    format!("delegated_{id}")
+                }
+            };
+
+            node.record_child(network_node_name, |net_node| {
+                if let Some(name) = &properties.name {
+                    net_node.record_string("name", name);
+                }
+                if let Some(network_type) = &properties.network_type {
+                    net_node.record_string("network_type", network_type.as_str());
+                }
+                if let Some(connectivity_state) = &properties.connectivity_state {
+                    net_node.record_string("connectivity_state", connectivity_state.as_str());
+                }
+            });
+        }
+    }
+}
+
+trait NetworkTypeInspectExt {
+    fn as_str(&self) -> &'static str;
+}
+
+impl NetworkTypeInspectExt for fnp_socketproxy::NetworkType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            fnp_socketproxy::NetworkType::Unknown => "Unknown",
+            fnp_socketproxy::NetworkType::Ethernet => "Ethernet",
+            fnp_socketproxy::NetworkType::Wifi => "Wifi",
+            fnp_socketproxy::NetworkType::Bluetooth => "Bluetooth",
+            fnp_socketproxy::NetworkType::Cellular => "Cellular",
+            fnp_socketproxy::NetworkType::__SourceBreaking { .. } => "Unknown",
+        }
+    }
+}
+
+trait ConnectivityStateInspectExt {
+    fn as_str(&self) -> &'static str;
+}
+
+impl ConnectivityStateInspectExt for fnp_socketproxy::ConnectivityState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            fnp_socketproxy::ConnectivityState::NoConnectivity => "NoConnectivity",
+            fnp_socketproxy::ConnectivityState::LocalConnectivity => "LocalConnectivity",
+            fnp_socketproxy::ConnectivityState::PartialConnectivity => "PartialConnectivity",
+            fnp_socketproxy::ConnectivityState::FullConnectivity => "FullConnectivity",
+            fnp_socketproxy::ConnectivityState::__SourceBreaking { .. } => "Unknown",
+        }
+    }
 }
 
 /// Helper trait for building property update lists based on a client's registration.
@@ -685,6 +758,7 @@ pub enum NetworkRequestStream {
         stream: fnp_properties::PropertyWatcherRequestStream,
     },
     DelegatedNetworks(fnp_socketproxy::NetworkRegistryRequestStream),
+    Reachability(freachability::MonitorRequestStream),
 }
 
 impl From<fnp_properties::NetworksRequestStream> for NetworkRequestStream {
@@ -701,6 +775,12 @@ impl From<fnp_properties::NetworkTokenResolverRequestStream> for NetworkRequestS
 impl From<fnp_socketproxy::NetworkRegistryRequestStream> for NetworkRequestStream {
     fn from(s: fnp_socketproxy::NetworkRegistryRequestStream) -> Self {
         Self::DelegatedNetworks(s)
+    }
+}
+
+impl From<freachability::MonitorRequestStream> for NetworkRequestStream {
+    fn from(s: freachability::MonitorRequestStream) -> Self {
+        Self::Reachability(s)
     }
 }
 
@@ -724,6 +804,7 @@ enum NetworkRequestStreamInner {
         Tagged<PropertyWatcherConnectionId, fnp_properties::PropertyWatcherRequestStream>,
     ),
     DelegatedNetworks(fnp_socketproxy::NetworkRegistryRequestStream),
+    Reachability(ReachabilityStream),
 }
 
 impl futures::Stream for NetworkRequestStreamInner {
@@ -758,6 +839,12 @@ impl futures::Stream for NetworkRequestStreamInner {
                         .map(NetworkRequest::DelegatedNetworks)
                 })
             }
+            NetworkRequestStreamInner::Reachability(ref mut stream) => {
+                stream.poll_next_unpin(cx).map(|o| {
+                    o.map(|(id, request)| ReachabilityRequest { id, request })
+                        .map(NetworkRequest::Reachability)
+                })
+            }
         }
     }
 }
@@ -786,6 +873,15 @@ pub struct DelegatedNetworksRequest {
     pub request: Result<fnp_socketproxy::NetworkRegistryRequest, fidl::Error>,
 }
 
+/// A wrapper for [`freachability::MonitorRequest`] that includes the
+/// [`ReachabilityWatcherConnectionId`] and indicates whether the watcher stream is still open.
+pub struct ReachabilityRequest {
+    pub id: ReachabilityWatcherConnectionId,
+    /// Note: Storing the Request inside the Option allows us to distinguish between the channel
+    /// being closed and a Watch request being sent to support cleaner channel-closing logic.
+    pub request: Option<Result<freachability::MonitorRequest, fidl::Error>>,
+}
+
 /// An enum representing all possible events that can be received by the NetpolNetworksService
 /// event loop.
 pub enum NetworkRequest {
@@ -793,6 +889,7 @@ pub enum NetworkRequest {
     NetworkTokenResolver(NetworkTokenResolverRequest),
     PropertyWatcher(PropertyWatcherRequest),
     DelegatedNetworks(DelegatedNetworksRequest),
+    Reachability(ReachabilityRequest),
 }
 
 impl futures::Stream for NetpolNetworksService {
@@ -892,21 +989,74 @@ pub struct NetpolNetworksService {
     next_networks_id: ConnectionId,
     // The next id to use for a property watcher connection
     next_watcher_id: PropertyWatcherConnectionId,
+    // Reachability Monitor Watcher Handler
+    reachability_handler: ReachabilityHandler,
     // The multiplexed stream of events handled by the eventloop
     streams: futures::stream::SelectAll<NetworkRequestStreamInner>,
 
     // Inspect metrics for operations
     metrics: OperationsMetrics,
+    // Inspect node for network topology & properties
+    networks_inspect_node: Option<fuchsia_inspect::Node>,
 }
 
 impl NetpolNetworksService {
-    pub fn with_inspect(
+    pub fn with_operations_inspect(
         mut self,
         parent: &fuchsia_inspect::Node,
         name: impl AsRef<str>,
     ) -> Result<Self, fuchsia_inspect_derive::AttachError> {
         self.metrics = OperationsMetrics::default().with_inspect(parent, name)?;
         Ok(self)
+    }
+
+    pub fn with_network_registry_inspect(
+        mut self,
+        parent: &fuchsia_inspect::Node,
+        name: impl AsRef<str>,
+    ) -> Self {
+        let network_registry_node = parent.create_child(name.as_ref());
+        self.network_registry.update_inspect(&network_registry_node);
+        self.networks_inspect_node = Some(network_registry_node);
+        self
+    }
+
+    pub fn with_inspect(
+        self,
+        telemetry_parent: &fuchsia_inspect::Node,
+        operations_name: impl AsRef<str>,
+        networks_parent: &fuchsia_inspect::Node,
+        networks_name: impl AsRef<str>,
+    ) -> Result<Self, fuchsia_inspect_derive::AttachError> {
+        let service = self.with_operations_inspect(telemetry_parent, operations_name)?;
+        Ok(service.with_network_registry_inspect(networks_parent, networks_name))
+    }
+
+    pub fn synthesize_reachability_snapshot(&self) -> freachability::Snapshot {
+        ReachabilityHandler::synthesize_snapshot(
+            self.network_registry
+                .default_network
+                .and_then(|id| self.network_registry.networks.get(&id)),
+        )
+    }
+
+    fn maybe_notify_watchers(&mut self) {
+        let current_snapshot = self.synthesize_reachability_snapshot();
+        self.reachability_handler.maybe_notify_watchers(&current_snapshot);
+    }
+
+    fn handle_reachability_request(
+        &mut self,
+        id: ReachabilityWatcherConnectionId,
+        request: Option<Result<freachability::MonitorRequest, fidl::Error>>,
+    ) {
+        let current_snapshot = self.synthesize_reachability_snapshot();
+        self.reachability_handler.handle_request(&current_snapshot, id, request);
+    }
+
+    #[cfg(test)]
+    pub fn reachability_watcher_count(&self) -> usize {
+        self.reachability_handler.watcher_count()
     }
 
     pub fn set_telemetry(&mut self, telemetry: TelemetrySender) {
@@ -931,6 +1081,11 @@ impl NetpolNetworksService {
                 self.streams
                     .push(NetworkRequestStreamInner::PropertyWatcher(stream.tagged(connection_id)));
             }
+            NetworkRequestStream::Reachability(stream) => {
+                if let Some(reachability_stream) = self.reachability_handler.add_stream(stream) {
+                    self.streams.push(NetworkRequestStreamInner::Reachability(reachability_stream));
+                }
+            }
         }
     }
 
@@ -952,6 +1107,10 @@ impl NetpolNetworksService {
             }
             NetworkRequest::PropertyWatcher(PropertyWatcherRequest { id, request }) => {
                 self.handle_property_watcher_request(id, request).await?;
+                Ok(DelegatedNetworkUpdateResult { dns_servers: None })
+            }
+            NetworkRequest::Reachability(ReachabilityRequest { id, request }) => {
+                self.handle_reachability_request(id, request);
                 Ok(DelegatedNetworkUpdateResult { dns_servers: None })
             }
         }
@@ -1493,6 +1652,9 @@ impl NetpolNetworksService {
             self.metrics.delegated.as_mut().default_network_id =
                 self.network_registry.starnix_default.map(|id| id.get().get() as u32);
         }
+        if let Some(networks_node) = &self.networks_inspect_node {
+            self.network_registry.update_inspect(networks_node);
+        }
 
         if let UpdateApplied::None = event {
             if default_changed.is_none() {
@@ -1547,6 +1709,7 @@ impl NetpolNetworksService {
         if let Some(DefaultChangedEvent { previous_default }) = default_changed {
             self.notify_default_network_changed(previous_default, &mut property_watchers).await;
             std::mem::swap(&mut self.property_watchers, &mut property_watchers);
+            self.maybe_notify_watchers();
             return;
         }
 
@@ -1639,6 +1802,7 @@ impl NetpolNetworksService {
                 "Re-inserted in an existing registration slot."
             );
         }
+        self.maybe_notify_watchers();
     }
 
     async fn notify_default_network_changed(
@@ -2820,7 +2984,7 @@ mod tests {
         let inspector = fuchsia_inspect::Inspector::default();
         let telemetry_node = inspector.root().create_child("telemetry");
         let mut service = NetpolNetworksService::default()
-            .with_inspect(&telemetry_node, "operations")
+            .with_inspect(&telemetry_node, "operations", &telemetry_node, "network_registry")
             .expect("failed to initialize inspect");
         inspector.root().record(telemetry_node);
 
@@ -3044,5 +3208,231 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[fuchsia::test]
+    async fn test_network_registry_inspect() {
+        const FUCHSIA_ID_2: NetworkId = NetworkId::Fuchsia(ID_2);
+        const DELEGATED_ID_100: NetworkId =
+            NetworkId::Delegated(InterfaceId(NonZeroU64::new(100).unwrap()));
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let telemetry_node = inspector.root().create_child("telemetry");
+        let mut service = NetpolNetworksService::default()
+            .with_inspect(&telemetry_node, "operations", &telemetry_node, "network_registry")
+            .expect("failed to initialize inspect");
+        inspector.root().record(telemetry_node);
+
+        // Initial check: empty network_registry node
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: {}
+                }
+            }
+        );
+
+        // Add a Fuchsia network (ID_2)
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                FUCHSIA_ID_2,
+                NetworkUpdate::Properties(NetworkPropertiesChange {
+                    added: true,
+                    name: Some("wlan0".to_string()),
+                    network_type: Some(fnp_socketproxy::NetworkType::Wifi),
+                    connectivity_state: Some(fnp_socketproxy::ConnectivityState::FullConnectivity),
+                    ..Default::default()
+                }),
+            ))
+            .await;
+
+        // Add a Delegated network (ID 100)
+        let mut marks = fnet::Marks::default();
+        marks.mark_1 = Some(100);
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                DELEGATED_ID_100,
+                NetworkUpdate::Properties(NetworkPropertiesChange {
+                    added: true,
+                    marks: Some(marks.clone()),
+                    name: Some("eth0".to_string()),
+                    network_type: Some(fnp_socketproxy::NetworkType::Ethernet),
+                    connectivity_state: Some(fnp_socketproxy::ConnectivityState::LocalConnectivity),
+                    ..Default::default()
+                }),
+            ))
+            .await;
+
+        // Make Delegated network Starnix default
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                DELEGATED_ID_100,
+                NetworkUpdate::MakeDefault,
+            ))
+            .await;
+
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: {
+                        default_network: "fuchsia:2",
+                        starnix_default: "delegated:100",
+                        fuchsia_2: {
+                            name: "wlan0",
+                            network_type: "Wifi",
+                            connectivity_state: "FullConnectivity",
+                        },
+                        delegated_100: {
+                            name: "eth0",
+                            network_type: "Ethernet",
+                            connectivity_state: "LocalConnectivity",
+                        },
+                    }
+                }
+            }
+        );
+
+        // Update Delegated network properties (change connectivity_state and name)
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                DELEGATED_ID_100,
+                NetworkUpdate::Properties(NetworkPropertiesChange {
+                    added: false,
+                    marks: Some(marks),
+                    name: Some("eth0_updated".to_string()),
+                    network_type: Some(fnp_socketproxy::NetworkType::Ethernet),
+                    connectivity_state: Some(fnp_socketproxy::ConnectivityState::FullConnectivity),
+                    ..Default::default()
+                }),
+            ))
+            .await;
+
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: {
+                        default_network: "fuchsia:2",
+                        starnix_default: "delegated:100",
+                        fuchsia_2: {
+                            name: "wlan0",
+                            network_type: "Wifi",
+                            connectivity_state: "FullConnectivity",
+                        },
+                        delegated_100: {
+                            name: "eth0_updated",
+                            network_type: "Ethernet",
+                            connectivity_state: "FullConnectivity",
+                        },
+                    }
+                }
+            }
+        );
+
+        // Remove the Fuchsia network (ID_2).
+        // Default network should now fall back to the delegated network.
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(FUCHSIA_ID_2, NetworkUpdate::Remove))
+            .await;
+
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: {
+                        default_network: "delegated:100",
+                        starnix_default: "delegated:100",
+                        delegated_100: {
+                            name: "eth0_updated",
+                            network_type: "Ethernet",
+                            connectivity_state: "FullConnectivity",
+                        },
+                    }
+                }
+            }
+        );
+
+        // Unset Starnix default and remove Delegated network.
+        // network_registry node should now be completely empty.
+        service.update(NetworkRegistryUpdate::UnsetDefaultNetwork).await;
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(DELEGATED_ID_100, NetworkUpdate::Remove))
+            .await;
+
+        let hierarchy = fuchsia_inspect::reader::read(&inspector).await.unwrap();
+        assert_data_tree!(
+            hierarchy,
+            root: contains {
+                telemetry: contains {
+                    network_registry: {}
+                }
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_reachability_service_integration() {
+        let mut service = NetpolNetworksService::default();
+
+        let mut expected_disconnected = freachability::Snapshot::default();
+        expected_disconnected.gateway_reachable = Some(false);
+        expected_disconnected.internet_available = Some(false);
+        expected_disconnected.dns_active = Some(false);
+        expected_disconnected.http_active = Some(false);
+
+        let mut expected_validated = freachability::Snapshot::default();
+        expected_validated.gateway_reachable = Some(true);
+        expected_validated.internet_available = Some(true);
+        expected_validated.dns_active = Some(true);
+        expected_validated.http_active = Some(true);
+
+        let (proxy, stream) =
+            fidl::endpoints::create_proxy_and_stream::<freachability::MonitorMarker>();
+        service.add_stream(stream);
+        assert_eq!(service.reachability_watcher_count(), 1);
+
+        let watch_fut = proxy.watch();
+        let event = service.select_next_some().await;
+        assert_eq!(
+            service.handle_event(event).await.expect("handle event"),
+            DelegatedNetworkUpdateResult::default()
+        );
+        let snapshot = watch_fut.await.expect("watch error");
+        assert_eq!(snapshot, expected_disconnected);
+
+        let mut second_watch = proxy.watch();
+        let event = service.select_next_some().await;
+        assert_eq!(
+            service.handle_event(event).await.expect("handle event"),
+            DelegatedNetworkUpdateResult::default()
+        );
+        assert_matches!(futures::poll!(&mut second_watch), std::task::Poll::Pending);
+
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                DELEGATED_ID_1,
+                NetworkUpdate::Properties(DELEGATED_NET_1.change_with(
+                    true,
+                    Some(test_marks()),
+                    None,
+                    Some(fnp_socketproxy::ConnectivityState::FullConnectivity),
+                )),
+            ))
+            .await;
+        service
+            .update(NetworkRegistryUpdate::ChangeNetwork(
+                DELEGATED_ID_1,
+                NetworkUpdate::MakeDefault,
+            ))
+            .await;
+
+        let snapshot = second_watch.await.expect("watch should succeed");
+        assert_eq!(snapshot, expected_validated);
     }
 }

@@ -726,7 +726,9 @@ static int cmd_crash(int argc, const cmd_args* argv, uint32_t flags) {
 }
 
 static int cmd_build_instrumentation(int argc, const cmd_args* argv, uint32_t flags) {
-  auto print_feature = [](const char* what) { printf("build_instrumentation: %s\n", what); };
+  [[maybe_unused]] auto print_feature = [](const char* what) {
+    printf("build_instrumentation: %s\n", what);
+  };
 
 #if __has_feature(address_sanitizer)
   print_feature("address_sanitizer");

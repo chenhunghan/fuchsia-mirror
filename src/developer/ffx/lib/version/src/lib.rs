@@ -5,6 +5,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
+use std::sync::LazyLock;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VersionInfo {
@@ -47,30 +48,34 @@ static VERSION_INFO: VersionBuf = ['v' as u8; 64];
 static BUILD_VERSION: VersionBuf = ['v' as u8; 64];
 
 pub fn build_info() -> VersionInfo {
-    // SAFETY: We're using read_volatile to prevent the compiler from optimizing
-    // on the value of the statics provided in this file, since it will be
-    // overridden in a later build step. The values we read are the same type as
-    // the original statics.
-    let version_info = &unsafe { (VERSION_INFO.as_ptr() as *const VersionBuf).read_volatile() };
-    let build_version = &unsafe { (BUILD_VERSION.as_ptr() as *const VersionBuf).read_volatile() };
+    static CACHED_BUILD_INFO: LazyLock<VersionInfo> = LazyLock::new(|| {
+        // SAFETY: We're using read_volatile to prevent the compiler from optimizing
+        // on the value of the statics provided in this file, since it will be
+        // overridden in a later build step. The values we read are the same type as
+        // the original statics.
+        let version_info = &unsafe { (VERSION_INFO.as_ptr() as *const VersionBuf).read_volatile() };
+        let build_version =
+            &unsafe { (BUILD_VERSION.as_ptr() as *const VersionBuf).read_volatile() };
 
-    let null_char = |b: &u8| *b == 0;
-    let version_info =
-        &version_info[..version_info.iter().position(null_char).unwrap_or(version_info.len())];
-    let build_version =
-        &build_version[..build_version.iter().position(null_char).unwrap_or(build_version.len())];
-    build_info_impl(
-        CString::new(version_info)
-            .expect("ffx build error: invalid version string format embedded")
-            .to_string_lossy()
-            .trim()
-            .to_string(),
-        CString::new(build_version)
-            .expect("ffx build error: invalid version string format embedded")
-            .to_string_lossy()
-            .trim()
-            .to_string(),
-    )
+        let null_char = |b: &u8| *b == 0;
+        let version_info =
+            &version_info[..version_info.iter().position(null_char).unwrap_or(version_info.len())];
+        let build_version = &build_version
+            [..build_version.iter().position(null_char).unwrap_or(build_version.len())];
+        build_info_impl(
+            CString::new(version_info)
+                .expect("ffx build error: invalid version string format embedded")
+                .to_string_lossy()
+                .trim()
+                .to_string(),
+            CString::new(build_version)
+                .expect("ffx build error: invalid version string format embedded")
+                .to_string_lossy()
+                .trim()
+                .to_string(),
+        )
+    });
+    CACHED_BUILD_INFO.clone()
 }
 
 fn build_info_impl(raw_version_info: String, raw_build_version: String) -> VersionInfo {

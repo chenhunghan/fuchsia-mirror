@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -35,6 +36,20 @@ const (
 	MaxFailureReasonTotalSize = 16384
 	// MaxBatchSize is the maximum number of items (results or exonerations) reported in a single request.
 	MaxBatchSize = 250
+	// DefaultRepo is the Gitiles repository URL for the main Fuchsia repository.
+	DefaultRepo = "https://fuchsia.googlesource.com/fuchsia"
+	// VendorGoogleRepo is the Gitiles repository URL for the Google vendor repository.
+	VendorGoogleRepo = "https://turquoise-internal.googlesource.com/vendor/google"
+	// VendorGooglePathPrefix is the path prefix for the Google vendor repository.
+	VendorGooglePathPrefix = "//vendor/google"
+	// MaxLocationRepoLength is the maximum length in bytes for a test location repository URL (256 bytes).
+	// //third_party/luci-go/resultdb/proto/v1/test_metadata.proto:106
+	// https://source.chromium.org/chromium/infra/infra_superproject/+/main:infra/go/src/go.chromium.org/luci/resultdb/proto/v1/test_metadata.proto;l=107
+	MaxLocationRepoLength = 256
+	// MaxLocationFileNameLength is the maximum length in bytes for a test location file name (512 bytes).
+	// //third_party/luci-go/resultdb/proto/v1/test_metadata.proto:113
+	// https://source.chromium.org/chromium/infra/infra_superproject/+/main:infra/go/src/go.chromium.org/luci/resultdb/proto/v1/test_metadata.proto;l=114
+	MaxLocationFileNameLength = 512
 )
 
 // ParseSummary unmarshals the summary.json file content into runtests.TestSummary struct.
@@ -171,6 +186,135 @@ func setTestMetadata(r *sinkpb.TestResult, testDetail runtests.TestDetails, disp
 		owners := strings.Join(truncatedListOfOwners, ",")
 		r.Tags = append(r.Tags, &resultpb.StringPair{Key: "owners", Value: owners})
 	}
+	label := testDetail.SourceLabel
+	if label == "" {
+		label = testDetail.GNLabel
+	}
+	if len(label) > 0 {
+		loc, err := parseTestLocation(label)
+		if err != nil {
+			log.Printf("[Warn] Failed to parse test location for %q: %v", label, err)
+		} else {
+			r.TestMetadata.Location = loc
+		}
+	}
+}
+
+// parseTestLocation parses a test's source label and resolves
+// the source code directory or file path within the repository, returning a
+// resultpb.TestLocation suitable for ResultDB / Milo Gitiles source linking.
+func parseTestLocation(label string) (*resultpb.TestLocation, error) {
+	// Strip toolchain suffix (e.g. "(//build/toolchain:x64)") from label.
+	cleaned := strings.TrimSpace(label)
+	if cleaned == "" {
+		return nil, fmt.Errorf("label is empty")
+	}
+
+	if idx := strings.LastIndex(cleaned, "("); idx != -1 {
+		candidate := cleaned[idx:]
+		if strings.HasPrefix(candidate, "(//") || strings.HasPrefix(candidate, "(@//") || strings.HasPrefix(candidate, "(@@//") {
+			if !strings.HasSuffix(candidate, ")") {
+				return nil, fmt.Errorf("malformed toolchain in label %q", label)
+			}
+			cleaned = strings.TrimSpace(cleaned[:idx])
+			if cleaned == "" {
+				return nil, fmt.Errorf("label %q is empty after stripping toolchain", label)
+			}
+		} else if strings.HasSuffix(cleaned, ")") {
+			// If the label ends with a closing parenthesis but does not look like a valid toolchain,
+			// treat it as a malformed toolchain or unmatched parenthesis.
+			return nil, fmt.Errorf("malformed toolchain in label %q", label)
+		}
+	} else if strings.HasSuffix(cleaned, ")") {
+		return nil, fmt.Errorf("malformed toolchain in label %q", label)
+	}
+
+	// Validate label does not contain whitespace.
+	if strings.ContainsAny(cleaned, " \t\n\r") {
+		return nil, fmt.Errorf("label %q contains whitespace", label)
+	}
+
+	// Normalize Bazel/GN prefixes so the label starts with "//".
+	for _, prefix := range []string{"@@//", "@//"} {
+		if strings.HasPrefix(cleaned, prefix) {
+			cleaned = "//" + strings.TrimPrefix(cleaned, prefix)
+			break
+		}
+	}
+
+	if !strings.HasPrefix(cleaned, "//") {
+		// Support and normalize single leading slash (e.g. "/src/...") to "//" defensively
+		// to tolerate tool or input variations, although GN and Bazel labels standardly begin with "//".
+		if strings.HasPrefix(cleaned, "/") {
+			cleaned = "/" + cleaned
+		} else {
+			return nil, fmt.Errorf("label %q must start with '//'", label)
+		}
+	}
+
+	// Extract the source file or directory path from the cleaned label.
+	parts := strings.SplitN(cleaned, ":", 2)
+	dirPart := strings.TrimRight(parts[0], "/")
+	if dirPart == "" {
+		dirPart = "//"
+	}
+
+	fileName := dirPart
+	if len(parts) == 2 {
+		targetPart := parts[1]
+		ext := path.Ext(targetPart)
+		// If the target has a file extension and is not a compiled component manifest (.cm),
+		// treat it as a file inside the package directory. We link to the directory for
+		// .cm targets because the manifest source (usually .cml) resides in that package
+		// directory, whereas the .cm itself is a build artifact.
+		if ext != "" && ext != ".cm" {
+			if dirPart == "//" {
+				fileName = "//" + targetPart
+			} else {
+				fileName = fmt.Sprintf("%s/%s", dirPart, targetPart)
+			}
+		}
+	}
+
+	// Clean path using the path package (not filepath, since build labels always use forward slashes).
+	// Strip leading slashes before cleaning so that path.Clean treats it as an unrooted relative path.
+	// This preserves any leading ".." components so we can detect paths that escape the repository root,
+	// and avoids Go's path.Clean collapsing double leading slashes into a single slash.
+	cleanRel := path.Clean(strings.TrimLeft(fileName, "/"))
+	if cleanRel == ".." || strings.HasPrefix(cleanRel, "../") {
+		return nil, fmt.Errorf("label path %q escapes repository root: %s", label, cleanRel)
+	}
+
+	repoPath := "//"
+	if cleanRel != "." && cleanRel != "" {
+		repoPath = "//" + cleanRel
+	}
+
+	// For vendor/google, route to turquoise-internal.googlesource.com/vendor/google
+	// and make path relative to that repository root.
+	repo := DefaultRepo
+	filePath := repoPath
+	if strings.HasPrefix(repoPath, VendorGooglePathPrefix+"/") {
+		repo = VendorGoogleRepo
+		filePath = "//" + strings.TrimPrefix(repoPath, VendorGooglePathPrefix+"/")
+	} else if repoPath == VendorGooglePathPrefix {
+		repo = VendorGoogleRepo
+		filePath = "//"
+	}
+
+	// Validate field lengths according to ResultDB TestLocation specifications.
+	if len(repo) > MaxLocationRepoLength {
+		return nil, fmt.Errorf("repo %q exceeds max length %d bytes (%d bytes)", repo, MaxLocationRepoLength, len(repo))
+	}
+	if len(filePath) > MaxLocationFileNameLength {
+		return nil, fmt.Errorf("file path %q exceeds max length %d bytes (%d bytes)", filePath, MaxLocationFileNameLength, len(filePath))
+	}
+
+	// Keeping Line defaulting to 0 denotes an unknown or unspecified line number in ResultDB (which uses 1-based line numbers).
+	return &resultpb.TestLocation{
+		Repo:     repo,
+		FileName: filePath,
+	}, nil
 }
 
 // testCaseToResultSink converts TestCaseResult defined in //tools/testing/runtests/runtests.go

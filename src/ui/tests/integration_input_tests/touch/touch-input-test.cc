@@ -541,7 +541,7 @@ class CppInputTestBase : public TouchInputBase<Ts...> {
          .targets = {ChildRef{kCppFlatlandClient}}},
         {.capabilities =
              {Protocol{fidl::DiscoverableProtocolName<fuchsia_element::GraphicalPresenter>},
-              Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::Flatland>},
+              Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::FlatlandFactory>},
               Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::Allocator>}},
          .source = ui_testing::PortableUITest::kTestUIStackRef,
          .targets = {ChildRef{kCppFlatlandClient}}},

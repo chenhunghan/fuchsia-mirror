@@ -75,6 +75,16 @@ import("//build/toolchain/rbe.gni")
 #   disable_clippy (optional)
 #     Don't run clippy on this target.
 #
+#   lint_config (optional)
+#     Label of a config with target-specific Rust lints, appended on top of the
+#     lint configs applied to every Rust target.
+#
+#     This mirrors the `lint_config` attribute on the Bazel rustc_*() macros so
+#     that bazel2gn can pass it through unchanged. NOTE the semantics differ:
+#     here the config is *appended* to the defaults, while in Bazel it
+#     *replaces* the macro default. The configs under //build/config/rust/lints
+#     are defined so that both spellings produce the same rustc flags.
+#
 #   emit_tool_path (optional)
 #     Exclude this target from tool_paths.json.
 #
@@ -87,6 +97,12 @@ import("//build/toolchain/rbe.gni")
 #   original_target_name
 #     The name of the target as it appears in the BUILD file. Enables tooling
 #     to find the template invocation in a BUILD file where this target was defined.
+#
+#   proc_macro_deps (optional)
+#     List of labels of Rust procedural macro dependencies. Same semantics as
+#     `deps`, except that these are always built in `$host_toolchain`, since
+#     procedural macros run as compiler plugins on the build machine. Entries
+#     must not specify a toolchain.
 #
 #
 #   all_dependent_configs
@@ -153,6 +169,24 @@ template("rustc_artifact") {
     _local_inputs += rust_rbe_deps
   }
 
+  _deps = []
+  if (defined(invoker.deps)) {
+    _deps += invoker.deps
+  }
+
+  # Procedural macros run as compiler plugins on the build machine, so they and
+  # all their dependencies must be built in `$host_toolchain`. Redirecting here
+  # instead of relying on the forwarding group defined by `rustc_macro()` in
+  # other toolchains to avoid extra indirections.
+  if (defined(invoker.proc_macro_deps)) {
+    foreach(_proc_macro_dep, invoker.proc_macro_deps) {
+      assert(
+          string_replace(_proc_macro_dep, "(", "") == _proc_macro_dep,
+          "proc_macro_deps entries must not specify a toolchain, they are always built in the host toolchain. Remove the toolchain suffix from: ${_proc_macro_dep}")
+      _deps += [ "${_proc_macro_dep}($host_toolchain)" ]
+    }
+  }
+
   # These do not have aux targets (yet).
   _should_define_rust_aux = invoker.crate_type != "cdylib" &&
                             (invoker.crate_type != "proc-macro" ||
@@ -197,7 +231,7 @@ template("rustc_artifact") {
         actual_name = _group_name
       }
 
-      invoker_deps = invoker.deps
+      invoker_deps = _deps
       rustflags = _rustflags
 
       if (!defined(configs)) {
@@ -211,6 +245,11 @@ template("rustc_artifact") {
       # Add production-oriented lints to non-test code.
       if (!(defined(testonly) && testonly)) {
         configs += [ "//build/config/rust/lints:clippy_warn_production" ]
+      }
+
+      # Add the target-specific lints config, if any, on top of the defaults.
+      if (defined(invoker.lint_config)) {
+        configs += [ invoker.lint_config ]
       }
 
       # rustdoc should not be data_dep'd for third party crates
@@ -244,6 +283,7 @@ template("rustc_artifact") {
                [
                  "original_target_name",
                  "disable_clippy",
+                 "lint_config",
                ])
   }
 
@@ -282,7 +322,6 @@ template("rustc_artifact") {
                              "assert_no_deps",
                              "crate_type",
                              "data_deps",
-                             "deps",
                              "emit_tool_path",
                              "exclude_toolchain_tags",
                              "metadata",
@@ -300,6 +339,8 @@ template("rustc_artifact") {
                              "variant_selector_target_type",
                              "visibility",
                            ])
+
+    deps = _deps
 
     # rustc does not support dashes in crate names.
     crate_name = string_replace(invoker.crate_name, "-", "_")

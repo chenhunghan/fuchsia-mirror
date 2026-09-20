@@ -17,7 +17,6 @@ fidl_library(
     stable = False,
     visibility = ["//visibility:public"],
     deps = [
-        "//sdk/fidl/fuchsia.hardware.power.source",
         "//sdk/fidl/fuchsia.power.system",
         "//zircon/vdso/zx",
     ],

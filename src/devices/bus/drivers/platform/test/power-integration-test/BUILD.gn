@@ -9,10 +9,21 @@ import("//build/fidl/fidl.gni")
 import("//build/test.gni")
 import("//tools/power_config/build/config.gni")
 
+fuchsia_driver_dml("test-power-child-dml") {
+  dml = "meta/test-power-child.dml"
+  driver_name = "test-power-child"
+}
+
+fuchsia_driver_dml("test-power-parent-dml") {
+  dml = "meta/test-power-parent.dml"
+  driver_name = "test-power-parent"
+}
+
 driver_bind_rules("test-power-integration-board-bind") {
   rules = "meta/test-power-integration.bind"
   deps = [
     "//src/devices/bind/fuchsia",
+    "//src/devices/bind/fuchsia.test",
     "//src/devices/bind/fuchsia.test.platform",
   ]
 }
@@ -46,8 +57,13 @@ fuchsia_driver_component("test-power-integration-board") {
 }
 
 driver_bind_rules("test-power-parent-bind") {
-  rules = "meta/test-power-parent.bind"
-  deps = [ "//src/devices/bind/fuchsia.test.platform" ]
+  bind_output = "test-power-parent.bindbc"
+  dml_label = ":test-power-parent-dml"
+  deps = [
+    "//src/devices/bind/fuchsia",
+    "//src/devices/bind/fuchsia.test",
+    "//src/devices/bind/fuchsia.test.platform",
+  ]
 }
 
 fuchsia_cc_driver("test-power-parent-driver") {
@@ -71,8 +87,13 @@ fuchsia_cc_driver("test-power-parent-driver") {
 }
 
 driver_bind_rules("test-power-child-bind") {
-  rules = "meta/test-power-child.bind"
-  deps = [ "//src/devices/bind/fuchsia.test.platform" ]
+  bind_output = "test-power-child.bindbc"
+  dml_label = ":test-power-child-dml"
+  deps = [
+    "//src/devices/bind/fuchsia",
+    "//src/devices/bind/fuchsia.test",
+    "//src/devices/bind/fuchsia.test.platform",
+  ]
 }
 
 fuchsia_cc_driver("test-power-child-driver") {
@@ -91,17 +112,17 @@ fuchsia_cc_driver("test-power-child-driver") {
 }
 
 fuchsia_driver_component("test-power-child") {
+  dml_label = ":test-power-child-dml"
   component_name = "test-power-child"
   deps = [ ":test-power-child-driver" ]
   info = "meta/test-power-child-info.json"
-  manifest = "meta/test-power-child.cml"
 }
 
 fuchsia_driver_component("test-power-parent") {
+  dml_label = ":test-power-parent-dml"
   component_name = "test-power-parent"
   deps = [ ":test-power-parent-driver" ]
   info = "meta/test-power-parent-info.json"
-  manifest = "meta/test-power-parent.cml"
 }
 
 fidl("fuchsia.test.drivers.power") {

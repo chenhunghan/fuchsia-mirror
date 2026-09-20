@@ -147,6 +147,7 @@ test("display-coordinator-unittests") {
     "inspect-test.cc",
     "integration-test.cc",
     "layer-test.cc",
+    "vsync-monitor-test.cc",
     "waiting-image-list-test.cc",
   ]
   deps = [

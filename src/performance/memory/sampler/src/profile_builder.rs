@@ -67,6 +67,7 @@ pub struct ProfileBuilder {
     /// store a reference, rather than the entire stack trace that
     /// could be fairly large.
     stack_traces: HashSet<Rc<StackTrace>>,
+    is_lossy: bool,
 }
 
 /// Computes the unsampling scale factor for an allocation of a given `size` using
@@ -165,18 +166,46 @@ impl ProfileBuilder {
     pub fn get_approximate_reclaimable_stack_traces_count(&self) -> usize {
         self.dead_allocations.len() + self.deallocations.len()
     }
+    /// Sets whether the profile session experienced buffer saturation and is lossy.
+    pub fn set_lossy(&mut self, is_lossy: bool) {
+        self.is_lossy = is_lossy;
+    }
+
+    /// Returns whether the profile session experienced buffer saturation and is lossy.
+    pub fn is_lossy(&self) -> bool {
+        self.is_lossy
+    }
+
+    /// Returns the process name to report, annotated when the profile is lossy.
+    /// The annotation rides on the name because that is what `pprof` surfaces
+    /// in the banner, tab title and profile picker, making the taint hard to
+    /// overlook.
+    fn annotated_process_name(&self) -> String {
+        const TAINT_SUFFIX: &str = "[TAINTED: BUFFER OVERFLOW]";
+        if !self.is_lossy {
+            return self.process_name.clone();
+        }
+        if self.process_name.is_empty() {
+            TAINT_SUFFIX.to_string()
+        } else {
+            format!("{} {}", self.process_name, TAINT_SUFFIX)
+        }
+    }
+
     /// Finalize the profile. Consumes this builder.
     pub fn build(self) -> Result<ProfileReport, Error> {
+        let process_name = self.annotated_process_name();
         let profile = pprof::build_profile(
             self.module_map.iter(),
             self.live_allocations.values(),
             self.dead_allocations,
             self.deallocations,
             &self.stack_traces,
+            self.is_lossy,
         );
 
         let (vmo, size) = profile_to_vmo(&profile)?;
-        Ok(ProfileReport::Final { process_name: self.process_name, profile: vmo, size })
+        Ok(ProfileReport::Final { process_name, profile: vmo, size })
     }
     /// Produce a partial profile from a process that is still
     /// live. Drop `dead_allocations` from `self`, and prune the
@@ -186,6 +215,7 @@ impl ProfileBuilder {
     /// long-lived process, while clearing from memory the state that
     /// will no longer be useful.
     pub fn build_partial_profile(&mut self, iteration: usize) -> Result<ProfileReport, Error> {
+        let process_name = self.annotated_process_name();
         let profile = {
             pprof::build_profile(
                 self.module_map.iter(),
@@ -193,17 +223,13 @@ impl ProfileBuilder {
                 std::mem::replace(&mut self.dead_allocations, HashMap::new()),
                 std::mem::replace(&mut self.deallocations, HashMap::new()),
                 &self.stack_traces,
+                self.is_lossy,
             )
         };
         self.prune_unreferenced_stack_traces();
 
         let (vmo, size) = profile_to_vmo(&profile)?;
-        Ok(ProfileReport::Partial {
-            process_name: self.process_name.clone(),
-            profile: vmo,
-            size,
-            iteration,
-        })
+        Ok(ProfileReport::Partial { process_name, profile: vmo, size, iteration })
     }
 }
 
@@ -331,5 +357,14 @@ mod test {
 
         assert_eq!(process_name, builder.process_name);
         assert_eq!(module_map, builder.module_map);
+    }
+
+    #[fuchsia::test]
+    fn test_lossy_profile_name() {
+        let mut builder = ProfileBuilder::default();
+        builder.set_process_info(Some("my_proc".to_string()), [].into_iter());
+        builder.set_lossy(true);
+        let report = builder.build().unwrap();
+        assert_eq!(report.get_process_name(), "my_proc [TAINTED: BUFFER OVERFLOW]");
     }
 }

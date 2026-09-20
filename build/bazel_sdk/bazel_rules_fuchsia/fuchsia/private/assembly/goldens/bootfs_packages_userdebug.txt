@@ -5,7 +5,6 @@ archivist
 ?asix-88772b
 ?auto-slot-committer
 ?blobfs
-block-core
 ?boot-shell-commands
 ?bootstrap
 ?bt-transport-usb

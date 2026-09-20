@@ -9,14 +9,14 @@
 
 #include <lib/user_copy/user_ptr.h>
 #include <stdint.h>
+#include <string.h>
 #include <zircon/types.h>
 
 #include <cstdint>
 
 #include <fbl/intrusive_double_list.h>
-#include <fbl/intrusive_single_list.h>
+#include <ktl/span.h>
 #include <ktl/unique_ptr.h>
-#include <object/buffer_chain.h>
 #include <object/handle.h>
 
 constexpr uint32_t kMaxMessageSize = 65536u;
@@ -39,12 +39,28 @@ struct MessagePacketDeleter;
 // specific custom deletion requirement.
 using MessagePacketPtr = ktl::unique_ptr<MessagePacket, internal::MessagePacketDeleter>;
 
+extern "C" {
+zx_status_t rust_message_packet_create_user(uintptr_t data, size_t data_size, size_t num_handles,
+                                            MessagePacket** out);
+zx_status_t rust_message_packet_create_iovecs(uintptr_t iovecs, size_t num_iovecs,
+                                              size_t num_handles, MessagePacket** out);
+zx_status_t rust_message_packet_create_kernel(const uint8_t* data, size_t data_size,
+                                              size_t num_handles, MessagePacket** out);
+void rust_message_packet_delete(MessagePacket* packet);
+zx_status_t rust_message_packet_copy_data_to(const MessagePacket* packet, uintptr_t buf);
+size_t rust_message_packet_get_data_size(const MessagePacket* packet);
+size_t rust_message_packet_get_num_handles(const MessagePacket* packet);
+Handle* const* rust_message_packet_get_handles(const MessagePacket* packet);
+Handle** rust_message_packet_get_mutable_handles(MessagePacket* packet);
+void rust_message_packet_set_owns_handles(MessagePacket* packet, bool owns_handles);
+zx_txid_t rust_message_packet_get_txid(const MessagePacket* packet);
+void rust_message_packet_set_txid(MessagePacket* packet, zx_txid_t txid);
+void rust_message_packet_get_start_of_payload(const MessagePacket* packet, const uint8_t** out_ptr,
+                                              size_t* out_len);
+}  // extern "C"
+
 class MessagePacket final : public fbl::DoublyLinkedListable<MessagePacketPtr> {
  public:
-  // The number of iovecs to read and process at a time.
-  // If number of iovecs <= kIovecChunkSize, then the message buf size will be computed and the
-  // minimum required number of pages will be allocated. Otherwise, a large enough buffer for
-  // the largest possible message will be allocated.
   static constexpr uint32_t kIovecChunkSize = 16;
 
   // Creates a message packet containing the provided data and space for
@@ -57,35 +73,31 @@ class MessagePacket final : public fbl::DoublyLinkedListable<MessagePacketPtr> {
   static zx_status_t Create(const char* data, uint32_t data_size, uint32_t num_handles,
                             MessagePacketPtr* msg);
 
-  uint32_t data_size() const { return data_size_; }
+  uint32_t data_size() const {
+    return static_cast<uint32_t>(rust_message_packet_get_data_size(this));
+  }
 
   // Copies the packet's |data_size()| bytes to |buf|.
   // Returns an error if |buf| points to a bad user address.
   zx_status_t CopyDataTo(user_out_ptr<char> buf) const {
-    return buffer_chain_->CopyOut(buf, payload_offset_, data_size_);
+    return rust_message_packet_copy_data_to(this, reinterpret_cast<uintptr_t>(buf.get()));
   }
 
-  uint32_t num_handles() const { return num_handles_; }
-  Handle* const* handles() const { return handles_; }
-  Handle** mutable_handles() { return handles_; }
+  uint32_t num_handles() const {
+    return static_cast<uint32_t>(rust_message_packet_get_num_handles(this));
+  }
+  Handle* const* handles() const { return rust_message_packet_get_handles(this); }
+  Handle** mutable_handles() { return rust_message_packet_get_mutable_handles(this); }
 
-  void set_owns_handles(bool own_handles) { owns_handles_ = own_handles; }
+  void set_owns_handles(bool own_handles) {
+    rust_message_packet_set_owns_handles(this, own_handles);
+  }
 
   // zx_channel_call treats the leading bytes of the payload as
   // a transaction id of type zx_txid_t.
-  zx_txid_t get_txid() const {
-    if (data_size_ < sizeof(zx_txid_t)) {
-      return 0;
-    }
-    // The first few bytes of the payload are a zx_txid_t.
-    return *static_cast<const zx_txid_t*>(payload());
-  }
+  zx_txid_t get_txid() const { return rust_message_packet_get_txid(this); }
 
-  void set_txid(zx_txid_t txid) {
-    if (data_size_ >= sizeof(zx_txid_t)) {
-      *(static_cast<zx_txid_t*>(payload())) = txid;
-    }
-  }
+  void set_txid(zx_txid_t txid) { rust_message_packet_set_txid(this, txid); }
 
   struct FidlHeader {
     zx_txid_t txid{};
@@ -96,8 +108,11 @@ class MessagePacket final : public fbl::DoublyLinkedListable<MessagePacketPtr> {
   static_assert(sizeof(FidlHeader) == 2 * sizeof(uint64_t));
 
   FidlHeader fidl_header() const {
-    if (data_size_ >= sizeof(FidlHeader)) {
-      return *static_cast<const FidlHeader*>(payload());
+    const ktl::span<const uint8_t> payload = start_of_payload();
+    if (payload.size() >= sizeof(FidlHeader)) {
+      FidlHeader header;
+      memcpy(&header, payload.data(), sizeof(header));
+      return header;
     }
     return FidlHeader{};
   }
@@ -105,63 +120,18 @@ class MessagePacket final : public fbl::DoublyLinkedListable<MessagePacketPtr> {
   // The first chunk of payload.
   // Eventually we'd want to actually get the whole message out.
   ktl::span<const uint8_t> start_of_payload() const {
-    // The first Buffer of a BufferChain will contain the handles (if any are present) and at least
-    // some of the message's payload.  How much of message payload?  Up to kContig minus the
-    // payload's offset.
-    const size_t size =
-        ktl::min(static_cast<uint32_t>(BufferChain::kContig) - payload_offset_, data_size_);
-    return ktl::span<const uint8_t>(static_cast<const uint8_t*>(payload()), size);
+    const uint8_t* ptr = nullptr;
+    size_t len = 0;
+    rust_message_packet_get_start_of_payload(this, &ptr, &len);
+    return ktl::span<const uint8_t>(ptr, len);
   }
 
  private:
-  // A private constructor ensures that users must use the static factory
-  // Create method to create a MessagePacket.  This, in turn, guarantees that
-  // when a user creates a MessagePacket, they end up with the proper
-  // MessagePacket::UPtr type for managing the message packet's life cycle.
-  MessagePacket(BufferChain* chain, uint32_t data_size, uint32_t payload_offset,
-                uint16_t num_handles, Handle** handles)
-      : buffer_chain_(chain),
-        handles_(handles),
-        data_size_(data_size),
-        payload_offset_(payload_offset),
-        num_handles_(num_handles),
-        owns_handles_(false) {}
-
-  // A private destructor helps to make sure that only our custom deleter is
-  // ever used to destroy this object which, in turn, makes it very difficult
-  // to not properly recycle the object.
-  ~MessagePacket() {
-    DEBUG_ASSERT(!InContainer());
-    if (owns_handles_) {
-      for (size_t ix = 0; ix != num_handles_; ++ix) {
-        // Delete the handle via HandleOwner dtor.
-        HandleOwner ho(handles_[ix]);
-      }
-    }
-  }
+  MessagePacket() = default;
+  ~MessagePacket() = default;
 
   friend struct internal::MessagePacketDeleter;
-  static void recycle(MessagePacket* packet);
-
-  static zx_status_t CreateIovecBounded(user_in_ptr<const zx_channel_iovec_t> iovecs,
-                                        uint32_t num_iovecs, uint32_t num_handles,
-                                        MessagePacketPtr* msg);
-  static zx_status_t CreateIovecUnbounded(user_in_ptr<const zx_channel_iovec_t> iovecs,
-                                          uint32_t num_iovecs, uint32_t num_handles,
-                                          MessagePacketPtr* msg);
-  static zx_status_t CreateCommon(size_t data_size, size_t num_handles, MessagePacketPtr* msg);
-
-  void set_data_size(uint32_t data_size) { data_size_ = data_size; }
-
-  const void* payload() const { return buffer_chain_->buffers()->front().data() + payload_offset_; }
-  void* payload() { return buffer_chain_->buffers()->front().data() + payload_offset_; }
-
-  BufferChain* buffer_chain_;
-  Handle** const handles_;
-  uint32_t data_size_;
-  const uint32_t payload_offset_;
-  const uint16_t num_handles_;
-  bool owns_handles_;
+  static void recycle(MessagePacket* packet) { rust_message_packet_delete(packet); }
 };
 
 namespace internal {
@@ -169,5 +139,42 @@ struct MessagePacketDeleter {
   void operator()(MessagePacket* packet) const noexcept { MessagePacket::recycle(packet); }
 };
 }  // namespace internal
+
+inline zx_status_t MessagePacket::Create(user_in_ptr<const char> data, uint32_t data_size,
+                                         uint32_t num_handles, MessagePacketPtr* msg) {
+  MessagePacket* raw = nullptr;
+  zx_status_t status = rust_message_packet_create_user(reinterpret_cast<uintptr_t>(data.get()),
+                                                       data_size, num_handles, &raw);
+  if (status != ZX_OK) {
+    return status;
+  }
+  msg->reset(raw);
+  return ZX_OK;
+}
+
+inline zx_status_t MessagePacket::Create(user_in_ptr<const zx_channel_iovec_t> iovecs,
+                                         uint32_t num_iovecs, uint32_t num_handles,
+                                         MessagePacketPtr* msg) {
+  MessagePacket* raw = nullptr;
+  zx_status_t status = rust_message_packet_create_iovecs(reinterpret_cast<uintptr_t>(iovecs.get()),
+                                                         num_iovecs, num_handles, &raw);
+  if (status != ZX_OK) {
+    return status;
+  }
+  msg->reset(raw);
+  return ZX_OK;
+}
+
+inline zx_status_t MessagePacket::Create(const char* data, uint32_t data_size, uint32_t num_handles,
+                                         MessagePacketPtr* msg) {
+  MessagePacket* raw = nullptr;
+  zx_status_t status = rust_message_packet_create_kernel(reinterpret_cast<const uint8_t*>(data),
+                                                         data_size, num_handles, &raw);
+  if (status != ZX_OK) {
+    return status;
+  }
+  msg->reset(raw);
+  return ZX_OK;
+}
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_MESSAGE_PACKET_H_

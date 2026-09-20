@@ -28,28 +28,24 @@ pub use superblock::{
 pub use xattr::{Index as XattrIndex, XattrEntry};
 
 #[cfg(test)]
+fn open_f2fs_test_image() -> storage_device::fake_device::FakeDevice {
+    let compressed_image =
+        std::fs::read("/pkg/testdata/f2fs.img.zst").expect("failed to read f2fs image");
+    let decompressed_image = zstd::bulk::decompress(&compressed_image, 256 * 1024 * 1024)
+        .expect("failed to decompress f2fs image");
+    storage_device::fake_device::FakeDevice::from_vec(decompressed_image, BLOCK_SIZE as u32)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::reader::Reader;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Copied from reader.rs tests, might want to deduplicate later if it grows.
-    fn open_test_image(path: &str) -> storage_device::fake_device::FakeDevice {
-        use storage_device::fake_device::FakeDevice;
-        let path = std::path::PathBuf::from(path);
-        println!("path is {path:?}");
-        FakeDevice::from_image(
-            zstd::Decoder::new(std::fs::File::open(&path).expect("open image"))
-                .expect("decompress image"),
-            BLOCK_SIZE as u32,
-        )
-        .expect("open image")
-    }
-
     #[fuchsia::test]
     async fn test_readahead() {
-        let mut device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let mut device = open_f2fs_test_image();
         let read_count = Arc::new(AtomicUsize::new(0));
         let read_count_clone = read_count.clone();
 

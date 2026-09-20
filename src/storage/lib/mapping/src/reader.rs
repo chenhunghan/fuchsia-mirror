@@ -409,7 +409,7 @@ impl<S: BlockService + ?Sized> BlockService for ChildBlockService<S> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::Extent;
+    use crate::{Extent, Transform};
     use std::cmp::min;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
@@ -1329,7 +1329,7 @@ pub(crate) mod tests {
         let parent_service = Arc::new(FakeBlockService::new(device_data));
 
         let mappings = Extents::try_new([Extent::new(0..4096, Some(4096))], 0).unwrap();
-        let file = Arc::new(File::new(mappings, 4096, None));
+        let file = Arc::new(File::new(mappings, 4096, Transform::None));
 
         let child_service = ChildBlockService::new(parent_service.clone(), file.clone());
         assert_eq!(child_service.file().extents().iter_extents(0).count(), 1);

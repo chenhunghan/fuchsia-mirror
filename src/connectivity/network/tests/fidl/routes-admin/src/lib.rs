@@ -30,7 +30,7 @@ use net_declare::{
 };
 use net_types::ip::{GenericOverIp, Ip, IpInvariant, Ipv4, Ipv6};
 use netstack_testing_common::ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT;
-use netstack_testing_common::realms::{Netstack, Netstack2, Netstack3, TestSandboxExt};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt};
 use netstack_testing_macros::netstack_test;
 use routes_common::{TestSetup, test_route};
 use std::pin::pin;
@@ -50,7 +50,6 @@ enum RouteSet {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(true, METRIC_TRACKS_INTERFACE, RouteSet::User; "explicitly removing the route")]
 #[test_case(
@@ -84,7 +83,7 @@ enum RouteSet {
     RouteSet::Global;
     "explicit non-zero metric, global"
 )]
-async fn add_remove_route<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Netstack>(
+async fn add_remove_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
     explicit_remove: bool,
     metric: fnet_routes::SpecifiedMetric,
@@ -98,7 +97,7 @@ async fn add_remove_route<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Netstack>(
         route_table,
         global_route_table,
         state,
-    } = TestSetup::<I>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -203,7 +202,6 @@ fn specified_properties(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     fidl_ip_v4_with_prefix!("192.0.2.0/24"),
     None,
@@ -273,7 +271,7 @@ fn specified_properties(
     => Err(fnet_routes_admin::RouteSetError::MissingMetric);
     "rejects missing metric"
 )]
-async fn validates_route_v4<N: Netstack>(
+async fn validates_route_v4(
     name: &str,
     destination: fnet::Ipv4AddressWithPrefix,
     next_hop: Option<fnet::Ipv4Address>,
@@ -287,7 +285,7 @@ async fn validates_route_v4<N: Netstack>(
         route_table,
         global_route_table: _,
         state: _,
-    } = TestSetup::<Ipv4>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<Ipv4>::new(&sandbox, name).await;
     let proxy = fnet_routes_ext::admin::new_route_set::<Ipv4>(&route_table).expect("new route set");
     let grant = interface.get_authorization().await.expect("getting grant should succeed");
     let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
@@ -315,7 +313,6 @@ async fn validates_route_v4<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     fidl_ip_v6_with_prefix!("2001:DB8::/64"), None,
     specified_properties(Some(fnet_routes::SpecifiedMetric::InheritedFromInterface(
@@ -381,7 +378,7 @@ async fn validates_route_v4<N: Netstack>(
     => Err(fnet_routes_admin::RouteSetError::MissingMetric);
     "rejects missing metric"
 )]
-async fn validates_route_v6<N: Netstack>(
+async fn validates_route_v6(
     name: &str,
     destination: fnet::Ipv6AddressWithPrefix,
     next_hop: Option<fnet::Ipv6Address>,
@@ -395,7 +392,7 @@ async fn validates_route_v6<N: Netstack>(
         route_table,
         global_route_table: _,
         state: _,
-    } = TestSetup::<Ipv6>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<Ipv6>::new(&sandbox, name).await;
     let proxy = fnet_routes_ext::admin::new_route_set::<Ipv6>(&route_table).expect("new route set");
     let grant = interface.get_authorization().await.expect("getting grant should succeed");
     let proof = fnet_interfaces_ext::admin::proof_from_grant(&grant);
@@ -421,11 +418,10 @@ async fn validates_route_v6<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
 #[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
-async fn add_route_twice_with_same_set<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Netstack>(
+async fn add_route_twice_with_same_set<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
     system_route_protocol: SystemRouteProtocol,
 ) {
@@ -437,7 +433,7 @@ async fn add_route_twice_with_same_set<I: FidlRouteAdminIpExt + FidlRouteIpExt, 
         route_table,
         global_route_table,
         state,
-    } = TestSetup::<I>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -516,14 +512,8 @@ async fn add_route_twice_with_same_set<I: FidlRouteAdminIpExt + FidlRouteIpExt, 
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn add_route_with_multiple_route_sets<
-    I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
->(
-    name: &str,
-) {
+async fn add_route_with_multiple_route_sets<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup {
         realm: _realm,
@@ -532,7 +522,7 @@ async fn add_route_with_multiple_route_sets<
         route_table,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -624,17 +614,16 @@ async fn add_route_with_multiple_route_sets<
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
 #[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
-async fn add_remove_system_route<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Netstack>(
+async fn add_remove_system_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
     system_route_protocol: SystemRouteProtocol,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup { realm, network: _network, interface, route_table, global_route_table, state } =
-        TestSetup::<I>::new::<N>(&sandbox, name).await;
+        TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -741,20 +730,16 @@ async fn add_remove_system_route<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Net
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
 #[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
-async fn system_removes_route_from_route_set<
-    I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
->(
+async fn system_removes_route_from_route_set<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
     system_route_protocol: SystemRouteProtocol,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup { realm, network: _network, interface, route_table, global_route_table, state } =
-        TestSetup::<I>::new::<N>(&sandbox, name).await;
+        TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -852,14 +837,10 @@ async fn system_removes_route_from_route_set<
 // TODO(https://fxbug.dev/42081105): Remove all uses of {Add,Del}ForwardingEntry
 // from this file.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(SystemRouteProtocol::NetRootRoutes; "fuchsia.net.root/Routes")]
 #[test_case(SystemRouteProtocol::NetStack; "fuchsia.net.stack/Stack")]
-async fn root_route_apis_can_remove_loopback_route<
-    I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
->(
+async fn root_route_apis_can_remove_loopback_route<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
     system_route_protocol: SystemRouteProtocol,
 ) {
@@ -871,7 +852,7 @@ async fn root_route_apis_can_remove_loopback_route<
         route_table: _,
         global_route_table,
         state,
-    } = TestSetup::<I>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -973,13 +954,11 @@ enum DefaultRouteRemovalCase {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(DefaultRouteRemovalCase::DropRouteSet; "drop route set")]
 #[test_case(DefaultRouteRemovalCase::ExplicitRemove; "explicit remove")]
 async fn removing_one_default_route_does_not_flip_presence<
     I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
 >(
     name: &str,
     removal_case: DefaultRouteRemovalCase,
@@ -992,7 +971,7 @@ async fn removing_one_default_route_does_not_flip_presence<
         route_table,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -1141,11 +1120,9 @@ async fn removing_one_default_route_does_not_flip_presence<
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 async fn dropping_global_route_set_does_not_remove_routes<
     I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
 >(
     name: &str,
 ) {
@@ -1157,7 +1134,7 @@ async fn dropping_global_route_set_does_not_remove_routes<
         route_table: _,
         global_route_table,
         state,
-    } = TestSetup::<I>::new::<N>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
 
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
@@ -1223,7 +1200,6 @@ enum InvalidProofKind {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(
     InvalidProofKind::ClientGenerated,
@@ -1257,7 +1233,6 @@ enum InvalidProofKind {
 )]
 async fn interface_authorization_fails_with_invalid_token<
     I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
 >(
     name: &str,
     invalid_proof_kind: InvalidProofKind,
@@ -1265,7 +1240,7 @@ async fn interface_authorization_fails_with_invalid_token<
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup { realm, network: _, interface, route_table, global_route_table, state } =
-        TestSetup::<I>::new::<N>(&sandbox, name).await;
+        TestSetup::<I>::new(&sandbox, name).await;
 
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let second_interface = realm
@@ -1337,20 +1312,16 @@ async fn interface_authorization_fails_with_invalid_token<
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(RouteSet::User; "user routeset")]
 #[test_case(RouteSet::Global; "global routeset")]
-async fn authorizing_for_one_interface_out_of_two<
-    I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
->(
+async fn authorizing_for_one_interface_out_of_two<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
     name: &str,
     route_set_type: RouteSet,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup { realm, network: _, interface, route_table, global_route_table, state: _ } =
-        TestSetup::<I>::new::<N>(&sandbox, name).await;
+        TestSetup::<I>::new(&sandbox, name).await;
 
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let second_interface = realm
@@ -1390,20 +1361,18 @@ async fn authorizing_for_one_interface_out_of_two<
 // interface_authorization_fails_with_invalid_token ensures that unauthenticated
 // connections can't add routes.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(RouteSet::User)]
 #[test_case(RouteSet::Global)]
 async fn unauthenticated_connections_cannot_remove_routes<
     I: FidlRouteAdminIpExt + FidlRouteIpExt,
-    N: Netstack,
 >(
     name: &str,
     route_set_type: RouteSet,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let TestSetup { realm: _, network: _, interface, route_table, global_route_table, state } =
-        TestSetup::<I>::new::<N>(&sandbox, name).await;
+        TestSetup::<I>::new(&sandbox, name).await;
     let routes_stream =
         fnet_routes_ext::event_stream_from_state::<I>(&state).expect("should succeed");
     let mut routes_stream = pin!(routes_stream);
@@ -1479,11 +1448,10 @@ async fn unauthenticated_connections_cannot_remove_routes<
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn main_table_remove<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Netstack>(name: &str) {
+async fn main_table_remove<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let route_table = realm
         .connect_to_protocol::<I::RouteTableMarker>()
         .expect("connect to routes-admin RouteTable");
@@ -1496,10 +1464,9 @@ async fn main_table_remove<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Netstack>
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn unique_main_table_id<N: Netstack>(name: &str) {
+async fn unique_main_table_id(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let main_table_v4 = realm
         .connect_to_protocol::<fnet_routes_admin::RouteTableV4Marker>()
         .expect("connect to routes-admin RouteTable");
@@ -1516,13 +1483,10 @@ async fn unique_main_table_id<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn main_table_authorization<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Netstack>(
-    name: &str,
-) {
+async fn main_table_authorization<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let route_table = realm
         .connect_to_protocol::<I::RouteTableMarker>()
         .expect("connect to routes-admin RouteTable");
@@ -1537,31 +1501,10 @@ async fn main_table_authorization<I: FidlRouteAdminIpExt + FidlRouteIpExt, N: Ne
     assert_eq!(table_id.get(), authorized_table_id);
 }
 
-// Netstack2 does not support fuchsia.net.routes.admin.RouteTableProviderV{4, 6}, so it closes the
-// channel as soon as a request comes in.
-#[netstack_test]
-#[variant(I, Ip)]
-async fn route_table_provider_netstack2_closes_channel<I: FidlRouteAdminIpExt + FidlRouteIpExt>(
-    name: &str,
-) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<Netstack2, _>(name).expect("create realm");
-    let route_table_provider = realm
-        .connect_to_protocol::<I::RouteTableProviderMarker>()
-        .expect("connect to route table provider");
-    let _table = fnet_routes_ext::admin::new_route_table::<I>(&route_table_provider, None)
-        .expect("create new route table");
-
-    let signals =
-        route_table_provider.on_closed().await.expect("should await closure successfully");
-    assert!(signals.contains(zx::Signals::CHANNEL_PEER_CLOSED));
-}
-
 #[netstack_test]
 #[variant(I, Ip)]
 async fn add_route_table<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support multiple route tables in netstack2.
     let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let main_route_table =
         realm.connect_to_protocol::<I::RouteTableMarker>().expect("connect to main route table");
@@ -1610,7 +1553,6 @@ async fn route_set_closed_when_table_removed<I: FidlRouteAdminIpExt + FidlRouteI
     detach: bool,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support multiple route tables in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -1618,7 +1560,7 @@ async fn route_set_closed_when_table_removed<I: FidlRouteAdminIpExt + FidlRouteI
         route_table: _,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let route_table_provider = realm
         .connect_to_protocol::<I::RouteTableProviderMarker>()
         .expect("connect to main route table");
@@ -1719,7 +1661,6 @@ async fn route_set_closed_when_table_removed<I: FidlRouteAdminIpExt + FidlRouteI
 #[variant(I, Ip)]
 async fn add_route_in_user_table<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support multiple route tables in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -1727,7 +1668,7 @@ async fn add_route_in_user_table<I: FidlRouteAdminIpExt + FidlRouteIpExt>(name: 
         route_table: _,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let route_table_provider = realm
         .connect_to_protocol::<I::RouteTableProviderMarker>()
         .expect("connect to main route table");
@@ -1785,7 +1726,6 @@ async fn interface_removal_remove_routes_in_all_tables<I: FidlRouteAdminIpExt + 
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support multiple route tables in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -1793,7 +1733,7 @@ async fn interface_removal_remove_routes_in_all_tables<I: FidlRouteAdminIpExt + 
         route_table,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let route_table_provider = realm
         .connect_to_protocol::<I::RouteTableProviderMarker>()
         .expect("connect to main route table");
@@ -1871,7 +1811,6 @@ async fn concurrent_route_table_and_route_set_removal<I: FidlRouteAdminIpExt + F
 ) {
     const ITERATIONS: usize = 55;
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    // We don't support multiple route tables in netstack2.
     let TestSetup {
         realm,
         network: _network,
@@ -1879,7 +1818,7 @@ async fn concurrent_route_table_and_route_set_removal<I: FidlRouteAdminIpExt + F
         route_table: _,
         global_route_table: _,
         state,
-    } = TestSetup::<I>::new::<Netstack3>(&sandbox, name).await;
+    } = TestSetup::<I>::new(&sandbox, name).await;
     let route_table_provider = realm
         .connect_to_protocol::<I::RouteTableProviderMarker>()
         .expect("connect to main route table");
@@ -1939,10 +1878,9 @@ async fn concurrent_route_table_and_route_set_removal<I: FidlRouteAdminIpExt + F
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn del_forwarding_entry_matches_device<N: Netstack>(name: &str) {
+async fn del_forwarding_entry_matches_device(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let network = sandbox.create_network(name).await.expect("create network");
     let if_1 = realm.join_network(&network, "ep1").await.expect("join network");
     let if_2 = realm.join_network(&network, "ep2").await.expect("join network");

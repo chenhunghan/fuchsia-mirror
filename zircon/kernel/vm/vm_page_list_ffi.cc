@@ -101,9 +101,13 @@ FFI_ALWAYS_INLINE void* cpp_vm_page_list_btree_insert(VmPageListBtree* tree, uin
     return nullptr;
   }
   VmPageListNode* raw_ptr = pl.get();
-  cursor->iter = tree->insert(cursor->iter, node_offset, ktl::move(pl));
-  if (!cursor->iter.IsValid()) {
+  auto hint = cursor ? cursor->iter : VmPageListBtree::iterator{};
+  auto iter = tree->insert(hint, node_offset, ktl::move(pl));
+  if (!iter.IsValid()) {
     return nullptr;
+  }
+  if (cursor) {
+    cursor->iter = iter;
   }
   return raw_ptr;
 }
@@ -130,6 +134,12 @@ cpp_vm_page_list_btree_cursor_next(VmPageListBtreeCursor* cursor) {
     ++cursor->iter;
   }
   return entry;
+}
+
+FFI_ALWAYS_INLINE VmPageListBtreeNodeEntry
+cpp_vm_page_list_btree_cursor_prev(VmPageListBtreeCursor* cursor) {
+  --cursor->iter;
+  return unwrap_entry<VmPageListBtreeNodeEntry>(cursor->iter);
 }
 
 FFI_ALWAYS_INLINE void cpp_vm_page_list_btree_const_cursor_init(VmPageListBtreeConstCursor* cursor,

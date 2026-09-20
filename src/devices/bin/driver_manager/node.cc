@@ -2157,7 +2157,7 @@ void Node::StartDriver(
     } else {
       std::span<const std::weak_ptr<Node>> parent_nodes = parents();
       std::queue<std::weak_ptr<Node>> ancestors;
-      for (auto parent : parent_nodes) {
+      for (const auto& parent : parent_nodes) {
         ancestors.push(parent);
       }
 

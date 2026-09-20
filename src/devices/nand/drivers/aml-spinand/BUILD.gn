@@ -5,6 +5,11 @@
 import("//build/bind/bind.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("aml-spinand-dml") {
+  dml = "meta/aml-spinand.dml"
+  driver_name = "aml-spinand"
+}
+
 fuchsia_cc_driver("aml-spinand-driver") {
   output_name = "aml-spinand"
   deps = [
@@ -14,14 +19,14 @@ fuchsia_cc_driver("aml-spinand-driver") {
 }
 
 fuchsia_driver_component("aml-spinand") {
+  dml_label = ":aml-spinand-dml"
   info = "meta/aml-spinand-info.json"
   component_name = "aml-spinand"
   deps = [ ":aml-spinand-driver" ]
-  manifest = "meta/aml-spinand.cml"
 }
 
 driver_bind_rules("aml-spinand-bind") {
-  rules = "meta/aml-spinand.bind"
+  dml_label = ":aml-spinand-dml"
   bind_output = "aml-spinand.bindbc"
   tests = "bind_tests.json"
   deps = [

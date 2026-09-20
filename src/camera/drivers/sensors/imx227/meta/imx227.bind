@@ -43,12 +43,11 @@ parent "i2c" {
 parent "pdev" {
   if fuchsia.COMPATIBLE == "sony,imx227" {
       true;
-  } else if fuchsia.BIND_PROTOCOL == fuchsia.platform.BIND_PROTOCOL.DEVICE {
+  } else {
+      fuchsia.BIND_PROTOCOL == fuchsia.platform.BIND_PROTOCOL.DEVICE;
       fuchsia.BIND_PLATFORM_DEV_VID == fuchsia.sony.platform.BIND_PLATFORM_DEV_VID.SONY;
       fuchsia.BIND_PLATFORM_DEV_PID == fuchsia.sony.platform.BIND_PLATFORM_DEV_PID.IMX227;
       fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.sony.platform.BIND_PLATFORM_DEV_DID.CAMERA_SENSOR;
-  } else {
-      false;
   }
 }
 

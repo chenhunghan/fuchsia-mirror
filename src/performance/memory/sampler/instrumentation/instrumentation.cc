@@ -34,7 +34,7 @@ __attribute__((visibility("default"))) void __scudo_allocate_hook(void* ptr, siz
   memory_sampler::ScopedReentrancyGuard guard;
 
   auto* recorder = memory_sampler::Recorder::GetIfReady();
-  if (recorder == nullptr)
+  if (recorder == nullptr || recorder->is_disabled())
     return;
   recorder->MaybeRecordAllocation(ptr, size);
 }
@@ -54,7 +54,7 @@ __attribute__((visibility("default"))) void __scudo_deallocate_hook(void* ptr) {
   memory_sampler::ScopedReentrancyGuard guard;
 
   auto* recorder = memory_sampler::Recorder::GetIfReady();
-  if (recorder == nullptr)
+  if (recorder == nullptr || recorder->is_disabled())
     return;
   recorder->MaybeForgetAllocation(ptr);
 }

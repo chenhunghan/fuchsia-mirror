@@ -218,7 +218,7 @@ def generate_test_wrapper(
     output_launcher: Path,
     output_runtime_dir: Path,
     output_test_runtime_deps_json: Path,
-    host_test_data_manifest: T.Optional[Path],
+    host_test_data_manifest: Path | None,
     host_test_wrapper_template: Path,
     data_runfiles: list[str],
     test_args: list[str],

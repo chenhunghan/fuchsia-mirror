@@ -2,17 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use assert_matches::assert_matches;
 use fidl_fuchsia_net::IpAddress;
 use fidl_fuchsia_net_policy_socketproxy::{
-    FuchsiaNetworkInfo, FuchsiaNetworksProxy, FuchsiaNetworksRequest, FuchsiaNetworksRequestStream,
     Network, NetworkDnsServers, NetworkInfo, NetworkRegistryAddResult, NetworkRegistryRemoveResult,
     NetworkRegistrySetDefaultResult, NetworkRegistryUpdateResult, StarnixNetworkInfo,
     StarnixNetworksProxy,
 };
 use fidl_fuchsia_posix_socket::OptionalUint32;
-use futures::{FutureExt as _, StreamExt as _};
-use socket_proxy::NetworkRegistryError;
 use std::future::Future;
 
 fn starnix_network_info(mark: u32) -> NetworkInfo {
@@ -32,35 +28,18 @@ fn starnix_network(network_id: u32) -> Network {
     }
 }
 
-fn fuchsia_network(network_id: u32) -> Network {
-    Network {
-        network_id: Some(network_id),
-        info: Some(NetworkInfo::Fuchsia(FuchsiaNetworkInfo { ..Default::default() })),
-        dns_servers: Some(Default::default()),
-        ..Default::default()
-    }
-}
-
 pub trait ToNetwork {
-    fn to_network(self, registry: RegistryType) -> Network;
+    fn to_network(self) -> Network;
 }
 
 impl ToNetwork for u32 {
-    fn to_network(self, registry: RegistryType) -> Network {
-        match registry {
-            RegistryType::Starnix => starnix_network(self),
-            RegistryType::Fuchsia => fuchsia_network(self),
-        }
+    fn to_network(self) -> Network {
+        starnix_network(self)
     }
 }
 
-pub enum RegistryType {
-    Starnix,
-    Fuchsia,
-}
-
 impl ToNetwork for (u32, Vec<IpAddress>) {
-    fn to_network(self, registry: RegistryType) -> Network {
+    fn to_network(self) -> Network {
         let (v4, v6) = self.1.iter().fold((Vec::new(), Vec::new()), |(mut v4s, mut v6s), s| {
             match s {
                 IpAddress::Ipv4(v4) => v4s.push(*v4),
@@ -68,10 +47,7 @@ impl ToNetwork for (u32, Vec<IpAddress>) {
             }
             (v4s, v6s)
         });
-        let base = match registry {
-            RegistryType::Starnix => starnix_network(self.0),
-            RegistryType::Fuchsia => fuchsia_network(self.0),
-        };
+        let base = starnix_network(self.0);
         Network {
             dns_servers: Some(NetworkDnsServers {
                 v4: Some(v4),
@@ -84,8 +60,8 @@ impl ToNetwork for (u32, Vec<IpAddress>) {
 }
 
 impl<N: ToNetwork + Clone> ToNetwork for &N {
-    fn to_network(self, registry: RegistryType) -> Network {
-        self.clone().to_network(registry)
+    fn to_network(self) -> Network {
+        self.clone().to_network()
     }
 }
 
@@ -145,42 +121,4 @@ macro_rules! impl_network_registry {
     ($($ty:ty),*,) => { impl_network_registry!($($ty),*); };
 }
 
-impl_network_registry!(StarnixNetworksProxy, FuchsiaNetworksProxy);
-
-pub async fn respond_to_socketproxy(
-    socket_proxy_req_stream: &mut FuchsiaNetworksRequestStream,
-    result: Result<(), NetworkRegistryError>,
-) {
-    socket_proxy_req_stream
-        .next()
-        .map(|req| match req.expect("request stream ended").expect("receive request") {
-            FuchsiaNetworksRequest::SetDefault { network_id: _, responder } => {
-                let res = result.map_err(|e| {
-                    assert_matches!(e, NetworkRegistryError::SetDefault(err) => {
-                        return err;
-                    });
-                });
-                responder.send(res).expect("respond to SetDefault");
-            }
-            FuchsiaNetworksRequest::Add { network: _, responder } => {
-                let res = result.map_err(|e| {
-                    assert_matches!(e, NetworkRegistryError::Add(err) => {
-                        return err;
-                    });
-                });
-                responder.send(res).expect("respond to Add");
-            }
-            FuchsiaNetworksRequest::Update { network: _, responder: _ } => {
-                unreachable!("not called in tests");
-            }
-            FuchsiaNetworksRequest::Remove { network_id: _, responder } => {
-                let res = result.map_err(|e| {
-                    assert_matches!(e, NetworkRegistryError::Remove(err) => {
-                        return err;
-                    });
-                });
-                responder.send(res).expect("respond to Remove");
-            }
-        })
-        .await;
-}
+impl_network_registry!(StarnixNetworksProxy);

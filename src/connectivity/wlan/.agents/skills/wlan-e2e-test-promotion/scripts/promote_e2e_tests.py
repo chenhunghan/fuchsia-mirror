@@ -46,12 +46,21 @@ def run_cmd(cmd, input_data=None):
         return None
 
 
-def parse_fyi_tests_from_file(filepath):
+def parse_fyi_tests_from_file(filepath, workspace_root=None):
     """Simple regex-based parser to extract tests in tests_for_fyi from GN/GNI files."""
     with open(filepath, "r") as f:
         content = f.read()
     content = re.sub(r"#.*", "", content)  # Remove comments
     tests = []
+
+    def format_dep(dep):
+        dep = dep.strip().strip('"').strip("'").strip(":")
+        if not dep:
+            return None
+        if not dep.startswith("//") and workspace_root:
+            rel_dir = os.path.relpath(os.path.dirname(filepath), workspace_root)
+            return f"//{rel_dir}:{dep}"
+        return dep
 
     # Pattern 1: group("tests_for_fyi") { ... public_deps = [ ... ] }
     group_match = re.search(
@@ -66,9 +75,9 @@ def parse_fyi_tests_from_file(filepath):
         )
         if deps_match:
             for dep in deps_match.group(1).split(","):
-                dep = dep.strip().strip('"').strip("'").strip(":")
-                if dep:
-                    tests.append(dep)
+                formatted = format_dep(dep)
+                if formatted:
+                    tests.append(formatted)
 
     # Pattern 2: <prefix>_tests_for_fyi = [ ... ]
     gni_match = re.search(
@@ -76,33 +85,32 @@ def parse_fyi_tests_from_file(filepath):
     )
     if gni_match:
         for dep in gni_match.group(1).split(","):
-            dep = dep.strip().strip('"').strip("'").strip(":")
-            if dep:
-                tests.append(dep)
+            formatted = format_dep(dep)
+            if formatted:
+                tests.append(formatted)
 
     return tests
 
 
 def find_all_fyi_tests(workspace_root):
-    """Scans the WLAN tests directory to find all tests currently in FYI."""
-    tests_dir = os.path.join(workspace_root, "src/connectivity/wlan/tests")
+    """Scans the WLAN tests directory in open source and vendor repos to find all tests currently in FYI."""
+    search_dirs = [
+        os.path.join(workspace_root, "src/connectivity/wlan/tests"),
+        os.path.join(workspace_root, "vendor/google/tests/end_to_end/wlan"),
+    ]
     fyi_tests = set()
 
-    if not os.path.exists(tests_dir):
-        print(
-            f"Warning: WLAN tests directory not found at {tests_dir}",
-            file=sys.stderr,
-        )
-        return []
-
-    for root, dirs, files in os.walk(tests_dir):
-        for file in files:
-            if file in ("BUILD.gn", "test_lists.gni"):
-                filepath = os.path.join(root, file)
-                parsed = parse_fyi_tests_from_file(filepath)
-                for t in parsed:
-                    fyi_tests.add(t)
-    return list(fyi_tests)
+    for tests_dir in search_dirs:
+        if not os.path.exists(tests_dir):
+            continue
+        for root, dirs, files in os.walk(tests_dir):
+            for file in files:
+                if file in ("BUILD.gn", "test_lists.gni"):
+                    filepath = os.path.join(root, file)
+                    parsed = parse_fyi_tests_from_file(filepath, workspace_root)
+                    for t in parsed:
+                        fyi_tests.add(t)
+    return sorted(list(fyi_tests))
 
 
 def get_latest_build_id():
@@ -174,6 +182,16 @@ def clean_test_name(name):
     if ":" in name:
         name = name.split(":")[-1]
     return name
+
+
+def match_test_id(fyi_name, tid):
+    """Matches an FYI test target against a ResultDB test ID."""
+    if ":" in fyi_name and fyi_name.startswith("//"):
+        gn_path = fyi_name.lstrip("/").replace(":", "/")
+        if f"{gn_path}.sh-" in tid:
+            return True
+    cleaned = clean_test_name(fyi_name)
+    return f"/{cleaned}.sh-" in tid
 
 
 def format_time_ago(partition_time_str, now):
@@ -337,7 +355,7 @@ def main():
         cleaned_fyi_name = clean_test_name(fyi_name)
         matched_tests[fyi_name] = []
         for tid in build_tids:
-            if cleaned_fyi_name in tid:
+            if match_test_id(fyi_name, tid):
                 matched_tests[fyi_name].append(tid)
 
         if not matched_tests[fyi_name]:

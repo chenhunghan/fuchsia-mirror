@@ -10,7 +10,6 @@ group("string") {
     ":strerror_r",
     ":strsignal",
     ":strverscmp",
-    ":wcs",
   ]
   if (!use_llvm_libc_string_functions) {
     deps += [
@@ -282,23 +281,6 @@ source_set("bsd") {
     "index.c",
     "rindex.c",
     "swab.c",
-  ]
-
-  if (zircon_toolchain != false) {
-    configs -= [ "//build/config:symbol_visibility_hidden" ]
-  } else {
-    defines = [ "HIDDEN=1" ]
-  }
-}
-
-source_set("wcs") {
-  visibility = [ ":*" ]
-
-  deps = [ "//zircon/third_party/ulib/musl:musl_internal" ]
-  sources = [
-    "wcscasecmp.c",
-    "wcsncasecmp.c",
-    "wcswcs.c",
   ]
 
   if (zircon_toolchain != false) {

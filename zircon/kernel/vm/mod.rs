@@ -9,6 +9,7 @@ pub mod attribution;
 pub mod compression;
 pub mod compressor;
 pub mod continuous_attribution_tracker;
+pub mod debug_compressor;
 pub mod discardable_vmo_tracker;
 pub mod evictor;
 pub mod fault;

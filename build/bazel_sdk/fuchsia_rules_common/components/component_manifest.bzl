@@ -33,7 +33,7 @@ def compile_component_manifest(
         "--output",
         manifest_out.path,
         manifest_in.path,
-        "--includeroot",
+        "--includepath",
         manifest_in.dirname,
     ] + include_path_args + config_values_package_path_args
 

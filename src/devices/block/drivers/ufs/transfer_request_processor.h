@@ -138,8 +138,8 @@ class TransferRequestProcessor : public RequestProcessor {
   void RequestCompletion(uint8_t slot_num, RequestSlot &request_slot, bool is_timeout,
                          fit::callback<void(zx_status_t)> &cb, zx_status_t &status)
       TA_REQ(slot_lock_);
-  zx_status_t UpiuCompletion(uint8_t slot_num, RequestSlot &request_slot, bool is_timeout)
-      TA_REQ(slot_lock_);
+  zx_status_t UpiuCompletion(uint8_t slot_num, RequestSlot &request_slot,
+                             zx_status_t completion_status = ZX_OK) TA_REQ(slot_lock_);
 
   std::optional<uint8_t> GetAdminCommandSlotNumber() const override {
     return kAdminCommandSlotNumber;

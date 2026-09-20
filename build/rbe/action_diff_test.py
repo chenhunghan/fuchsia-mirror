@@ -7,7 +7,6 @@ import contextlib
 import io
 import unittest
 from pathlib import Path
-from typing import Dict
 from unittest import mock
 
 import action_diff
@@ -17,7 +16,7 @@ from api.log import log_pb2
 
 
 def add_output_file_digests_to_record(
-    log_record: log_pb2.LogRecord, digests: Dict[Path, str]
+    log_record: log_pb2.LogRecord, digests: dict[Path, str]
 ):
     log_record.command.output.output_files.extend(digests.keys())
     for k, v in digests.items():

@@ -7,7 +7,8 @@
 import("//build/config/current_target_tuple.gni")
 import("//build/rust/build.gni")
 import("//build/rust/rustc_library.gni")
-import("kernel_test_deps.gni")
+import("//zircon/kernel/kernel_test_deps.gni")
+import("//zircon/kernel/kernel_tests_enabled.gni")
 
 # Define a Rust module of code going into a kernel crate.
 #
@@ -131,9 +132,7 @@ template("kernel_rust_mod") {
         forward_variables_from(invoker.metadata, "*")
       }
 
-      _is_test_kernel = toolchain_variant.tags + [ "kernel-with-tests" ] -
-                        [ "kernel-with-tests" ] != toolchain_variant.tags
-      if (_is_test_kernel) {
+      if (kernel_tests_enabled) {
         _kernel_bin_name = "vmzircon.with-tests"
       } else {
         _kernel_bin_name = "vmzircon"
@@ -257,9 +256,7 @@ template("kernel_rust_mod_crate_root") {
     if (defined(invoker.executable_target)) {
       _kernel_bin_name = invoker.executable_target
     } else {
-      _is_test_kernel = toolchain_variant.tags + [ "kernel-with-tests" ] -
-                        [ "kernel-with-tests" ] != toolchain_variant.tags
-      if (_is_test_kernel) {
+      if (kernel_tests_enabled) {
         _kernel_bin_name = "vmzircon.with-tests"
       } else {
         _kernel_bin_name = "vmzircon"

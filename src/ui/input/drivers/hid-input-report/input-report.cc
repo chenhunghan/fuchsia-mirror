@@ -28,10 +28,6 @@ namespace hid_input_report_dev {
 namespace fhidbus = fuchsia_hardware_hidbus;
 namespace finput = fuchsia_hardware_input;
 
-void InputReport::RemoveReaderFromList(InputReportsReader* reader) {
-  std::erase_if(readers_list_, [reader](const auto& item) { return item.get() == reader; });
-}
-
 void InputReport::RemoveReaderFromList(InputReportsReaderV2* reader) {
   std::erase_if(readers_v2_list_, [reader](const auto& item) { return item.get() == reader; });
 }
@@ -93,9 +89,6 @@ void InputReport::HandleReport(cpp20::span<const uint8_t> report, zx::time repor
       }
     }
 
-    for (auto& reader : readers_list_) {
-      reader->ReceiveReport(report, report_time, device.get());
-    }
     for (auto& reader : readers_v2_list_) {
       reader->ReceiveReport(report, report_time, device.get());
     }
@@ -127,25 +120,6 @@ bool InputReport::ParseHidInputReportDescriptor(const hid::ReportDescriptor* rep
   }
   devices_.push_back(std::move(device));
   return true;
-}
-
-void InputReport::SendInitialConsumerControlReport(InputReportsReader* reader) {
-  for (auto& device : devices_) {
-    if (device->GetDeviceType() == hid_input_report::DeviceType::kConsumerControl) {
-      if (!device->InputReportId().has_value()) {
-        continue;
-      }
-
-      fidl::WireResult result =
-          input_device_->GetReport(fhidbus::ReportType::kInput, *device->InputReportId());
-      if (!result.ok() || result->is_error()) {
-        continue;
-      }
-      reader->ReceiveReport(
-          cpp20::span(result.value()->report.data(), result.value()->report.size()),
-          zx::clock::get_monotonic(), device.get());
-    }
-  }
 }
 
 void InputReport::SendInitialConsumerControlReport(InputReportsReaderV2* reader) {
@@ -198,14 +172,7 @@ std::string InputReport::GetDeviceTypesString() const {
 
 void InputReport::GetInputReportsReader(GetInputReportsReaderRequestView request,
                                         GetInputReportsReaderCompleter::Sync& completer) {
-  std::unique_ptr<InputReportsReader> reader =
-      std::make_unique<InputReportsReader>(this, next_reader_id_++, std::move(request->reader));
-
-  SendInitialConsumerControlReport(reader.get());
-  readers_list_.push_back(std::move(reader));
-
-  // Signal to a test framework (if it exists) that we are connected to a reader.
-  sync_completion_signal(&next_reader_wait_);
+  ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
 }
 
 void InputReport::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,

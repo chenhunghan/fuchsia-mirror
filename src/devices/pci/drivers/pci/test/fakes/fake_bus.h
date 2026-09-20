@@ -64,7 +64,10 @@ class FakeBus : public BusDeviceInterface {
 
   uint16_t GetSegmentGroup() final { return pciroot_.info().segment_group; }
 
-  zx_status_t AddToSharedIrqList(pci::Device* device, uint32_t vector) final { return ZX_OK; }
+  zx_status_t AddToSharedIrqList(pci::Device* device, uint32_t vector,
+                                 zx::unowned_interrupt /*irq_handle*/) final {
+    return ZX_OK;
+  }
   zx_status_t RemoveFromSharedIrqList(pci::Device* device, uint32_t vector) final { return ZX_OK; }
 
   pci::Device& get_device(pci_bdf_t bdf) { return *devices_.at(bdf); }

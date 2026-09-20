@@ -278,6 +278,7 @@ zx::result<PowerDomainSet> PowerDomainSet::Create(
       dprintf(CRITICAL, "POWER: Failed to allocate PowerDomain for domain %u\n", config.domain_id);
       return zx::error(ZX_ERR_NO_MEMORY);
     }
+    domain->SetSchedulerControlEnabled(true);
 
     domain_array[i] = std::move(domain);
   }

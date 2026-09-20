@@ -4,7 +4,6 @@ archivist
 ?asix-88179
 ?asix-88772b
 ?blobfs
-block-core
 ?bootstrap
 ?bt-transport-usb
 ?bus-pci

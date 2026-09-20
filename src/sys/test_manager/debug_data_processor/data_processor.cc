@@ -153,7 +153,7 @@ bool DataProcessor::ProcessDataInner(std::shared_ptr<DataProcessorInner> inner,
     TestDebugDataMap debug_data_map;
     for (auto& [sink_name, dump_file_tag_map] : sinks_map) {
       for (auto& [dump_file, urls] : dump_file_tag_map) {
-        for (auto url : urls) {
+        for (const auto& url : urls) {
           debug_data_map[url][sink_name][dump_file.file] = dump_file.name;
         }
       }

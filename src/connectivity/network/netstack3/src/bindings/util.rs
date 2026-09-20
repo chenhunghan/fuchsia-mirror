@@ -52,6 +52,7 @@ use crate::bindings::socket::{IntoErrno, IpSockAddrExt, SockAddr};
 use crate::bindings::{BindingsCtx, LifetimeExt as _, routes};
 
 mod data_available;
+pub(crate) mod rcu;
 mod result_ext;
 mod scope_ext;
 pub(crate) use data_available::*;
@@ -1752,7 +1753,7 @@ mod tests {
         <A::AddrType as IpAddress>::Version: IpSockAddrExt<SocketAddress = A>,
         DeviceId<BindingsCtx>:
             TryFromFidlWithContext<NonZeroU64, Error = DeviceNotFoundError>,
-    {
+{
         let ctx = FakeConversionContext::new().await;
         let zoned = zoned.map(|z| match z {
             ZonedAddr::Unzoned(z) => ZonedAddr::Unzoned(z),

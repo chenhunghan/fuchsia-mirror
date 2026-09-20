@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use anyhow::{Context, Result};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
@@ -20,8 +21,11 @@ impl SizeDiff {
         self.blobs.insert(blob);
     }
 
-    pub fn print(&self) {
-        println!("{}", self.get_print_lines().join("\n"));
+    pub fn print<W: std::io::Write>(&self, writer: &mut W) -> Result<()> {
+        for line in self.get_print_lines() {
+            writeln!(writer, "{}", line).context("Failed to write size diff output")?;
+        }
+        Ok(())
     }
 
     fn get_print_lines(&self) -> Vec<String> {
@@ -653,5 +657,10 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         assert_eq!(expected_lines, lines);
+
+        let mut output = Vec::new();
+        diff.print(&mut output).unwrap();
+        let expected_output = expected_lines.join("\n") + "\n";
+        assert_eq!(String::from_utf8(output).unwrap(), expected_output);
     }
 }

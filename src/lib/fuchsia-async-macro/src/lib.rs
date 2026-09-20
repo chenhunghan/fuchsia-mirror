@@ -181,7 +181,7 @@ pub fn run_until_stalled(attr: TokenStream, item: TokenStream) -> TokenStream {
     let executor = executor_ident();
     let run_executor = if test {
         quote! {
-            ::fuchsia_async::test_support::run_until_stalled_test(true, func)
+            ::fuchsia_async::test_support::run_until_stalled_test(true, func, ::fuchsia_async::test_support::TestOptions::default())
         }
     } else {
         quote! {
@@ -230,7 +230,7 @@ pub fn run_singlethreaded(attr: TokenStream, item: TokenStream) -> TokenStream {
     let test = parse_macro_input!(attr as Option<kw::test>).is_some();
     let run_executor = if test {
         quote! {
-            ::fuchsia_async::test_support::run_singlethreaded_test(func)
+            ::fuchsia_async::test_support::run_singlethreaded_test(func, ::fuchsia_async::test_support::TestOptions::default())
         }
     } else {
         quote! {
@@ -289,7 +289,7 @@ pub fn run(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let run_executor = if test {
         quote! {
-            ::fuchsia_async::test_support::run_test(func, #threads)
+            ::fuchsia_async::test_support::run_test(func, #threads, ::fuchsia_async::test_support::TestOptions::default())
         }
     } else {
         quote! {

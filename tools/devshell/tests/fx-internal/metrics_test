@@ -609,5 +609,112 @@ TEST_metrics_init_agent_hides_notice() {
   ANTIGRAVITY_AGENT=1 metrics-init "build" "something" 2>"${metrics_notice}"
   expect_not_show_notice
 }
+TEST_track_test_event() {
+  if [[ "${HOST_OS}" == "mac" ]]; then
+    return
+  fi
+  set_up_environment "1" "1" "N" "1"
+  metrics-read-config
+  metrics_init
+
+  local start_time="1000000"
+  local end_time="2000000"
+  local exit_status="0"
+  local was_aborted="0"
+  local stats_json='{"t":1000000,"a":0,"ab":null,"top":[],"sum":{}}'
+  local dummy_build_dir="${BT_TEMP_DIR}/build_dir"
+  mkdir -p "${dummy_build_dir}"
+  cat > "${dummy_build_dir}/args.json" <<EOF
+{
+  "build_info_product": "test_product",
+  "build_info_board": "test_board",
+  "main_pb_label": "//products:bundle"
+}
+EOF
+
+  (track-test-event "${start_time}" "${end_time}" "${exit_status}" "${was_aborted}" "${stats_json}" "${dummy_build_dir}")
+  metrics_wait
+
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"test"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"start_time_micros":1000000'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"end_time_micros":2000000'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"exit_status":"0"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"was_aborted":"0"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"product":"test_product"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"board":"test_board"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"test_selection":'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"stats_json1":'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"stats_json2":""'
+}
+
+TEST_track_test_event_selection_extraction_and_stripping() {
+  if [[ "${HOST_OS}" == "mac" ]]; then
+    return
+  fi
+  set_up_environment "1" "1" "N" "1"
+  metrics-read-config
+  metrics_init
+
+  local stats_json='{"t":1000000,"a":0,"sel":"--package foo --and --component bar"}'
+  (track-test-event "1000000" "2000000" "0" "0" "${stats_json}" "${BT_TEMP_DIR}")
+  metrics_wait
+
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"test"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"test_selection":"--package foo --and --component bar"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"stats_json1":"{\\"t\\":1000000,\\"a\\":0}"'
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${metrics_log}" '\\"sel\\"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"stats_json2":""'
+}
+
+TEST_track_test_event_non_internal() {
+  if [[ "${HOST_OS}" == "mac" ]]; then
+    return
+  fi
+  set_up_environment "0" "1" "N" "1"
+  metrics-read-config
+  metrics_init
+
+  (track-test-event "1000000" "2000000" "0" "0" "{}" "${BT_TEMP_DIR}")
+  metrics_wait
+
+  expect_not_send_analytics
+}
+
+TEST_track_test_event_aborted() {
+  if [[ "${HOST_OS}" == "mac" ]]; then
+    return
+  fi
+  set_up_environment "1" "1" "N" "1"
+  metrics-read-config
+  metrics_init
+
+  (track-test-event "1000000" "2000000" "130" "1" '{"t":1000000,"a":1}' "${BT_TEMP_DIR}")
+  metrics_wait
+
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"test"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"exit_status":"130"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"was_aborted":"1"'
+}
+
+TEST_track_test_event_chunking() {
+  if [[ "${HOST_OS}" == "mac" ]]; then
+    return
+  fi
+  set_up_environment "1" "1" "N" "1"
+  metrics-read-config
+  metrics_init
+
+  # Construct a 1200 char string: 1000 'A's followed by 200 'B's
+  local chunk1=$(printf 'A%.0s' {1..1000})
+  local chunk2=$(printf 'B%.0s' {1..200})
+  local long_json="${chunk1}${chunk2}"
+
+  (track-test-event "1000000" "2000000" "0" "0" "${long_json}" "${BT_TEMP_DIR}")
+  metrics_wait
+
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"test"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" "\"stats_json1\":\"${chunk1}\""
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" "\"stats_json2\":\"${chunk2}\""
+}
 
 BT_RUN_TESTS "$@"

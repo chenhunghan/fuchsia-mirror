@@ -47,6 +47,7 @@ rustc_library("crypto") {
     "//src/storage/f2fs_reader/*",
     "//src/storage/fxfs/*",
     "//src/storage/lib/block_server/*",
+    "//src/storage/lib/mapping/*",
     "//vendor/google/*",
   ]
 

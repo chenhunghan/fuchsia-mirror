@@ -35,6 +35,7 @@
 #include <kernel/thread.h>
 #include <kernel/wait.h>
 #include <ktl/algorithm.h>
+#include <ktl/atomic.h>
 #include <ktl/optional.h>
 #include <ktl/span.h>
 #include <ktl/utility.h>
@@ -511,6 +512,19 @@ class Scheduler {
   }
   static cpu_mask_t PeekIdleMask() { return idle_schedulers_.load(ktl::memory_order_relaxed); }
   static bool PeekIsIdle(cpu_num_t cpu) { return (PeekIdleMask() & cpu_num_to_mask(cpu)) != 0; }
+
+  // Accumulates processor idle time.
+  void AddProcessorIdleTime(SchedDuration idle_time) {
+    processor_idle_time_ns_.fetch_add(idle_time.raw_value(), ktl::memory_order_relaxed);
+  }
+
+  // Clears any accumulated processor idle time.
+  void ResetProcessorIdleTime() { processor_idle_time_ns_.store(0, ktl::memory_order_relaxed); }
+
+  // Returns the accumulated processor idle time for assertions/diagnostics.
+  SchedDuration processor_idle_time() const {
+    return SchedDuration{processor_idle_time_ns_.load(ktl::memory_order_relaxed)};
+  }
 
   // Reschedules the given CPU mask, applying any updated bookkeeping that may
   // affect the currently running threads on those CPUs.
@@ -1119,6 +1133,11 @@ class Scheduler {
                                         SchedDuration actual_runtime_ns)
       TA_REQ(current_thread->get_lock(), queue_lock_);
 
+  // Returns and resets the accumulated processor idle time.
+  SchedDuration TakeProcessorIdleTime() {
+    return SchedDuration{processor_idle_time_ns_.exchange(0, ktl::memory_order_relaxed)};
+  }
+
   // Utilities to scale up or down the given value by the performance scale of the CPU.
   template <typename T>
   inline T ScaleUp(T value) const TA_REQ(queue_lock_);
@@ -1455,6 +1474,9 @@ class Scheduler {
   TA_GUARDED(queue_lock_)
   SchedTime last_update_time_ns_{0};
 
+  // Accumulates the time spent in an idle state since the last reschedule.
+  ktl::atomic<zx_duration_mono_t> processor_idle_time_ns_{0};
+
   // The system time that the current time slice started.
   SchedTime start_of_current_time_slice_ns_{0};
 
@@ -1635,6 +1657,9 @@ class Scheduler {
         processing_rate_ = updated_processing_rate_;
         processing_rate_reciprocal_ = 1 / processing_rate_;
         active_power_coefficient_nw_ = power_state_.active_power_coefficient_nw();
+        if (!domain()) {
+          max_processing_rate_ = processing_rate_;
+        }
       }
       return processing_rate_;
     }
@@ -1774,6 +1799,13 @@ class Scheduler {
       return domain() ? power_state_.target_processing_rate() : processing_rate_;
     }
 
+    // Returns true if there is a pending request to change the active power level.
+    bool has_pending_request() const { return pending_update_request_.has_value(); }
+
+    // Returns whether the kernel scheduler should send power level update requests through the
+    // control interface to handle utilization changes.
+    bool scheduler_control_enabled() const { return power_state_.scheduler_control_enabled(); }
+
     // Returns the processing rate of the active power level immediately
     // preceding the target power level (the lower bound of the target power level).
     SchedProcessingRate preceding_target_processing_rate() const {
@@ -1781,12 +1813,11 @@ class Scheduler {
                       : preceding_processing_rate();
     }
 
-    // Returns true if the clamped demand is outside the processing rate range
-    // of the target active power level.
-    bool processing_rate_should_change() const {
-      const SchedUtilization clamped_demand = clamped_total_demand();
-      return clamped_demand <= preceding_target_processing_rate() ||
-             clamped_demand > target_processing_rate();
+    // Returns true if the targeted active power level has an active power level
+    // preceding it (i.e. is not the lowest active power level).
+    bool has_preceding_target_power_level() const {
+      return domain() ? power_state_.has_preceding_target_power_level()
+                      : preceding_processing_rate() > 0;
     }
 
     // Returns true if the clamped demand is above the processing rate of the
@@ -1800,7 +1831,14 @@ class Scheduler {
     // the preceding target active power level.
     bool processing_rate_should_decrease() const {
       const SchedUtilization clamped_demand = clamped_total_demand();
-      return clamped_demand <= preceding_target_processing_rate();
+      return has_preceding_target_power_level() &&
+             clamped_demand <= preceding_target_processing_rate();
+    }
+
+    // Returns true if the clamped demand is outside the processing rate range
+    // of the target active power level.
+    bool processing_rate_should_change() const {
+      return processing_rate_should_decrease() || processing_rate_should_increase();
     }
 
     // Returns true if there is a pending update to the processing rate that has not yet been
@@ -1838,5 +1876,9 @@ class Scheduler {
   TA_GUARDED(queue_lock_)
   PowerLevelControl power_level_control_{this};
 };
+
+extern "C" {
+cpu_mask_t cpp_scheduler_peek_active_mask();
+}  // extern "C"
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_SCHEDULER_H_

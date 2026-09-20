@@ -17,5 +17,5 @@ pub use defer::{Deferred, defer};
 pub use lossy_utf8::from_utf8_lossy;
 pub use opaque::{Opaque, OpaqueFacade};
 pub use opaque_bytes::OpaqueBytes;
-pub use ptr::{AtomicConstPtr, ToMutPtr};
+pub use ptr::{AtomicConstPtr, ToMutPtr, slice_from_raw_parts, slice_from_raw_parts_mut};
 pub use string::{parse_usize, to_array};

@@ -158,7 +158,7 @@ struct Abi<Elf, AbiTraits>::Module {
 
   // <lib/ld/remote-abi-transcriber.h> introspection API.
 
-  using AbiLocal = typename Abi<Elf, elfldltl::LocalAbiTraits>::Module;
+  using AbiLocal = Abi<Elf, elfldltl::LocalAbiTraits>::Module;
 
   template <template <class...> class Template>
   using AbiBases = Template<>;
@@ -193,7 +193,7 @@ constexpr AbiModuleList<Elf> AbiLoadedModules(const abi::Abi<Elf>& abi) {
 // symbols_visible is true.
 template <class Elf = elfldltl::Elf<>>
 constexpr auto AbiLoadedSymbolModules(const abi::Abi<Elf>& abi) {
-  using Module = typename abi::Abi<Elf>::Module;
+  using Module = abi::Abi<Elf>::Module;
   return std::views::filter(AbiLoadedModules(abi), &Module::symbols_visible);
 }
 

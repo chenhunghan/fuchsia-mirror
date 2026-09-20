@@ -799,7 +799,7 @@ const FeatureSet& supported_features() {
 
 std::string FeatureSetToString(const FeatureSet& features) {
   std::string output = "";
-  for (auto f : features) {
+  for (const auto& f : features) {
     output += f + ',';
   }
   return output;

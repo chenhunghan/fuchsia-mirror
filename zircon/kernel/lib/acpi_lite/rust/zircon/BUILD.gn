@@ -14,6 +14,7 @@ kernel_rust_mod("zircon") {
     "//sdk/rust/zx-status",
     "//src/lib/kalloc",
     "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
     "//zircon/kernel/lib/acpi_lite/rust:acpi_lite",

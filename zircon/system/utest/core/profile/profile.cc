@@ -10,12 +10,15 @@
 #include <lib/zx/resource.h>
 #include <lib/zx/result.h>
 #include <lib/zx/thread.h>
+#include <lib/zx/timer.h>
 #include <zircon/errors.h>
+#include <zircon/syscalls.h>
 #include <zircon/syscalls/profile.h>
 #include <zircon/syscalls/resource.h>
 #include <zircon/syscalls/types.h>
 #include <zircon/time.h>
 
+#include <atomic>
 #include <thread>
 
 #include <zxtest/zxtest.h>
@@ -583,6 +586,97 @@ TEST(ProfileTest, ApplySchedulingProfileToVmarIsOk) {
 
   // Applying scheduling profile to VMAR should succeed (doing nothing)
   EXPECT_OK(zx::vmar::root_self()->set_profile(profile, 0));
+}
+
+// Regression test for b/511528549: verifies that remote priority inheritance propagation on an
+// idle CPU does not cause an assertion failure in energy statistics calculation due to mismatched
+// per-CPU idle time attribution.
+TEST(SchedulerProfileTest, DeadlinePiUtilizationPanicRepro) {
+  if (GetCpuCount() < 2) {
+    ZXTEST_SKIP("At least 2 CPUs are required for this test");
+  }
+
+  zx::result<zx::resource> maybe_profile_rsrc = GetSystemProfileResource();
+  ASSERT_OK(maybe_profile_rsrc.status_value());
+
+  zx::profile prof_dl;
+  zx_profile_info_t pinfo = MakeSchedulerProfileInfo({ZX_MSEC(2), ZX_MSEC(3), ZX_MSEC(3)});
+  ASSERT_OK(zx::profile::create(maybe_profile_rsrc.value(), 0u, &pinfo, &prof_dl));
+
+  zx::channel ch1, ch2;
+  ASSERT_OK(zx::channel::create(0, &ch1, &ch2));
+
+  zx_futex_t futex1 = 1;
+  std::atomic<bool> ready = false;
+  std::atomic<bool> done = false;
+  std::atomic<bool> failed = false;
+
+  zx::thread main_thread_handle;
+  ASSERT_OK(zx::thread::self()->duplicate(ZX_RIGHT_SAME_RIGHTS, &main_thread_handle));
+
+  auto t1_func = [&]() {
+    if (zx_status_t status = zx::thread::self()->set_profile(prof_dl, 0); status != ZX_OK) {
+      failed = true;
+      EXPECT_OK(status);
+      return;
+    }
+    while (!ready && !failed) {
+      zx::nanosleep(zx::deadline_after(zx::usec(1)));
+    }
+    while (!done && !failed) {
+      zx_futex_wait(&futex1, 1, main_thread_handle.get(), zx_deadline_after(ZX_USEC(10)));
+    }
+  };
+
+  std::thread t1(t1_func);
+  std::thread t3(t1_func);
+
+  std::thread t2([&]() {
+    while (!ready && !failed) {
+      zx::nanosleep(zx::deadline_after(zx::usec(1)));
+    }
+    char msg[16];
+    uint32_t act_bytes, act_handles;
+    while (!done && !failed) {
+      if (ch2.wait_one(ZX_CHANNEL_READABLE, zx::deadline_after(zx::msec(10)), nullptr) == ZX_OK) {
+        if (ch2.read(0, msg, nullptr, sizeof(msg), 0, &act_bytes, &act_handles) == ZX_OK) {
+          ch2.write(0, msg, 8, nullptr, 0);
+        }
+      }
+    }
+  });
+
+  zx::nanosleep(zx::deadline_after(zx::msec(10)));
+  ready = true;
+
+  char tx_msg[8] = "msg";
+  char rx_msg[8] = {0};
+  zx_channel_call_args_t args = {
+      .wr_bytes = tx_msg,
+      .wr_handles = nullptr,
+      .rd_bytes = rx_msg,
+      .rd_handles = nullptr,
+      .wr_num_bytes = 8,
+      .wr_num_handles = 0,
+      .rd_num_bytes = 8,
+      .rd_num_handles = 0,
+  };
+
+  uint32_t act_bytes, act_handles;
+  for (int i = 0; i < 50000 && !done && !failed; i++) {
+    ch1.call(0, zx::deadline_after(zx::msec(50)), &args, &act_bytes, &act_handles);
+    if (i % 50 == 0) {
+      zx::nanosleep(zx::deadline_after(zx::usec(1)));
+    }
+  }
+
+  done = true;
+  zx_futex_wake(&futex1, 0xFFFFFFFF);
+  t1.join();
+  t3.join();
+  t2.join();
+
+  EXPECT_FALSE(failed.load());
 }
 
 }  // namespace

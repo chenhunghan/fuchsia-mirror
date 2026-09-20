@@ -48,7 +48,7 @@ inline ld::RemoteLoadModule<Elf>::SymbolFilter RemotePerfectSymbolFilter(
 // instantiated with an internal-linkage elfldltl::SymbolNameArray initialized
 // via elfldltl::PerfectSymbolTable.
 template <class Diagnostics, class Elf = elfldltl::Elf<>>
-using RemotePerfectSymbolFilterMaker = typename ld::RemoteLoadModule<Elf>::SymbolFilter(
+using RemotePerfectSymbolFilterMaker = ld::RemoteLoadModule<Elf>::SymbolFilter(
     Diagnostics& diag, typename RemoteDecodedModule<Elf>::Ptr module);
 
 }  // namespace ld

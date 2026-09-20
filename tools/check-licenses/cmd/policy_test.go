@@ -228,3 +228,42 @@ func TestPolicyCommand_Execute_InvalidCheckName(t *testing.T) {
 		t.Errorf("Expected ExitUsageError for invalid check name, got %v", status)
 	}
 }
+
+func TestPolicyCommand_Execute_AllProjectsMustHaveAReadme(t *testing.T) {
+	tempDir := t.TempDir()
+
+	origEnv := os.Getenv("FUCHSIA_DIR")
+	os.Setenv("FUCHSIA_DIR", tempDir)
+	defer os.Setenv("FUCHSIA_DIR", origEnv)
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+
+	seedConfig := filepath.Join(tempDir, "tools", "check-licenses", "config.json")
+	os.MkdirAll(filepath.Dir(seedConfig), 0755)
+	os.WriteFile(seedConfig, []byte(`{"includes": ["tools/check-licenses/assets"]}`), 0644)
+
+	cmd := &PolicyCommand{
+		fuchsiaDir: tempDir,
+	}
+
+	ctx := context.Background()
+	f := flag.NewFlagSet("test_readme_policy", flag.ContinueOnError)
+	cmd.SetFlags(f)
+	f.Parse([]string{"add", "-bug", "b/123", "AllProjectsMustHaveAReadme", "third_party/foo/bar"})
+
+	if status := cmd.Execute(ctx, f); status != subcommands.ExitSuccess {
+		t.Errorf("Expected ExitSuccess for AllProjectsMustHaveAReadme, got %v", status)
+	}
+
+	expectedConfigPath := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "policy_exceptions", "AllProjectsMustHaveAReadme", "bar.json")
+	if _, err := os.Stat(expectedConfigPath); os.IsNotExist(err) {
+		t.Errorf("Expected config file to be created at %s", expectedConfigPath)
+	}
+}

@@ -144,9 +144,68 @@ impl<T> From<*const T> for AtomicConstPtr<T> {
     }
 }
 
+/// Forms a slice from an FFI pointer and a length, returning an empty slice `&[]` when `len == 0`
+/// even if `data` is null or misaligned.
+///
+/// # Safety
+///
+/// If `len > 0`, `data` must satisfy the safety requirements of [`core::slice::from_raw_parts`]:
+/// it must be non-null, valid for reads for `len * mem::size_of::<T>()` many bytes, properly
+/// aligned, and point to `len` consecutive properly initialized values of type `T` that are not
+/// mutated for the duration of lifetime `'a`.
+#[inline]
+pub const unsafe fn slice_from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
+    if len == 0 {
+        &[]
+    } else {
+        // SAFETY: `len > 0`, and the caller guarantees `data` is valid for `len` elements.
+        unsafe { core::slice::from_raw_parts(data, len) }
+    }
+}
+
+/// Performs the same functionality as [`slice_from_raw_parts`], except that a mutable slice is
+/// returned.
+///
+/// # Safety
+///
+/// If `len > 0`, `data` must satisfy the safety requirements of
+/// [`core::slice::from_raw_parts_mut`]: it must be non-null, valid for both reads and writes for
+/// `len * mem::size_of::<T>()` many bytes, properly aligned, and point to `len` consecutive
+/// properly initialized values of type `T` not accessed through any other pointer for the duration
+/// of lifetime `'a`.
+#[inline]
+pub const unsafe fn slice_from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {
+    if len == 0 {
+        &mut []
+    } else {
+        // SAFETY: `len > 0`, and the caller guarantees `data` is uniquely valid for `len` elements.
+        unsafe { core::slice::from_raw_parts_mut(data, len) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_slice_from_raw_parts_zero_length() {
+        let empty: &[u32] = unsafe { slice_from_raw_parts(core::ptr::null(), 0) };
+        assert!(empty.is_empty());
+
+        let empty_mut: &mut [u32] = unsafe { slice_from_raw_parts_mut(core::ptr::null_mut(), 0) };
+        assert!(empty_mut.is_empty());
+    }
+
+    #[test]
+    fn test_slice_from_raw_parts_non_empty() {
+        let mut arr = [10u32, 20, 30];
+        let s = unsafe { slice_from_raw_parts(arr.as_ptr(), arr.len()) };
+        assert_eq!(s, &[10, 20, 30]);
+
+        let s_mut = unsafe { slice_from_raw_parts_mut(arr.as_mut_ptr(), arr.len()) };
+        s_mut[1] = 25;
+        assert_eq!(arr, [10, 25, 30]);
+    }
 
     #[test]
     fn test_atomic_const_ptr_basic() {

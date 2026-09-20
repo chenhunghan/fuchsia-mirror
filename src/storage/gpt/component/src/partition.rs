@@ -4,9 +4,9 @@
 use crate::gpt::GptPartition;
 use anyhow::{Context as _, Error};
 use block_client::{ReadOptions, VmoId, WriteOptions};
-use block_server::async_interface::{PassthroughSession, SessionManager};
+use block_server::async_interface::{Interface, PassthroughSession, SessionManager};
 use block_server::{DeviceInfo, OffsetMap};
-use fidl::endpoints::RequestStream;
+use fidl::endpoints::{RequestStream, ServerEnd};
 use fidl_fuchsia_storage_block as fblock;
 use fuchsia_async as fasync;
 
@@ -62,11 +62,11 @@ impl Drop for VmoIdWrapper {
 pub struct PartitionBackend {
     partition: Arc<GptPartition>,
     vmo_keys_to_vmoids_map: Mutex<BTreeMap<usize, Arc<VmoIdWrapper>>>,
-    offset_map: block_server::OffsetMap,
+    offset_map: OffsetMap,
     mapper_key: OnceLock<u64>,
 }
 
-impl block_server::async_interface::Interface for PartitionBackend {
+impl Interface for PartitionBackend {
     async fn open_session(
         &self,
         session_manager: Arc<SessionManager<Self>>,
@@ -97,21 +97,21 @@ impl block_server::async_interface::Interface for PartitionBackend {
 
     fn open_mapper_session(
         session_manager: Arc<SessionManager<Self>>,
-        session: fidl::endpoints::ServerEnd<fblock::MapperSessionMarker>,
+        session: ServerEnd<fblock::MapperSessionMarker>,
         mapping_vmo: zx::Vmo,
         _block_size: u32,
         port: Option<zx::Port>,
         delivery_queue: Option<zx::Vmo>,
     ) -> Result<impl Future<Output = Result<(), Error>> + Send + 'static, zx::Status> {
-        if session_manager.interface().offset_map.is_empty() {
+        let this = session_manager.interface();
+        let Some(gpt) = this.partition.gpt() else {
+            return Err(zx::Status::BAD_STATE);
+        };
+        if this.offset_map.is_empty() || !gpt.has_mapper() {
             return Err(zx::Status::NOT_SUPPORTED);
         }
-        let this = session_manager.interface().clone();
+        let this = this.clone();
         Ok(async move {
-            let Some(gpt) = this.partition.gpt() else {
-                let _ = session.close_with_epitaph(zx::Status::BAD_STATE);
-                anyhow::bail!("GPT is no longer running");
-            };
             let mut init = false;
             let key = *this.mapper_key.get_or_init(|| {
                 init = true;

@@ -66,7 +66,6 @@ fuchsia_test_package("tests") {
     ":integration-test-component",
     "//src/bringup/bin/device-name-provider",
     "//src/bringup/bin/device-name-provider:component",
-    "//src/devices/block/drivers/core",
     "//src/devices/block/drivers/ramdisk",
     "//src/devices/board/drivers/integration-test",
     "//src/devices/bus/drivers/platform",

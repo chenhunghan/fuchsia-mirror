@@ -3,23 +3,12 @@
 # found in the LICENSE file.
 
 source_set("math") {
-  deps = [ "//zircon/third_party/ulib/musl:musl_internal" ]
+  deps = [
+    ":internal",
+    "//zircon/third_party/ulib/musl:musl_internal",
+  ]
   include_dirs = [ "//zircon/third_party/ulib/musl/third_party/include" ]
   sources = [
-    "__cos.c",
-    "__cosdf.c",
-    "__cosl.c",
-    "__polevll.c",
-    "__rem_pio2.c",
-    "__rem_pio2_large.c",
-    "__rem_pio2f.c",
-    "__rem_pio2l.c",
-    "__sin.c",
-    "__sindf.c",
-    "__sinl.c",
-    "__tan.c",
-    "__tandf.c",
-    "__tanl.c",
     "acos.c",
     "acosf.c",
     "asin.c",
@@ -95,5 +84,28 @@ source_set("math") {
   configs -= [ "//build/config:symbol_visibility_hidden" ]
 
   # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+  configs += [ "//build/config:Wno-conversion" ]
+}
+
+source_set("internal") {
+  visibility = [ ":*" ]
+  sources = [
+    "__cos.c",
+    "__cosdf.c",
+    "__cosl.c",
+    "__polevll.c",
+    "__rem_pio2.c",
+    "__rem_pio2_large.c",
+    "__rem_pio2f.c",
+    "__rem_pio2l.c",
+    "__sin.c",
+    "__sindf.c",
+    "__sinl.c",
+    "__tan.c",
+    "__tandf.c",
+    "__tanl.c",
+  ]
+  include_dirs = [ "//zircon/third_party/ulib/musl/third_party/include" ]
+  deps = [ "//zircon/third_party/ulib/musl:musl_internal" ]
   configs += [ "//build/config:Wno-conversion" ]
 }

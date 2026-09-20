@@ -21,7 +21,6 @@ func TestInvalidSerialSetting(t *testing.T) {
 	})
 	arch := distro.TargetCPU()
 	device := emulator.DefaultVirtualDevice(string(arch))
-	device.Initrd = "zircon-r" // zedboot zbi.
 	device.KernelArgs = append(device.KernelArgs, "kernel.enable-serial-syscalls=badvalue")
 
 	stdout, stderr := distro.RunNonInteractive(

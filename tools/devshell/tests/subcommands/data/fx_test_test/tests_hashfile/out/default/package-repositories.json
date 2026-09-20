@@ -1,8 +1,0 @@
-
-[
-  {
-    "blobs": "amber-files/repository/blobs",
-    "path": "amber-files/repository",
-    "targets": "amber-files/repository/targets.json"
-  }
-]

@@ -34,9 +34,12 @@ if (toolchain_environment == "kernel.phys" ||
   compiler_config("integer-register-abi") {
     c_family_flags = [ "-mgeneral-regs-only" ]
     rust_target_features = [
+      "-fp-armv8",
       "-neon",
       "-sve",
       "-sve2",
+      "-aes",
+      "-sha2",
     ]
     if (toolchain_environment == "kernel") {
       rust_target_edits = [
@@ -156,6 +159,7 @@ if (toolchain_environment == "kernel.phys" ||
       "//zircon/kernel/lib/instrumentation",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/page",
+      "//zircon/kernel/lib/page_cache",
       "//zircon/kernel/lib/perfmon",
       "//zircon/kernel/lib/syscalls",
       "//zircon/kernel/lib/thread-stack",

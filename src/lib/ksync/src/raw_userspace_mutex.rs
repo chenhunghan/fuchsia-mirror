@@ -71,11 +71,17 @@ unsafe impl lock_api::RawMutex for RawMutex {
 pub struct RawMutexPolicy;
 
 impl super::LockPolicy<RawMutex> for RawMutexPolicy {
+    type AcquireArgs = ();
     type GuardState = ();
 
     #[inline]
-    unsafe fn acquire(lock: &RawMutex, _entry: *mut ()) -> Self::GuardState {
+    unsafe fn acquire(lock: &RawMutex, _entry: *mut (), _args: ()) -> Self::GuardState {
         lock.lock();
+    }
+
+    #[inline]
+    unsafe fn reacquire(lock: &RawMutex, entry: *mut (), state: &mut Self::GuardState) {
+        *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
     #[inline]

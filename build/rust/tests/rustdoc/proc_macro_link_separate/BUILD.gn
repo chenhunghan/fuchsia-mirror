@@ -27,7 +27,7 @@ if (is_host) {
     sources = [ "$target_gen_dir/march.doc.zip" ]
     public_deps = [
       ":charlie.rustdoc",
-      ":march_proc_macro.rustdoc",
+      ":march.rustdoc",
     ]
     outputs = [ "$target_gen_dir/march.doc.zip.copy" ]
   }

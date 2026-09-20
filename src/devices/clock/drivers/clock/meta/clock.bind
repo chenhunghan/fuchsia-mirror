@@ -8,8 +8,6 @@ using fuchsia;
 
 if fuchsia.BIND_PROTOCOL == fuchsia.clock.BIND_PROTOCOL.IMPL {
     true;
-} else if fuchsia.Service == "fuchsia.hardware.clockimpl.Service" {
-    true;
 } else {
-    false;
+    fuchsia.Service == "fuchsia.hardware.clockimpl.Service";
 }

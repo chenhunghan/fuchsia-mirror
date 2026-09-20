@@ -22,7 +22,7 @@ use netstack3_core::socket::{
 use netstack3_core::{PendingDatagramSocketError, tcp, udp};
 use thiserror::Error;
 
-use crate::bindings::socket::datagram::{UdpSendError, UdpSendToError};
+use crate::bindings::socket::datagram::{IcmpSendError, UdpSendError};
 use crate::bindings::util::{
     DeviceNotFoundError, MulticastMembershipConversionError, SocketAddressError,
     WrongIpVersionError,
@@ -104,7 +104,7 @@ pub(crate) enum Error {
     #[error(transparent)]
     UdpSendError(#[from] UdpSendError),
     #[error(transparent)]
-    UdpSendToError(#[from] UdpSendToError),
+    IcmpSendError(#[from] IcmpSendError),
     #[error(transparent)]
     WrongIpVersionError(#[from] WrongIpVersionError),
     #[error(transparent)]

@@ -458,14 +458,16 @@ impl<I: IoApic> InterruptManager<I> {
 #[unittest::suite]
 #[allow(unused_imports)]
 mod pc_interrupt_tests {
+    use core::hint;
+    use core::pin::Pin;
+    use core::sync::atomic::{AtomicU8, Ordering};
 
     use super::{InterruptManager, IoApic};
     use crate::arch_rs::x86::interrupts::{
         X86_INT_PLATFORM_BASE, X86_INT_PLATFORM_MAX, X86InterruptVector,
     };
     use crate::dev_interrupt::{InterruptHandler, InterruptPolarity, InterruptTriggerMode};
-    use core::mem::MaybeUninit;
-    use core::sync::atomic::Ordering;
+    use lazy_init::LazyInit;
     use unittest::{assert_ok, expect_eq, expect_gt, expect_ne, expect_true, unwrap_ok};
     use zx_status::Status;
 
@@ -563,30 +565,50 @@ mod pc_interrupt_tests {
         InterruptHandler { cookie: core::ptr::null_mut(), r#fn: Some(dummy_handler_fn) }
     }
 
-    static mut TEST_IM: MaybeUninit<InterruptManager<TestIoApic>> = MaybeUninit::uninit();
+    static TEST_IM: LazyInit<InterruptManager<TestIoApic>> = LazyInit::uninit();
 
     fn get_test_im() -> &'static InterruptManager<TestIoApic> {
-        // SAFETY: `TEST_IM` is initialized once prior to test runs in `init_test_im`.
-        unsafe { &*(core::ptr::addr_of!(TEST_IM) as *const InterruptManager<TestIoApic>) }
-    }
-
-    fn init_test_im() {
-        static ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-        if ONCE.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            // SAFETY: `TEST_IM` is a static mut variable. Pin-initializing it once during tests is safe.
-            let _ = unsafe {
-                InterruptManager::<TestIoApic>::new().__pinned_init(
-                    core::ptr::addr_of_mut!(TEST_IM) as *mut InterruptManager<TestIoApic>,
-                )
-            };
+        #[repr(u8)]
+        enum InitState {
+            Uninitialized = 0,
+            Initializing = 1,
+            Initialized = 2,
         }
+
+        static INIT_STATE: AtomicU8 = AtomicU8::new(InitState::Uninitialized as u8);
+
+        match INIT_STATE.compare_exchange(
+            InitState::Uninitialized as u8,
+            InitState::Initializing as u8,
+            Ordering::Acquire,
+            // Acquire on failure so that that the write to TEST_IM by the
+            // initializing thread is visible to this one.
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                // SAFETY: Only the thread that transitioned from Uninitialized executes this.
+                unsafe {
+                    let _ =
+                        Pin::static_ref(&TEST_IM).init_pin(InterruptManager::<TestIoApic>::new());
+                }
+                INIT_STATE.store(InitState::Initialized as u8, Ordering::Release);
+            }
+            Err(s) if s == InitState::Initializing as u8 => {
+                // Spin until the initializing thread completes.
+                while INIT_STATE.load(Ordering::Acquire) != InitState::Initialized as u8 {
+                    hint::spin_loop();
+                }
+            }
+            _ => {}
+        }
+
+        &TEST_IM
     }
 
     /// Test registering and unregistering an interrupt handler.
     #[test]
     fn test_register_interrupt_handler() {
         reset_fake_state();
-        init_test_im();
         let im = get_test_im();
         im.reset();
         let _ = im.init();
@@ -607,7 +629,6 @@ mod pc_interrupt_tests {
     #[test]
     fn test_register_interrupt_handler_twice() {
         reset_fake_state();
-        init_test_im();
         let im = get_test_im();
         im.reset();
         let _ = im.init();
@@ -633,7 +654,6 @@ mod pc_interrupt_tests {
     #[test]
     fn test_unregister_interrupt_handler_not_registered() {
         reset_fake_state();
-        init_test_im();
         let im = get_test_im();
         im.reset();
         let _ = im.init();
@@ -646,7 +666,6 @@ mod pc_interrupt_tests {
     #[test]
     fn test_register_interrupt_handler_too_many() {
         reset_fake_state();
-        init_test_im();
         let im = get_test_im();
         im.reset();
         let _ = im.init();
@@ -672,7 +691,6 @@ mod pc_interrupt_tests {
     /// Test alignment of vector allocation.
     #[test]
     fn test_handler_allocation_alignment() {
-        init_test_im();
         let im = get_test_im();
         im.reset();
         let _ = im.init();

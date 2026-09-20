@@ -19,6 +19,8 @@ import("//build/assembly/product_bundle.gni")
 #    product
 #    platform
 #    base_packages
+#    bootfs_files_labels
+#    bootfs_packages
 #
 #  Variables forwarded to assembled_system()
 #    enable_example_aib
@@ -28,6 +30,7 @@ import("//build/assembly/product_bundle.gni")
 #    virtual_devices
 #    update
 #    name
+#    emit_metadata
 #
 template("test_product_bundle") {
   assert(defined(invoker.board_config), "board_config is required")
@@ -50,9 +53,11 @@ template("test_product_bundle") {
     visibility = [ ":${targets.assembled_system}.product_assembler" ]
     forward_variables_from(invoker,
                            [
-                             "product",
-                             "platform",
                              "base_packages",
+                             "bootfs_files_labels",
+                             "bootfs_packages",
+                             "platform",
+                             "product",
                            ])
     testonly = true
   }
@@ -88,6 +93,7 @@ template("test_product_bundle") {
     forward_variables_from(invoker,
                            [
                              "deps",
+                             "emit_metadata",
                              "virtual_devices",
                              "update",
                              "name",
@@ -103,5 +109,14 @@ template("test_product_bundle") {
       name = target_name
     }
     system_a = files.assembled_system
+
+    # test_product_bundles are normally referenced by path rather than being
+    # looked up by name in product_bundles.json, so there's no need to emit
+    # metadata. The one exception is if the product bundle will be referenced by
+    # a product_bundle_test_group, in which case `emit_metadata` must be set to
+    # true because product_bundle_test_groups
+    if (!defined(invoker.emit_metadata)) {
+      emit_metadata = false
+    }
   }
 }

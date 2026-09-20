@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use crate::errors::FxfsError;
+use crate::filesystem::TruncateGuard;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
@@ -14,8 +15,8 @@ use crate::object_store::transaction::{
     LockKey, LockKeys, Mutation, Options, Transaction, lock_keys,
 };
 use crate::object_store::{
-    DataObjectHandle, HandleOptions, HandleOwner, ObjectStore, SetExtendedAttributeMode,
-    StoreObjectHandle,
+    AttributeId, DataObjectHandle, HandleOptions, HandleOwner, ObjectStore,
+    SetExtendedAttributeMode, StoreObjectHandle, TombstoneMode, TrimMode, TrimResult,
 };
 use anyhow::{Error, anyhow, bail, ensure};
 use fidl_fuchsia_io as fio;
@@ -36,6 +37,7 @@ type BoxPredicate<'a> = Box<dyn Fn(&ObjectKey) -> ControlFlow<bool> + Send + 'a>
 /// ID and type of the src and dst.
 pub struct ReplaceContext<'a> {
     pub transaction: Transaction<'a>,
+    pub truncate_guard: Option<TruncateGuard<'static>>,
     pub src_id_and_descriptor: Option<(u64, ObjectDescriptor)>,
     pub dst_id_and_descriptor: Option<(u64, ObjectDescriptor)>,
     pub src_name: Option<String>,
@@ -418,6 +420,7 @@ impl<S: HandleOwner> Directory<S> {
         // We can look into not having this loop by adding support to try to add locks in the
         // transaction. If it fails, we can drop all the locks and start a new transaction.
         let store = self.store();
+        let fs = store.filesystem();
         let mut child_object_id = INVALID_OBJECT_ID;
         let mut src_object_id = src.map(|_| INVALID_OBJECT_ID);
         let mut lock_keys = LockKeys::with_capacity(4);
@@ -434,6 +437,11 @@ impl<S: HandleOwner> Directory<S> {
             }
             if child_object_id != INVALID_OBJECT_ID {
                 lock_keys.push(LockKey::object(store.store_object_id(), child_object_id));
+            };
+            let truncate_guard = if child_object_id != INVALID_OBJECT_ID {
+                Some(fs.truncate_guard_owned(store.store_object_id(), child_object_id).await)
+            } else {
+                None
             };
             let transaction = store
                 .new_transaction(
@@ -502,6 +510,7 @@ impl<S: HandleOwner> Directory<S> {
             if have_required_locks {
                 return Ok(ReplaceContext {
                     transaction,
+                    truncate_guard,
                     src_id_and_descriptor,
                     dst_id_and_descriptor,
                     src_name: src_name_out,
@@ -1714,10 +1723,14 @@ impl<'a, 'b> DirectoryIterator<'a, 'b> {
 #[derive(Debug)]
 pub enum ReplacedChild {
     None,
+
     // "Object" can be a file or symbolic link, but not a directory.
     Object(u64),
     ObjectWithRemainingLinks(u64),
     Directory(u64),
+
+    // The file or symlink was purged directly in the single transaction.
+    Purged(u64),
 }
 
 /// Moves src.0/src.1 to dst.0/dst.1.
@@ -1731,6 +1744,18 @@ pub async fn replace_child<'a, S: HandleOwner>(
     transaction: &mut Transaction<'a>,
     src: Option<(&'a Directory<S>, &str)>,
     dst: (&'a Directory<S>, &str),
+) -> Result<ReplacedChild, Error> {
+    replace_child_with_purge(transaction, src, dst, false).await
+}
+
+/// Like `replace_child`, but if `can_purge` is true and the replaced child is a file or symlink
+/// with no remaining references, it will attempt to purge the object directly in the current
+/// transaction, skipping the graveyard.
+pub async fn replace_child_with_purge<'a, S: HandleOwner>(
+    transaction: &mut Transaction<'a>,
+    src: Option<(&'a Directory<S>, &str)>,
+    dst: (&'a Directory<S>, &str),
+    can_purge: bool,
 ) -> Result<ReplacedChild, Error> {
     let mut sub_dirs_delta: i64 = 0;
     let now = Timestamp::now();
@@ -1756,6 +1781,7 @@ pub async fn replace_child<'a, S: HandleOwner>(
                 DirType::Encrypted(dst_id) | DirType::EncryptedCasefold(dst_id),
             ) => {
                 ensure!(src_id == dst_id, FxfsError::InconsistentEncryptionPolicy);
+
                 // Renames only work on unlocked encrypted directories. Fail rename if src is
                 // locked.
                 let _ = src_dir.get_fscrypt_key().await?.into_cipher().ok_or(FxfsError::NoKey)?;
@@ -1789,13 +1815,14 @@ pub async fn replace_child<'a, S: HandleOwner>(
     } else {
         None
     };
-    replace_child_with_object(
+    replace_child_with_object_impl(
         transaction,
         src,
         dst,
         sub_dirs_delta,
         is_same_dir_casefold_rename,
         now,
+        can_purge,
     )
     .await
 }
@@ -1813,9 +1840,30 @@ pub async fn replace_child_with_object<'a, S: HandleOwner>(
     transaction: &mut Transaction<'a>,
     src: Option<(u64, ObjectDescriptor)>,
     dst: (&'a Directory<S>, &str),
+    sub_dirs_delta: i64,
+    is_same_dir_casefold_rename: bool,
+    timestamp: Timestamp,
+) -> Result<ReplacedChild, Error> {
+    replace_child_with_object_impl(
+        transaction,
+        src,
+        dst,
+        sub_dirs_delta,
+        is_same_dir_casefold_rename,
+        timestamp,
+        false,
+    )
+    .await
+}
+
+async fn replace_child_with_object_impl<'a, S: HandleOwner>(
+    transaction: &mut Transaction<'a>,
+    src: Option<(u64, ObjectDescriptor)>,
+    dst: (&'a Directory<S>, &str),
     mut sub_dirs_delta: i64,
     is_same_dir_casefold_rename: bool,
     timestamp: Timestamp,
+    can_purge: bool,
 ) -> Result<ReplacedChild, Error> {
     let deleted_info =
         if is_same_dir_casefold_rename { None } else { dst.0.lookup_ext(dst.1).await? };
@@ -1825,15 +1873,39 @@ pub async fn replace_child_with_object<'a, S: HandleOwner>(
         None => (None, None),
     };
     let store_id = dst.0.store().store_object_id();
-    // There might be optimizations here that allow us to skip the graveyard where we can delete an
-    // object in a single transaction (which should be the common case).
+
     let result = match deleted_id_and_descriptor {
         Some((old_id, ObjectDescriptor::File | ObjectDescriptor::Symlink)) => {
-            let was_last_ref = dst.0.store().adjust_refs(transaction, old_id, -1).await?;
-            dst.0.store().update_attributes(transaction, old_id, None, Some(timestamp)).await?;
+            let was_last_ref =
+                dst.0.store().adjust_refs_impl(transaction, old_id, -1, !can_purge).await?;
             if was_last_ref {
-                ReplacedChild::Object(old_id)
+                if can_purge {
+                    let trim_result = dst
+                        .0
+                        .store()
+                        .trim_some(
+                            transaction,
+                            old_id,
+                            AttributeId::SORTED_START,
+                            TrimMode::Tombstone(TombstoneMode::Object),
+                        )
+                        .await?;
+                    if matches!(trim_result, TrimResult::Done(None)) {
+                        ReplacedChild::Purged(old_id)
+                    } else {
+                        // Could not purge completely in this transaction; fall back to graveyard.
+                        dst.0.store().add_to_graveyard(transaction, old_id);
+                        ReplacedChild::Object(old_id)
+                    }
+                } else {
+                    dst.0
+                        .store()
+                        .update_attributes(transaction, old_id, None, Some(timestamp))
+                        .await?;
+                    ReplacedChild::Object(old_id)
+                }
             } else {
+                dst.0.store().update_attributes(transaction, old_id, None, Some(timestamp)).await?;
                 ReplacedChild::ObjectWithRemainingLinks(old_id)
             }
         }
@@ -1842,6 +1914,7 @@ pub async fn replace_child_with_object<'a, S: HandleOwner>(
             if dir.has_children().await? {
                 bail!(FxfsError::NotEmpty);
             }
+
             // Directories might have extended attributes which might require multiple transactions
             // to delete, so we delete directories via the graveyard.
             dst.0.store().add_to_graveyard(transaction, old_id);
@@ -1923,6 +1996,7 @@ mod tests {
     use crate::object_handle::{ObjectHandle, WriteObjectHandle};
     use crate::object_store::directory::{
         Directory, MutableAttributesInternal, ReplacedChild, replace_child,
+        replace_child_with_purge,
     };
     use crate::object_store::object_record::{ObjectKey, ObjectValue, Timestamp};
     use crate::object_store::transaction::{Options, lock_keys};
@@ -2952,6 +3026,68 @@ mod tests {
         let mut buf = bar.allocate_buffer(TEST_DEVICE_BLOCK_SIZE as usize).await;
         bar.read(0, buf.as_mut()).await.expect("read failed");
         assert_eq!(buf.to_vec(), vec![0xaa; TEST_DEVICE_BLOCK_SIZE as usize]);
+        fs.close().await.expect("Close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_replace_child_with_purge() {
+        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let dir;
+        let mut transaction = fs
+            .root_store()
+            .new_transaction(lock_keys![], Options::default())
+            .await
+            .expect("new_transaction failed");
+        dir = Directory::create(&mut transaction, &fs.root_store(), None)
+            .await
+            .expect("create failed");
+        let file =
+            dir.create_child_file(&mut transaction, "foo").await.expect("create_child_file failed");
+        let file_oid = file.object_id();
+        transaction.commit().await.expect("commit failed");
+
+        {
+            let mut buf = file.allocate_buffer(TEST_DEVICE_BLOCK_SIZE as usize).await;
+            buf.fill(0xaa);
+            file.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
+        }
+        std::mem::drop(file);
+
+        let initial_alloc = fs.allocator().get_allocated_bytes();
+        assert!(initial_alloc >= fs.block_size());
+
+        transaction = fs
+            .root_store()
+            .new_transaction(
+                lock_keys![
+                    LockKey::object(fs.root_store().store_object_id(), dir.object_id()),
+                    LockKey::object(fs.root_store().store_object_id(), file_oid),
+                ],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        assert_matches!(
+            replace_child_with_purge(&mut transaction, None, (&dir, "foo"), true)
+                .await
+                .expect("replace_child_with_purge failed"),
+            ReplacedChild::Purged(id) if id == file_oid
+        );
+        transaction.commit().await.expect("commit failed");
+
+        assert_eq!(dir.lookup("foo").await.expect("lookup failed"), None);
+        assert_eq!(fs.root_store().graveyard_count(), 0);
+        assert_eq!(fs.allocator().get_allocated_bytes(), initial_alloc - fs.block_size());
+        assert!(
+            fs.root_store()
+                .tree()
+                .find(&ObjectKey::object(file_oid))
+                .await
+                .expect("find failed")
+                .is_none()
+        );
+
         fs.close().await.expect("Close failed");
     }
 

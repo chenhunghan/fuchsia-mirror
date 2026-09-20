@@ -56,11 +56,190 @@ class LinkMetrics:
     """Represents link quality and rate metrics perceived by AP and DUT."""
 
     ap_rssi: int | None = None
+    ap_snr: int | None = None
     ap_tx_rate_mbps: float | None = None
     ap_rx_rate_mbps: float | None = None
+    ap_phy_mode: str | None = None
+    ap_nss: int | None = None
     dut_rssi: int | None = None
     dut_tx_rate_mbps: float | None = None
     dut_rx_rate_mbps: float | None = None
+
+
+@dataclass
+class MetricStats:
+    avg: float | None = None
+    min: float | int | None = None
+    max: float | int | None = None
+
+    @classmethod
+    def from_values(
+        cls, values: list[int | float | None], round_digits: int = 1
+    ) -> "MetricStats":
+        valid = [v for v in values if v is not None]
+        if not valid:
+            return cls()
+        return cls(
+            avg=round(sum(valid) / len(valid), round_digits),
+            min=min(valid),
+            max=max(valid),
+        )
+
+
+@dataclass
+class LinkMetricSummary:
+    """Aggregated link quality and rate statistics across all measurement samples."""
+
+    ap_rssi: MetricStats
+    ap_snr: MetricStats
+    ap_tx_rate_mbps: MetricStats
+    ap_rx_rate_mbps: MetricStats
+    dut_rssi: MetricStats
+    dut_tx_rate_mbps: MetricStats
+    dut_rx_rate_mbps: MetricStats
+    phy_mode: str | None
+    nss: int | None
+    samples: list[LinkMetrics]
+
+    @classmethod
+    def from_samples(cls, samples: list[LinkMetrics]) -> "LinkMetricSummary":
+        # Find the most recent valid phy_mode and nss from the collected samples,
+        # reflecting the steady-state negotiated configuration under load.
+        phy_mode: str | None = None
+        for s in reversed(samples):
+            if s.ap_phy_mode:
+                phy_mode = s.ap_phy_mode
+                break
+
+        nss: int | None = None
+        for s in reversed(samples):
+            if s.ap_nss is not None:
+                nss = s.ap_nss
+                break
+
+        return cls(
+            ap_rssi=MetricStats.from_values(
+                [s.ap_rssi for s in samples], round_digits=1
+            ),
+            ap_snr=MetricStats.from_values(
+                [s.ap_snr for s in samples], round_digits=1
+            ),
+            ap_tx_rate_mbps=MetricStats.from_values(
+                [s.ap_tx_rate_mbps for s in samples], round_digits=1
+            ),
+            ap_rx_rate_mbps=MetricStats.from_values(
+                [s.ap_rx_rate_mbps for s in samples], round_digits=1
+            ),
+            dut_rssi=MetricStats.from_values(
+                [s.dut_rssi for s in samples], round_digits=1
+            ),
+            dut_tx_rate_mbps=MetricStats.from_values(
+                [s.dut_tx_rate_mbps for s in samples], round_digits=1
+            ),
+            dut_rx_rate_mbps=MetricStats.from_values(
+                [s.dut_rx_rate_mbps for s in samples], round_digits=1
+            ),
+            phy_mode=phy_mode,
+            nss=nss,
+            samples=samples,
+        )
+
+    def format_summary(self) -> str:
+        def fmt_rate(val: float | None) -> str:
+            return f"{val:.1f} Mbps" if val is not None else "N/A"
+
+        def fmt_rssi(val: float | None) -> str:
+            return f"{val:.1f} dBm" if val is not None else "N/A"
+
+        def fmt_snr(val: float | None) -> str:
+            return f"{val:.1f} dB" if val is not None else "N/A"
+
+        mode_str = self.phy_mode or "N/A"
+        nss_str = str(self.nss) if self.nss is not None else "N/A"
+
+        return (
+            f"AP PHY (Mode: {mode_str}, NSS: {nss_str}, "
+            f"RSSI: {fmt_rssi(self.ap_rssi.avg)}, "
+            f"SNR: {fmt_snr(self.ap_snr.avg)}, "
+            f"TX: {fmt_rate(self.ap_tx_rate_mbps.avg)}, "
+            f"RX: {fmt_rate(self.ap_rx_rate_mbps.avg)}), "
+            f"DUT PHY (RSSI: {fmt_rssi(self.dut_rssi.avg)}, "
+            f"TX: {fmt_rate(self.dut_tx_rate_mbps.avg)}, "
+            f"RX: {fmt_rate(self.dut_rx_rate_mbps.avg)})"
+        )
+
+    def format_sample_table(self) -> list[str]:
+        if not self.samples:
+            return []
+
+        def r_val(val: float | None) -> str:
+            return f"{val:.1f}" if val is not None else "N/A"
+
+        def v_val(val: int | None) -> str:
+            return str(val) if val is not None else "N/A"
+
+        rows = [
+            (
+                "  RSSI (ap/dut):",
+                [
+                    f"{v_val(s.ap_rssi)}/{v_val(s.dut_rssi)}"
+                    for s in self.samples
+                ],
+            ),
+            (
+                "  SNR (ap):",
+                [f"{v_val(s.ap_snr)}" for s in self.samples],
+            ),
+            (
+                "  PHY (ap_tx/dut_rx):",
+                [
+                    f"{r_val(s.ap_tx_rate_mbps)}/{r_val(s.dut_rx_rate_mbps)}"
+                    for s in self.samples
+                ],
+            ),
+            (
+                "  PHY (ap_rx/dut_tx):",
+                [
+                    f"{r_val(s.ap_rx_rate_mbps)}/{r_val(s.dut_tx_rate_mbps)}"
+                    for s in self.samples
+                ],
+            ),
+        ]
+        col_width = max(len(c) for _, cells in rows for c in cells)
+        prefix_width = max(len(prefix) for prefix, _ in rows) + 1
+        return [
+            f"{prefix.ljust(prefix_width)}{'  '.join(c.ljust(col_width) for c in cells)}"
+            for prefix, cells in rows
+        ]
+
+    def to_csv_strings(self) -> list[str]:
+        def fmt_avg(val: int | float | None) -> str:
+            if val is None:
+                return ""
+            return f"{val:.1f}"
+
+        def fmt_val(val: int | float | None) -> str:
+            if val is None:
+                return ""
+            if isinstance(val, float) and val.is_integer():
+                return str(int(val))
+            return str(val)
+
+        def fmt_rate(val: int | float | None) -> str:
+            if val is None:
+                return ""
+            return f"{val:.1f}"
+
+        vals: list[str] = []
+        for s in [self.ap_rssi, self.ap_snr]:
+            vals.extend([fmt_avg(s.avg), fmt_val(s.min), fmt_val(s.max)])
+        for s in [self.ap_tx_rate_mbps, self.ap_rx_rate_mbps]:
+            vals.extend([fmt_rate(s.avg), fmt_rate(s.min), fmt_rate(s.max)])
+        for s in [self.dut_rssi]:
+            vals.extend([fmt_avg(s.avg), fmt_val(s.min), fmt_val(s.max)])
+        for s in [self.dut_tx_rate_mbps, self.dut_rx_rate_mbps]:
+            vals.extend([fmt_rate(s.avg), fmt_rate(s.min), fmt_rate(s.max)])
+        return vals
 
 
 class IperfUdpResult(TypedDict):
@@ -163,10 +342,15 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
         with open(self.csv_file_path, "w", encoding="utf-8") as csv_file:
             csv_file.write(
-                "security,channel,bandwidth,"
-                + "ap_rssi,ap_tx_rate_mbps,ap_rx_rate_mbps,"
-                + "dut_rssi,dut_tx_rate_mbps,dut_rx_rate_mbps,"
-                + "udp_or_tcp,dut_tx_or_rx,result_mbps\n"
+                "security,channel,bandwidth,phy_mode,nss,"
+                + "udp_or_tcp,dut_tx_or_rx,result_mbps,"
+                + "ap_rssi_avg,ap_rssi_min,ap_rssi_max,"
+                + "ap_snr_avg,ap_snr_min,ap_snr_max,"
+                + "ap_tx_rate_mbps_avg,ap_tx_rate_mbps_min,ap_tx_rate_mbps_max,"
+                + "ap_rx_rate_mbps_avg,ap_rx_rate_mbps_min,ap_rx_rate_mbps_max,"
+                + "dut_rssi_avg,dut_rssi_min,dut_rssi_max,"
+                + "dut_tx_rate_mbps_avg,dut_tx_rate_mbps_min,dut_tx_rate_mbps_max,"
+                + "dut_rx_rate_mbps_avg,dut_rx_rate_mbps_min,dut_rx_rate_mbps_max\n"
             )
 
     async def setup_test(self) -> None:
@@ -229,8 +413,11 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             f"Expected positive AP RX PHY rate for {dut_mac}: {ap_status}",
         )
         metrics.ap_rssi = ap_status.rssi
+        metrics.ap_snr = ap_status.snr
         metrics.ap_tx_rate_mbps = ap_status.tx_rate_mbps
         metrics.ap_rx_rate_mbps = ap_status.rx_rate_mbps
+        metrics.ap_phy_mode = ap_status.phy_mode
+        metrics.ap_nss = ap_status.nss
 
         # 2. Query DUT perspective
         signal_report = await iface.get_signal_report()
@@ -272,7 +459,7 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         dut_mac: MacAddress,
         band: Band,
         bandwidth: None = None,
-    ) -> tuple[IperfTcpResult, LinkMetrics]:
+    ) -> tuple[IperfTcpResult, LinkMetricSummary]:
         ...
 
     @overload
@@ -285,7 +472,7 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         dut_mac: MacAddress,
         band: Band,
         bandwidth: str | None = None,
-    ) -> tuple[IperfUdpResult, LinkMetrics]:
+    ) -> tuple[IperfUdpResult, LinkMetricSummary]:
         ...
 
     async def get_iperf_throughput_bps(
@@ -297,7 +484,7 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         dut_mac: MacAddress,
         band: Band,
         bandwidth: str | None = None,
-    ) -> tuple[IperfUdpResult | IperfTcpResult, LinkMetrics]:
+    ) -> tuple[IperfUdpResult | IperfTcpResult, LinkMetricSummary]:
         args = [
             "--client",
             iperf_server_address,
@@ -318,19 +505,27 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             asyncio.to_thread(self.dut.ffx.run_ssh_cmd, cmd=cmd)
         )
 
-        # Wait for the middle of the throughput measurement
-        half_duration = IPERF_DURATION.total_seconds() / 2.0
+        start_time = asyncio.get_running_loop().time()
+        samples: list[LinkMetrics] = []
         try:
-            await asyncio.sleep(half_duration)
+            loop = asyncio.get_running_loop()
+            # Sample link metrics once every second during the test run, starting at
+            # t = 1s and ending before the iperf duration elapses.
+            for target_second in range(1, int(IPERF_DURATION.total_seconds())):
+                # Compensate for measurement drift to maintain 1-second intervals.
+                sleep_duration = (start_time + target_second) - loop.time()
+                if sleep_duration > 0:
+                    done, _ = await asyncio.wait(
+                        [iperf_task], timeout=sleep_duration
+                    )
+                    if done:
+                        break
+                elif iperf_task.done():
+                    break
 
-            # Take measurements in the middle of each throughput measurement
-            if iperf_task.done():
-                output = await iperf_task
-                raise RuntimeError(
-                    f"iperf3 terminated prematurely before mid-test sampling: {output}"
+                samples.append(
+                    await self._measure_link_metrics(iface, dut_mac, band)
                 )
-
-            metrics = await self._measure_link_metrics(iface, dut_mac, band)
 
             # Wait for iperf3 to complete
             output = await iperf_task
@@ -339,76 +534,77 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 iperf_task.cancel()
             raise
 
+        # Check for iperf3 errors before verifying samples were collected
         try:
             data = json.loads(output)
             if "error" in data:
                 raise signals.TestError(f"iperf3 error: {data['error']}")
-
-            end_data = data.get("end", {})
-
-            server_cpu_utilization_percent = end_data.get(
-                "cpu_utilization_percent", {}
-            ).get("remote_total")
-            if server_cpu_utilization_percent is None:
-                logger.error(
-                    f"Could not extract cpu_utilization_percent from iperf3 JSON: {data}"
-                )
-                raise signals.TestError(
-                    "Could not extract cpu_utilization_percent from iperf3 JSON"
-                )
-
-            if udp:
-                raw_udp_bps = end_data.get("sum", {}).get("bits_per_second")
-                lost_percent = end_data.get("sum", {}).get("lost_percent")
-                if raw_udp_bps is None:
-                    logger.error(
-                        f"Could not extract bits_per_second from iperf3 JSON: {data}"
-                    )
-                    raise signals.TestError(
-                        "Could not extract bits_per_second from iperf3 JSON"
-                    )
-                bps = raw_udp_bps * (1.0 - (lost_percent / 100.0))
-
-                res_udp: IperfUdpResult = {
-                    "udp_bps_uncorrected": raw_udp_bps,
-                    "udp_bps_corrected": bps,
-                    "udp_loss_percent": lost_percent,
-                    "server_cpu_utilization_percent": server_cpu_utilization_percent,
-                }
-                return res_udp, metrics
-            else:
-                bps = end_data.get("sum_received", {}).get("bits_per_second")
-                if bps is None:
-                    logger.error(
-                        f"Could not extract bits_per_second from iperf3 JSON: {data}"
-                    )
-                    raise signals.TestError(
-                        "Could not extract bits_per_second from iperf3 JSON"
-                    )
-
-                res_tcp: IperfTcpResult = {
-                    "tcp_bps": bps,
-                    "server_cpu_utilization_percent": server_cpu_utilization_percent,
-                }
-                return res_tcp, metrics
-
         except json.JSONDecodeError as e:
             logger.error("Failed to parse data from command output:")
             logger.error(output)
             raise signals.TestError(f"Invalid JSON from iperf3: {e}") from e
 
+        asserts.assert_true(
+            samples, "Expected at least one link metrics sample"
+        )
+        metrics = LinkMetricSummary.from_samples(samples)
+
+        end_data = data.get("end", {})
+
+        server_cpu_utilization_percent = end_data.get(
+            "cpu_utilization_percent", {}
+        ).get("remote_total")
+        if server_cpu_utilization_percent is None:
+            logger.error(
+                f"Could not extract cpu_utilization_percent from iperf3 JSON: {data}"
+            )
+            raise signals.TestError(
+                "Could not extract cpu_utilization_percent from iperf3 JSON"
+            )
+
+        if udp:
+            raw_udp_bps = end_data.get("sum", {}).get("bits_per_second")
+            lost_percent = end_data.get("sum", {}).get("lost_percent")
+            if raw_udp_bps is None:
+                logger.error(
+                    f"Could not extract bits_per_second from iperf3 JSON: {data}"
+                )
+                raise signals.TestError(
+                    "Could not extract bits_per_second from iperf3 JSON"
+                )
+            bps = raw_udp_bps * (1.0 - (lost_percent / 100.0))
+
+            res_udp: IperfUdpResult = {
+                "udp_bps_uncorrected": raw_udp_bps,
+                "udp_bps_corrected": bps,
+                "udp_loss_percent": lost_percent,
+                "server_cpu_utilization_percent": server_cpu_utilization_percent,
+            }
+            return res_udp, metrics
+        else:
+            bps = end_data.get("sum_received", {}).get("bits_per_second")
+            if bps is None:
+                logger.error(
+                    f"Could not extract bits_per_second from iperf3 JSON: {data}"
+                )
+                raise signals.TestError(
+                    "Could not extract bits_per_second from iperf3 JSON"
+                )
+
+            res_tcp: IperfTcpResult = {
+                "tcp_bps": bps,
+                "server_cpu_utilization_percent": server_cpu_utilization_percent,
+            }
+            return res_tcp, metrics
+
     def _log_measurement_result(
-        self, test_label: str, mbps: float, metrics: LinkMetrics
+        self, test_label: str, mbps: float, metrics: LinkMetricSummary
     ) -> None:
         logger.info(
-            f"{test_label} Result: {mbps} Mbps | "
-            f"AP PHY (RSSI: {self._fmt_metric(metrics.ap_rssi, 'dBm')}, "
-            f"TX: {self._fmt_metric(metrics.ap_tx_rate_mbps, 'Mbps')}, "
-            f"RX: {self._fmt_metric(metrics.ap_rx_rate_mbps, 'Mbps')}), "
-            f"DUT PHY (RSSI: {self._fmt_metric(metrics.dut_rssi, 'dBm')}, "
-            f"TX: {self._fmt_metric(metrics.dut_tx_rate_mbps, 'Mbps')}, "
-            f"RX: {self._fmt_metric(metrics.dut_rx_rate_mbps, 'Mbps')})"
+            f"{test_label} Result: {mbps} Mbps | {metrics.format_summary()}"
         )
+        for line in metrics.format_sample_table():
+            logger.info(line)
 
     def _log_udp_correction(
         self, test_label: str, udp_res: IperfUdpResult, tested_send_speed: str
@@ -544,12 +740,18 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 ("udp", "tx", udp_tx_metrics, udp_tx_mbps),
                 ("udp", "rx", udp_rx_metrics, udp_rx_mbps),
             ]:
-                csv_file.write(
-                    f"{sec_name},{test.channel},{test.channel_bandwidth},"
-                    + f"{self._fmt_csv(metrics.ap_rssi)},{self._fmt_csv(metrics.ap_tx_rate_mbps)},{self._fmt_csv(metrics.ap_rx_rate_mbps)},"
-                    + f"{self._fmt_csv(metrics.dut_rssi)},{self._fmt_csv(metrics.dut_tx_rate_mbps)},{self._fmt_csv(metrics.dut_rx_rate_mbps)},"
-                    + f"{proto},{direction},{mbps}\n"
-                )
+                row = [
+                    sec_name,
+                    str(test.channel),
+                    str(test.channel_bandwidth),
+                    metrics.phy_mode or "",
+                    str(metrics.nss) if metrics.nss is not None else "",
+                    proto,
+                    direction,
+                    str(mbps),
+                    *metrics.to_csv_strings(),
+                ]
+                csv_file.write(",".join(row) + "\n")
 
     @staticmethod
     def get_target_udp_bandwidth(channel_bandwidth: int) -> str:
@@ -593,22 +795,6 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     def bps_to_mbps(bps: int | float) -> float:
         throughput_mbps = float(bps) / 1_000_000
         return round(throughput_mbps, 2)
-
-    @staticmethod
-    def _fmt_csv(val: int | float | None) -> str:
-        if val is None:
-            return ""
-        if isinstance(val, float) and val.is_integer():
-            return str(int(val))
-        return str(val)
-
-    @staticmethod
-    def _fmt_metric(val: int | float | None, unit: str) -> str:
-        if val is None:
-            return "N/A"
-        if isinstance(val, float) and val.is_integer():
-            return f"{int(val)} {unit}"
-        return f"{val} {unit}"
 
     def _update_html_report(self) -> None:
         """Renders throughput.csv into a clean, human-readable HTML table."""

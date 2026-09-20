@@ -3,13 +3,17 @@
 // found in the LICENSE file.
 
 use crate::reader::{BlockService, read_aligned_range};
-use crate::{Extents, MappingCommand, NullPageRequest, PageRequest, RawMappingCommand};
+use crate::{
+    ENCRYPTION_KEY_SIZE, Extents, MappingCommand, NullPageRequest, PageRequest, RawMappingCommand,
+};
 use anyhow::{Error, anyhow, bail};
 use blob_metadata::{BlobFormat, BlobMetadata, MerkleLeaves};
 use byteorder::{LittleEndian, ReadBytesExt};
 use delivery_blob::compression::{CompressionAlgorithm, CompressionInfo, StreamingDecompressor};
 use fuchsia_sync::Mutex;
 use futures::channel::oneshot;
+use fxfs_crypto::{Cipher, FxfsCipher, UnwrappedKey};
+use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::hash_map::{Entry, HashMap};
 use std::ops::{ControlFlow, Range};
@@ -30,20 +34,68 @@ pub fn read_ahead_size_for_chunk_size(chunk_size: u64, suggested_read_ahead_size
     }
 }
 
-/// A mapped file containing extents and optional decompression metadata.
+/// Transformation applied to stored data before it can be presented to the reader.
+#[derive(Default)]
+pub enum Transform {
+    /// The file is stored uncompressed and unencrypted.
+    #[default]
+    None,
+    /// The file is stored compressed with chunked metadata.
+    Compressed(CompressionInfo),
+    /// The file is stored encrypted with a cipher.
+    Encrypted(Arc<dyn Cipher>),
+}
+
+impl std::fmt::Debug for Transform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "Transform::None"),
+            Self::Compressed(_) => write!(f, "Transform::Compressed(..)"),
+            Self::Encrypted(cipher) => f.debug_tuple("Transform::Encrypted").field(cipher).finish(),
+        }
+    }
+}
+
+impl From<Option<CompressionInfo>> for Transform {
+    fn from(info: Option<CompressionInfo>) -> Self {
+        match info {
+            Some(info) => Self::Compressed(info),
+            None => Self::None,
+        }
+    }
+}
+
+impl From<CompressionInfo> for Transform {
+    fn from(info: CompressionInfo) -> Self {
+        Self::Compressed(info)
+    }
+}
+
+impl From<Arc<dyn Cipher>> for Transform {
+    fn from(cipher: Arc<dyn Cipher>) -> Self {
+        Self::Encrypted(cipher)
+    }
+}
+
+#[derive(Clone)]
+struct FileCompression(Arc<File>);
+
+impl Borrow<CompressionInfo> for FileCompression {
+    fn borrow(&self) -> &CompressionInfo {
+        self.0.compression_info().expect("compression_info missing")
+    }
+}
+
+/// A mapped file containing extents and an optional transformation (compression or encryption).
 pub struct File {
     extents: Extents,
     uncompressed_size: u64,
-    compression_info: Option<Arc<CompressionInfo>>,
+    transform: Transform,
 }
 
 impl File {
-    pub fn new(
-        extents: Extents,
-        uncompressed_size: u64,
-        compression_info: Option<Arc<CompressionInfo>>,
-    ) -> Self {
-        Self { extents, uncompressed_size, compression_info }
+    pub fn new(extents: Extents, uncompressed_size: u64, transform: Transform) -> Self {
+        Self { extents, uncompressed_size, transform }
     }
 
     /// Returns the extents mapping logical offsets to device offsets.
@@ -56,14 +108,30 @@ impl File {
         self.uncompressed_size
     }
 
+    /// Returns the transform applied to the file if compressed or encrypted.
+    pub fn transform(&self) -> &Transform {
+        &self.transform
+    }
+
     /// Returns decompression metadata if the file is compressed.
     pub fn compression_info(&self) -> Option<&CompressionInfo> {
-        self.compression_info.as_deref()
+        match &self.transform {
+            Transform::Compressed(info) => Some(info),
+            _ => None,
+        }
+    }
+
+    /// Returns the cipher if the file is encrypted.
+    pub fn cipher(&self) -> Option<&Arc<dyn Cipher>> {
+        match &self.transform {
+            Transform::Encrypted(cipher) => Some(cipher),
+            _ => None,
+        }
     }
 
     /// Streams and decodes the uncompressed range requested by `page_request`, applying readahead.
     pub fn read_range(
-        &self,
+        self: &Arc<Self>,
         service: &(impl BlockService + ?Sized),
         mut page_request: impl PageRequest,
     ) {
@@ -78,9 +146,11 @@ impl File {
             return;
         }
 
-        let read_ahead_size = match &self.compression_info {
-            Some(info) => read_ahead_size_for_chunk_size(info.chunk_size(), READ_AHEAD_SIZE),
-            None => READ_AHEAD_SIZE,
+        let read_ahead_size = match &self.transform {
+            Transform::Compressed(info) => {
+                read_ahead_size_for_chunk_size(info.chunk_size(), READ_AHEAD_SIZE)
+            }
+            Transform::None | Transform::Encrypted(_) => READ_AHEAD_SIZE,
         };
 
         let read_range = (original_range.start / read_ahead_size) * read_ahead_size
@@ -92,8 +162,8 @@ impl File {
             return;
         }
 
-        match &self.compression_info {
-            None => {
+        match &self.transform {
+            Transform::None => {
                 let mut current_offset = read_range.start;
                 let uncompressed_size = self.uncompressed_size;
 
@@ -115,10 +185,12 @@ impl File {
                     ControlFlow::Continue(())
                 });
             }
-            Some(info) => {
-                let Ok((mut decompressor, aligned_range)) =
-                    StreamingDecompressor::new(info.clone(), self.uncompressed_size, page_request)
-                else {
+            Transform::Compressed(_) => {
+                let Ok((mut decompressor, aligned_range)) = StreamingDecompressor::new(
+                    FileCompression(self.clone()),
+                    self.uncompressed_size,
+                    page_request,
+                ) else {
                     // The range must be out of range. This should be handled when `page_request`
                     // is dropped.
                     return;
@@ -131,6 +203,39 @@ impl File {
                     if decompressor.push(buffer.as_ptr_slice()).is_err() {
                         return ControlFlow::Break(());
                     }
+                    ControlFlow::Continue(())
+                });
+            }
+            Transform::Encrypted(cipher) => {
+                let mut current_offset = read_range.start;
+                let uncompressed_size = self.uncompressed_size;
+                let cipher = cipher.clone();
+
+                read_aligned_range(&self.extents, read_range, service, move |res| {
+                    let Ok(buffer) = res else {
+                        return ControlFlow::Break(());
+                    };
+                    let mut dest = page_request.mut_ptr_slice().subslice_mut(0..buffer.len());
+                    // Both `buffer` and `dest` are aligned to 64 bytes.
+                    if let Err(error) = cipher.decrypt_to(
+                        0,
+                        0,
+                        0,
+                        current_offset,
+                        buffer.as_ptr_slice(),
+                        dest.reborrow(),
+                    ) {
+                        log::error!(error:?; "Failed to decrypt buffer");
+                        return ControlFlow::Break(());
+                    }
+                    let valid_len =
+                        min(buffer.len() as u64, uncompressed_size.saturating_sub(current_offset))
+                            as usize;
+                    dest.subslice_mut(valid_len..buffer.len()).fill(0);
+                    if page_request.commit(buffer.len()).is_err() {
+                        return ControlFlow::Break(());
+                    }
+                    current_offset += buffer.len() as u64;
                     ControlFlow::Continue(())
                 });
             }
@@ -363,7 +468,7 @@ fn deserialize_blob_metadata(mut bytes: &[u8]) -> Result<BlobMetadata, anyhow::E
 /// and Merkle leaves. Compression info will be None if blob is uncompressed.
 pub struct DecodedBlobMetadata {
     pub uncompressed_size: u64,
-    pub compression_info: Option<Arc<CompressionInfo>>,
+    pub compression_info: Option<CompressionInfo>,
     pub merkle_leaves: MerkleLeaves,
 }
 
@@ -431,7 +536,7 @@ pub fn read_blob_metadata(
                 ) {
                     Ok(compression_info) => DecodedBlobMetadata {
                         uncompressed_size,
-                        compression_info: Some(Arc::new(compression_info)),
+                        compression_info: Some(compression_info),
                         merkle_leaves,
                     },
                     Err(error) => {
@@ -449,7 +554,7 @@ pub fn read_blob_metadata(
                 ) {
                     Ok(compression_info) => DecodedBlobMetadata {
                         uncompressed_size,
-                        compression_info: Some(Arc::new(compression_info)),
+                        compression_info: Some(compression_info),
                         merkle_leaves,
                     },
                     Err(error) => {
@@ -511,26 +616,43 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
             stored_size,
             device_offset,
             metadata_count,
-            blob_count,
+            extent_count,
+            encrypted,
         } => {
-            let blob_bytes_len = (blob_count as usize)
+            if encrypted && metadata_count > 0 {
+                bail!("Encrypted files cannot have blob metadata");
+            }
+            let extent_bytes_len = (extent_count as usize)
                 .checked_mul(8)
-                .ok_or_else(|| anyhow!("Overflow calculating blob extent byte length"))?;
+                .ok_or_else(|| anyhow!("Overflow calculating extent byte length"))?;
             let metadata_bytes_len = (metadata_count as usize)
                 .checked_mul(8)
                 .ok_or_else(|| anyhow!("Overflow calculating metadata extent byte length"))?;
-            let total_bytes_len = blob_bytes_len
+            let key_bytes_len = if encrypted { ENCRYPTION_KEY_SIZE } else { 0 };
+            let total_bytes_len = extent_bytes_len
                 .checked_add(metadata_bytes_len)
+                .and_then(|len| len.checked_add(key_bytes_len))
                 .ok_or_else(|| anyhow!("Overflow calculating total extent byte length"))?;
             let payload_len: u32 = total_bytes_len
                 .try_into()
                 .map_err(|_| anyhow!("Extent byte length exceeds u32"))?;
 
             let payload_bytes = msg.payload_slice(offset, payload_len);
-            let data_bytes = payload_bytes.subslice(0..blob_bytes_len);
-            let metadata_bytes = payload_bytes.subslice(blob_bytes_len..total_bytes_len);
+            let data_bytes = payload_bytes.subslice(0..extent_bytes_len);
             let data_extents = Extents::from_encoded(data_bytes.iter_as::<u64>(), device_offset)
                 .ok_or_else(|| anyhow!("Failed to decode data extents"))?;
+
+            if encrypted {
+                let key_bytes = payload_bytes.subslice(extent_bytes_len..total_bytes_len);
+                let cipher_key = UnwrappedKey::new(key_bytes.to_vec());
+                let cipher = Arc::new(FxfsCipher::new(&cipher_key)) as Arc<dyn Cipher>;
+                let file =
+                    Arc::new(File::new(data_extents, stored_size, Transform::Encrypted(cipher)));
+                files.insert(key, file);
+                return Ok(());
+            }
+
+            let metadata_bytes = payload_bytes.subslice(extent_bytes_len..total_bytes_len);
             let metadata_extents =
                 Extents::from_encoded(metadata_bytes.iter_as::<u64>(), device_offset)
                     .ok_or_else(|| anyhow!("Failed to decode metadata extents"))?;
@@ -547,7 +669,7 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
                 let file = Arc::new(File::new(
                     data_extents,
                     metadata.uncompressed_size,
-                    metadata.compression_info,
+                    metadata.compression_info.into(),
                 ));
                 guard.commit(file);
             });
@@ -572,7 +694,9 @@ mod tests {
     use byteorder::WriteBytesExt;
     use delivery_blob::compression::{ChunkedArchiveOptions, CompressionAlgorithm};
     use fuchsia_async as fasync;
+    use fxfs_crypto::{Cipher, FxfsCipher, UnwrappedKey};
     use std::sync::Arc;
+    use storage_ptr_slice::MutPtrByteSlice;
 
     fn serialize_metadata(metadata: &BlobMetadata) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -594,7 +718,7 @@ mod tests {
         let service = FakeBlockService::new(expected_data.clone());
 
         let extents = Extents::try_new([Extent::new(0..(8 * BLOCK_SIZE), Some(0))], 0).unwrap();
-        let file = Arc::new(File::new(extents, 8 * BLOCK_SIZE, None));
+        let file = Arc::new(File::new(extents, 8 * BLOCK_SIZE, Transform::None));
 
         let (page_request, rx) = TestVecBuffer::new_with_range(0..(8 * BLOCK_SIZE));
         file.read_range(&service, page_request);
@@ -640,11 +764,7 @@ mod tests {
             CompressionAlgorithm::Zstd,
         )
         .unwrap();
-        let file = Arc::new(File::new(
-            extents,
-            uncompressed_size as u64,
-            Some(Arc::new(compression_info)),
-        ));
+        let file = Arc::new(File::new(extents, uncompressed_size as u64, compression_info.into()));
 
         let dest_alloc_size = uncompressed_size.next_multiple_of(chunk_size);
         let (mut page_request, rx) = TestVecBuffer::new_with_range(0..(uncompressed_size as u64));
@@ -702,11 +822,7 @@ mod tests {
             CompressionAlgorithm::Lz4,
         )
         .unwrap();
-        let file = Arc::new(File::new(
-            extents,
-            uncompressed_size as u64,
-            Some(Arc::new(compression_info)),
-        ));
+        let file = Arc::new(File::new(extents, uncompressed_size as u64, compression_info.into()));
 
         let (page_request, rx) = TestVecBuffer::new_with_range(0..(uncompressed_size as u64));
         file.read_range(&service, page_request);
@@ -719,7 +835,7 @@ mod tests {
     fn test_read_range_invalid_range_noop() {
         let service = FakeBlockService::new(vec![0u8; 8192]);
         let extents = Extents::try_new([Extent::new(0..8192, Some(0))], 0).unwrap();
-        let file = Arc::new(File::new(extents, 8192, None));
+        let file = Arc::new(File::new(extents, 8192, Transform::None));
 
         let (page_request, rx) = TestVecBuffer::new_with_range(4096..4096);
         // start >= end should be a no-op returning Ok(())
@@ -732,18 +848,33 @@ mod tests {
         let extents = Extents::try_new([Extent::new(0..8192, Some(0))], 0).unwrap();
         let uncompressed_size = 8192u64;
 
-        let file_uncompressed = File::new(extents, uncompressed_size, None);
+        let file_uncompressed = File::new(extents, uncompressed_size, Transform::None);
         assert_eq!(file_uncompressed.uncompressed_size(), 8192);
+        assert!(matches!(file_uncompressed.transform(), Transform::None));
         assert!(file_uncompressed.compression_info().is_none());
+        assert!(file_uncompressed.cipher().is_none());
 
         let compression_info =
             CompressionInfo::new(32768, 4096, &[0], CompressionAlgorithm::Zstd).unwrap();
         let file_compressed = File::new(
             Extents::try_new([Extent::new(0..8192, Some(0))], 0).unwrap(),
             uncompressed_size,
-            Some(Arc::new(compression_info)),
+            compression_info.into(),
         );
+        assert!(matches!(file_compressed.transform(), Transform::Compressed(_)));
         assert!(file_compressed.compression_info().is_some());
+        assert!(file_compressed.cipher().is_none());
+
+        let key = UnwrappedKey::new(vec![0x42u8; 32]);
+        let cipher: Arc<dyn Cipher> = Arc::new(FxfsCipher::new(&key));
+        let file_encrypted = File::new(
+            Extents::try_new([Extent::new(0..8192, Some(0))], 0).unwrap(),
+            uncompressed_size,
+            cipher.into(),
+        );
+        assert!(matches!(file_encrypted.transform(), Transform::Encrypted(_)));
+        assert!(file_encrypted.compression_info().is_none());
+        assert!(file_encrypted.cipher().is_some());
     }
 
     #[test]
@@ -766,7 +897,7 @@ mod tests {
         }
 
         let extents = Extents::try_new([Extent::new(0..8192, Some(0))], 0).unwrap();
-        let file = File::new(extents, 8192, None);
+        let file = Arc::new(File::new(extents, 8192, Transform::None));
 
         let (page_request, rx) = TestVecBuffer::new_with_range(0..8192);
 
@@ -787,7 +918,7 @@ mod tests {
 
         let extents =
             Extents::try_new([Extent::new(0..(block_count * BLOCK_SIZE), Some(0))], 0).unwrap();
-        let file = File::new(extents, block_count * BLOCK_SIZE, None);
+        let file = Arc::new(File::new(extents, block_count * BLOCK_SIZE, Transform::None));
 
         let (page_request, rx) = TestVecBuffer::new_with_range(0..(block_count * BLOCK_SIZE));
         file.read_range(&service, page_request);
@@ -806,7 +937,7 @@ mod tests {
         let service = FakeBlockService::new(expected_data.clone());
 
         let extents = Extents::try_new([Extent::new(0..8192, Some(0))], 0).unwrap();
-        let file = File::new(extents, uncompressed_size, None);
+        let file = Arc::new(File::new(extents, uncompressed_size, Transform::None));
 
         let (page_request, rx) = TestVecBuffer::new_with_range(0..8192);
         file.read_range(&service, page_request);
@@ -826,7 +957,7 @@ mod tests {
 
         let extents =
             Extents::try_new([Extent::new(0..(total_blocks * BLOCK_SIZE), Some(0))], 0).unwrap();
-        let file = File::new(extents, total_blocks * BLOCK_SIZE, None);
+        let file = Arc::new(File::new(extents, total_blocks * BLOCK_SIZE, Transform::None));
 
         // Request 1 block at offset 4096. Readahead should expand to 0..128 KiB.
         let (page_request, rx) = TestVecBuffer::new_with_range(4096..8192);
@@ -850,7 +981,7 @@ mod tests {
 
         let extents =
             Extents::try_new([Extent::new(0..(total_blocks * BLOCK_SIZE), Some(0))], 0).unwrap();
-        let file = File::new(extents, total_blocks * BLOCK_SIZE, None);
+        let file = Arc::new(File::new(extents, total_blocks * BLOCK_SIZE, Transform::None));
 
         // Request 1 block at offset 132 KiB (135168..139264).
         // Readahead should expand to 128 KiB..256 KiB (131072..262144).
@@ -876,7 +1007,7 @@ mod tests {
 
         let extents =
             Extents::try_new([Extent::new(0..(total_blocks * BLOCK_SIZE), Some(0))], 0).unwrap();
-        let file = File::new(extents, uncompressed_size, None);
+        let file = Arc::new(File::new(extents, uncompressed_size, Transform::None));
 
         // Request 1 block at offset 132 KiB (135168..139264).
         // Readahead window starts at 128 KiB (131072) and would normally extend to 256 KiB
@@ -936,7 +1067,7 @@ mod tests {
             CompressionAlgorithm::Zstd,
         )
         .unwrap();
-        let file = File::new(extents, uncompressed_size as u64, Some(Arc::new(compression_info)));
+        let file = Arc::new(File::new(extents, uncompressed_size as u64, compression_info.into()));
 
         // Request 1 block in the second 128 KiB readahead window (e.g. 135168..139264).
         // Readahead should expand to 131072..262144 (chunks 4, 5, 6, 7).
@@ -992,7 +1123,7 @@ mod tests {
             CompressionAlgorithm::Zstd,
         )
         .unwrap();
-        let file = File::new(extents, uncompressed_size as u64, Some(Arc::new(compression_info)));
+        let file = Arc::new(File::new(extents, uncompressed_size as u64, compression_info.into()));
 
         // Pre-fill destination buffer with 0xFF bytes to verify tail zeroing
         let (mut page_request, rx) = TestVecBuffer::new_with_range(0..(uncompressed_size as u64));
@@ -1008,7 +1139,7 @@ mod tests {
     #[test]
     fn test_files_registry() {
         let extents = Extents::try_new([Extent::new(0..4096, Some(0))], 0).unwrap();
-        let file = Arc::new(File::new(extents, 4096, None));
+        let file = Arc::new(File::new(extents, 4096, Transform::None));
         let service = Arc::new(FakeBlockService::new(vec![0u8; 4096]));
         let files =
             Files::new(service, TestDeliveryHandler(|_key, _range| TestVecBuffer::new(4096).0));
@@ -1026,7 +1157,7 @@ mod tests {
     #[test]
     fn test_files_new_without_pager() {
         let extents = Extents::try_new([Extent::new(0..4096, Some(0))], 0).unwrap();
-        let file = Arc::new(File::new(extents, 4096, None));
+        let file = Arc::new(File::new(extents, 4096, Transform::None));
         let service = Arc::new(FakeBlockService::new(vec![0u8; 4096]));
         let files = Files::new_without_pager(service);
 
@@ -1210,7 +1341,7 @@ mod tests {
             stored_size: 4096,
             device_offset: 0,
             metadata_count: 1,
-            blob_count: 1,
+            extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
         let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
@@ -1286,7 +1417,7 @@ mod tests {
             stored_size: 4096,
             device_offset: 0,
             metadata_count: 1,
-            blob_count: 1,
+            extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
         let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
@@ -1398,7 +1529,7 @@ mod tests {
             stored_size: 4096,
             device_offset: 0,
             metadata_count: 1,
-            blob_count: 1,
+            extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
         let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
@@ -1474,7 +1605,7 @@ mod tests {
             stored_size: BLOCK_SIZE,
             device_offset: 0,
             metadata_count: 1,
-            blob_count: 1,
+            extent_count: 1,
         };
 
         let vmo = Vmo::create(65536).unwrap();
@@ -1574,7 +1705,7 @@ mod tests {
             stored_size: BLOCK_SIZE,
             device_offset: 0,
             metadata_count: 1,
-            blob_count: 1,
+            extent_count: 1,
         };
 
         let vmo = Vmo::create(65536).unwrap();
@@ -1645,7 +1776,7 @@ mod tests {
             stored_size: 4096,
             device_offset: 0,
             metadata_count: 0,
-            blob_count: 1,
+            extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
 
@@ -1665,7 +1796,7 @@ mod tests {
                 stored_size: 0,
                 device_offset: 0,
                 metadata_count: 0,
-                blob_count: 0,
+                extent_count: 0,
             })
             .unwrap();
 
@@ -1718,7 +1849,7 @@ mod tests {
         let files = Arc::new(Files::new_without_pager(service));
 
         let extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
-        let file = Arc::new(File::new(extents, BLOCK_SIZE, None));
+        let file = Arc::new(File::new(extents, BLOCK_SIZE, Transform::None));
 
         // Wait before insert.
         let files_clone = files.clone();
@@ -1734,5 +1865,284 @@ mod tests {
         // Wait after insert.
         let loaded_file2 = files.wait_for_file(42).await.unwrap();
         assert_eq!(loaded_file2.uncompressed_size(), BLOCK_SIZE);
+    }
+
+    #[test]
+    fn test_read_range_encrypted() {
+        let block_count = 8;
+        let mut expected_data = vec![0u8; (block_count as u64 * BLOCK_SIZE) as usize];
+        for (i, byte) in expected_data.iter_mut().enumerate() {
+            *byte = (i % 255) as u8;
+        }
+
+        let key = UnwrappedKey::new(vec![0x42u8; 32]);
+        let cipher: Arc<dyn Cipher> = Arc::new(FxfsCipher::new(&key));
+
+        let mut encrypted_data = expected_data.clone();
+        cipher.encrypt(0, 0, 0, 0, MutPtrByteSlice::from(&mut encrypted_data[..])).unwrap();
+        let service = FakeBlockService::new(encrypted_data);
+
+        let extents = Extents::try_new([Extent::new(0..(8 * BLOCK_SIZE), Some(0))], 0).unwrap();
+        let file = Arc::new(File::new(extents, 8 * BLOCK_SIZE, cipher.into()));
+
+        let (page_request, rx) = TestVecBuffer::new_with_range(0..(8 * BLOCK_SIZE));
+        file.read_range(&service, page_request);
+
+        assert_eq!(rx.commits(), vec![(0, (8 * BLOCK_SIZE) as usize)]);
+        assert_eq!(rx.output(), expected_data);
+    }
+
+    #[test]
+    fn test_read_range_encrypted_with_offset() {
+        let total_blocks = 64; // 256 KiB
+        let mut expected_data = vec![0u8; (total_blocks * BLOCK_SIZE) as usize];
+        for (i, byte) in expected_data.iter_mut().enumerate() {
+            *byte = ((i * 17) % 255) as u8;
+        }
+
+        let key = UnwrappedKey::new(vec![0x5au8; 32]);
+        let cipher: Arc<dyn Cipher> = Arc::new(FxfsCipher::new(&key));
+
+        let mut encrypted_data = expected_data.clone();
+        cipher.encrypt(0, 0, 0, 0, MutPtrByteSlice::from(&mut encrypted_data[..])).unwrap();
+        let service = FakeBlockService::new(encrypted_data);
+
+        let extents =
+            Extents::try_new([Extent::new(0..(total_blocks * BLOCK_SIZE), Some(0))], 0).unwrap();
+        let file = Arc::new(File::new(extents, total_blocks * BLOCK_SIZE, cipher.into()));
+
+        // Request 1 block at offset 132 KiB (135168..139264).
+        // Readahead window expands to 128 KiB..256 KiB (131072..262144), ensuring that
+        // current_offset starts at a non-zero offset (128 KiB) with correct sector tweak.
+        let (page_request, rx) = TestVecBuffer::new_with_range(135168..139264);
+        file.read_range(&service, page_request);
+
+        assert_eq!(rx.commits(), vec![(READ_AHEAD_SIZE, READ_AHEAD_SIZE as usize)]);
+        assert_eq!(
+            &rx.output()[..READ_AHEAD_SIZE as usize],
+            &expected_data[READ_AHEAD_SIZE as usize..2 * READ_AHEAD_SIZE as usize]
+        );
+    }
+
+    #[test]
+    fn test_read_range_encrypted_multi_chunk() {
+        let block_count = 4;
+        let mut expected_data = vec![0u8; (block_count as u64 * BLOCK_SIZE) as usize];
+        for (i, byte) in expected_data.iter_mut().enumerate() {
+            *byte = ((i * 31) % 255) as u8;
+        }
+
+        let key = UnwrappedKey::new(vec![0x7fu8; 32]);
+        let cipher: Arc<dyn Cipher> = Arc::new(FxfsCipher::new(&key));
+
+        let mut encrypted_data = expected_data.clone();
+        cipher.encrypt(0, 0, 0, 0, MutPtrByteSlice::from(&mut encrypted_data[..])).unwrap();
+        // Capping to BLOCK_SIZE forces read_aligned_range to issue separate buffer reads for each chunk.
+        let service = FakeBlockService::new_with_cap(encrypted_data, Some(BLOCK_SIZE as usize));
+
+        let extents =
+            Extents::try_new([Extent::new(0..(block_count * BLOCK_SIZE), Some(0))], 0).unwrap();
+        let file = Arc::new(File::new(extents, block_count * BLOCK_SIZE, cipher.into()));
+
+        let (page_request, rx) = TestVecBuffer::new_with_range(0..(block_count * BLOCK_SIZE));
+        file.read_range(&service, page_request);
+
+        assert_eq!(rx.commits().len(), 4);
+        assert_eq!(rx.output(), expected_data);
+    }
+
+    #[test]
+    fn test_read_range_decryption_error() {
+        #[derive(Debug)]
+        struct FailingCipher(FxfsCipher);
+        impl Cipher for FailingCipher {
+            fn encrypt(
+                &self,
+                ino: u64,
+                attr: u64,
+                dev: u64,
+                file: u64,
+                buf: MutPtrByteSlice<'_>,
+            ) -> Result<(), Error> {
+                self.0.encrypt(ino, attr, dev, file, buf)
+            }
+            fn decrypt(
+                &self,
+                _ino: u64,
+                _attribute_id: u64,
+                _device_offset: u64,
+                _file_offset: u64,
+                _buffer: MutPtrByteSlice<'_>,
+            ) -> Result<(), Error> {
+                bail!("decrypt failed")
+            }
+            fn encrypt_filename(&self, ino: u64, name: &mut Vec<u8>) -> Result<(), Error> {
+                self.0.encrypt_filename(ino, name)
+            }
+            fn decrypt_filename(&self, ino: u64, name: &mut Vec<u8>) -> Result<(), Error> {
+                self.0.decrypt_filename(ino, name)
+            }
+            fn hash_code(&self, name: &[u8], filename: &str) -> Option<u32> {
+                self.0.hash_code(name, filename)
+            }
+            fn hash_code_casefold(&self, filename: &str) -> u32 {
+                self.0.hash_code_casefold(filename)
+            }
+            fn supports_inline_encryption(&self) -> bool {
+                self.0.supports_inline_encryption()
+            }
+            fn crypt_ctx(&self, ino: u64, attr: u64, offset: u64) -> Option<(u64, u8)> {
+                self.0.crypt_ctx(ino, attr, offset)
+            }
+        }
+
+        let key = UnwrappedKey::new(vec![0x42u8; 32]);
+        let failing_cipher: Arc<dyn Cipher> = Arc::new(FailingCipher(FxfsCipher::new(&key)));
+        let service = FakeBlockService::new(vec![0u8; 8192]);
+        let extents = Extents::try_new([Extent::new(0..8192, Some(0))], 0).unwrap();
+        let file = Arc::new(File::new(extents, 8192, failing_cipher.into()));
+
+        let (page_request, rx) = TestVecBuffer::new_with_range(0..8192);
+        file.read_range(&service, page_request);
+        assert_eq!(rx.commits().len(), 0);
+    }
+
+    #[fuchsia::test]
+    fn test_process_mapping_command_unencrypted_no_metadata() {
+        let block_count = 2;
+        let mut expected_data = vec![0u8; (block_count as u64 * BLOCK_SIZE) as usize];
+        for (i, byte) in expected_data.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+        let service = Arc::new(FakeBlockService::new(expected_data.clone()));
+        let files = Arc::new(Files::new(
+            service.clone(),
+            TestDeliveryHandler(|_k, r| TestVecBuffer::new_with_range(r).0),
+        ));
+
+        let data_extents =
+            Extents::try_new([Extent::new(0..(block_count as u64 * BLOCK_SIZE), Some(0))], 0)
+                .unwrap();
+        let mut payload_bytes = Vec::new();
+        for w in Extents::encode_extents(&data_extents) {
+            payload_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+
+        let vmo = zx::Vmo::create(65536).unwrap();
+        let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            1024,
+            16,
+        )
+        .unwrap();
+        let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
+        payload_buf.data().copy_from_slice(&payload_bytes);
+        let cmd = crate::RawMappingCommand {
+            opcode: crate::MAPPINGS_COMMAND,
+            offset: payload_buf.offset(),
+            key: 100,
+            stored_size: block_count as u64 * BLOCK_SIZE,
+            device_offset: 0,
+            metadata_count: 0,
+            extent_count: 1,
+        };
+        payload_buf.commit(cmd).unwrap();
+        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+
+        let msg = receiver.peek().unwrap();
+        process_mapping_command(&msg, &files).unwrap();
+
+        let file = files.get_file(100).expect("File should be loaded immediately");
+        let (page_request, rx) =
+            TestVecBuffer::new_with_range(0..(block_count as u64 * BLOCK_SIZE));
+        file.read_range(service.as_ref(), page_request);
+        assert_eq!(rx.output(), expected_data);
+    }
+
+    #[fuchsia::test]
+    fn test_process_mapping_command_encrypted() {
+        struct NoRegisterBlobHandler;
+        impl DeliveryHandler for NoRegisterBlobHandler {
+            type Request = TestVecBuffer;
+            fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
+                TestVecBuffer::new_with_range(range).0
+            }
+            fn register_blob(&self, _key: u64, _merkle_leaves: &[[u8; 32]]) -> Result<(), Error> {
+                panic!("register_blob should not be called for encrypted files");
+            }
+        }
+
+        let block_count = 2;
+        let mut plaintext = vec![0u8; (block_count as u64 * BLOCK_SIZE) as usize];
+        for (i, byte) in plaintext.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+
+        let raw_key = [0x5au8; 32];
+        let key = UnwrappedKey::new(raw_key.to_vec());
+        let cipher = FxfsCipher::new(&key);
+
+        let mut ciphertext = plaintext.clone();
+        cipher.encrypt(0, 0, 0, 0, MutPtrByteSlice::from(&mut ciphertext[..])).unwrap();
+
+        let service = Arc::new(FakeBlockService::new(ciphertext));
+        let files = Arc::new(Files::new(service.clone(), NoRegisterBlobHandler));
+
+        let data_extents =
+            Extents::try_new([Extent::new(0..(block_count as u64 * BLOCK_SIZE), Some(0))], 0)
+                .unwrap();
+        let mut payload_bytes = Vec::new();
+        for w in Extents::encode_extents(&data_extents) {
+            payload_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        payload_bytes.extend_from_slice(&raw_key);
+
+        let vmo = zx::Vmo::create(65536).unwrap();
+        let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            1024,
+            16,
+        )
+        .unwrap();
+        let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
+        payload_buf.data().copy_from_slice(&payload_bytes);
+        let cmd = crate::RawMappingCommand {
+            opcode: crate::MAPPINGS_COMMAND | crate::MAPPINGS_FLAG_ENCRYPTED,
+            offset: payload_buf.offset(),
+            key: 101,
+            stored_size: block_count as u64 * BLOCK_SIZE,
+            device_offset: 0,
+            metadata_count: 0,
+            extent_count: 1,
+        };
+        payload_buf.commit(cmd).unwrap();
+
+        let invalid_cmd = crate::RawMappingCommand {
+            opcode: crate::MAPPINGS_COMMAND | crate::MAPPINGS_FLAG_ENCRYPTED,
+            offset: 0,
+            key: 102,
+            stored_size: block_count as u64 * BLOCK_SIZE,
+            device_offset: 0,
+            metadata_count: 1,
+            extent_count: 1,
+        };
+        sender.reserve_payload(0).unwrap().commit(invalid_cmd).unwrap();
+
+        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+
+        let msg = receiver.peek().unwrap();
+        process_mapping_command(&msg, &files).unwrap();
+        msg.pop().unwrap();
+
+        let invalid_msg = receiver.peek().unwrap();
+        assert!(process_mapping_command(&invalid_msg, &files).is_err());
+
+        let file = files.get_file(101).expect("File should be loaded immediately");
+        assert!(matches!(file.transform(), Transform::Encrypted(_)));
+
+        let (page_request, rx) =
+            TestVecBuffer::new_with_range(0..(block_count as u64 * BLOCK_SIZE));
+        file.read_range(service.as_ref(), page_request);
+        assert_eq!(rx.output(), plaintext);
     }
 }

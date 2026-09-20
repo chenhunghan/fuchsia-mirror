@@ -4,8 +4,18 @@
 
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("child-driver-dml") {
+  dml = "meta/child-driver.dml"
+  driver_name = "banjo_transport_child"
+}
+
+fuchsia_driver_dml("parent-driver-dml") {
+  dml = "meta/parent-driver.dml"
+  driver_name = "banjo_transport_parent"
+}
+
 driver_bind_rules("parent_bind") {
-  rules = "meta/parent-driver.bind"
+  dml_label = ":parent-driver-dml"
   bind_output = "parent-driver.bindbc"
   deps = [
     "//examples/drivers/bind/bindlib:gizmo.example",
@@ -27,8 +37,7 @@ fuchsia_cc_driver("parent_driver") {
 }
 
 fuchsia_driver_component("parent_component") {
-  component_name = "banjo_transport_parent"
-  manifest = "meta/parent-driver.cml"
+  dml_label = ":parent-driver-dml"
   deps = [
     ":parent_bind",
     ":parent_driver",
@@ -37,7 +46,7 @@ fuchsia_driver_component("parent_component") {
 }
 
 driver_bind_rules("child_bind") {
-  rules = "meta/child-driver.bind"
+  dml_label = ":child-driver-dml"
   bind_output = "child-driver.bindbc"
   deps = [
     "//examples/drivers/bind/bindlib:gizmo.example",
@@ -57,8 +66,7 @@ fuchsia_cc_driver("child_driver") {
 }
 
 fuchsia_driver_component("child_component") {
-  component_name = "banjo_transport_child"
-  manifest = "meta/child-driver.cml"
+  dml_label = ":child-driver-dml"
   deps = [
     ":child_bind",
     ":child_driver",

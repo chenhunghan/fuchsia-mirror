@@ -17,8 +17,8 @@ use super::thread_dispatcher_ffi::{
     cpp_thread_dispatcher_set_base_profile, cpp_thread_dispatcher_set_soft_affinity,
     cpp_thread_dispatcher_start, cpp_thread_dispatcher_suspend, cpp_thread_dispatcher_write_state,
 };
+use crate::kernel::scheduler_state::SchedulerStateBaseProfile;
 use core::mem::MaybeUninit;
-use object_constants_rs as object_constants;
 use zx_status::Status;
 use zx_types::{
     zx_exception_context_t, zx_excp_type_t, zx_info_task_runtime_t, zx_info_thread_stats_t,
@@ -26,25 +26,6 @@ use zx_types::{
 };
 
 pub use crate::kernel::types::cpu_mask_t;
-
-/// Opaque byte container matching C++ `SchedulerState::BaseProfile`.
-#[repr(C, align(8))]
-pub struct SchedulerStateBaseProfile(
-    pub zr::OpaqueBytes<{ object_constants::kSchedulerStateBaseProfileSize }>,
-);
-
-zr::static_assert_size_and_align!(
-    SchedulerStateBaseProfile,
-    object_constants::kSchedulerStateBaseProfileSize,
-    object_constants::kSchedulerStateBaseProfileAlign,
-);
-
-impl SchedulerStateBaseProfile {
-    /// Returns a raw pointer to the underlying byte storage.
-    pub fn get(&self) -> *mut [u8; object_constants::kSchedulerStateBaseProfileSize] {
-        self.0.get()
-    }
-}
 
 crate::object::dispatcher::impl_dispatcher_facade!(
     pub struct ThreadDispatcher,

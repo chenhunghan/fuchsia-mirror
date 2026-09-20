@@ -4,7 +4,7 @@
 library fuchsia.hardware.audio.signalprocessing;
 
 /// For an overview of the signal processing protocols see
-/// [Audio Signal Processing](//docs/concepts/drivers/driver_architectures/audio_drivers/audio_signal_processing.md)
+/// [Audio Signal Processing](//docs/development/audio/drivers/signal-processing.md)
 closed protocol Connector {
     /// Connect to a `SignalProcessing` protocol.
     /// Multiple connections may be supported, if a new connection request is not supported, i.e.

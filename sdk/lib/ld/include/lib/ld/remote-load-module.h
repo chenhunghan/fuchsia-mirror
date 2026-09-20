@@ -51,9 +51,9 @@ class RemoteLoadModule : public RemoteLoadModuleBase<Elf> {
   using typename Base::Module;
   using typename Base::size_type;
   using typename Base::Soname;
-  using ExecInfo = typename Decoded::ExecInfo;
-  using DecodedPtr = typename Decoded::Ptr;
-  using Sym = typename Elf::Sym;
+  using ExecInfo = Decoded::ExecInfo;
+  using DecodedPtr = Decoded::Ptr;
+  using Sym = Elf::Sym;
 
   // This is the type of the module list.  The ABI remoting scheme relies on
   // this being indexable; see <lib/ld/remote-abi.h> for details.  Being able

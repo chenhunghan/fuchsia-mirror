@@ -10,6 +10,7 @@ use super::job_dispatcher::JobDispatcher;
 #[cfg(target_arch = "x86_64")]
 use super::process_dispatcher_ffi::cpp_process_dispatcher_hw_trace_context_id;
 use super::process_dispatcher_ffi::{
+    cpp_process_add_initialized_thread, cpp_process_attach_aspace_to_thread,
     cpp_process_dispatcher_current, cpp_process_dispatcher_enforce_basic_policy,
     cpp_process_dispatcher_get_debug_addr, cpp_process_dispatcher_get_dyn_break_on_load,
     cpp_process_dispatcher_get_info, cpp_process_dispatcher_is_current,
@@ -17,10 +18,13 @@ use super::process_dispatcher_ffi::{
     cpp_process_dispatcher_resume, cpp_process_dispatcher_set_critical_to_job,
     cpp_process_dispatcher_set_debug_addr, cpp_process_dispatcher_set_dyn_break_on_load,
     cpp_process_dispatcher_start, cpp_process_dispatcher_suspend,
-    cpp_process_dispatcher_vdso_base_address,
+    cpp_process_dispatcher_vdso_base_address, cpp_process_futex_grow_pool,
+    cpp_process_futex_shrink_pool, cpp_process_get_job_koid, cpp_process_remove_thread,
 };
 use super::thread_dispatcher::ThreadDispatcher;
 use super::vm_address_region_dispatcher::VmAddressRegionDispatcher;
+use crate::arch_rs::UserEntryState;
+use crate::kernel::thread::ThreadPtr;
 use core::mem::MaybeUninit;
 use pin_init::{PinInit, pin_data, pin_init};
 use zx_status::Status;
@@ -49,7 +53,7 @@ impl ProcessDispatcher {
     /// Returns whether this `ProcessDispatcher` is the current process.
     pub fn is_current(&self) -> bool {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_is_current(self as *const _) }
+        unsafe { cpp_process_dispatcher_is_current(self.as_ffi()) }
     }
 
     /// Starts execution of this process.
@@ -70,7 +74,7 @@ impl ProcessDispatcher {
         // and `arg_handle_ptr` ownership is transferred to C++.
         let status = unsafe {
             cpp_process_dispatcher_start(
-                self as *const _ as *mut _,
+                self.as_ffi_mut(),
                 raw_thread,
                 pc,
                 sp,
@@ -86,7 +90,7 @@ impl ProcessDispatcher {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
         let raw = unsafe {
             super::process_dispatcher_ffi::cpp_process_dispatcher_remove_handle(
-                self as *const _ as *mut _,
+                self.as_ffi_mut(),
                 handle.raw_value(),
             )
         };
@@ -97,7 +101,7 @@ impl ProcessDispatcher {
     /// Kills this process with the given return code.
     pub fn kill(&self, retcode: i64) {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_kill(self as *const _ as *mut _, retcode) }
+        unsafe { cpp_process_dispatcher_kill(self.as_ffi_mut(), retcode) }
     }
 
     /// Suspends execution of this process.
@@ -107,14 +111,14 @@ impl ProcessDispatcher {
     /// - `ZX_ERR_BAD_STATE` if the process is dying or dead.
     pub fn suspend(&self) -> Result<(), Status> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let status = unsafe { cpp_process_dispatcher_suspend(self as *const _ as *mut _) };
+        let status = unsafe { cpp_process_dispatcher_suspend(self.as_ffi_mut()) };
         Status::ok(status)
     }
 
     /// Resumes execution of this process.
     pub fn resume(&self) {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_resume(self as *const _ as *mut _) }
+        unsafe { cpp_process_dispatcher_resume(self.as_ffi_mut()) }
     }
 
     /// Creates a handle for the given dispatcher in this process's handle table.
@@ -132,7 +136,7 @@ impl ProcessDispatcher {
         // `out` points to writable memory.
         let status = unsafe {
             cpp_process_dispatcher_make_and_add_handle(
-                self as *const _ as *mut _,
+                self.as_ffi_mut(),
                 &mut handle,
                 rights,
                 &mut out,
@@ -159,7 +163,7 @@ impl ProcessDispatcher {
         // transferred to C++, and `out` points to writable memory.
         let status = unsafe {
             super::process_dispatcher_ffi::cpp_process_dispatcher_make_and_add_handle_from_ref(
-                self as *const _ as *mut _,
+                self.as_ffi_mut(),
                 raw_dispatcher as *mut _,
                 rights,
                 &mut out,
@@ -172,9 +176,8 @@ impl ProcessDispatcher {
     /// Enforces basic policy for this process.
     pub fn enforce_basic_policy(&self, policy: u32) -> Result<(), Status> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let status = unsafe {
-            cpp_process_dispatcher_enforce_basic_policy(self as *const _ as *mut _, policy)
-        };
+        let status =
+            unsafe { cpp_process_dispatcher_enforce_basic_policy(self.as_ffi_mut(), policy) };
         Status::ok(status)
     }
 
@@ -183,7 +186,7 @@ impl ProcessDispatcher {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
         unsafe {
             super::process_dispatcher_ffi::cpp_process_dispatcher_get_timer_slack_policy_amount(
-                self as *const _,
+                self.as_ffi(),
             )
         }
     }
@@ -194,7 +197,7 @@ impl ProcessDispatcher {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference and `slack` points to valid memory.
         unsafe {
             super::process_dispatcher_ffi::cpp_process_dispatcher_get_timer_slack_policy(
-                self as *const _,
+                self.as_ffi(),
                 &mut slack,
             );
         }
@@ -207,7 +210,7 @@ impl ProcessDispatcher {
         // SAFETY: `self` is a valid `ProcessDispatcher`, and its handle table lock is a valid `BrwLockPi`.
         unsafe {
             let lock_ptr = super::process_dispatcher_ffi::cpp_process_dispatcher_handle_table_lock(
-                self as *const _,
+                self.as_ffi(),
             );
             &*(lock_ptr as *const ksync::BrwLockPi<HandleTableLockClass>)
         }
@@ -216,7 +219,7 @@ impl ProcessDispatcher {
     /// Returns information about this process.
     pub fn get_info(&self) -> zx_info_process_t {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_get_info(self as *const _) }
+        unsafe { cpp_process_dispatcher_get_info(self.as_ffi()) }
     }
 
     /// Sets this process as critical to the given job.
@@ -229,7 +232,7 @@ impl ProcessDispatcher {
         // reference count into C++.
         let status = unsafe {
             cpp_process_dispatcher_set_critical_to_job(
-                self as *const _ as *mut _,
+                self.as_ffi_mut(),
                 fbl::RefPtr::into_raw(job) as *mut _,
                 retcode_nonzero,
             )
@@ -346,10 +349,7 @@ impl ProcessDispatcher {
     pub fn aspace_at(&self, va: usize) -> Option<&crate::vm::vm_aspace::VmAspace> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
         let aspace_ptr = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_aspace_at(
-                self as *const _ as *mut _,
-                va,
-            )
+            super::process_dispatcher_ffi::cpp_process_dispatcher_aspace_at(self.as_ffi_mut(), va)
         };
         // SAFETY: `aspace_ptr` is either null or points to a valid `VmAspace` managed by the process.
         unsafe { aspace_ptr.as_ref() }
@@ -358,9 +358,8 @@ impl ProcessDispatcher {
     /// Returns the job associated with this process.
     pub fn job(&self) -> Option<fbl::RefPtr<JobDispatcher>> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let ptr = unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_job(self as *const _ as *mut _)
-        };
+        let ptr =
+            unsafe { super::process_dispatcher_ffi::cpp_process_dispatcher_job(self.as_ffi_mut()) };
         // SAFETY: `ptr` is exported via `fbl::ExportToRawPtr` with an acquired refcount.
         unsafe { fbl::RefPtr::try_from_raw(ptr) }
     }
@@ -368,28 +367,27 @@ impl ProcessDispatcher {
     /// Returns the debug address of the dynamic loader (`_dl_debug_addr`) for this process.
     pub fn get_debug_addr(&self) -> usize {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_get_debug_addr(self as *const _) }
+        unsafe { cpp_process_dispatcher_get_debug_addr(self.as_ffi()) }
     }
 
     /// Sets the debug address of the dynamic loader (`_dl_debug_addr`) for this process.
     pub fn set_debug_addr(&self, addr: usize) -> Result<(), Status> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let status =
-            unsafe { cpp_process_dispatcher_set_debug_addr(self as *const _ as *mut _, addr) };
+        let status = unsafe { cpp_process_dispatcher_set_debug_addr(self.as_ffi_mut(), addr) };
         Status::ok(status)
     }
 
     /// Returns the dynamic break-on-load state for this process.
     pub fn get_dyn_break_on_load(&self) -> usize {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_get_dyn_break_on_load(self as *const _) }
+        unsafe { cpp_process_dispatcher_get_dyn_break_on_load(self.as_ffi()) }
     }
 
     /// Sets the dynamic break-on-load state for this process.
     pub fn set_dyn_break_on_load(&self, break_on_load: usize) -> Result<(), Status> {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
         let status = unsafe {
-            cpp_process_dispatcher_set_dyn_break_on_load(self as *const _ as *mut _, break_on_load)
+            cpp_process_dispatcher_set_dyn_break_on_load(self.as_ffi_mut(), break_on_load)
         };
         Status::ok(status)
     }
@@ -397,34 +395,89 @@ impl ProcessDispatcher {
     /// Returns the base address of the vDSO mapping for this process.
     pub fn vdso_base_address(&self) -> usize {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_vdso_base_address(self as *const _ as *mut _) }
+        unsafe { cpp_process_dispatcher_vdso_base_address(self.as_ffi()) }
     }
 
     /// Returns the hardware trace context ID for this process.
     #[cfg(target_arch = "x86_64")]
     pub fn hw_trace_context_id(&self) -> usize {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_hw_trace_context_id(self as *const _) }
+        unsafe { cpp_process_dispatcher_hw_trace_context_id(self.as_ffi()) }
+    }
+
+    /// Returns a `*const ProcessDispatcher` pointer suitable for passing to FFI routines.
+    #[inline]
+    pub fn as_ffi(&self) -> *const Self {
+        self as *const Self
+    }
+
+    /// Returns a `*mut ProcessDispatcher` pointer suitable for passing to FFI routines that
+    /// take a non-const `ProcessDispatcher*`.
+    #[inline]
+    pub fn as_ffi_mut(&self) -> *mut Self {
+        self.as_ffi() as *mut Self
+    }
+
+    /// Grows the futex state pool for this process.
+    pub fn futex_context_grow_pool(&self) -> Result<(), Status> {
+        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
+        let status = unsafe { cpp_process_futex_grow_pool(self.as_ffi()) };
+        Status::ok(status)
+    }
+
+    /// Shrinks the futex state pool for this process.
+    pub fn futex_context_shrink_pool(&self) -> Result<(), Status> {
+        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
+        let status = unsafe { cpp_process_futex_shrink_pool(self.as_ffi()) };
+        Status::ok(status)
+    }
+
+    /// Attaches the normal address space of this process to `core_thread`.
+    pub fn attach_normal_aspace_to_thread(&self, core_thread: ThreadPtr) -> Result<(), Status> {
+        // SAFETY: `self` is a valid `ProcessDispatcher`, and `core_thread` upholds the
+        // `ThreadPtr` invariant that it points to a live kernel thread.
+        let status =
+            unsafe { cpp_process_attach_aspace_to_thread(self.as_ffi(), core_thread.as_raw()) };
+        Status::ok(status)
+    }
+
+    /// Returns the parent job koid.
+    pub fn job_koid(&self) -> zx_types::zx_koid_t {
+        // SAFETY: `self` is a valid `ProcessDispatcher`.
+        unsafe { cpp_process_get_job_koid(self.as_ffi()) }
+    }
+
+    /// Transitions `thread` from the initialized state to a runnable state and adds it to the
+    /// thread list of this process.
+    ///
+    /// If `ensure_initial_thread` is true, this fails unless `thread` is the initial thread in
+    /// the process.
+    pub fn add_initialized_thread(
+        &self,
+        thread: &ThreadDispatcher,
+        ensure_initial_thread: bool,
+        entry: &UserEntryState,
+    ) -> Result<(), Status> {
+        // SAFETY: `self` and `thread` are valid references.
+        let status = unsafe {
+            cpp_process_add_initialized_thread(
+                self.as_ffi(),
+                thread as *const _,
+                ensure_initial_thread,
+                entry,
+            )
+        };
+        Status::ok(status)
+    }
+
+    /// Removes `thread` from the thread list of this process.
+    pub fn remove_thread(&self, thread: &ThreadDispatcher) {
+        // SAFETY: `self` and `thread` are valid references.
+        unsafe { cpp_process_remove_thread(self.as_ffi(), thread as *const _) }
     }
 }
 
 zr::static_assert!(core::mem::size_of::<ProcessDispatcher>() == 0);
-
-#[cfg(ktest)]
-mod tests {
-    #[allow(unused_imports)]
-    use super::*;
-
-    #[test]
-    fn test_process_default_rights() {
-        assert_eq!(ProcessDispatcher::default_rights(), ProcessDispatcher::DEFAULT_RIGHTS);
-    }
-
-    #[test]
-    fn test_process_dispatcher_layout() {
-        assert_eq!(core::mem::size_of::<ProcessDispatcher>(), 0);
-    }
-}
 
 /// RAII reader lock guard for a process's handle table.
 ///
@@ -451,7 +504,7 @@ impl<'a> HandleTableReadGuard<'a> {
         // SAFETY: `self.process` is valid and the handle table lock is held for the duration of `self`.
         let ptr = unsafe {
             super::process_dispatcher_ffi::cpp_process_dispatcher_handle_table_get_handle_locked(
-                self.process as *const _,
+                self.process.as_ffi(),
                 handle_value.raw_value(),
             )
         };

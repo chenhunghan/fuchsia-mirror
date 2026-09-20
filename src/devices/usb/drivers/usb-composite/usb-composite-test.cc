@@ -4,7 +4,7 @@
 
 #include "src/devices/usb/drivers/usb-composite/usb-composite.h"
 
-#include <queue>
+#include <vector>
 
 #include <fbl/auto_lock.h>
 #include <fbl/ref_counted.h>
@@ -87,11 +87,11 @@ class UsbCompositeTest : public zxtest::Test {
 
       auto* intf = child->GetDeviceContext<UsbInterface>();
       ASSERT_EQ(intf->UsbGetDescriptorsLength(), expected[i].length);
-      uint8_t desc[expected[i].length];
+      std::vector<uint8_t> desc(expected[i].length);
       size_t actual;
-      intf->UsbGetDescriptors(desc, sizeof(desc), &actual);
-      EXPECT_EQ(actual, sizeof(desc));
-      EXPECT_BYTES_EQ(expected[i].start, desc, sizeof(desc));
+      intf->UsbGetDescriptors(desc.data(), desc.size(), &actual);
+      EXPECT_EQ(actual, desc.size());
+      EXPECT_BYTES_EQ(expected[i].start, desc.data(), desc.size());
 
       i++;
     }

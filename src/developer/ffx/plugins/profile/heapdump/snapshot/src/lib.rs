@@ -13,7 +13,7 @@ use ffx_profile_heapdump_common::{
     connect_to_collector,
 };
 use ffx_profile_heapdump_snapshot_args::SnapshotCommand;
-use ffx_writer::SimpleWriter;
+use ffx_writer::VerifiedMachineWriter;
 use fho::{AvailabilityFlag, FfxMain, FfxTool};
 use std::io::Write;
 use target_holders::RemoteControlProxyHolder;
@@ -31,12 +31,13 @@ fho::embedded_plugin!(SnapshotTool);
 
 #[async_trait(?Send)]
 impl FfxMain for SnapshotTool {
-    type Writer = SimpleWriter;
+    type Writer = VerifiedMachineWriter<()>;
 
     type Error = ::fho::Error;
 
-    async fn main(self, _writer: Self::Writer) -> fho::Result<()> {
+    async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
         snapshot(&self.context, self.remote_control, self.cmd).await?;
+        writer.machine(&())?;
         Ok(())
     }
 }

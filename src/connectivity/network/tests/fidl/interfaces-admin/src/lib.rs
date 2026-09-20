@@ -37,9 +37,7 @@ use netstack_testing_common::devices::{
 };
 use netstack_testing_common::interfaces::{self, TestInterfaceExt as _, add_address_wait_assigned};
 use netstack_testing_common::ndp::{send_ra_with_router_lifetime, wait_for_router_solicitation};
-use netstack_testing_common::realms::{
-    Netstack, Netstack3, NetstackVersion, TestRealmExt as _, TestSandboxExt as _,
-};
+use netstack_testing_common::realms::{Netstack3, TestRealmExt as _, TestSandboxExt as _};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
 };
@@ -55,10 +53,9 @@ use std::pin::pin;
 use test_case::test_case;
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn address_deprecation<N: Netstack>(name: &str) {
+async fn address_deprecation(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
         .install_endpoint(device, InterfaceConfig::default())
@@ -146,10 +143,9 @@ async fn address_deprecation<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn update_address_lifetimes<N: Netstack>(name: &str) {
+async fn update_address_lifetimes(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
         .install_endpoint(device, Default::default())
@@ -319,10 +315,9 @@ async fn update_address_lifetimes<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn add_address_sets_correct_valid_until<N: Netstack>(name: &str) {
+async fn add_address_sets_correct_valid_until(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
         .install_endpoint(device, InterfaceConfig::default())
@@ -380,10 +375,9 @@ async fn add_address_sets_correct_valid_until<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn add_address_errors<N: Netstack>(name: &str) {
+async fn add_address_errors(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let fidl_fuchsia_net_interfaces_ext::Properties { id: loopback_id, addresses, .. } = realm
         .loopback_properties()
@@ -475,8 +469,6 @@ async fn add_address_errors<N: Netstack>(name: &str) {
 
 #[netstack_test]
 async fn invalid_address_properties(name: &str) {
-    // NB: Only runs on netstack3 because netstack2 doesn't perform property
-    // validation.
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let network = sandbox.create_network(name).await.expect("create network");
@@ -538,10 +530,9 @@ async fn invalid_address_properties(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn add_ipv4_mapped_ipv6_address<N: Netstack>(name: &str) {
+async fn add_ipv4_mapped_ipv6_address(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let fidl_fuchsia_net_interfaces_ext::Properties { id: loopback_id, .. } = realm
         .loopback_properties()
@@ -556,33 +547,20 @@ async fn add_ipv4_mapped_ipv6_address<N: Netstack>(name: &str) {
     let mapped_address =
         fidl_fuchsia_net::Subnet { addr: fidl_ip!("::FFFF:192.0.2.1"), prefix_len: 128 };
 
-    // NS2 is more permissive than NS3 when validating interface addresses, and
-    // allows IPv4-mapped-IPv6 addresses to be assigned.
-    let assertion = |result| match N::VERSION {
-        NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => {
-            assert_matches::assert_matches!(
-                result,
-                Err(fnet_interfaces_ext::admin::AddressStateProviderError::AddressRemoved(
-                    finterfaces_admin::AddressRemovalReason::Invalid,
-                ))
-            )
-        }
-        NetstackVersion::Netstack2 { .. } | NetstackVersion::ProdNetstack2 => {
-            assert_matches::assert_matches!(result, Ok(_))
-        }
-    };
-    assertion(
+    assert_matches::assert_matches!(
         interfaces::add_address_wait_assigned(
             &control,
             mapped_address,
             fidl_fuchsia_net_interfaces_admin::AddressParameters::default(),
         )
         .await,
+        Err(fnet_interfaces_ext::admin::AddressStateProviderError::AddressRemoved(
+            finterfaces_admin::AddressRemovalReason::Invalid,
+        ))
     )
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case([FrameType::Ethernet], [FrameType::Ethernet],
     Some(fidl_mac!("02:03:04:05:06:07")), Ok(()); "ethernet")]
 #[test_case([FrameType::Ipv4], [FrameType::Ipv4], None, Err(()); "ipv4-only-fails")]
@@ -594,7 +572,7 @@ async fn add_ipv4_mapped_ipv6_address<N: Netstack>(name: &str) {
     Some(fidl_mac!("02:03:04:05:06:07")), Err(()); "mixed-fails")]
 #[test_case([FrameType::Ethernet], [FrameType::Ipv4, FrameType::Ipv6],
     Some(fidl_mac!("02:03:04:05:06:07")), Err(()); "asymmetric-fails")]
-async fn supported_port_frame_types<N: Netstack>(
+async fn supported_port_frame_types(
     name: &str,
     rx_frame_types: impl IntoIterator<Item = FrameType>,
     tx_frame_types: impl IntoIterator<Item = FrameType>,
@@ -602,7 +580,7 @@ async fn supported_port_frame_types<N: Netstack>(
     expected_result: Result<(), ()>,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let (tun_device, network_device) = create_tun_device();
     let admin_device_control = install_device(&realm, network_device);
     let (tun_port, network_port) =
@@ -648,18 +626,13 @@ enum AddressRemovalMethod {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(false, AddressRemovalMethod::InterfaceControl ; "eth removing address via Control.Remove")]
 #[test_case(false, AddressRemovalMethod::AddressStateProviderExplicitRemove ; "eth removing address via AddressStateProvider.Remove")]
 #[test_case(true, AddressRemovalMethod::InterfaceControl ; "tun removing address via Control.Remove")]
 #[test_case(true, AddressRemovalMethod::AddressStateProviderExplicitRemove ; "tun removing address via AddressStateProvider.Remove")]
-async fn add_address_removal<N: Netstack>(
-    name: &str,
-    tun: bool,
-    removal_method: AddressRemovalMethod,
-) {
+async fn add_address_removal(name: &str, tun: bool, removal_method: AddressRemovalMethod) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     enum KeepResource<'a> {
         Interface {
@@ -803,10 +776,9 @@ async fn add_address_removal<N: Netstack>(
 // Races address and interface removal and verifies that the end state is as
 // expected. Guards against regression for ASP race in Netstack3.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn race_address_and_interface_removal<N: Netstack>(name: &str) {
+async fn race_address_and_interface_removal(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
@@ -868,10 +840,9 @@ async fn race_address_and_interface_removal<N: Netstack>(name: &str) {
 // Add an address while the interface is offline, bring the interface online and ensure that the
 // assignment state is set correctly.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn add_address_offline<N: Netstack>(name: &str) {
+async fn add_address_offline(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = device.into_interface_in_realm(&realm).await.expect("add endpoint to Netstack");
     let id = interface.id();
@@ -923,12 +894,11 @@ async fn add_address_offline<N: Netstack>(name: &str) {
 // request is pending causes the `AddressStateProvider` protocol to close,
 // regardless of whether the protocol is detached.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(false; "no_detach")]
 #[test_case(true; "detach")]
-async fn duplicate_watch_address_assignment_state<N: Netstack>(name: &str, detach: bool) {
+async fn duplicate_watch_address_assignment_state(name: &str, detach: bool) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
         .install_endpoint(device, InterfaceConfig::default())
@@ -973,7 +943,7 @@ async fn duplicate_watch_address_assignment_state<N: Netstack>(name: &str, detac
 }
 
 /// Creates a realm in the provided sandbox and an interface in that realm.
-async fn create_realm_and_interface<'a, N: Netstack>(
+async fn create_realm_and_interface<'a>(
     name: &'a str,
     sandbox: &'a netemul::TestSandbox,
 ) -> (
@@ -982,7 +952,7 @@ async fn create_realm_and_interface<'a, N: Netstack>(
     u64,
     fidl_fuchsia_net_interfaces_ext::admin::Control,
 ) {
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let interface_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
@@ -1035,7 +1005,6 @@ enum AddressRemoval {
 use AddressRemoval::*;
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     None,
     false,
@@ -1090,15 +1059,14 @@ use AddressRemoval::*;
     DropHandle;
     "add_subnet_route is true implicit remove"
 )]
-async fn add_address_and_remove<N: Netstack>(
+async fn add_address_and_remove(
     name: &str,
     add_subnet_route: Option<bool>,
     expect_subnet_route: bool,
     remove_address: AddressRemoval,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let (realm, interface_state, id, control) =
-        create_realm_and_interface::<N>(name, &sandbox).await;
+    let (realm, interface_state, id, control) = create_realm_and_interface(name, &sandbox).await;
 
     // Adding a valid address succeeds.
     let subnet = fidl_subnet!("1.1.1.1/32");
@@ -1222,7 +1190,7 @@ async fn add_address_and_remove<N: Netstack>(
 
     // The address should disappear. Unfortunately, we can't assume it to be
     // synchronously gone from interface watchers as there's no synchronization
-    // guarantee between interfaces-admin and interface watchers on netstack2.
+    // guarantee between interfaces-admin and interface watchers.
     fnet_interfaces_ext::wait_interface_with_id(
         fnet_interfaces_ext::event_stream_from_state::<fnet_interfaces_ext::DefaultInterest>(
             &interface_state,
@@ -1282,18 +1250,16 @@ async fn add_address_and_remove<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(None, false; "default add_subnet_route")]
 #[test_case(Some(false), false; "add_subnet_route is false")]
 #[test_case(Some(true), true; "add_subnet_route is true")]
-async fn add_address_and_detach<N: Netstack>(
+async fn add_address_and_detach(
     name: &str,
     add_subnet_route: Option<bool>,
     expect_subnet_route: bool,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let (realm, interface_state, id, control) =
-        create_realm_and_interface::<N>(name, &sandbox).await;
+    let (realm, interface_state, id, control) = create_realm_and_interface(name, &sandbox).await;
 
     // Adding a valid address and detaching does not cause the address (or the
     // subnet, if one was requested) to be removed.
@@ -1361,13 +1327,12 @@ async fn add_address_and_detach<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn add_remove_address_on_loopback<N: Netstack>(name: &str) {
+async fn add_remove_address_on_loopback(name: &str) {
     const IPV4_LOOPBACK: fidl_fuchsia_net::Subnet = fidl_subnet!("127.0.0.1/8");
     const IPV6_LOOPBACK: fidl_fuchsia_net::Subnet = fidl_subnet!("::1/128");
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let (loopback_id, addresses) = assert_matches::assert_matches!(
         realm.loopback_properties().await,
@@ -1423,10 +1388,9 @@ async fn add_remove_address_on_loopback<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn remove_slaac_address<N: Netstack>(name: &str) {
+async fn remove_slaac_address(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let network = sandbox.create_network(name).await.expect("create network");
     let iface = realm.join_network(&network, "testif1").await.expect("join network");
 
@@ -1466,13 +1430,12 @@ async fn remove_slaac_address<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn device_control_create_interface<N: Netstack>(name: &str) {
+async fn device_control_create_interface(name: &str) {
     // NB: interface names are limited to fuchsia.net.interfaces/INTERFACE_NAME_LENGTH.
     const IF_NAME: &'static str = "ctrl_create_if";
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let endpoint = sandbox.create_endpoint(name).await.expect("create endpoint");
     let installer = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces_admin::InstallerMarker>()
@@ -1520,11 +1483,7 @@ async fn device_control_create_interface<N: Netstack>(name: &str) {
         }
     };
 
-    let port_identity_koid = if N::VERSION.is_netstack3() {
-        Some(endpoint.get_port_identity_koid().await.expect("get id event"))
-    } else {
-        None
-    };
+    let port_identity_koid = Some(endpoint.get_port_identity_koid().await.expect("get id event"));
 
     assert_eq!(
         properties,
@@ -1546,14 +1505,13 @@ async fn device_control_create_interface<N: Netstack>(name: &str) {
 // Tests that when a DeviceControl instance is dropped, all interfaces created
 // from it are dropped as well.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(false; "no_detach")]
 #[test_case(true; "detach")]
-async fn device_control_owns_interfaces_lifetimes<N: Netstack>(name: &str, detach: bool) {
+async fn device_control_owns_interfaces_lifetimes(name: &str, detach: bool) {
     let detach_str = if detach { "detach" } else { "no_detach" };
     let name = format!("{name}_{detach_str}");
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     // Create tun interfaces directly to attach ports to different interfaces.
     let (tun_dev, netdevice_client_end) = create_tun_device();
@@ -1751,7 +1709,6 @@ async fn device_control_owns_interfaces_lifetimes<N: Netstack>(name: &str, detac
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
 fidl_fuchsia_net_interfaces_admin::InterfaceRemovedReason::DuplicateName;
 "DuplicateName"
@@ -1763,14 +1720,14 @@ fidl_fuchsia_net_interfaces_admin::InterfaceRemovedReason::PortAlreadyBound;
 #[test_case(fidl_fuchsia_net_interfaces_admin::InterfaceRemovedReason::BadPort; "BadPort")]
 #[test_case(fidl_fuchsia_net_interfaces_admin::InterfaceRemovedReason::PortClosed; "PortClosed")]
 #[test_case(fidl_fuchsia_net_interfaces_admin::InterfaceRemovedReason::User; "User")]
-async fn control_terminal_events<N: Netstack>(
+async fn control_terminal_events(
     name: &str,
     reason: fidl_fuchsia_net_interfaces_admin::InterfaceRemovedReason,
 ) {
     let name = format!("{}_{:?}", name, reason);
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(&name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(&name).expect("create realm");
 
     let installer = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces_admin::InstallerMarker>()
@@ -1953,10 +1910,9 @@ async fn control_terminal_events<N: Netstack>(
 
 // Test that destroying a device causes device control instance to close.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn device_control_closes_on_device_close<N: Netstack>(name: &str) {
+async fn device_control_closes_on_device_close(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let endpoint = sandbox.create_endpoint(name).await.expect("create endpoint");
 
     // Create a watcher, we'll use it to ensure the Netstack didn't crash.
@@ -2078,9 +2034,8 @@ impl<T: fasync::TimeoutExt> PanicOnTimeout for T {}
 
 // Tests that interfaces created through installer have a valid datapath.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn installer_creates_datapath<N: Netstack, I: Ip>(test_name: &str) {
+async fn installer_creates_datapath<I: Ip>(test_name: &str) {
     const ALICE_IP_V4: fidl_fuchsia_net::Subnet = fidl_subnet!("192.168.0.1/24");
     const BOB_IP_V4: fidl_fuchsia_net::Subnet = fidl_subnet!("192.168.0.2/24");
     const ALICE_MAC: fnet::MacAddress = fidl_mac!("02:00:00:00:00:01");
@@ -2113,8 +2068,9 @@ async fn installer_creates_datapath<N: Netstack, I: Ip>(test_name: &str) {
         let network = &network;
         async move {
             let test_name = format!("{}_{}", test_name, name);
-            let realm =
-                sandbox.create_netstack_realm::<N, _>(test_name.clone()).expect("create realm");
+            let realm = sandbox
+                .create_netstack_realm::<Netstack3, _>(test_name.clone())
+                .expect("create realm");
             let endpoint = network
                 .create_endpoint_with(
                     test_name,
@@ -2318,10 +2274,9 @@ async fn installer_creates_datapath<N: Netstack, I: Ip>(test_name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn control_enable_disable<N: Netstack>(name: &str) {
+async fn control_enable_disable(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let endpoint = sandbox.create_endpoint(name).await.expect("create endpoint");
     endpoint.set_link_up(true).await.expect("set link up");
     let installer = realm
@@ -2417,10 +2372,9 @@ async fn control_enable_disable<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn link_state_interface_state_interaction<N: Netstack>(name: &str) {
+async fn link_state_interface_state_interaction(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("new sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = device.into_interface_in_realm(&realm).await.expect("add endpoint to Netstack");
     let iface_id = interface.id();
@@ -2513,7 +2467,6 @@ enum SetupOrder {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(SetupOrder::PreferredInterfaceFirst; "setup_preferred_interface_first")]
 #[test_case(SetupOrder::PreferredInterfaceLast; "setup_preferred_interface_last")]
@@ -2525,12 +2478,14 @@ enum SetupOrder {
 // within the same subnet (and add subnet routes). Finally, verify (by checking
 // the source addr) that sending from the send side to the receive side uses the
 // preferred send interface.
-async fn interface_routing_metric<N: Netstack, I: Ip>(name: &str, order: SetupOrder) {
+async fn interface_routing_metric<I: Ip>(name: &str, order: SetupOrder) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let send_realm =
-        sandbox.create_netstack_realm::<N, _>(format!("{name}_send")).expect("create realm");
-    let recv_realm =
-        sandbox.create_netstack_realm::<N, _>(format!("{name}_recv")).expect("create realm");
+    let send_realm = sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_send"))
+        .expect("create realm");
+    let recv_realm = sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_recv"))
+        .expect("create realm");
     let network = sandbox.create_network(name).await.expect("create network");
 
     async fn setup_interface_in_realm<'a>(
@@ -2635,10 +2590,9 @@ async fn interface_routing_metric<N: Netstack, I: Ip>(name: &str, order: SetupOr
 
 // Test add/remove address and observe the events in InterfaceWatcher.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn control_add_remove_address<N: Netstack>(name: &str) {
+async fn control_add_remove_address(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
         .install_endpoint(device, InterfaceConfig::default())
@@ -2808,15 +2762,14 @@ async fn control_add_remove_address<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(false; "no_detach")]
 #[test_case(true; "detach")]
-async fn control_owns_interface_lifetime<N: Netstack>(name: &str, detach: bool) {
+async fn control_owns_interface_lifetime(name: &str, detach: bool) {
     let detach_str = if detach { "detach" } else { "no_detach" };
     let name = format!("{}_{}", name, detach_str);
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(&name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(&name).expect("create realm");
     let endpoint = sandbox.create_endpoint(&name).await.expect("create endpoint");
     let installer = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces_admin::InstallerMarker>()
@@ -3000,7 +2953,6 @@ async fn get_ip_forwarding(iface: &fnet_interfaces_ext::admin::Control) -> IpFor
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     IpForwarding { v4_unicast: None, v4_multicast: None, v6_unicast: None, v6_multicast: None },
     None
@@ -3049,13 +3001,13 @@ async fn get_ip_forwarding(iface: &fnet_interfaces_ext::admin::Control) -> IpFor
     IpForwarding { v4_unicast: Some(true), v4_multicast: Some(true), v6_unicast: Some(true), v6_multicast: Some(true) },
     Some(finterfaces_admin::ControlSetConfigurationError::Ipv4ForwardingUnsupported)
 ; "set_ip_and_multicast_ip_true")]
-async fn get_set_forwarding_loopback<N: Netstack>(
+async fn get_set_forwarding_loopback(
     name: &str,
     forwarding_config: IpForwarding,
     expected_err: Option<finterfaces_admin::ControlSetConfigurationError>,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let loopback_control = realm
         .interface_control(assert_matches::assert_matches!(
             realm.loopback_properties().await,
@@ -3092,7 +3044,6 @@ async fn get_set_forwarding_loopback<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(IpForwarding { v4_unicast: None, v4_multicast: None, v6_unicast: None, v6_multicast: None }; "set_none")]
 #[test_case(IpForwarding { v4_unicast: Some(false), v4_multicast: None, v6_unicast: Some(false), v6_multicast: None }; "set_ip_false")]
 #[test_case(IpForwarding { v4_unicast: Some(true), v4_multicast: None, v6_unicast: Some(false), v6_multicast: None }; "set_ipv4_true")]
@@ -3105,9 +3056,9 @@ async fn get_set_forwarding_loopback<N: Netstack>(
 #[test_case(IpForwarding { v4_unicast: Some(true), v4_multicast: Some(false), v6_unicast: Some(true), v6_multicast: Some(false) }; "set_ip_true_and_multicast_ip_false")]
 #[test_case(IpForwarding { v4_unicast: Some(false), v4_multicast: Some(true), v6_unicast: Some(false), v6_multicast: Some(true) }; "set_ip_false_and_multicast_ip_true")]
 #[test_case(IpForwarding { v4_unicast: Some(true), v4_multicast: Some(true), v6_unicast: Some(true), v6_multicast: Some(true) }; "set_ip_and_multicast_ip_true")]
-async fn get_set_forwarding<N: Netstack>(name: &str, forwarding_config: IpForwarding) {
+async fn get_set_forwarding(name: &str, forwarding_config: IpForwarding) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let net = sandbox.create_network("net").await.expect("create network");
     let iface1 = realm.join_network(&net, "iface1").await.expect("create iface1");
     let iface2 = realm.join_network(&net, "iface2").await.expect("create iface1");
@@ -3205,10 +3156,9 @@ async fn get_set_forwarding<N: Netstack>(name: &str, forwarding_config: IpForwar
 
 // Test that reinstalling a port with the same base port identifier works.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn reinstall_same_port<N: Netstack>(name: &str) {
+async fn reinstall_same_port(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let installer = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces_admin::InstallerMarker>()
@@ -3309,10 +3259,9 @@ async fn reinstall_same_port<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn synchronous_remove<N: Netstack>(name: &str) {
+async fn synchronous_remove(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let ep = sandbox.create_endpoint(name).await.expect("create endpoint");
     let iface = ep.into_interface_in_realm(&realm).await.expect("install interface");
     iface.control().remove().await.expect("remove completes").expect("remove succeeds");
@@ -3322,10 +3271,9 @@ async fn synchronous_remove<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn no_remove_loopback<N: Netstack>(name: &str) {
+async fn no_remove_loopback(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let fidl_fuchsia_net_interfaces_ext::Properties { id, .. } = realm
         .loopback_properties()
         .await
@@ -3345,10 +3293,9 @@ async fn no_remove_loopback<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn epitaph_is_sent_after_interface_removal<N: Netstack>(name: &str) {
+async fn epitaph_is_sent_after_interface_removal(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let ep = sandbox.create_endpoint(name).await.expect("create endpoint");
 
     let (device, port_id) = ep.get_netdevice().await.expect("get netdevice");
@@ -3429,12 +3376,11 @@ fn new_nud_config<I: Ip>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn nud_max_multicast_solicitations<N: Netstack, I: Ip>(name: &str) {
+async fn nud_max_multicast_solicitations<I: Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("create netstack realm");
 
     let network = sandbox.create_network(name).await.expect("create network");
@@ -3520,11 +3466,10 @@ async fn nud_max_multicast_solicitations<N: Netstack, I: Ip>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn nud_config_not_supported_on_loopback<N: Netstack, I: Ip>(name: &str) {
+async fn nud_config_not_supported_on_loopback<I: Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
 
     // Check that the behavior is as expected for loopback, which doesn't
     // support these configurations.
@@ -3576,12 +3521,11 @@ async fn nud_config_not_supported_on_loopback<N: Netstack, I: Ip>(name: &str) {
 /// at the wire behavior after setting. We rely on unit tests for that because
 /// the set up is more trouble than it's worth.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn nud_max_unicast_solicitations<N: Netstack, I: Ip>(name: &str) {
+async fn nud_max_unicast_solicitations<I: Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("create netstack realm");
 
     let network = sandbox.create_network(name).await.expect("create network");
@@ -3633,12 +3577,11 @@ async fn nud_max_unicast_solicitations<N: Netstack, I: Ip>(name: &str) {
 /// in REACHABLE changes as a result of changing base reachable time due to
 /// timing sensitivity.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn nud_base_reachable_time<N: Netstack, I: Ip>(name: &str) {
+async fn nud_base_reachable_time<I: Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("create netstack realm");
 
     let network = sandbox.create_network(name).await.expect("create network");
@@ -3693,10 +3636,9 @@ async fn nud_base_reachable_time<N: Netstack, I: Ip>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dad_transmits<N: Netstack>(name: &str) {
+async fn dad_transmits(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let network = sandbox.create_network(name).await.expect("create network");
     let iface = realm.join_network(&network, "client").await.expect("join network");
 
@@ -3750,25 +3692,14 @@ async fn dad_transmits<N: Netstack>(name: &str) {
         )
     };
 
-    let get_expectation = |want| {
-        match N::VERSION {
-            NetstackVersion::Netstack2 { .. } | NetstackVersion::ProdNetstack2 => {
-                // Netstack2 doesn't support DAD transmits, so always expect to
-                // see `None` in all returns.
-                None
-            }
-            NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => Some(want),
-        }
-    };
-
     // Default number of DAD transmits. Defined in RFC 5227 for IPv4 and
     // RFC 4862 for IPv6.
     const DEFAULT_DAD_TRANSMITS_IPV4: u16 = 3;
     const DEFAULT_DAD_TRANSMITS_IPV6: u16 = 1;
 
     let (initial_ipv4, initial_ipv6) = get_transmits().await;
-    assert_eq!(initial_ipv4, get_expectation(DEFAULT_DAD_TRANSMITS_IPV4));
-    assert_eq!(initial_ipv6, get_expectation(DEFAULT_DAD_TRANSMITS_IPV6));
+    assert_eq!(initial_ipv4, Some(DEFAULT_DAD_TRANSMITS_IPV4));
+    assert_eq!(initial_ipv6, Some(DEFAULT_DAD_TRANSMITS_IPV6));
 
     // Arbitrary Values, that are distinguishable from one another.
     const WANT_TRANSMITS_IPV4: u16 = 4;
@@ -3781,19 +3712,18 @@ async fn dad_transmits<N: Netstack>(name: &str) {
         .expect("set configuration error");
 
     let (ipv4_from_update, ipv6_from_update) = transmits_from_config(update);
-    assert_eq!(ipv4_from_update, get_expectation(DEFAULT_DAD_TRANSMITS_IPV4));
-    assert_eq!(ipv6_from_update, get_expectation(DEFAULT_DAD_TRANSMITS_IPV6));
+    assert_eq!(ipv4_from_update, Some(DEFAULT_DAD_TRANSMITS_IPV4));
+    assert_eq!(ipv6_from_update, Some(DEFAULT_DAD_TRANSMITS_IPV6));
 
     let (new_ipv4, new_ipv6) = get_transmits().await;
-    assert_eq!(new_ipv4, get_expectation(WANT_TRANSMITS_IPV4));
-    assert_eq!(new_ipv6, get_expectation(WANT_TRANSMITS_IPV6));
+    assert_eq!(new_ipv4, Some(WANT_TRANSMITS_IPV4));
+    assert_eq!(new_ipv6, Some(WANT_TRANSMITS_IPV6));
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn temporary_address_generation<N: Netstack>(name: &str) {
+async fn temporary_address_generation(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let network = sandbox.create_network(name).await.expect("create network");
     let iface = realm.join_network(&network, "client").await.expect("join network");
 
@@ -4031,10 +3961,9 @@ async fn router_solicitation_configuration(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn interface_authorization<N: Netstack>(name: &str) {
+async fn interface_authorization(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let device_1 = sandbox.create_endpoint(format!("{name}1")).await.expect("create endpoint");
     let endpoint_1 = realm
@@ -4077,10 +4006,9 @@ async fn interface_authorization<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn interface_authorization_root_access<N: Netstack>(name: &str) {
+async fn interface_authorization_root_access(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let endpoint = realm

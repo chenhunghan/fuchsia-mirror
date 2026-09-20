@@ -73,18 +73,18 @@ template <class ElfLayout, template <typename> class SegmentContainer, AbiModule
 class DecodedModule : public DecodedModuleBase {
  public:
   using Elf = ElfLayout;
-  using Addr = typename Elf::Addr;
-  using size_type = typename Elf::size_type;
-  using Module = typename abi::Abi<Elf>::Module;
-  using TlsModule = typename abi::Abi<Elf>::TlsModule;
+  using Addr = Elf::Addr;
+  using size_type = Elf::size_type;
+  using Module = abi::Abi<Elf>::Module;
+  using TlsModule = abi::Abi<Elf>::TlsModule;
   using LoadInfo =
       elfldltl::LoadInfo<Elf, SegmentContainer, elfldltl::PhdrLoadPolicy::kBasic, SegmentWrapper>;
   using RelocationInfo = elfldltl::RelocationInfo<Elf>;
   using Soname = elfldltl::Soname<Elf>;
-  using Ehdr = typename Elf::Ehdr;
-  using Phdr = typename Elf::Phdr;
-  using Dyn = typename Elf::Dyn;
-  using Sym = typename Elf::Sym;
+  using Ehdr = Elf::Ehdr;
+  using Phdr = Elf::Phdr;
+  using Dyn = Elf::Dyn;
+  using Sym = Elf::Sym;
 
   // This is the return value that the <lib/elfldltl/resolve.h> Module API
   // requires for the Lookup method.
@@ -327,7 +327,7 @@ class DecodedModule : public DecodedModuleBase {
   // omitted from the container it's success even with an empty container.
   template <template <typename> class Container, class Diagnostics, class Offsets>
   constexpr std::optional<Container<Soname>> ReifyNeeded(Diagnostics& diag, Offsets&& offsets) {
-    using OffsetType = typename std::decay_t<Offsets>::value_type;
+    using OffsetType = std::decay_t<Offsets>::value_type;
     static_assert(std::is_same_v<size_type, OffsetType>);
     std::optional<Container<Soname>> needed{std::in_place};
     if (!needed->reserve(diag, kNeededFail, offsets.size())) [[unlikely]] {

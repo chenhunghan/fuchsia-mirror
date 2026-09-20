@@ -42,9 +42,6 @@ pub struct Mapping {
     /// The flags used by the mapping, including protection.
     flags: MappingFlags,
 
-    /// The maximum amount of access allowed to this mapping.
-    max_access: Access,
-
     /// The name for this mapping.
     ///
     /// This may be a reference to the filesystem node backing this mapping or a userspace-assigned
@@ -67,24 +64,18 @@ pub struct Mapping {
 static_assertions::assert_eq_size!(Mapping, [u8; 24]);
 
 impl Mapping {
-    pub fn new(
-        backing: MappingBacking,
-        flags: MappingFlags,
-        max_access: Access,
-        mode: MappingMode,
-    ) -> Mapping {
-        Self::with_name(backing, flags, max_access, MappingName::None, mode)
+    pub fn new(backing: MappingBacking, flags: MappingFlags, mode: MappingMode) -> Mapping {
+        Self::with_name(backing, flags, MappingName::None, mode)
     }
 
     pub fn with_name(
         backing: MappingBacking,
         mut flags: MappingFlags,
-        max_access: Access,
         name: MappingName,
         mode: MappingMode,
     ) -> Mapping {
         flags.set(MappingFlags::MAPPED_IN_VMAR, mode == MappingMode::Eager);
-        MappingUnsplit { backing, flags, max_access, name }.decompose()
+        MappingUnsplit { backing, flags, name }.decompose()
     }
 
     pub fn flags(&self) -> MappingFlags {
@@ -107,8 +98,31 @@ impl Mapping {
         self.flags = new_flags;
     }
 
-    pub fn max_access(&self) -> Access {
-        self.max_access
+    /// Maximum [`Access`] permissions allowed for this mapping, used by [`Mapping::vm_flags`] to
+    /// report `mr`, `mw`, and `me` in `/proc/[pid]/smaps` (see `proc_pid_smaps(5)`).
+    fn max_access(&self) -> Access {
+        match self.name() {
+            MappingNameRef::None
+            | MappingNameRef::Stack
+            | MappingNameRef::Heap
+            | MappingNameRef::Vma(_)
+            | MappingNameRef::Ashmem(_)
+            | MappingNameRef::AioContext(_) => Access::rwx(),
+            // The vDSO and vvar mappings are backed by read-only kernel VMOs (with execute rights
+            // for the vDSO) and cannot be made writable by userspace via `mprotect`.
+            MappingNameRef::Vdso => Access::READ | Access::EXEC,
+            MappingNameRef::Vvar => Access::READ,
+            MappingNameRef::File(file) => {
+                let mut access = file.file().max_access_for_memory_mapping();
+                // Private file mappings use copy-on-write, so they may always be made writable
+                // (e.g. via `mprotect(PROT_WRITE)`) even if the underlying file was opened
+                // read-only.
+                if !self.flags.contains(MappingFlags::SHARED) {
+                    access |= Access::WRITE;
+                }
+                access
+            }
+        }
     }
 
     pub fn get_backing_internal(&self) -> &MappingBacking {
@@ -139,18 +153,11 @@ impl Mapping {
     }
 
     pub fn new_private_anonymous(
-        mut flags: MappingFlags,
+        flags: MappingFlags,
         name: MappingName,
         mode: MappingMode,
     ) -> Mapping {
-        flags.set(MappingFlags::MAPPED_IN_VMAR, mode == MappingMode::Eager);
-        MappingUnsplit {
-            backing: MappingBacking::PrivateAnonymous,
-            flags,
-            max_access: Access::rwx(),
-            name,
-        }
-        .decompose()
+        Self::with_name(MappingBacking::PrivateAnonymous, flags, name, mode)
     }
 
     pub fn inflate_to_include_guard_pages(&self, range: &Range<UserAddress>) -> Range<UserAddress> {
@@ -196,6 +203,7 @@ impl Mapping {
 
     pub fn vm_flags(&self) -> String {
         let mut string = String::default();
+        let max_access = self.max_access();
         // From <https://man7.org/linux/man-pages/man5/proc_pid_smaps.5.html>:
         //
         // rd   -   readable
@@ -211,19 +219,19 @@ impl Mapping {
             string.push_str("ex ");
         }
         // sh   -   shared
-        if self.flags.contains(MappingFlags::SHARED) && self.max_access.contains(Access::WRITE) {
+        if self.flags.contains(MappingFlags::SHARED) && max_access.contains(Access::WRITE) {
             string.push_str("sh ");
         }
         // mr   -   may read
-        if self.max_access.contains(Access::READ) {
+        if max_access.contains(Access::READ) {
             string.push_str("mr ");
         }
         // mw   -   may write
-        if self.max_access.contains(Access::WRITE) {
+        if max_access.contains(Access::WRITE) {
             string.push_str("mw ");
         }
         // me   -   may execute
-        if self.max_access.contains(Access::EXEC) {
+        if max_access.contains(Access::EXEC) {
             string.push_str("me ");
         }
         // ms   -   may share

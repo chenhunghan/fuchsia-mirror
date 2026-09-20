@@ -42,16 +42,39 @@ impl<Class: LockClass, M: RawLock> KMutex<Class, M> {
 
     /// Acquires the lock, using the default policy, and registers the active loop node.
     #[inline]
-    pub fn lock(&self) -> impl PinInit<KMutexGuard<'_, Class, M>, core::convert::Infallible> {
+    pub fn lock(&self) -> impl PinInit<KMutexGuard<'_, Class, M>, core::convert::Infallible>
+    where
+        <M as RawLock>::DefaultPolicy: LockPolicy<M, AcquireArgs = ()>,
+    {
         KMutexGuard::new(self)
+    }
+
+    /// Acquires the lock with arguments, using the default policy, and registers the active loop
+    /// node.
+    #[inline]
+    pub fn lock_with(
+        &self,
+        args: <<M as RawLock>::DefaultPolicy as LockPolicy<M>>::AcquireArgs,
+    ) -> impl PinInit<KMutexGuard<'_, Class, M>, core::convert::Infallible> {
+        KMutexGuard::new_with_args(self, args)
     }
 
     /// Acquires the lock, using the specified policy, and registers the active loop node.
     #[inline]
-    pub fn lock_policy<P: LockPolicy<M>>(
+    pub fn lock_policy<P: LockPolicy<M, AcquireArgs = ()>>(
         &self,
     ) -> impl PinInit<KMutexGuard<'_, Class, M, P>, core::convert::Infallible> {
         KMutexGuard::new(self)
+    }
+
+    /// Acquires the lock with arguments, using the specified policy, and registers the active loop
+    /// node.
+    #[inline]
+    pub fn lock_policy_with<P: LockPolicy<M>>(
+        &self,
+        args: P::AcquireArgs,
+    ) -> impl PinInit<KMutexGuard<'_, Class, M, P>, core::convert::Infallible> {
+        KMutexGuard::new_with_args(self, args)
     }
 
     /// Acquires this lock and aliases it with `alias`, returning a guard that proves ownership
@@ -61,18 +84,48 @@ impl<Class: LockClass, M: RawLock> KMutex<Class, M> {
         &'a self,
         alias: &'a KMutex<AliasClass, M2>,
     ) -> impl PinInit<KMutexAliasedGuard<'a, Class, AliasClass, M, M2>, core::convert::Infallible>
+    where
+        <M as RawLock>::DefaultPolicy: LockPolicy<M, AcquireArgs = ()>,
     {
         KMutexAliasedGuard::new(self, alias)
     }
 
+    /// Acquires this lock with arguments and aliases it with `alias`, returning a guard that proves
+    /// ownership of both `Class` and `AliasClass`.
+    #[inline]
+    pub fn aliased_lock_with<'a, AliasClass: LockClass, M2: RawLock>(
+        &'a self,
+        alias: &'a KMutex<AliasClass, M2>,
+        args: <<M as RawLock>::DefaultPolicy as LockPolicy<M>>::AcquireArgs,
+    ) -> impl PinInit<KMutexAliasedGuard<'a, Class, AliasClass, M, M2>, core::convert::Infallible>
+    {
+        KMutexAliasedGuard::new_with_args(self, alias, args)
+    }
+
     /// Acquires this lock with policy `P` and aliases it with `alias`.
     #[inline]
-    pub fn aliased_lock_policy<'a, AliasClass: LockClass, M2: RawLock, P: LockPolicy<M>>(
+    pub fn aliased_lock_policy<
+        'a,
+        AliasClass: LockClass,
+        M2: RawLock,
+        P: LockPolicy<M, AcquireArgs = ()>,
+    >(
         &'a self,
         alias: &'a KMutex<AliasClass, M2>,
     ) -> impl PinInit<KMutexAliasedGuard<'a, Class, AliasClass, M, M2, P>, core::convert::Infallible>
     {
         KMutexAliasedGuard::new(self, alias)
+    }
+
+    /// Acquires this lock with policy `P` and arguments and aliases it with `alias`.
+    #[inline]
+    pub fn aliased_lock_policy_with<'a, AliasClass: LockClass, M2: RawLock, P: LockPolicy<M>>(
+        &'a self,
+        alias: &'a KMutex<AliasClass, M2>,
+        args: P::AcquireArgs,
+    ) -> impl PinInit<KMutexAliasedGuard<'a, Class, AliasClass, M, M2, P>, core::convert::Infallible>
+    {
+        KMutexAliasedGuard::new_with_args(self, alias, args)
     }
 
     /// Returns a reference to the underlying raw lock.
@@ -117,7 +170,19 @@ pub struct KMutexGuard<
 
 impl<'a, Class: LockClass, M: RawLock, P: LockPolicy<M>> KMutexGuard<'a, Class, M, P> {
     /// Creates a new stack-pinned validation guard initialization block.
-    pub fn new(mutex: &'a KMutex<Class, M>) -> impl PinInit<Self, core::convert::Infallible> {
+    pub fn new(mutex: &'a KMutex<Class, M>) -> impl PinInit<Self, core::convert::Infallible>
+    where
+        P: LockPolicy<M, AcquireArgs = ()>,
+    {
+        Self::new_with_args(mutex, ())
+    }
+
+    /// Creates a new stack-pinned validation guard initialization block with policy acquire
+    /// arguments.
+    pub fn new_with_args(
+        mutex: &'a KMutex<Class, M>,
+        args: P::AcquireArgs,
+    ) -> impl PinInit<Self, core::convert::Infallible> {
         // SAFETY: The closure correctly initializes all fields of the allocated `KMutexGuard`
         // and satisfies all safety requirements of `pin_init_from_closure`.
         unsafe {
@@ -131,7 +196,7 @@ impl<'a, Class: LockClass, M: RawLock, P: LockPolicy<M>> KMutexGuard<'a, Class, 
                 let entry_addr = core::ptr::addr_of_mut!((*this).lock_entry);
                 core::ptr::write(entry_addr, M::LockEntry::default());
 
-                let state = P::acquire(&mutex.mutex, entry_addr);
+                let state = P::acquire(&mutex.mutex, entry_addr, args);
 
                 let state_addr = core::ptr::addr_of_mut!((*this).state);
                 core::ptr::write(state_addr, state);
@@ -169,12 +234,13 @@ impl<'a, Class: LockClass, M: RawLock, P: LockPolicy<M>> KMutexGuard<'a, Class, 
             let entry_addr = &mut me.lock_entry as *mut _;
             P::release(&me.mutex.mutex, entry_addr, me.state);
             let result = f();
-            me.state = P::acquire(&me.mutex.mutex, entry_addr);
+            P::reacquire(&me.mutex.mutex, entry_addr, &mut me.state);
             result
         }
     }
 
-    /// Calls a closure while temporarily disabling lockdep tracking for the lock held by this guard.
+    /// Calls a closure while temporarily disabling lockdep tracking for the lock held by this
+    /// guard.
     #[inline]
     pub fn call_untracked<R, F: FnOnce(&mut LockToken<'a, Class>) -> R>(
         self: Pin<&mut Self>,
@@ -225,14 +291,45 @@ pub struct AliasedLock;
 pub fn aliased_lock<'a, Class1: LockClass, Class2: LockClass, M1: RawLock, M2: RawLock>(
     lock1: &'a KMutex<Class1, M1>,
     lock2: &'a KMutex<Class2, M2>,
-) -> impl PinInit<KMutexAliasedGuard<'a, Class1, Class2, M1, M2>, core::convert::Infallible> {
+) -> impl PinInit<KMutexAliasedGuard<'a, Class1, Class2, M1, M2>, core::convert::Infallible>
+where
+    <M1 as RawLock>::DefaultPolicy: LockPolicy<M1, AcquireArgs = ()>,
+{
     KMutexAliasedGuard::new(lock1, lock2)
 }
 
-/// Acquires an aliased lock with a specific policy on two `KMutex` instances that reference the same
+/// Acquires an aliased lock with arguments on two `KMutex` instances that reference the same
 /// underlying lock.
 #[inline]
+pub fn aliased_lock_with<'a, Class1: LockClass, Class2: LockClass, M1: RawLock, M2: RawLock>(
+    lock1: &'a KMutex<Class1, M1>,
+    lock2: &'a KMutex<Class2, M2>,
+    args: <<M1 as RawLock>::DefaultPolicy as LockPolicy<M1>>::AcquireArgs,
+) -> impl PinInit<KMutexAliasedGuard<'a, Class1, Class2, M1, M2>, core::convert::Infallible> {
+    KMutexAliasedGuard::new_with_args(lock1, lock2, args)
+}
+
+/// Acquires an aliased lock with a specific policy on two `KMutex` instances that reference the
+/// same underlying lock.
+#[inline]
 pub fn aliased_lock_policy<
+    'a,
+    Class1: LockClass,
+    Class2: LockClass,
+    M1: RawLock,
+    M2: RawLock,
+    P: LockPolicy<M1, AcquireArgs = ()>,
+>(
+    lock1: &'a KMutex<Class1, M1>,
+    lock2: &'a KMutex<Class2, M2>,
+) -> impl PinInit<KMutexAliasedGuard<'a, Class1, Class2, M1, M2, P>, core::convert::Infallible> {
+    KMutexAliasedGuard::new(lock1, lock2)
+}
+
+/// Acquires an aliased lock with a specific policy and arguments on two `KMutex` instances that
+/// reference the same underlying lock.
+#[inline]
+pub fn aliased_lock_policy_with<
     'a,
     Class1: LockClass,
     Class2: LockClass,
@@ -242,8 +339,9 @@ pub fn aliased_lock_policy<
 >(
     lock1: &'a KMutex<Class1, M1>,
     lock2: &'a KMutex<Class2, M2>,
+    args: P::AcquireArgs,
 ) -> impl PinInit<KMutexAliasedGuard<'a, Class1, Class2, M1, M2, P>, core::convert::Infallible> {
-    KMutexAliasedGuard::new(lock1, lock2)
+    KMutexAliasedGuard::new_with_args(lock1, lock2, args)
 }
 
 /// A validation guard representing ownership of two aliased locks simultaneously.
@@ -273,7 +371,20 @@ impl<'a, Class1: LockClass, Class2: LockClass, M1: RawLock, M2: RawLock, P: Lock
     /// Creates a new stack-pinned aliased validation guard initialization block.
     pub fn new(
         lock1: &'a KMutex<Class1, M1>,
+        lock2: &'a KMutex<Class2, M2>,
+    ) -> impl PinInit<Self, core::convert::Infallible>
+    where
+        P: LockPolicy<M1, AcquireArgs = ()>,
+    {
+        Self::new_with_args(lock1, lock2, ())
+    }
+
+    /// Creates a new stack-pinned aliased validation guard initialization block with policy acquire
+    /// arguments.
+    pub fn new_with_args(
+        lock1: &'a KMutex<Class1, M1>,
         _lock2: &'a KMutex<Class2, M2>,
+        args: P::AcquireArgs,
     ) -> impl PinInit<Self, core::convert::Infallible> {
         if core::mem::size_of::<M2>() > 0 {
             debug_assert_eq!(
@@ -283,7 +394,7 @@ impl<'a, Class1: LockClass, Class2: LockClass, M1: RawLock, M2: RawLock, P: Lock
             );
         }
         pin_init!(Self {
-            inner <- KMutexGuard::new(lock1),
+            inner <- KMutexGuard::new_with_args(lock1, args),
             // SAFETY: `inner` holds the underlying mutex, which is aliased to represent `Class2`.
             token2: unsafe { LockToken::new() },
             _phantom: PhantomData,
@@ -336,7 +447,8 @@ impl<'a, Class1: LockClass, Class2: LockClass, M1: RawLock, M2: RawLock, P: Lock
         inner_pin.call_unlocked(f)
     }
 
-    /// Calls a closure while temporarily disabling lockdep tracking for the lock held by this guard.
+    /// Calls a closure while temporarily disabling lockdep tracking for the lock held by this
+    /// guard.
     #[inline]
     pub fn call_untracked<
         R,

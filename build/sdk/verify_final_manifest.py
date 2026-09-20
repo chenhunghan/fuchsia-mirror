@@ -20,7 +20,8 @@ import os
 import pathlib
 import re
 import sys
-from typing import Sequence, TextIO, TypedDict
+from collections.abc import Sequence
+from typing import TextIO, TypedDict
 
 HOST_TOOL_SCHEMES: Sequence[str] = [
     "host_tool",

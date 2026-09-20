@@ -11,9 +11,10 @@ import gzip
 import json
 import os
 import subprocess
+from collections.abc import Iterable
 from concurrent import futures
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 JsonTrace = dict[str, Any]
 

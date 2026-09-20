@@ -653,17 +653,6 @@ fn create_starnix_network(id: u32, mark: u32) -> fnp_socketproxy::Network {
     }
 }
 
-fn create_fuchsia_network(id: u32) -> fnp_socketproxy::Network {
-    fnp_socketproxy::Network {
-        network_id: Some(id),
-        info: Some(fnp_socketproxy::NetworkInfo::Fuchsia(fnp_socketproxy::FuchsiaNetworkInfo {
-            ..Default::default()
-        })),
-        dns_servers: Some(fnp_socketproxy::NetworkDnsServers { ..Default::default() }),
-        ..Default::default()
-    }
-}
-
 /// Integration test fixture encapsulating the component realm and mock dependencies.
 struct TestRealm {
     /// The running component test realm.
@@ -733,7 +722,6 @@ impl TestRealm {
                     .capability(Capability::protocol::<fposix_socket::ProviderMarker>())
                     .capability(Capability::protocol::<fposix_socket_raw::ProviderMarker>())
                     .capability(Capability::protocol::<fnp_socketproxy::StarnixNetworksMarker>())
-                    .capability(Capability::protocol::<fnp_socketproxy::FuchsiaNetworksMarker>())
                     .from(&socket_proxy)
                     .to(Ref::parent()),
             )
@@ -938,139 +926,6 @@ async fn integration(should_set_default: bool, expected_mark: OptionalUint32) ->
             ])
             .await;
     }
-
-    Ok(())
-}
-
-#[fuchsia::test]
-async fn integration_across_registries() -> Result<(), Error> {
-    const STARNIX_NETWORK_ID: u32 = 1;
-    const STARNIX_NETWORK_MARK: u32 = 123;
-    const FUCHSIA_NETWORK_ID: u32 = 2;
-
-    let test_realm = TestRealm::new().await?;
-    let marks = test_realm.marks.clone();
-    let posix_socket: fposix_socket::ProviderProxy = test_realm.connect_to_protocol()?;
-    let starnix_networks: fnp_socketproxy::StarnixNetworksProxy =
-        test_realm.connect_to_protocol()?;
-    let fuchsia_networks: fnp_socketproxy::FuchsiaNetworksProxy =
-        test_realm.connect_to_protocol()?;
-
-    {
-        let socket = posix_socket
-            .stream_socket(fposix_socket::Domain::Ipv4, fposix_socket::StreamSocketProtocol::Tcp)
-            .await?
-            .map_err(|e| anyhow!("Could not get socket: {e:?}"))?
-            .into_proxy();
-
-        // With no registered networks, the mark should be unset
-        assert_eq!(
-            socket.get_mark(MarkDomain::Mark1).await?,
-            Ok(OptionalUint32::Unset(fposix_socket::Empty))
-        );
-        let locked_marks = marks.lock().await;
-        assert_eq!(locked_marks.len(), 1);
-        let first_mark = locked_marks[0].0.lock().await;
-        assert_eq!(*first_mark, OptionalUint32::Unset(fposix_socket::Empty));
-    }
-
-    // Add a network to the Starnix and Fuchsia registries.
-    starnix_networks
-        .add(&create_starnix_network(STARNIX_NETWORK_ID, STARNIX_NETWORK_MARK))
-        .await?
-        .map_err(|e| anyhow!("Could not add network: {e:?}"))?;
-    fuchsia_networks
-        .add(&create_fuchsia_network(FUCHSIA_NETWORK_ID))
-        .await?
-        .map_err(|e| anyhow!("Could not add network: {e:?}"))?;
-
-    // Set the Starnix network as default in the Starnix registry to use the
-    // Starnix default network's mark.
-    starnix_networks
-        .set_default(&OptionalUint32::Value(STARNIX_NETWORK_ID))
-        .await?
-        .map_err(|e| anyhow!("Could not set default network: {e:?}"))?;
-
-    {
-        let socket = posix_socket
-            .stream_socket(fposix_socket::Domain::Ipv4, fposix_socket::StreamSocketProtocol::Tcp)
-            .await?
-            .map_err(|e| anyhow!("Could not get socket: {e:?}"))?
-            .into_proxy();
-
-        // With a Starnix default network and no Fuchsia default network, the
-        // mark should be set to the Starnix default network's mark.
-        assert_eq!(
-            socket.get_mark(MarkDomain::Mark1).await?,
-            Ok(OptionalUint32::Value(STARNIX_NETWORK_MARK))
-        );
-        let locked_marks = marks.lock().await;
-        assert_eq!(locked_marks.len(), 2);
-        let first_mark = locked_marks[1].0.lock().await;
-        assert_eq!(*first_mark, OptionalUint32::Value(STARNIX_NETWORK_MARK));
-    }
-
-    // Set the Fuchsia network as default in the Fuchsia registry to use the
-    // Fuchsia default network's mark since the Fuchsia default network
-    // is preferred.
-    fuchsia_networks
-        .set_default(&fposix_socket::OptionalUint32::Value(FUCHSIA_NETWORK_ID))
-        .await?
-        .map_err(|e| anyhow!("Could not set default network: {e:?}"))?;
-
-    {
-        let socket = posix_socket
-            .stream_socket(fposix_socket::Domain::Ipv4, fposix_socket::StreamSocketProtocol::Tcp)
-            .await?
-            .map_err(|e| anyhow!("Could not get socket: {e:?}"))?
-            .into_proxy();
-
-        // With a Fuchsia default network, the mark should be set to the
-        // Fuchsia default network's mark.
-        assert_eq!(
-            socket.get_mark(MarkDomain::Mark1).await?,
-            Ok(OptionalUint32::Unset(fposix_socket::Empty))
-        );
-        let locked_marks = marks.lock().await;
-        assert_eq!(locked_marks.len(), 3);
-        let first_mark = locked_marks[2].0.lock().await;
-        assert_eq!(*first_mark, OptionalUint32::Unset(fposix_socket::Empty));
-    }
-
-    // When the Fuchsia network is unset, the mark should fallback to the
-    // Starnix default network's mark.
-    fuchsia_networks
-        .set_default(&OptionalUint32::Unset(fposix_socket::Empty))
-        .await?
-        .map_err(|e| anyhow!("Could not unset default network: {e:?}"))?;
-
-    {
-        let socket = posix_socket
-            .stream_socket(fposix_socket::Domain::Ipv4, fposix_socket::StreamSocketProtocol::Tcp)
-            .await?
-            .map_err(|e| anyhow!("Could not get socket: {e:?}"))?
-            .into_proxy();
-
-        // The mark should reflect the Starnix default network's mark.
-        assert_eq!(
-            socket.get_mark(MarkDomain::Mark1).await?,
-            Ok(OptionalUint32::Value(STARNIX_NETWORK_MARK))
-        );
-        let locked_marks = marks.lock().await;
-        assert_eq!(locked_marks.len(), 4);
-        let first_mark = locked_marks[3].0.lock().await;
-        assert_eq!(*first_mark, OptionalUint32::Value(STARNIX_NETWORK_MARK));
-    }
-
-    test_realm
-        .mock_netcfg
-        .wait_for_forwarded_requests(&[
-            NetworkRegistryRequest::Add {
-                network: create_starnix_network(STARNIX_NETWORK_ID, STARNIX_NETWORK_MARK),
-            },
-            NetworkRegistryRequest::SetDefault { network_id: Some(STARNIX_NETWORK_ID) },
-        ])
-        .await;
 
     Ok(())
 }

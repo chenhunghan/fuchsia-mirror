@@ -56,6 +56,16 @@ impl KeyMap {
             }
         }
     }
+
+    /// Returns every Linux keycode present in the keymap.
+    ///
+    /// The iteration order is unspecified. The result also includes the block of
+    /// test-only keycodes described in b/311425670, so callers building user-visible
+    /// capability bitmaps will generally want to filter it — see
+    /// `keyboard_key_attributes` in `input_file.rs` for an example.
+    pub fn all_linux_keycodes(&self) -> impl Iterator<Item = u32> + '_ {
+        self.linux_to_fuchsia.keys().copied()
+    }
 }
 
 fn init_key_map() -> KeyMap {

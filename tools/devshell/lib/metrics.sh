@@ -20,7 +20,7 @@
 # depends on FUCHSIA_DIR being defined correctly.
 
 # Increase the metrics version by 1 when analytics is updated
-_METRICS_VERSION="10"
+_METRICS_VERSION="11"
 _METRICS_ALLOWS_CUSTOM_REPORTING=( "test" )
 # If args match the below, then track capture group 1
 _METRICS_TRACK_REGEX=(
@@ -869,6 +869,68 @@ function track-build-event {
 
 
   # Send any remaining hits.
+  _send-analytics-batch
+  return 0
+}
+
+function track-test-event {
+  exec 1>/dev/null
+  exec 2>/dev/null
+  local start_time="$1"
+  local end_time="$2"
+  local exit_status="$3"
+  local was_aborted="$4"
+  local stats_json="$5"
+  local build_dir="$6"
+
+  metrics-read-config
+  if [[ "${METRICS_LEVEL}" -eq 0 ]] || ! metrics-is-internal-user; then
+    return 0
+  fi
+
+  # Package event params in a single jq call directly reading args.json if present.
+  # Extracts test_selection from stats_json and strips it from stats_json
+  # before chunking across stats_json1 and stats_json2 to avoid duplication and
+  # protect the 2000-char stats budget.
+  local slurp_arg=()
+  if [[ -f "${build_dir}/args.json" ]]; then
+    slurp_arg=(--slurpfile args "${build_dir}/args.json")
+  else
+    slurp_arg=(--argjson args '[{}]')
+  fi
+
+  local event_params
+  event_params=$(fx-command-run jq -c -n \
+    "${slurp_arg[@]}" \
+    --argjson start_time_micros "${start_time:-0}" \
+    --argjson end_time_micros "${end_time:-0}" \
+    --arg exit_status "${exit_status}" \
+    --arg was_aborted "${was_aborted}" \
+    --arg stats_json "${stats_json}" \
+    'def parse_stats:
+       (try fromjson catch null) as $s |
+       if ($s | type) == "object" then
+         { sel: ($s.sel // ""), stats: ($s | del(.sel) | tojson) }
+       else
+         { sel: "", stats: . }
+       end;
+
+     ($args[0] // {}) as $a |
+     ($stats_json | parse_stats) as $s |
+     {
+       start_time_micros: $start_time_micros,
+       end_time_micros: $end_time_micros,
+       exit_status: $exit_status,
+       was_aborted: $was_aborted,
+       product: ($a.build_info_product // ""),
+       board: ($a.build_info_board // ""),
+       main_product_bundle: ($a.main_pb_label // ""),
+       test_selection: ($s.sel | tostring | .[0:1000]),
+       stats_json1: $s.stats[0:1000],
+       stats_json2: $s.stats[1000:2000]
+     }')
+
+  _add-to-analytics-batch "test" "${event_params}"
   _send-analytics-batch
   return 0
 }

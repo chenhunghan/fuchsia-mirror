@@ -573,6 +573,43 @@ Public means `pub` or `pub(crate)`.
 **Explanation:** The `fuchsia_sync` implementations perform deadlock detection
 in `debug` builds.
 
+## Prose writing style
+
+**Guideline:** One idea per sentence.
+
+**Explanation:** AI agents aim to make minimal local edits, which build up to
+run-on sentences.
+
+**Guideline:** Three or more parallel items go in a list or a table. Only use a
+table when the items have attributes worth aligning.
+
+**Explanation:** Concrete fix for major cause of run-on sentences.
+
+**Guideline:** Rationale gets its own sentence or paragraph. Follow progressive
+disclosure: rule first, followed by rationale, followed by evidence.
+
+**Explanation:** Concrete fix for major cause of run-on sentences.
+
+**Guideline:** Limit historical information to evidence backing current
+rationale explanations. Avoid narrative style elements: unnecessary incident
+details, dates, plan iteration IDs. Delete superseded decisions and facts that
+are no longer relevant.
+
+**Explanation:** AI agents tend to build mini-archives of historical information
+in comments and documents, instead of relying on version history for archival.
+
+**Guideline:** State each fact once, in the most relevant place. Use references
+instead of duplicating.
+
+**Explanation:** Same as above.
+
+**Guideline:** Aim for terseness, within the bounds of remaining clear. Use
+present tense and precise technical language. Avoid subjective details -- most
+adjectives are subjective.
+
+**Explanation:** Tunes the AI agent tone to balance token effectiveness and
+helpfulness.
+
 ## Additional guides
 
 This document focuses on issues commonly encountered while reviewing code

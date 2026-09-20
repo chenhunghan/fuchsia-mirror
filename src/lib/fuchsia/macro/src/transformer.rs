@@ -32,11 +32,11 @@ enum Executor {
     // #[test]
     Test,
     // fasync::run_singlethreaded(test)
-    SinglethreadedTest,
+    SinglethreadedTest { allow_interrupts: bool },
     // fasync::run(test)
-    MultithreadedTest { threads: Box<Expr> },
+    MultithreadedTest { threads: Box<Expr>, allow_interrupts: bool },
     // fasync::run_until_stalled
-    UntilStalledTest,
+    UntilStalledTest { allow_interrupts: bool },
 }
 
 fn build_instrumentation(instrumentation: bool) -> (TokenStream, TokenStream) {
@@ -110,15 +110,34 @@ impl Executor {
                     )
                 }
             }
-            Executor::SinglethreadedTest => {
-                (quote! {}, quote! { ::fuchsia::test_singlethreaded(#func) })
-            }
-            Executor::MultithreadedTest { threads } => {
-                (quote! {}, quote! { ::fuchsia::test_multithreaded(#func, #threads) })
-            }
-            Executor::UntilStalledTest => {
-                (quote! {}, quote! { ::fuchsia::test_until_stalled(#func) })
-            }
+            Executor::SinglethreadedTest { allow_interrupts } => (
+                quote! {},
+                quote! {
+                    ::fuchsia::test_singlethreaded(
+                        #func,
+                        ::fuchsia::TestOptions { allow_interrupts: #allow_interrupts },
+                    )
+                },
+            ),
+            Executor::MultithreadedTest { threads, allow_interrupts } => (
+                quote! {},
+                quote! {
+                    ::fuchsia::test_multithreaded(
+                        #func,
+                        #threads,
+                        ::fuchsia::TestOptions { allow_interrupts: #allow_interrupts },
+                    )
+                },
+            ),
+            Executor::UntilStalledTest { allow_interrupts } => (
+                quote! {},
+                quote! {
+                    ::fuchsia::test_until_stalled(
+                        #func,
+                        ::fuchsia::TestOptions { allow_interrupts: #allow_interrupts },
+                    )
+                },
+            ),
         };
         quote! {{
             #instrumentation
@@ -159,6 +178,7 @@ struct Args {
     panic_prefix: Option<LitStr>,
     add_test_attr: bool,
     instrumentation: bool,
+    allow_interrupts: bool,
 }
 
 #[derive(Default)]
@@ -249,6 +269,7 @@ impl Args {
             interest: Interest::default(),
             add_test_attr: true,
             instrumentation: false,
+            allow_interrupts: false,
         };
 
         let arg_parser = syn::meta::parser(|meta| {
@@ -277,6 +298,7 @@ impl Args {
                 }
                 "add_test_attr" => args.add_test_attr = get_bool_arg(&meta.input, true)?,
                 "instrumentation" => args.instrumentation = get_bool_arg(&meta.input, true)?,
+                "allow_interrupts" => args.allow_interrupts = get_bool_arg(&meta.input, true)?,
                 _ => return Err(meta.error("unrecognized argument")),
             }
 
@@ -313,6 +335,14 @@ impl Transformer {
 
         let err = |message| Err(Error::new(sig.ident.span(), message));
 
+        if matches!(function_type, FunctionType::Component) && args.allow_interrupts {
+            return err("allow_interrupts only applies to tests");
+        }
+        let allow_interrupts = args.allow_interrupts;
+        if !is_async && allow_interrupts {
+            return err("allow_interrupts only applies to async tests");
+        }
+
         let executor =
             match (args.threads, args.allow_stalls, args.thread_role, is_async, function_type) {
                 (_, _, Some(_), _, FunctionType::Test) => {
@@ -342,12 +372,14 @@ impl Transformer {
                 }
                 (None, None, _, false, FunctionType::Test) => Executor::Test,
                 (None, Some(true) | None, _, true, FunctionType::Test) => {
-                    Executor::SinglethreadedTest
+                    Executor::SinglethreadedTest { allow_interrupts }
                 }
                 (Some(threads), Some(true) | None, _, true, FunctionType::Test) => {
-                    Executor::MultithreadedTest { threads: Box::new(threads) }
+                    Executor::MultithreadedTest { threads: Box::new(threads), allow_interrupts }
                 }
-                (None, Some(false), _, true, FunctionType::Test) => Executor::UntilStalledTest,
+                (None, Some(false), _, true, FunctionType::Test) => {
+                    Executor::UntilStalledTest { allow_interrupts }
+                }
                 (_, Some(false), _, _, FunctionType::Test) => {
                     return err("allow_stalls=false tests must be single threaded");
                 }

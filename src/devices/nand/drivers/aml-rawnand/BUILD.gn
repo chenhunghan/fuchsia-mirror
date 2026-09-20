@@ -14,21 +14,13 @@ fuchsia_cc_driver("aml-rawnand-driver") {
   ]
 }
 
-fuchsia_driver_component("aml-rawnand") {
-  info = "meta/aml-rawnand-info.json"
-  component_name = "aml-rawnand"
-  deps = [ ":aml-rawnand-driver" ]
-  manifest = "meta/aml-rawnand.cml"
-}
-
-fuchsia_driver_package("package") {
-  package_name = "aml-rawnand"
-  export_to_bazel = true
-  driver_components = [ ":aml-rawnand" ]
+fuchsia_driver_dml("aml-rawnand-dml") {
+  dml = "meta/aml-rawnand.dml"
+  driver_name = "aml-rawnand"
 }
 
 driver_bind_rules("aml-rawnand-bind") {
-  rules = "meta/aml-rawnand.bind"
+  dml_label = ":aml-rawnand-dml"
   bind_output = "aml-rawnand.bindbc"
   tests = "meta/bind-tests.json"
   deps = [
@@ -37,6 +29,19 @@ driver_bind_rules("aml-rawnand-bind") {
     "//src/devices/bind/fuchsia.gpio",
     "//src/devices/bind/fuchsia.platform",
   ]
+}
+
+fuchsia_driver_component("aml-rawnand") {
+  dml_label = ":aml-rawnand-dml"
+  info = "meta/aml-rawnand-info.json"
+  component_name = "aml-rawnand"
+  deps = [ ":aml-rawnand-driver" ]
+}
+
+fuchsia_driver_package("package") {
+  package_name = "aml-rawnand"
+  export_to_bazel = true
+  driver_components = [ ":aml-rawnand" ]
 }
 
 source_set("common") {

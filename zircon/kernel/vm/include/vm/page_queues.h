@@ -15,6 +15,7 @@
 #include <fbl/algorithm.h>
 #include <fbl/macros.h>
 #include <kernel/event.h>
+#include <kernel/ffi.h>
 #include <kernel/lockdep.h>
 #include <kernel/mutex.h>
 #include <kernel/semaphore.h>
@@ -25,6 +26,12 @@
 #include <vm/page.h>
 
 class VmCowPages;
+class PageQueues;
+
+// Declared here, and not just in page_queues_ffi.h, so that the friend declaration in PageQueues
+// refers to this C linkage function.
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+extern "C" FFI_ALWAYS_INLINE void cpp_page_queues_stop_threads(PageQueues* queues);
 
 // Allocated pages that are part of the cow pages in a VmObjectPaged can be placed in a page queue.
 // The page queues provide a way to
@@ -476,6 +483,10 @@ class PageQueues {
 
   // Internal helper for shutting down any threads created in |StartThreads|.
   void StopThreads();
+
+  // The Rust Drop implementation of PageQueues performs the equivalent work of ~PageQueues(), and
+  // needs to be able to shut the threads down.
+  friend void cpp_page_queues_stop_threads(PageQueues* queues);
 
   // Entry point for the thread that will performing aging and increment the mru generation.
   void MruThread();

@@ -99,10 +99,12 @@ fn test_icmp_connection<I: TestIpExt + IpExt>(
                 socket_api
                     .connect(&conn, Some(ZonedAddr::Unzoned(remote_addr)), REMOTE_ID)
                     .unwrap();
-                socket_api.send(&conn, buf).unwrap();
+                socket_api.send(&conn, buf, Default::default()).unwrap();
             }
             IcmpSendType::SendTo => {
-                socket_api.send_to(&conn, Some(ZonedAddr::Unzoned(remote_addr)), buf).unwrap();
+                socket_api
+                    .send_to(&conn, Some(ZonedAddr::Unzoned(remote_addr)), buf, Default::default())
+                    .unwrap();
             }
         }
         conn

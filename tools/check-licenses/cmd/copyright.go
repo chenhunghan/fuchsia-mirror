@@ -5,14 +5,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/google/subcommands"
 
@@ -230,55 +228,6 @@ func ApplyCopyrightFix(fuchsiaDir, filePath string, printStdout bool) error {
 	return nil
 }
 
-var commentPrefixes = map[string]string{
-	// C-style comments
-	".c": "//", ".cc": "//", ".cpp": "//", ".h": "//", ".hh": "//", ".hpp": "//",
-	".inc": "//", ".go": "//", ".rs": "//", ".dart": "//", ".java": "//", ".js": "//",
-	".m": "//", ".cml": "//", ".fidl": "//", ".d": "//", ".dat": "//",
-	// Script/Config-style comments
-	".py": "#", ".sh": "#", ".gn": "#", ".gni": "#", ".gyp": "#", ".gypi": "#",
-	".merkle": "#", ".ac": "#", ".am": "#", ".yaml": "#", ".yml": "#", ".toml": "#",
-	".bzl": "#", ".bazel": "#",
-	// Assembly
-	".asm": ";",
-	// Windows Batch
-	".bat": "rem",
-}
-
 func addCopyright(filePath string) ([]byte, error) {
-	ext := filepath.Ext(filePath)
-
-	commentPrefix, ok := commentPrefixes[ext]
-	if !ok {
-		// Do not guess. If we guess wrong, we corrupt the build.
-		return nil, fmt.Errorf("unsupported file extension %q for automatic copyright injection", ext)
-	}
-
-	year := time.Now().Year()
-
-	header := fmt.Sprintf("%s Copyright %d The Fuchsia Authors. All rights reserved.\n%s Use of this source code is governed by a BSD-style license that can be\n%s found in the LICENSE file.\n\n", commentPrefix, year, commentPrefix, commentPrefix)
-
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prepend the header
-	var newContent bytes.Buffer
-
-	// Handle shebangs (e.g. #!/bin/bash)
-	if bytes.HasPrefix(content, []byte("#!")) {
-		lines := bytes.SplitN(content, []byte("\n"), 2)
-		newContent.Write(lines[0])
-		newContent.WriteString("\n")
-		newContent.WriteString(header)
-		if len(lines) > 1 {
-			newContent.Write(lines[1])
-		}
-	} else {
-		newContent.WriteString(header)
-		newContent.Write(content)
-	}
-
-	return newContent.Bytes(), nil
+	return validate.AddCopyright(filePath)
 }

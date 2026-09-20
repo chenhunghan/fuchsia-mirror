@@ -25,7 +25,6 @@ zx::result<uint32_t> Device::QueryIrqMode(fpci::InterruptMode mode) {
   const fbl::AutoLock dev_lock(&dev_lock_);
   switch (mode) {
     case fpci::InterruptMode::kLegacy:
-    case fpci::InterruptMode::kLegacyNoack:
       if (cfg_->Read(Config::kInterruptLine) != 0) {
         return zx::ok(kLegacyInterruptCount);
       }
@@ -41,6 +40,7 @@ zx::result<uint32_t> Device::QueryIrqMode(fpci::InterruptMode mode) {
       }
       break;
     case fpci::InterruptMode::kDisabled:
+    case fpci::InterruptMode::kLegacyNoack:
     default:
       return zx::error(ZX_ERR_INVALID_ARGS);
   }
@@ -64,6 +64,9 @@ pci_interrupt_modes_t Device::GetInterruptModes() {
 }
 
 zx_status_t Device::SetIrqMode(fpci::InterruptMode mode, uint32_t irq_cnt) {
+  if (mode == fpci::InterruptMode::kLegacyNoack) {
+    return ZX_ERR_INVALID_ARGS;
+  }
   if (mode != fpci::InterruptMode::kDisabled && irq_cnt == 0) {
     return ZX_ERR_INVALID_ARGS;
   }
@@ -84,10 +87,7 @@ zx_status_t Device::SetIrqMode(fpci::InterruptMode mode, uint32_t irq_cnt) {
       status = ZX_OK;
       break;
     case fpci::InterruptMode::kLegacy:
-      status = EnableLegacy(/*needs_ack=*/true);
-      break;
-    case fpci::InterruptMode::kLegacyNoack:
-      status = EnableLegacy(/*needs_ack=*/false);
+      status = EnableLegacy();
       break;
     case fpci::InterruptMode::kMsi:
       if (caps_.msi) {
@@ -112,7 +112,6 @@ zx_status_t Device::DisableInterrupts() {
     case fpci::InterruptMode::kDisabled:
       return ZX_OK;
     case fpci::InterruptMode::kLegacy:
-    case fpci::InterruptMode::kLegacyNoack:
       st = DisableLegacy();
       break;
     case fpci::InterruptMode::kMsi:
@@ -145,8 +144,7 @@ zx::result<zx::interrupt> Device::MapInterrupt(uint32_t which_irq) {
   zx::interrupt interrupt = {};
   zx_status_t status = ZX_OK;
   switch (irqs_.mode) {
-    case fpci::InterruptMode::kLegacy:
-    case fpci::InterruptMode::kLegacyNoack: {
+    case fpci::InterruptMode::kLegacy: {
       if (which_irq != 0) {
         return zx::error(ZX_ERR_INVALID_ARGS);
       }
@@ -202,7 +200,9 @@ zx_status_t Device::AckLegacyIrq() {
     return ZX_ERR_BAD_STATE;
   }
 
-  EnableLegacyIrq();
+  // TODO(544749672): AckLegacyIrq is a no-op until fully removed.
+  // Unmasking is handled automatically by the Bus monitoring
+  // ZX_VIRTUAL_INTERRUPT_UNTRIGGERED.
   return ZX_OK;
 }
 
@@ -230,13 +230,14 @@ zx::result<std::pair<zx::msi, msi_allocation_info_t>> Device::AllocateMsi(uint32
   return zx::ok(std::make_pair(std::move(msi), info));
 }
 
-zx_status_t Device::EnableLegacy(bool needs_ack) {
+zx_status_t Device::EnableLegacy() {
   irqs_.legacy_vector = cfg_->Read(Config::kInterruptLine);
   if (irqs_.legacy_vector == 0) {
     return ZX_ERR_NOT_SUPPORTED;
   }
 
-  const zx_status_t status = bdi_->AddToSharedIrqList(this, irqs_.legacy_vector);
+  const zx_status_t status =
+      bdi_->AddToSharedIrqList(this, irqs_.legacy_vector, irqs_.legacy.borrow());
   if (status != ZX_OK) {
     zxlogf(ERROR, "[%s] failed to add legacy irq to shared handler list %#x: %s", cfg_->addr(),
            irqs_.legacy_vector, zx_status_get_string(status));
@@ -244,7 +245,8 @@ zx_status_t Device::EnableLegacy(bool needs_ack) {
   }
 
   ModifyCmdLocked(/*clr_bits=*/pci::kCommandIntDisable, /*set_bits=*/0);
-  irqs_.mode = (needs_ack) ? fpci::InterruptMode::kLegacy : fpci::InterruptMode::kLegacyNoack;
+  irqs_.legacy_disabled = false;
+  irqs_.mode = fpci::InterruptMode::kLegacy;
   irqs_.legacy_pin = cfg_->Read(Config::kInterruptPin);
   return ZX_OK;
 }
@@ -316,6 +318,9 @@ zx_status_t Device::EnableMsix(uint32_t irq_cnt) {
 }
 
 zx_status_t Device::DisableLegacy() {
+  ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/pci::kCommandIntDisable);
+  irqs_.legacy_disabled = true;
+
   const zx_status_t status = bdi_->RemoveFromSharedIrqList(this, irqs_.legacy_vector);
   if (status != ZX_OK) {
     zxlogf(ERROR, "[%s] failed to remove legacy irq to shared handler list %#x: %s", cfg_->addr(),
@@ -323,7 +328,6 @@ zx_status_t Device::DisableLegacy() {
     return status;
   }
 
-  ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/pci::kCommandIntDisable);
   irqs_.legacy_vector = 0;
   return ZX_OK;
 }

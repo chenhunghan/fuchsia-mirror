@@ -12,7 +12,7 @@
 //! SELinux LSM may also delegate to them.  They should never be called into directly.
 
 use crate::security;
-use crate::task::loader::ResolvedElf;
+use crate::task::loader::ResolvedProgram;
 use crate::task::{CurrentTask, Task};
 use crate::vfs::{FsNode, FsStr, XattrOp};
 use linux_uapi::XATTR_NAME_CAPS;
@@ -128,10 +128,10 @@ pub(super) fn ptrace_traceme(
 /// Corresponds to the `bprm_creds_from_file` LSM hook.
 pub(super) fn bprm_creds_from_file(
     current_task: &CurrentTask,
-    elf_state: &mut ResolvedElf,
+    resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
-    let prev = current_task.current_creds();
-    let securebits = elf_state.creds.securebits;
+    let prev = current_task.current_creds().clone();
+    let securebits = resolved_program.creds.securebits;
 
     // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
     //
@@ -166,8 +166,8 @@ pub(super) fn bprm_creds_from_file(
     //        then the file inheritable and permitted sets are ignored;
     //        instead they are notionally considered to be all ones (i.e.,
     //        all capabilities enabled).
-    let (file_permitted, file_inheritable) = if (elf_state.creds.uid == 0
-        || elf_state.creds.euid == 0)
+    let (file_permitted, file_inheritable) = if (resolved_program.creds.uid == 0
+        || resolved_program.creds.euid == 0)
         && !securebits.contains(SecureBits::NOROOT)
     {
         (Capabilities::all(), Capabilities::all())
@@ -180,7 +180,8 @@ pub(super) fn bprm_creds_from_file(
     //   (2)  If the effective user ID of the process is 0 (root) or the
     //        file effective bit is in fact enabled, then the file
     //        effective bit is notionally defined to be one (enabled).
-    let file_effective = elf_state.creds.euid == 0 && !securebits.contains(SecureBits::NOROOT);
+    let file_effective =
+        resolved_program.creds.euid == 0 && !securebits.contains(SecureBits::NOROOT);
 
     // TODO(https://fxbug.dev/328629782): File capabilities are honored for set-user-ID-root
     // binaries with capabilities executed by non-root users. See "Set-user-ID-root programs
@@ -192,29 +193,50 @@ pub(super) fn bprm_creds_from_file(
     //   or effective user ID is changed (e.g., executing a set-user-ID
     //   program) or if the program has file capabilities.
     //
-    // In practice Linux appears to clear the ambient set if the exec is "secure", whether
-    // because the caller's real & effective UIDs/GIDs differ, the new real & effective
-    // UIDs/GIDs differ due to SUID/SGID, of the file has a capabilities attribute.
-    if elf_state.secure_exec {
-        elf_state.creds.cap_ambient = Capabilities::empty();
+    // From <https://man7.org/linux/man-pages/man3/getauxval.3.html>:
+    //
+    //   AT_SECURE
+    //          [...] Most commonly, a nonzero value indicates that the
+    //          process is executing a set-user-ID or set-group-ID binary
+    //          (so that its real and effective UIDs or GIDs differ from one
+    //          another), or that it gained capabilities by executing a
+    //          binary file that has capabilities [...].  Alternatively, a
+    //          nonzero value may be triggered by a Linux Security Module.
+    //
+    // Because an LSM (e.g. SELinux denying `noatsecure`) may set `secure_exec` to
+    // trigger `AT_SECURE`, `cap_ambient` is only cleared on DAC UID/GID differences
+    // or file capabilities.
+    let file_is_privileged =
+        resolved_program.creds.euid != prev.euid || resolved_program.creds.egid != prev.egid;
+    let is_secure_exec = file_is_privileged
+        || resolved_program.creds.uid != resolved_program.creds.euid
+        || resolved_program.creds.gid != resolved_program.creds.egid;
+
+    if is_secure_exec {
+        resolved_program.creds.cap_ambient = Capabilities::empty();
     }
+    resolved_program.secure_exec |= is_secure_exec;
 
     //   P'(permitted)   = (P(inheritable) & F(inheritable)) |
     //                     (F(permitted) & P(bounding)) | P'(ambient)
-    elf_state.creds.cap_permitted = (elf_state.creds.cap_inheritable & file_inheritable)
-        | (file_permitted & elf_state.creds.cap_bounding)
-        | elf_state.creds.cap_ambient;
+    resolved_program.creds.cap_permitted = (resolved_program.creds.cap_inheritable
+        & file_inheritable)
+        | (file_permitted & resolved_program.creds.cap_bounding)
+        | resolved_program.creds.cap_ambient;
 
     //   P'(effective)   = F(effective) ? P'(permitted) : P'(ambient)
-    elf_state.creds.cap_effective =
-        if file_effective { elf_state.creds.cap_permitted } else { elf_state.creds.cap_ambient };
+    resolved_program.creds.cap_effective = if file_effective {
+        resolved_program.creds.cap_permitted
+    } else {
+        resolved_program.creds.cap_ambient
+    };
 
-    elf_state.creds.securebits.remove(SecureBits::KEEP_CAPS);
+    resolved_program.creds.securebits.remove(SecureBits::KEEP_CAPS);
 
     // Handle no_new_privs
     if current_task.read().no_new_privs() {
-        elf_state.creds.cap_permitted &= prev.cap_permitted;
-        elf_state.creds.cap_effective &= elf_state.creds.cap_permitted;
+        resolved_program.creds.cap_permitted &= prev.cap_permitted;
+        resolved_program.creds.cap_effective &= resolved_program.creds.cap_permitted;
     }
 
     Ok(())

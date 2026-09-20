@@ -6,7 +6,6 @@
 import json
 import unittest
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Union
 
 from serialization import (
     instance_from_dict,
@@ -59,7 +58,7 @@ class SerializeFieldsTest(unittest.TestCase):
         @dataclass
         class SimpleClass:
             int_field: int
-            str_field: List[str] = field(default_factory=list)
+            str_field: list[str] = field(default_factory=list)
 
         value = {"int_field": 42}
         self.assertEqual(
@@ -81,7 +80,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_serialize_optional_field_with_value(self) -> None:
         @dataclass
         class SimpleClassWithOptionalField:
-            int_field: Optional[int]
+            int_field: int | None
             str_field: str
 
         instance = SimpleClassWithOptionalField(21, "some value")
@@ -93,7 +92,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_serialize_optional_field_without_value(self) -> None:
         @dataclass
         class SimpleClassWithOptionalField:
-            int_field: Optional[int]
+            int_field: int | None
             str_field: str
 
         instance = SimpleClassWithOptionalField(None, "some value")
@@ -104,7 +103,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_serialize_list_fields(self) -> None:
         @dataclass
         class SimpleClassWithList:
-            int_field: List[int] = field(default_factory=list)
+            int_field: list[int] = field(default_factory=list)
             str_field: str = "foo"
 
         instance = SimpleClassWithList([1, 2, 3, 4, 5])
@@ -116,7 +115,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_serialize_empty_list_fields(self) -> None:
         @dataclass
         class SimpleClassWithList:
-            int_field: List[int] = field(default_factory=list)
+            int_field: list[int] = field(default_factory=list)
             str_field: str = "foo"
 
         instance = SimpleClassWithList()
@@ -127,7 +126,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_deserialize_list_fields(self) -> None:
         @dataclass
         class SimpleClassWithList:
-            int_field: List[int] = field(default_factory=list)
+            int_field: list[int] = field(default_factory=list)
             str_field: str = "foo"
 
         instance = SimpleClassWithList([1, 2, 3, 4, 5])
@@ -142,7 +141,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_deserialize_empty_list_fields(self) -> None:
         @dataclass
         class SimpleClassWithList:
-            int_field: List[int] = field(default_factory=list)
+            int_field: list[int] = field(default_factory=list)
             str_field: str = "foo"
 
         instance = SimpleClassWithList()
@@ -156,7 +155,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_deserialize_missing_list_fields_empty(self) -> None:
         @dataclass
         class SimpleClassWithList:
-            int_field: List[int] = field(default_factory=list)
+            int_field: list[int] = field(default_factory=list)
             str_field: str = "foo"
 
         instance = SimpleClassWithList()
@@ -169,7 +168,7 @@ class SerializeFieldsTest(unittest.TestCase):
         # Note that this also tests that sets are serialized into sorted-order
         @dataclass
         class SimpleClassWithSet:
-            int_field: Set[int] = field(default_factory=set)
+            int_field: set[int] = field(default_factory=set)
             str_field: str = "foo"
 
         instance = SimpleClassWithSet(set([5, 4, 3, 2, 1]))
@@ -181,7 +180,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_serialize_empty_set_fields(self) -> None:
         @dataclass
         class SimpleClassWithSet:
-            int_field: Set[int] = field(default_factory=set)
+            int_field: set[int] = field(default_factory=set)
             str_field: str = "foo"
 
         instance = SimpleClassWithSet()
@@ -192,7 +191,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_deserialize_set_fields(self) -> None:
         @dataclass
         class SimpleClassWithSet:
-            int_field: Set[int] = field(default_factory=set)
+            int_field: set[int] = field(default_factory=set)
             str_field: str = "foo"
 
         instance = SimpleClassWithSet(set([5, 4, 3, 2, 1]))
@@ -207,7 +206,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_deserialize_empty_set_fields(self) -> None:
         @dataclass
         class SimpleClassWithSet:
-            int_field: Set[int] = field(default_factory=set)
+            int_field: set[int] = field(default_factory=set)
             str_field: str = "foo"
 
         instance = SimpleClassWithSet()
@@ -222,7 +221,7 @@ class SerializeFieldsTest(unittest.TestCase):
         @dataclass
         class SimpleClassWithSet:
             str_field: str = "foo"
-            int_field: Set[int] = field(default_factory=set)
+            int_field: set[int] = field(default_factory=set)
 
         instance = SimpleClassWithSet()
         self.assertEqual(
@@ -233,7 +232,7 @@ class SerializeFieldsTest(unittest.TestCase):
     def test_serialize_dict_fields(self) -> None:
         @dataclass
         class SimpleClassWithDict:
-            dict_field: Dict[str, int]
+            dict_field: dict[str, int]
 
         instance = SimpleClassWithDict({"one": 1, "two": 2, "three": 3})
         self.assertEqual(
@@ -421,7 +420,7 @@ class SerializeFieldsTest(unittest.TestCase):
         @dataclass
         class SimpleClass:
             int_field: int
-            union_field: Union[int, List[str]]
+            union_field: int | list[str]
 
         self.assertEqual(
             SimpleClass(42, 23),
@@ -434,7 +433,7 @@ class SerializeFieldsTest(unittest.TestCase):
         @dataclass
         class SimpleClass:
             int_field: int
-            union_field: Union[int, List[str]]
+            union_field: int | list[str]
 
         self.assertEqual(
             SimpleClass(42, ["23"]),
@@ -528,7 +527,7 @@ class SerializeFieldsTest(unittest.TestCase):
         @dataclass
         class SimpleClass:
             int_field: int
-            union_field: str | List[str]
+            union_field: str | list[str]
 
         self.assertEqual(
             SimpleClass(42, ["foo"]),

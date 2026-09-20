@@ -27,6 +27,7 @@ FFI_ALWAYS_INLINE void cpp_pmm_checker_arm(PmmChecker* checker);
 FFI_ALWAYS_INLINE void cpp_pmm_checker_fill_pattern(const PmmChecker* checker, vm_page_t* page);
 FFI_ALWAYS_INLINE bool cpp_pmm_checker_validate_pattern(const PmmChecker* checker, vm_page_t* page);
 FFI_ALWAYS_INLINE void cpp_pmm_checker_assert_pattern(const PmmChecker* checker, vm_page_t* page);
+FFI_ALWAYS_INLINE void cpp_pmm_checker_print_status_stdout(const PmmChecker* checker);
 
 __END_CDECLS
 

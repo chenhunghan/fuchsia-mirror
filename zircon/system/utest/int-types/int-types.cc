@@ -266,15 +266,26 @@ static_assert(UINTMAX_C(0xffffffffffffffff) ==
 #define CHECK_x(fmt) EXPECT_EQ(LAST(fmt), 'x', "incorrect format specifier")
 #define CHECK_X(fmt) EXPECT_EQ(LAST(fmt), 'X', "incorrect format specifier")
 
+// This helper is marked [[gnu::noinline]] to ensure that the 256-byte stack buffer
+// (along with sanitizer instrumentation like ASan redzones) is allocated in its own
+// isolated stack frame per check and deallocated immediately upon return.
+// Inlining this across ~72 invocations under certain optimization modes (e.g. -Os with
+// ASan) prevents stack slot sharing, ballooning the caller's frame beyond the default
+// 256 KiB thread stack limit and triggering stack overflow crashes.
+template <typename Type>
+[[gnu::noinline]] void CheckFormatStringsHelper(const char* pri, const char* scn, Type max) {
+  char buf[256] = {0};
+  ASSERT_GT(snprintf(buf, sizeof(buf), pri, max), 1);
+  Type n = (Type)0;
+  ASSERT_EQ(sscanf(buf, scn, &n), 1);
+  ASSERT_EQ(n, max);
+}
+
 #define CHECK_FORMAT_STRINGS(pri, scn, pcheck, scheck, type, max) \
   do {                                                            \
     pcheck(pri);                                                  \
     scheck(scn);                                                  \
-    char buf[256] = {0};                                          \
-    ASSERT_GT(snprintf(buf, sizeof(buf), "%" pri, (type)max), 1); \
-    type n = (type)0;                                             \
-    ASSERT_EQ(sscanf(buf, "%" scn, &n), 1);                       \
-    ASSERT_EQ(n, max);                                            \
+    CheckFormatStringsHelper<type>("%" pri, "%" scn, (type)max);  \
   } while (0)
 
 #define CHECK_SIGNED_FORMATS(size, type, max)                                  \

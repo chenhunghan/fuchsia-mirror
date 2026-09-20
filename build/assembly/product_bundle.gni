@@ -54,6 +54,10 @@ main_product_bundle_name = "${build_info_product}.${build_info_board}"
 #   skip_transfer_manifest           (optional; default=false)
 #     [bool] Whether to skip creating transfer manifest
 #
+#   emit_metadata (optional; default=true)
+#     [bool] Whether to emit GN metadata that will cause the product bundle to
+#     appear in product_bundles.json.
+#
 template("product_bundle") {
   assert(defined(invoker.name),
          "product_bundle(${target_name}) must define `name`")
@@ -299,23 +303,25 @@ template("product_bundle") {
     product_version = sdk_id
     assert(product_version != "")
 
-    # A json file will be created by '//build/config/build_api_modules.gni'.
-    metadata = {
-      product_bundles = [
-        {
-          label = get_label_info(":$target_name", "label_with_toolchain")
-          path = rebase_path(files.outdir, root_build_dir)
-          name = product_name
-          cpu = current_cpu
-          product_version = product_version
-          if (!skip_transfer_manifest) {
-            transfer_manifest_path =
-                rebase_path(files.transfer_manifest, root_build_dir)
-            transfer_manifest_url = "file://" + transfer_manifest_path
-          }
-          json = rebase_path(files.product_bundle_manifest, root_build_dir)
-        },
-      ]
+    if (!defined(invoker.emit_metadata) || invoker.emit_metadata) {
+      # A json file will be created by '//build/config/build_api_modules.gni'.
+      metadata = {
+        product_bundles = [
+          {
+            label = get_label_info(":$target_name", "label_with_toolchain")
+            path = rebase_path(files.outdir, root_build_dir)
+            name = product_name
+            cpu = current_cpu
+            product_version = product_version
+            if (!skip_transfer_manifest) {
+              transfer_manifest_path =
+                  rebase_path(files.transfer_manifest, root_build_dir)
+              transfer_manifest_url = "file://" + transfer_manifest_path
+            }
+            json = rebase_path(files.product_bundle_manifest, root_build_dir)
+          },
+        ]
+      }
     }
   }
 }

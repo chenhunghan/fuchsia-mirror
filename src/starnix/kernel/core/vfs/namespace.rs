@@ -13,11 +13,11 @@ use crate::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileS
 use crate::vfs::pseudo::simple_file::SimpleFileNode;
 use crate::vfs::socket::{SocketAddress, SocketHandle, UnixSocket};
 use crate::vfs::{
-    AccessCheck, DirEntry, DirEntryHandle, FileHandle, FileObject, FileOps, FileSystemHandle,
-    FileSystemOptions, FileWriteGuardMode, FsContext, FsNode, FsNodeHandle, FsNodeOps, FsStr,
-    FsString, OpenAccessCheck, PathBuilder, RenameFlags, SymlinkTarget, UnlinkKind,
-    fileops_impl_dataless, fileops_impl_delegate_read_write_and_seek, fileops_impl_nonseekable,
-    fileops_impl_noop_sync, fs_node_impl_not_dir,
+    AccessCheck, DirEntry, DirEntryHandle, FileHandle, FileObject, FileOps, FileSystem,
+    FileSystemHandle, FileSystemOptions, FileWriteGuardMode, FsContext, FsNode, FsNodeHandle,
+    FsNodeOps, FsStr, FsString, OpenAccessCheck, PathBuilder, RenameFlags, SymlinkTarget,
+    UnlinkKind, fileops_impl_dataless, fileops_impl_delegate_read_write_and_seek,
+    fileops_impl_nonseekable, fileops_impl_noop_sync, fs_node_impl_not_dir,
 };
 use fuchsia_rcu::{RcuArc, RcuBox, RcuReadScope};
 use fuchsia_rcu_collections::rcu_raw_hash_map::RcuRawHashMap;
@@ -25,7 +25,7 @@ use fuchsia_sync::Mutex;
 use starnix_logging::log_warn;
 use starnix_rcu::RcuHashMap;
 use starnix_sync::{LockDepMutex, NamespaceFlagsLock};
-use starnix_uapi::arc_key::{PtrKey, WeakKey};
+use starnix_uapi::arc_key::{ArcKey, PtrKey, WeakKey};
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
@@ -109,6 +109,103 @@ impl Namespace {
         }
         node.mount = Some(mount).into();
         Some(node)
+    }
+
+    pub fn pivot_root(
+        self: &Arc<Namespace>,
+        current_root: &NamespaceNode,
+        new_root: &NamespaceNode,
+        put_old: &NamespaceNode,
+    ) -> Result<(), Errno> {
+        debug_assert!(new_root.entry.node.is_dir());
+        debug_assert!(put_old.entry.node.is_dir());
+
+        let new_root_mount = new_root.mount.as_ref().ok_or_else(|| errno!(EINVAL))?;
+        let current_root_mount = current_root.mount.as_ref().ok_or_else(|| errno!(EINVAL))?;
+        let put_old_mount = put_old.mount.as_ref().ok_or_else(|| errno!(EINVAL))?;
+
+        let current_root_mountpoint =
+            current_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?;
+        let new_root_mountpoint = new_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?;
+
+        if Arc::ptr_eq(new_root_mount, current_root_mount)
+            || Arc::ptr_eq(put_old_mount, current_root_mount)
+        {
+            return error!(EBUSY);
+        }
+
+        let current_root_mount = current_root.mount_if_root()?;
+        let new_root_mount = new_root.mount_if_root()?;
+
+        if !new_root.is_descendant_of(current_root) {
+            return error!(EINVAL);
+        }
+        if !put_old.is_descendant_of(new_root) {
+            return error!(EINVAL);
+        }
+
+        let kernel = self.kernel();
+        let mounts_guard = kernel.mounts_lock();
+
+        // Retain mounts and mountpoint entries so that any drops triggered by
+        // unlinking or reparenting under `mounts_guard` are deferred until after
+        // the spinlock is released, preventing blocking operations while holding
+        // the lock.
+        let new_root_parent = mounts_guard.retain(
+            new_root_mountpoint.mount.as_ref().expect("a mountpoint must be part of a mount"),
+        );
+        mounts_guard.retain(&new_root_mountpoint.entry);
+
+        if new_root_mount.peer_group().is_some() || new_root_parent.peer_group().is_some() {
+            return error!(EINVAL);
+        }
+
+        if put_old_mount.peer_group().is_some() {
+            return error!(EINVAL);
+        }
+
+        if current_root_mount.peer_group().is_some() {
+            return error!(EINVAL);
+        }
+
+        let current_root_parent = mounts_guard.retain(
+            current_root_mountpoint.mount.as_ref().expect("a mountpoint must be part of a mount"),
+        );
+        mounts_guard.retain(&current_root_mountpoint.entry);
+        if current_root_parent.peer_group().is_some() {
+            return error!(EINVAL);
+        }
+
+        // Retain the remaining mounts and entries involved in the pivot before
+        // detaching and attaching them below.
+        mounts_guard.retain(current_root_mount);
+        mounts_guard.retain(new_root_mount);
+        mounts_guard.retain(put_old_mount);
+        mounts_guard.retain(&put_old.entry);
+
+        // 1. Detach new_root_mount from its parent.
+        new_root_parent
+            .remove_submount_internal(&mounts_guard, &new_root_mountpoint.mount_hash_key())?;
+        new_root_mount.relations.set_mountpoint(&mounts_guard, None);
+
+        // 2. Place new_root_mount where current_root_mount was.
+        current_root_parent
+            .remove_submount_internal(&mounts_guard, &current_root_mountpoint.mount_hash_key())?;
+        current_root_mount.relations.set_mountpoint(&mounts_guard, None);
+        current_root_parent.create_submount(
+            &mounts_guard,
+            &current_root_mountpoint.entry,
+            WhatSubmount::Existing(Arc::clone(new_root_mount)),
+        )?;
+
+        // 3. Attach current_root_mount to put_old.
+        put_old_mount.create_submount(
+            &mounts_guard,
+            &put_old.entry,
+            WhatSubmount::Existing(Arc::clone(current_root_mount)),
+        )?;
+
+        Ok(())
     }
 }
 
@@ -1092,6 +1189,17 @@ pub enum SymlinkMode {
     NoFollow,
 }
 
+/// The `DirectoryMode` enum encodes whether a lookup requires the target to be a directory.
+#[derive(Default, PartialEq, Eq, Copy, Clone, Debug)]
+pub enum DirectoryMode {
+    /// The target of the path resolution can be any file type.
+    #[default]
+    AllowAny,
+
+    /// The target of the path resolution must be a directory.
+    MustBeDirectory,
+}
+
 /// The maximum number of symlink traversals that can be made during path resolution.
 pub const MAX_SYMLINK_FOLLOWS: u8 = 40;
 
@@ -1114,9 +1222,9 @@ pub struct LookupContext {
     /// Whether the result of the lookup must be a directory.
     ///
     /// For example, if the path ends with a `/` or if userspace passes
-    /// O_DIRECTORY. This flag can be set to true if the lookup encounters a
+    /// O_DIRECTORY. This flag can be set if the lookup encounters a
     /// symlink that ends with a `/`.
-    pub must_be_directory: bool,
+    pub directory_mode: DirectoryMode,
 
     /// Resolve flags passed to `openat2`. Empty if the lookup originated in any other syscall.
     pub resolve_flags: ResolveFlags,
@@ -1144,21 +1252,26 @@ impl LookupContext {
         LookupContext {
             symlink_mode,
             remaining_follows: MAX_SYMLINK_FOLLOWS,
-            must_be_directory: false,
+            directory_mode: DirectoryMode::default(),
             resolve_flags: ResolveFlags::empty(),
             resolve_base: ResolveBase::None,
         }
     }
 
-    pub fn with(&self, symlink_mode: SymlinkMode) -> LookupContext {
-        LookupContext { symlink_mode, resolve_base: self.resolve_base.clone(), ..*self }
+    pub fn with(&self, symlink_mode: SymlinkMode, directory_mode: DirectoryMode) -> LookupContext {
+        LookupContext {
+            symlink_mode,
+            directory_mode,
+            resolve_base: self.resolve_base.clone(),
+            ..*self
+        }
     }
 
     pub fn update_for_path(&mut self, path: &FsStr) {
         if path.last() == Some(&b'/') {
             // The last path element must resolve to a directory. This is because a trailing slash
             // was found in the path.
-            self.must_be_directory = true;
+            self.directory_mode = DirectoryMode::MustBeDirectory;
             // If the last path element is a symlink, we should follow it.
             // See https://pubs.opengroup.org/onlinepubs/9699919799/xrat/V4_xbd_chap03.html#tag_21_03_00_75
             self.symlink_mode = SymlinkMode::Follow;
@@ -1378,7 +1491,7 @@ impl NamespaceNode {
         current_task: &CurrentTask,
         name: &FsStr,
         kind: UnlinkKind,
-        must_be_directory: bool,
+        directory_mode: DirectoryMode,
     ) -> Result<(), Errno> {
         if DirEntry::is_reserved_name(name) {
             match kind {
@@ -1395,7 +1508,7 @@ impl NamespaceNode {
                 UnlinkKind::NonDirectory => error!(ENOTDIR),
             }
         } else {
-            self.entry.unlink(current_task, &self.mount, name, kind, must_be_directory)
+            self.entry.unlink(current_task, &self.mount, name, kind, directory_mode)
         }
     }
 
@@ -1506,7 +1619,9 @@ impl NamespaceNode {
                     return error!(EXDEV);
                 }
 
-                if context.must_be_directory && !current_namespace_node.entry.node.is_dir() {
+                if context.directory_mode == DirectoryMode::MustBeDirectory
+                    && !current_namespace_node.entry.node.is_dir()
+                {
                     return error!(ENOTDIR);
                 }
                 basenames = &basenames[1..];
@@ -1531,7 +1646,9 @@ impl NamespaceNode {
                     return error!(EXDEV);
                 }
 
-                if context.must_be_directory && !current_namespace_node.entry.node.is_dir() {
+                if context.directory_mode == DirectoryMode::MustBeDirectory
+                    && !current_namespace_node.entry.node.is_dir()
+                {
                     return error!(ENOTDIR);
                 }
 
@@ -1563,7 +1680,9 @@ impl NamespaceNode {
                     return error!(EXDEV);
                 }
 
-                if context.must_be_directory && !current_namespace_node.entry.node.is_dir() {
+                if context.directory_mode == DirectoryMode::MustBeDirectory
+                    && !current_namespace_node.entry.node.is_dir()
+                {
                     return error!(ENOTDIR);
                 }
 
@@ -2086,23 +2205,33 @@ impl Mounts {
         }
     }
 
-    pub fn sync_all(&self, current_task: &CurrentTask) -> Result<(), Errno> {
-        let mut filesystems = Vec::new();
-        {
-            let scope = RcuReadScope::new();
-            let mut seen = HashSet::new();
-            for (_dir_entry, m_list) in self.mounts.iter(&scope) {
-                for m in m_list {
-                    if let Some(mount) = m.0.upgrade() {
-                        if seen.insert(Arc::as_ptr(&mount.fs)) {
-                            filesystems.push(mount.fs.clone());
-                        }
+    /// Returns the set of unique mounted filesystems, including any underlying filesystems
+    /// wrapped by stacked filesystems such as OverlayFs.
+    fn unique_filesystems(&self) -> HashSet<ArcKey<FileSystem>> {
+        let mut filesystems = HashSet::new();
+        let mut queue = Vec::new();
+        let scope = RcuReadScope::new();
+        for (_dir_entry, m_list) in self.mounts.iter(&scope) {
+            for m in m_list {
+                if let Some(mount) = m.0.upgrade() {
+                    if filesystems.insert(ArcKey(mount.fs.clone())) {
+                        queue.push(mount.fs.clone());
                     }
                 }
             }
         }
+        while let Some(fs) = queue.pop() {
+            for sub_fs in fs.sub_filesystems() {
+                if filesystems.insert(ArcKey(sub_fs.clone())) {
+                    queue.push(sub_fs);
+                }
+            }
+        }
+        filesystems
+    }
 
-        for fs in filesystems {
+    pub fn sync_all(&self, current_task: &CurrentTask) -> Result<(), Errno> {
+        for fs in self.unique_filesystems() {
             if let Err(e) = fs.sync(current_task) {
                 log_warn!("sync failed for filesystem {:?}: {:?}", fs.name(), e);
             }
@@ -2111,23 +2240,14 @@ impl Mounts {
     }
 
     pub fn drop_caches(&self) {
-        let mut filesystems = Vec::new();
-        {
-            let scope = RcuReadScope::new();
-            let mut seen = HashSet::new();
-            for (_dir_entry, m_list) in self.mounts.iter(&scope) {
-                for m in m_list {
-                    if let Some(mount) = m.0.upgrade() {
-                        if seen.insert(Arc::as_ptr(&mount.fs)) {
-                            filesystems.push(mount.fs.clone());
-                        }
-                    }
-                }
-            }
+        let filesystems = self.unique_filesystems();
+        // First purge all directory entry caches so that stacked filesystems (like OverlayFs)
+        // drop references to underlying DirEntries/FsNodes before backend caches are cleared.
+        for fs in &filesystems {
+            fs.purge_dcache();
         }
-
-        for fs in filesystems {
-            fs.purge_all_entries();
+        for fs in &filesystems {
+            fs.drop_backend_caches();
         }
     }
 }
@@ -2191,8 +2311,8 @@ mod test {
     use crate::testing::spawn_kernel_and_run;
     use crate::vfs::namespace::DeviceId;
     use crate::vfs::{
-        CallbackSymlinkNode, FsNodeInfo, LookupContext, MountInfo, Namespace, NamespaceNode,
-        RenameFlags, SymlinkMode, SymlinkTarget, UnlinkKind, WhatToMount,
+        CallbackSymlinkNode, DirectoryMode, FsNodeInfo, LookupContext, MountInfo, Namespace,
+        NamespaceNode, RenameFlags, SymlinkMode, SymlinkTarget, UnlinkKind, WhatToMount,
     };
     use starnix_uapi::mount_flags::MountpointFlags;
     use starnix_uapi::{errno, mode};
@@ -2379,20 +2499,30 @@ mod test {
             // Trying to unlink from ns1 should fail.
             assert_eq!(
                 ns1.root()
-                    .unlink(&current_task, "foo".into(), UnlinkKind::Directory, false)
+                    .unlink(
+                        &current_task,
+                        "foo".into(),
+                        UnlinkKind::Directory,
+                        DirectoryMode::AllowAny
+                    )
                     .unwrap_err(),
                 errno!(EBUSY),
             );
 
             // But unlinking from ns2 should succeed.
             ns2.root()
-                .unlink(&current_task, "foo".into(), UnlinkKind::Directory, false)
+                .unlink(&current_task, "foo".into(), UnlinkKind::Directory, DirectoryMode::AllowAny)
                 .expect("unlink failed");
 
             // And it should no longer show up in ns1.
             assert_eq!(
                 ns1.root()
-                    .unlink(&current_task, "foo".into(), UnlinkKind::Directory, false)
+                    .unlink(
+                        &current_task,
+                        "foo".into(),
+                        UnlinkKind::Directory,
+                        DirectoryMode::AllowAny
+                    )
                     .unwrap_err(),
                 errno!(ENOENT),
             );

@@ -121,7 +121,6 @@ func captureCPRNGDraws(t *testing.T, entropy []byte, extraKernelArgs []string) m
 	device.KernelArgs = append(device.KernelArgs, cmdline...)
 	device.KernelArgs = removeCmdlineEntropy(device.KernelArgs)
 	device.KernelArgs = append(device.KernelArgs, extraKernelArgs...)
-	device.Initrd = "zircon-a"
 
 	device.KernelArgs = append(device.KernelArgs, cmdlineEntropy+hex.EncodeToString(entropy))
 

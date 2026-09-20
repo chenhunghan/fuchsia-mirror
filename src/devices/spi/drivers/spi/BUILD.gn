@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("spi-dml") {
+  dml = "meta/spi.dml"
+  driver_name = "spi"
+}
+
 driver_bind_rules("spi_bind") {
-  rules = "meta/spi.bind"
+  dml_label = ":spi-dml"
   bind_output = "spi.bindbc"
   tests = "meta/tests.json"
   deps = [ "//src/devices/bind/fuchsia" ]
@@ -80,7 +85,7 @@ fuchsia_driver_component("spi") {
   ]
   info = "meta/spi-info.json"
   component_name = "spi"
-  manifest = "meta/spi.cml"
+  dml_label = ":spi-dml"
   deps = [ ":spi-driver" ]
 }
 

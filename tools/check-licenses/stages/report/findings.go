@@ -7,6 +7,7 @@ package report
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,12 +17,13 @@ import (
 
 // Finding represents a single structured static analysis finding for shac / Gerrit.
 type Finding struct {
-	FilePath  string `json:"filepath,omitempty"`
-	Line      int    `json:"line,omitempty"`
-	EndLine   int    `json:"end_line,omitempty"`
-	Level     string `json:"level"`
-	Message   string `json:"message"`
-	CheckName string `json:"check_name,omitempty"`
+	FilePath     string   `json:"filepath,omitempty"`
+	Line         int      `json:"line,omitempty"`
+	EndLine      int      `json:"end_line,omitempty"`
+	Level        string   `json:"level"`
+	Message      string   `json:"message"`
+	CheckName    string   `json:"check_name,omitempty"`
+	Replacements []string `json:"replacements,omitempty"`
 }
 
 // FindingsReporter writes validation errors to a structured JSON file.
@@ -63,14 +65,17 @@ func (r *FindingsReporter) Run(ctx context.Context, projects []*pipeline.Project
 		}
 
 		findings = append(findings, Finding{
-			FilePath:  relPath,
-			Line:      startLine,
-			EndLine:   endLine,
-			Level:     "error",
-			Message:   e.Issue,
-			CheckName: e.CheckName,
+			FilePath:     relPath,
+			Line:         startLine,
+			EndLine:      endLine,
+			Level:        "error",
+			Message:      e.Issue,
+			CheckName:    e.CheckName,
+			Replacements: e.Replacements,
 		})
 	}
+
+	findings = DeduplicateFindings(findings)
 
 	sort.Slice(findings, func(i, j int) bool {
 		if findings[i].FilePath != findings[j].FilePath {
@@ -94,4 +99,18 @@ func (r *FindingsReporter) Run(ctx context.Context, projects []*pipeline.Project
 	}
 
 	return os.WriteFile(r.FindingsFile, append(data, '\n'), 0644)
+}
+
+// DeduplicateFindings removes duplicate findings with identical FilePath, Line, EndLine, CheckName, and Message.
+func DeduplicateFindings(findings []Finding) []Finding {
+	seen := make(map[string]bool)
+	deduped := make([]Finding, 0, len(findings))
+	for _, f := range findings {
+		key := fmt.Sprintf("%s:%d:%d:%s:%s", f.FilePath, f.Line, f.EndLine, f.CheckName, f.Message)
+		if !seen[key] {
+			seen[key] = true
+			deduped = append(deduped, f)
+		}
+	}
+	return deduped
 }

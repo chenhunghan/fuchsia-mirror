@@ -176,8 +176,6 @@ TEST(ScsiTest, QueueCommandCallback) {
 
 class TestController : public scsi::Controller {
  public:
-  bool UseNewInterface() const override { return true; }
-  size_t BlockOpSize() override { return sizeof(scsi::DeviceOp); }
   zx_status_t ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
                                  iovec data) override {
     return ZX_OK;
@@ -287,8 +285,6 @@ class TestScsiDriver : public virtio::ScsiDriver {
   using scsi::Controller::block_devs_;
   using virtio::ScsiDriver::scsi_device;
   using virtio::ScsiDriver::set_scsi_device;
-
-  bool UseNewInterface() const override { return true; }
 
   zx::result<std::unique_ptr<scsi::BlockDevice>> BindBlockDevice(
       uint8_t target, uint16_t lun, uint32_t max_transfer_bytes,

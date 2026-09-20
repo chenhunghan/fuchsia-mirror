@@ -24,6 +24,10 @@ pub use sched_scan_match::*;
 pub use sched_scan_plan::*;
 pub use sta_info::*;
 
+const REG_ALPHA2_LEN: usize = 2;
+// Length of the 2-byte code + null-terminating character.
+const REG_ALPHA2_NULL_STR_LEN: usize = 3;
+
 // Note: variants are sorted in ascending order by `kind` value.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Nl80211Attr {
@@ -73,7 +77,10 @@ impl Nla for Nl80211Attr {
             Mac(val) => size_of_val(val),
             StaInfo(val) => val.as_slice().buffer_len(),
             WiphyBands(bands) => to_nested_nlas(bands).as_slice().buffer_len(),
-            RegulatoryRegionAlpha2(reg) => reg.len(),
+            // NL80211_ATTR_REG_ALPHA2 is defined by the Linux kernel as an NLA_STRING.
+            // Under Netlink, NLA_STRINGs must include the null-terminating '\0' byte.
+            // Android daemons (like wificond) rely on this 3-byte C-string representation.
+            RegulatoryRegionAlpha2(_) => REG_ALPHA2_NULL_STR_LEN,
             MaxScanSsids(val) => size_of_val(val),
             ScanFrequencies(val) => to_nested_values(val).as_slice().buffer_len(),
             ScanSsids(val) => to_nested_values(val).as_slice().buffer_len(),
@@ -158,7 +165,11 @@ impl Nla for Nl80211Attr {
             Mac(val) => buffer.copy_from_slice(&val[..]),
             StaInfo(val) => val.as_slice().emit(buffer),
             WiphyBands(bands) => to_nested_nlas(bands).as_slice().emit(buffer),
-            RegulatoryRegionAlpha2(reg) => buffer.copy_from_slice(&reg[..]),
+            // Encode as a standard null-terminated C-string.
+            RegulatoryRegionAlpha2(reg) => {
+                buffer[..REG_ALPHA2_LEN].copy_from_slice(&reg[..]);
+                buffer[REG_ALPHA2_LEN] = 0;
+            }
             MaxScanSsids(val) => buffer[0] = *val,
             ScanFrequencies(val) => to_nested_values(val).as_slice().emit(buffer),
             ScanSsids(val) => to_nested_values(val).as_slice().emit(buffer),
@@ -218,11 +229,15 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>> for Nl80211Attr {
                 ));
             }
             NL80211_ATTR_REG_ALPHA2 => {
-                if payload.len() != 2 {
+                // Support both 2-byte raw values and 3-byte C-strings.
+                let is_valid_bytes = payload.len() == REG_ALPHA2_LEN;
+                let is_valid_string = payload.len() == REG_ALPHA2_NULL_STR_LEN
+                    && payload[REG_ALPHA2_NULL_STR_LEN - 1] == 0;
+                if !is_valid_bytes && !is_valid_string {
                     return Err(format!("invalid regulatory region alpha2: {payload:?}").into());
                 }
-                let mut reg = [0u8; 2];
-                reg[..].copy_from_slice(payload);
+                let mut reg = [0u8; REG_ALPHA2_LEN];
+                reg.copy_from_slice(&payload[..REG_ALPHA2_LEN]);
                 Self::RegulatoryRegionAlpha2(reg)
             }
             NL80211_ATTR_MAX_NUM_SCAN_SSIDS => Self::MaxScanSsids(payload[0]),
@@ -422,6 +437,11 @@ mod tests {
         vec![8, 0, NL80211_ATTR_EXT_FEATURES as u8, 0, 11, 22, 33, 44] ;
         "vec of u8"
     )]
+    #[test_case(
+        Nl80211Attr::RegulatoryRegionAlpha2(*b"AB"),
+        vec![7, 0, NL80211_ATTR_REG_ALPHA2 as u8, 0, b'A', b'B', 0, 0] ;
+        "regulatory region alpha2"
+    )]
     fn emit_and_parse_test(attr: Nl80211Attr, bytes: Vec<u8>) {
         // Test emitting the attr.
         let mut buffer = vec![0; attr.buffer_len()];
@@ -520,5 +540,51 @@ mod tests {
             8, 0, NL80211_SCHED_SCAN_PLAN_ITERATIONS as u8, 0, 5, 0, 0, 0, // iterations
         ];
         assert_eq!(buffer, expected_buffer);
+    }
+
+    #[test]
+    fn parse_regulatory_region_alpha2_2_bytes_is_valid() {
+        // 2-byte payload (without null terminator).
+        let bytes = [6, 0, NL80211_ATTR_REG_ALPHA2 as u8, 0, b'U', b'S', 0, 0];
+        let nla = NlaBuffer::new(&bytes[..]).expect("failed to create nla buffer");
+        assert_eq!(
+            Nl80211Attr::parse(&nla).expect("failed to parse"),
+            Nl80211Attr::RegulatoryRegionAlpha2(*b"US")
+        );
+    }
+
+    #[test]
+    fn parse_regulatory_region_alpha2_3_bytes_is_valid() {
+        // 3-byte payload with null terminator.
+        let bytes = [7, 0, NL80211_ATTR_REG_ALPHA2 as u8, 0, b'U', b'S', 0, 0];
+        let nla = NlaBuffer::new(&bytes[..]).expect("failed to create nla buffer");
+        assert_eq!(
+            Nl80211Attr::parse(&nla).expect("failed to parse"),
+            Nl80211Attr::RegulatoryRegionAlpha2(*b"US")
+        );
+    }
+
+    #[test]
+    fn parse_regulatory_region_alpha2_non_null_terminated_is_invalid() {
+        // 3-byte payload without null terminator (invalid).
+        let bytes = [7, 0, NL80211_ATTR_REG_ALPHA2 as u8, 0, b'U', b'S', b'A', 0];
+        let nla = NlaBuffer::new(&bytes[..]).expect("failed to create nla buffer");
+        assert!(Nl80211Attr::parse(&nla).is_err());
+    }
+
+    #[test]
+    fn parse_regulatory_region_alpha2_1_byte_is_invalid() {
+        // 1-byte payload (invalid length).
+        let bytes = [5, 0, NL80211_ATTR_REG_ALPHA2 as u8, 0, b'U', 0, 0, 0];
+        let nla = NlaBuffer::new(&bytes[..]).expect("failed to create nla buffer");
+        assert!(Nl80211Attr::parse(&nla).is_err());
+    }
+
+    #[test]
+    fn parse_regulatory_region_alpha2_4_bytes_is_invalid() {
+        // 4-byte payload (invalid length).
+        let bytes = [8, 0, NL80211_ATTR_REG_ALPHA2 as u8, 0, b'U', b'S', 0, 0];
+        let nla = NlaBuffer::new(&bytes[..]).expect("failed to create nla buffer");
+        assert!(Nl80211Attr::parse(&nla).is_err());
     }
 }

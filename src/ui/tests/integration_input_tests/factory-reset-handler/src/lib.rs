@@ -79,7 +79,7 @@ async fn assemble_realm(
         &a11y_test_realm,
     )
     .await;
-    b.route_to_peer::<fidl_fuchsia_ui_composition::FlatlandMarker>(
+    b.route_to_peer::<fidl_fuchsia_ui_composition::FlatlandFactoryMarker>(
         &scenic_test_realm,
         &a11y_test_realm,
     )

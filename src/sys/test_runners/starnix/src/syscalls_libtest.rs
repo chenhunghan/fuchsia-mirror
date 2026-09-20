@@ -5,6 +5,7 @@
 use crate::debian_guest::DebianGuest;
 use crate::helpers::{self, clone_start_info};
 use anyhow::{Context, Error, anyhow, bail};
+use cm_types::NamespacePath;
 use fidl_fuchsia_component_runner as frunner;
 use fidl_fuchsia_test as ftest;
 use fuchsia_async as fasync;
@@ -126,11 +127,20 @@ async fn run_libtests_on_debian_guest(
     debian_guest: Arc<DebianGuest>,
     options: ftest::RunOptions,
 ) -> Result<(), Error> {
-    let test_component_ns = namespace::Namespace::try_from(test_start_info.ns.take().unwrap())?;
+    let mut test_component_ns = namespace::Namespace::try_from(test_start_info.ns.take().unwrap())?;
     test_start_info.ns = Some(test_component_ns.clone().try_into()?);
+    let test_pkg_dir = test_component_ns
+        .remove(&NamespacePath::new("/pkg")?)
+        .ok_or_else(|| anyhow!("Could not find /pkg in namespace!"))?
+        .into_proxy();
 
-    let guest_binary =
-        debian_guest.push_test_dependencies(test_component_ns, &test_start_info).await?;
+    let data_mount = helpers::get_syscall_data_mount(&test_pkg_dir).await?;
+    debian_guest.configure_data_mount(data_mount);
+
+    let guest_binary = helpers::get_guest_syscall_test_binary_path(&test_start_info)?;
+    let test_binary_file =
+        helpers::open_guest_syscall_test_binary(&test_pkg_dir, &test_start_info).await?;
+    debian_guest.push_data_to_guest(test_binary_file, &guest_binary).await?;
 
     for test in tests {
         let test_name = test.name.clone().ok_or_else(|| anyhow!("Invocation missing test name"))?;

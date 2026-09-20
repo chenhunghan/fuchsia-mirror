@@ -86,7 +86,8 @@ TEST(TrivialAllocatorDeathTest, PageAllocatorMmap) {
 #ifdef __Fuchsia__
 
 TEST(TrivialAllocatorDeathTest, PageAllocatorVmar) {
-  ASSERT_NO_FATAL_FAILURE(PageAllocatorTest<trivial_allocator::ZirconVmar>(*zx::vmar::root_self()));
+  ASSERT_NO_FATAL_FAILURE(
+      PageAllocatorTest<trivial_allocator::ZirconVmar<>>(*zx::vmar::root_self()));
 }
 
 #endif
@@ -103,7 +104,9 @@ TEST(TrivialAllocatorTests, PageAllocatorRelease) {
     size_t page_size() const { return kPageSize; }
 
     // `this` gives a canonical (albeit nonsensical) pointer.
-    std::pair<void*, Capability> Allocate(size_t) { return {this, {}}; }
+    std::pair<void*, Capability> Allocate(size_t) {
+      return {this, {}};
+    }
 
     void Deallocate(Capability, void* ptr, size_t size) {
       ExpectAddressAndSize(ptr, size);

@@ -31,9 +31,9 @@ use net_types::{MulticastAddr, SpecifiedAddr, UnicastAddr, Witness as _};
 use netstack3_base::sync::{DynDebugReferences, Mutex};
 use netstack3_base::testutil::{
     AlwaysDefaultsSettingsContext, FakeAtomicInstant, FakeCryptoRng, FakeFrameCtx, FakeInstant,
-    FakeNetwork, FakeNetworkLinks, FakeNetworkSpec, FakeSocketWritableListener, FakeTimerCtx,
-    FakeTimerCtxExt, FakeTimerId, MonotonicIdentifier, TestAddrs, WithFakeFrameContext,
-    WithFakeTimerContext,
+    FakeNetwork, FakeNetworkLinks, FakeNetworkSpec, FakeSendToken, FakeSocketWritableListener,
+    FakeTimerCtx, FakeTimerCtxExt, FakeTimerId, MonotonicIdentifier, TestAddrs,
+    WithFakeFrameContext, WithFakeTimerContext,
 };
 use netstack3_base::{
     AddressResolutionFailed, CtxPair, DeferredResourceRemovalContext, EventContext,
@@ -1397,6 +1397,7 @@ impl<I: IpExt> UdpReceiveBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx 
 impl UdpBindingsTypes for FakeBindingsCtx {
     type ExternalData<I: Ip> = ();
     type SocketWritableListener = FakeSocketWritableListener;
+    type SendToken = FakeSendToken;
 }
 
 impl<I: IpExt> IcmpEchoBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx {
@@ -1427,6 +1428,7 @@ impl<I: IpExt> IcmpEchoBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx {
 impl IcmpEchoBindingsTypes for FakeBindingsCtx {
     type ExternalData<I: Ip> = ();
     type SocketWritableListener = FakeSocketWritableListener;
+    type SendToken = FakeSendToken;
 }
 
 impl DeviceSocketTypes for FakeBindingsCtx {

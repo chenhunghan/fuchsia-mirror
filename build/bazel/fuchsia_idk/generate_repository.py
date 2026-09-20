@@ -68,7 +68,7 @@ def _create_symlink(dst_path: Path, target_path: Path) -> None:
     dst_path.symlink_to(target_path)
 
 
-def _to_starlark_string_list(items: T.List[str], indent: int = 4) -> str:
+def _to_starlark_string_list(items: list[str], indent: int = 4) -> str:
     if len(items) == 0:
         return "[]"
     if len(items) == 1:
@@ -80,7 +80,7 @@ def _to_starlark_string_list(items: T.List[str], indent: int = 4) -> str:
     return result
 
 
-def _to_starlark_string_dict(mapping: T.Dict[str, str], indent: int = 4) -> str:
+def _to_starlark_string_dict(mapping: dict[str, str], indent: int = 4) -> str:
     if not mapping:
         return "{}"
     if len(mapping) == 1:
@@ -141,12 +141,12 @@ class OutputPackageInfo(object):
 
     def __init__(self) -> None:
         # The list of files exported by this package.
-        self._exports: T.Set[str] = set()
+        self._exports: set[str] = set()
         # The list of filesgroups in this package.
-        self._filegroups: T.Dict[str, T.List[str]] = {}
+        self._filegroups: dict[str, list[str]] = {}
         # The list of aliases in this package.
-        self._aliases: T.Dict[str, str] = {}
-        self._target_names: T.Set[str] = set()
+        self._aliases: dict[str, str] = {}
+        self._target_names: set[str] = set()
 
     def add_export(self, name: str) -> None:
         assert (
@@ -202,14 +202,14 @@ class OutputIdk(object):
 
     def __init__(self, output_dir: Path):
         self._output_dir = output_dir
-        self._packages: T.Dict[str, OutputPackageInfo] = {}
-        self._symlinks: T.Dict[str, Path] = {}
-        self._files: T.Dict[str, str] = {}
+        self._packages: dict[str, OutputPackageInfo] = {}
+        self._symlinks: dict[str, Path] = {}
+        self._files: dict[str, str] = {}
 
         # A map from Bazel target labels to where to copy their
         # artifact when generating a final IDK directory.
-        self._final_files: T.Dict[str, str] = {}
-        self._final_metas: T.Dict[str, str] = {}
+        self._final_files: dict[str, str] = {}
+        self._final_metas: dict[str, str] = {}
 
     def add_symlink(self, link_relpath: str, target_path: Path) -> None:
         cur_path = self._symlinks.setdefault(link_relpath, target_path)
@@ -363,25 +363,25 @@ class PathRewriter(object):
             return label
 
     def path_list(
-        self, paths: T.List[str], relative_from: None | Path = None
-    ) -> T.List[str]:
+        self, paths: list[str], relative_from: None | Path = None
+    ) -> list[str]:
         """Rewrite all paths in a list, return new list."""
         return [self.path(p, relative_from) for p in paths]
 
-    def property_inplace(self, obj: T.Dict[str, str], prop: str) -> None:
+    def property_inplace(self, obj: dict[str, str], prop: str) -> None:
         """Rewrite obj[prop] as path in-place if possible."""
         value: str | None = obj.get(prop, None)
         if value is not None:
             obj[prop] = self.path(value)
 
     def properties_inplace(
-        self, obj: T.Dict[str, str], props: T.Sequence[str]
+        self, obj: dict[str, str], props: T.Sequence[str]
     ) -> None:
         """Applies property_inplace() for a sequence of property names."""
         for prop in props:
             self.property_inplace(obj, prop)
 
-    def path_list_inplace(self, paths: T.List[str]) -> None:
+    def path_list_inplace(self, paths: list[str]) -> None:
         """Rewrite all paths in a list, modify in-place."""
         # Subtle: using `path_list[:] = new_value` changes the content
         # of path_list in-place, instead of assigning a new value to

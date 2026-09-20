@@ -653,6 +653,7 @@ impl IntoErrno for udp::SendToError {
     fn to_errno(&self) -> Errno {
         match self {
             Self::NotWriteable => Errno::Epipe,
+            Self::LocalAddress(err) => err.to_errno(),
             Self::CreateSock(err) => err.to_errno(),
             Self::Zone(err) => err.to_errno(),
             // NB: Mapping MTU to EMSGSIZE is different from the impl on

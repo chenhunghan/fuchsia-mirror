@@ -10,11 +10,12 @@
 #include <type_traits>
 
 #include "../abi-ptr.h"
+#include "../layout.h"
 
 namespace elfldltl {
 
 // Forward declaration.
-template <typename T, size_t N, class Elf, AbiPtrTraitsApi<T, Elf> Traits>
+template <typename T, size_t N, ElfApi Elf, AbiPtrTraitsApi<T, Elf> Traits>
 class AbiSpan;
 
 namespace internal {
@@ -22,12 +23,12 @@ namespace internal {
 // This is the common base type for all AbiSpan instantiations.
 // It's separately instantiated for each one, but then different
 // subclasses are defined for different instantiations.
-template <typename T, size_t N, class Elf, AbiPtrTraitsApi<T, Elf> Traits>
+template <typename T, size_t N, ElfApi Elf, AbiPtrTraitsApi<T, Elf> Traits>
 class AbiSpanImplBase {
  public:
   using Ptr = AbiPtr<T, Elf, Traits>;
-  using Addr = typename Ptr::Addr;
-  using size_type = typename Ptr::size_type;
+  using Addr = Ptr::Addr;
+  using size_type = Ptr::size_type;
 
   using element_type = T;
   using value_type = std::remove_cv_t<T>;
@@ -117,7 +118,7 @@ class AbiSpanImplBase {
 };
 
 // If AbiPtr::get() isn't supported, no access methods are provided.
-template <typename T, size_t N, class Elf, AbiPtrTraitsApi<T, Elf> Traits,
+template <typename T, size_t N, ElfApi Elf, AbiPtrTraitsApi<T, Elf> Traits,
           bool Local = AbiPtrLocalTraitsApi<Traits, T, Elf>>
   requires(Local == AbiPtrLocalTraitsApi<Traits, T, Elf>)
 class AbiSpanImpl : public AbiSpanImplBase<T, N, Elf, Traits> {
@@ -127,15 +128,15 @@ class AbiSpanImpl : public AbiSpanImplBase<T, N, Elf, Traits> {
 };
 
 // This specialization kicks in when AbiPtr::get() is available.
-template <typename T, size_t N, class Elf, class Traits>
+template <typename T, size_t N, ElfApi Elf, class Traits>
 class AbiSpanImpl<T, N, Elf, Traits, true> : public AbiSpanImplBase<T, N, Elf, Traits> {
  public:
   using pointer = T*;
   using const_pointer = const T*;
   using reference = T&;
   using const_reference = const T&;
-  using iterator = typename std::span<T, N>::iterator;
-  using reverse_iterator = typename std::span<T, N>::reverse_iterator;
+  using iterator = std::span<T, N>::iterator;
+  using reverse_iterator = std::span<T, N>::reverse_iterator;
 
   using AbiSpanImplBase<T, N, Elf, Traits>::AbiSpanImplBase;
   using AbiSpanImplBase<T, N, Elf, Traits>::AsSpan;

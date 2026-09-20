@@ -5,6 +5,7 @@
 //! This module tests the specific properties of the -full package resolver. The remote resolver
 //! modules test properties that the -full resolver shares with other capabilities.
 
+use diagnostics_assertions::{AnyProperty, assert_data_tree};
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg as fpkg;
 use fuchsia_async as fasync;
@@ -465,4 +466,154 @@ async fn executability_enforcement(enforcement_enabled: bool) {
     let (remote_sub_dir, _) =
         env.resolve_with_context_full("my-remote-subpackage", &remote_context).await.unwrap();
     assert_eq!(get_flags(&remote_sub_dir).await, non_base_expected_flags);
+}
+
+#[fuchsia::test]
+async fn inspect_success() {
+    let package = fuchsia_pkg_testing::PackageBuilder::new("test-package")
+        .add_resource_at("blob", "blob-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let repo = Arc::new(
+        fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .add_package(&package)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let (blocker, mut blocked_fetches) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseBodies::new();
+    let served_repository = Arc::clone(&repo).server().response_overrider(blocker).start().unwrap();
+    let repo_config =
+        served_repository.make_repo_config("fuchsia-pkg://example.org".parse().unwrap());
+    let env = crate::TestEnv::builder()
+        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages(
+            &repo_config,
+            &[&package],
+        ))
+        .build()
+        .await;
+
+    let (_package_dir, server_end) = fidl::endpoints::create_proxy();
+    let package_fut = env
+        .proxies
+        .full_package_resolver
+        .resolve("fuchsia-pkg://example.org/test-package", server_end);
+
+    // Let the meta.far fetch complete and wait for the content blob to be requested.
+    let () = blocked_fetches.next().await.unwrap().unblock();
+    let unblocker = blocked_fetches.next().await.unwrap();
+
+    assert_data_tree!(
+        env.inspect_hierarchy().await,
+        "root": contains {
+            "package_fetcher": {
+                "0": {
+                    "start_boot_ns": AnyProperty,
+                    "package_hash": package.hash().to_string(),
+                    "gc_protection": "OpenPackageTracking",
+                    "blob_source": format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                    "known_outstanding_blobs": 1u64,
+                }
+            },
+            "fuchsia.pkg.PackageResolver-full": {
+                "active": {
+                    "0": {
+                        "start_boot_ns": AnyProperty,
+                        "url": "fuchsia-pkg://example.org/test-package",
+                        "authority": "tuf",
+                        "blob_source":
+                            format!("Some({}/1)", repo_config.mirrors()[0].blob_mirror_url()),
+                        "hash": package.hash().to_string(),
+                    },
+                },
+                "recent": {},
+            }
+        }
+    );
+
+    // Finish the resolve.
+    let () = unblocker.unblock();
+    let _context = package_fut.await.unwrap().unwrap();
+
+    assert_data_tree!(
+        env.inspect_hierarchy().await,
+        "root": contains {
+            "package_fetcher": {},
+            "fuchsia.pkg.PackageResolver-full": {
+                "active": {},
+                "recent": {
+                    "0": {
+                        "0": {
+                            "start_boot_ns": AnyProperty,
+                            "url": "fuchsia-pkg://example.org/test-package",
+                            "authority": "tuf",
+                            "blob_source":
+                                format!("Some({}/1)", repo_config.mirrors()[0].blob_mirror_url()),
+                            "hash": package.hash().to_string(),
+                            "result": "success",
+                            "end_boot_ns": AnyProperty,
+                        }
+                    },
+                },
+            }
+        }
+    );
+}
+
+#[fuchsia::test]
+async fn inspect_failure() {
+    let package = fuchsia_pkg_testing::PackageBuilder::new("test-package").build().await.unwrap();
+    let repo = Arc::new(
+        fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .add_package(&package)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let served_repository = Arc::clone(&repo)
+        .server()
+        .response_overrider(
+            fuchsia_pkg_testing::serve::responder::StaticResponseCode::server_error(),
+        )
+        .start()
+        .unwrap();
+    let repo_config =
+        served_repository.make_repo_config("fuchsia-pkg://example.org".parse().unwrap());
+    let env = crate::TestEnv::builder()
+        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages(
+            &repo_config,
+            &[&package],
+        ))
+        .build()
+        .await;
+
+    std::assert_matches!(env.resolve_full("fuchsia-pkg://example.org/test-package").await, Err(_));
+
+    assert_data_tree!(
+        env.inspect_hierarchy().await,
+        "root": contains {
+            "package_fetcher": {},
+            "fuchsia.pkg.PackageResolver-full": {
+                "active": {},
+                "recent": {
+                    "0": {
+                        "0": {
+                            "start_boot_ns": AnyProperty,
+                            "url": "fuchsia-pkg://example.org/test-package",
+                            "authority": "tuf",
+                            "blob_source":
+                                format!("Some({}/1)", repo_config.mirrors()[0].blob_mirror_url()),
+                            "hash": package.hash().to_string(),
+                            "result":
+                                "error: forwarding to package fetcher: fetching blob: error while \
+                                 calling fuchsia.pkg.http.Client.DownloadBlob Network",
+                            "end_boot_ns": AnyProperty,
+                        }
+                    },
+                },
+            }
+        }
+    );
 }

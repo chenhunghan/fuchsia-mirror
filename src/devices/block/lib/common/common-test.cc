@@ -33,50 +33,6 @@ TEST_F(TestWithLogger, CheckIoRangeMaxTransferTest) {
   EXPECT_OK(CheckIoRange(0, 25, 100, 25, logger_.logger()));
 }
 
-TEST_F(TestWithLogger, CheckFlushValidTest) {
-  block_read_write rw;
-
-  rw = {
-      .vmo = 1,
-      .length = 0,
-      .offset_dev = 0,
-      .offset_vmo = 0,
-  };
-  EXPECT_EQ(CheckFlushValid(rw, logger_.logger()), ZX_ERR_INVALID_ARGS);
-
-  rw = {
-      .vmo = ZX_HANDLE_INVALID,
-      .length = 2,
-      .offset_dev = 0,
-      .offset_vmo = 0,
-  };
-  EXPECT_EQ(CheckFlushValid(rw, logger_.logger()), ZX_ERR_INVALID_ARGS);
-
-  rw = {
-      .vmo = ZX_HANDLE_INVALID,
-      .length = 0,
-      .offset_dev = 3,
-      .offset_vmo = 0,
-  };
-  EXPECT_EQ(CheckFlushValid(rw, logger_.logger()), ZX_ERR_INVALID_ARGS);
-
-  rw = {
-      .vmo = ZX_HANDLE_INVALID,
-      .length = 0,
-      .offset_dev = 0,
-      .offset_vmo = 4,
-  };
-  EXPECT_EQ(CheckFlushValid(rw, logger_.logger()), ZX_ERR_INVALID_ARGS);
-
-  rw = {
-      .vmo = ZX_HANDLE_INVALID,
-      .length = 0,
-      .offset_dev = 0,
-      .offset_vmo = 0,
-  };
-  EXPECT_OK(CheckFlushValid(rw, logger_.logger()));
-}
-
 TEST(EndianTest, BigEndian24Test) {
   uint8_t memory[3] = {};
   EXPECT_OK(WriteToBigEndian24(0x654321, memory));

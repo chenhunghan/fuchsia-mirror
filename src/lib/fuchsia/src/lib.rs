@@ -415,15 +415,35 @@ where
     result
 }
 
+/// Options for running an async test in fuchsia.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestOptions {
+    /// True iff the executor should support binding Zircon interrupts.
+    pub allow_interrupts: bool,
+}
+
+impl Default for TestOptions {
+    fn default() -> Self {
+        Self { allow_interrupts: false }
+    }
+}
+
+impl From<TestOptions> for fuchsia_async::test_support::TestOptions {
+    fn from(options: TestOptions) -> Self {
+        Self { allow_interrupts: options.allow_interrupts }
+    }
+}
+
 /// Run an async test function with a single threaded executor.
 #[doc(hidden)]
-pub fn test_singlethreaded<F, Fut, R>(f: F) -> R
+pub fn test_singlethreaded<F, Fut, R>(f: F, options: TestOptions) -> R
 where
     F: Fn(usize) -> Fut + Sync + 'static,
     Fut: Future<Output = R> + 'static,
     R: fuchsia_async::test_support::TestResult,
 {
-    let result = fuchsia_async::test_support::run_singlethreaded_test(f);
+    let result = fuchsia_async::test_support::run_singlethreaded_test(f, options.into());
     if result.is_ok() {
         install_lsan_hook();
     }
@@ -432,13 +452,13 @@ where
 
 /// Run an async test function with a multi threaded executor (containing `num_threads`).
 #[doc(hidden)]
-pub fn test_multithreaded<F, Fut, R>(f: F, num_threads: u8) -> R
+pub fn test_multithreaded<F, Fut, R>(f: F, num_threads: u8, options: TestOptions) -> R
 where
     F: Fn(usize) -> Fut + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: fuchsia_async::test_support::MultithreadedTestResult,
 {
-    let result = fuchsia_async::test_support::run_test(f, num_threads);
+    let result = fuchsia_async::test_support::run_test(f, num_threads, options.into());
     if result.is_ok() {
         install_lsan_hook();
     }
@@ -448,13 +468,13 @@ where
 /// Run an async test function until it stalls. The executor will also use fake time.
 #[doc(hidden)]
 #[cfg(target_os = "fuchsia")]
-pub fn test_until_stalled<F, Fut, R>(f: F) -> R
+pub fn test_until_stalled<F, Fut, R>(f: F, options: TestOptions) -> R
 where
     F: 'static + Sync + Fn(usize) -> Fut,
     Fut: 'static + Future<Output = R>,
     R: fuchsia_async::test_support::TestResult,
 {
-    let result = fuchsia_async::test_support::run_until_stalled_test(true, f);
+    let result = fuchsia_async::test_support::run_until_stalled_test(true, f, options.into());
     if result.is_ok() {
         install_lsan_hook();
     }

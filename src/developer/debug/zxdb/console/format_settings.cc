@@ -74,7 +74,7 @@ void AddSettingToTable(ConsoleContext* context, const std::string& name, const S
 
 OutputBuffer FormatSettingStore(ConsoleContext* context, const SettingStore& store) {
   std::vector<std::vector<OutputBuffer>> rows;
-  for (auto [key, _] : store.schema()->settings()) {
+  for (const auto& [key, _] : store.schema()->settings()) {
     auto value = store.GetValue(key);
     FX_DCHECK(!value.is_null());
     AddSettingToTable(context, key, value, &rows, true);

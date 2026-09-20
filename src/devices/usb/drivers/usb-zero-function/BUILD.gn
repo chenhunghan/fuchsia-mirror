@@ -6,8 +6,13 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("usb-zero-function-dml") {
+  dml = "meta/usb-zero-function.dml"
+  driver_name = "usb-zero-function"
+}
+
 driver_bind_rules("usb_zero_function_bind") {
-  rules = "meta/usb-zero-function.bind"
+  dml_label = ":usb-zero-function-dml"
   bind_output = "usb-zero-function.bindbc"
   tests = "meta/bind-tests.json"
   deps = [ "//src/devices/bind/fuchsia.usb" ]
@@ -41,12 +46,12 @@ fuchsia_rust_driver("usb-zero-function-driver") {
 }
 
 fuchsia_driver_component("usb-zero-function") {
+  dml_label = ":usb-zero-function-dml"
   component_name = "usb-zero-function"
   deps = [
     ":usb-zero-function-driver",
     ":usb_zero_function_bind",
   ]
-  manifest = "meta/usb-zero-function.cml"
   info = "meta/usb-zero-function-info.json"
 }
 

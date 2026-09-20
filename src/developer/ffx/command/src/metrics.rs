@@ -3,13 +3,12 @@
 // found in the LICENSE file.
 
 use crate::Error;
-use analytics::{add_custom_event, get_notice, opt_out_for_this_invocation};
+use analytics::{get_notice, opt_out_for_this_invocation};
 use ffx_config::EnvironmentContext;
 use ffx_metrics::{add_ffx_launch_event, enhanced_analytics, init_metrics_svc};
 use fuchsia_async::TimeoutExt;
 use itertools::Itertools;
 use regex::Regex;
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::process::ExitStatus;
 use std::sync::LazyLock;
@@ -107,16 +106,9 @@ impl MetricsSession {
             let redacted_args = redacted_args.iter().map(AsRef::as_ref).join(" ");
             let enhanced_args = enhanced_args.map(|val| val.iter().map(AsRef::as_ref).join(" "));
             let connection_mode = self.connection_mode;
-            let analytics_task = fuchsia_async::Task::local(async move {
-                let _ = add_custom_event(
-                    Some("ffx_connection_mode"),
-                    Some(connection_mode),
-                    None,
-                    BTreeMap::new(),
-                )
-                .await;
-
+            let analytics_done = async move {
                 if let Err(e) = add_ffx_launch_event(
+                    Some(connection_mode),
                     redacted_args,
                     enhanced_args,
                     timing_in_millis,
@@ -128,15 +120,13 @@ impl MetricsSession {
                     log::error!("metrics submission failed: {}", e);
                 }
                 Instant::now()
-            });
-
-            let analytics_done = analytics_task
-                .on_timeout(self.upload_timeout, || {
-                    log::error!("metrics submission timed out");
-                    // Metrics timeouts should not impact user flows.
-                    Instant::now()
-                })
-                .await;
+            }
+            .on_timeout(self.upload_timeout, || {
+                log::error!("metrics submission timed out");
+                // Metrics timeouts should not impact user flows.
+                Instant::now()
+            })
+            .await;
             let analytics_duration = analytics_done - command_done;
 
             Some(analytics_duration)

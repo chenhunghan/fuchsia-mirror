@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Context, Error};
+use anyhow::{Context, Error, format_err};
 use fidl_fuchsia_bluetooth_host::{BondingDelegateProxy, HostProxy, PeerWatcherGetNextResponse};
 use fidl_fuchsia_hardware_bluetooth::EmulatorProxy;
-use fuchsia_bluetooth::expectation::asynchronous::{
-    expectable, Expectable, ExpectableExt, ExpectableState, ExpectableStateExt,
-};
 use fuchsia_bluetooth::expectation::Predicate;
+use fuchsia_bluetooth::expectation::asynchronous::{
+    Expectable, ExpectableExt, ExpectableState, ExpectableStateExt, expectable,
+};
 use fuchsia_bluetooth::types::{HostInfo, Peer, PeerId};
 use futures::future::{self, BoxFuture, Future};
 use futures::{FutureExt, TryFutureExt};
@@ -17,10 +17,10 @@ use log::warn;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use test_harness::{SharedState, TestHarness, SHARED_STATE_TEST_COMPONENT_INDEX};
+use test_harness::{SHARED_STATE_TEST_COMPONENT_INDEX, SharedState, TestHarness};
 
 use crate::core_realm::SHARED_STATE_INDEX;
-use crate::emulator::{watch_controller_parameters, EmulatorState};
+use crate::emulator::{EmulatorState, watch_controller_parameters};
 use crate::host_realm::HostRealm;
 use crate::timeout_duration;
 
@@ -183,6 +183,7 @@ async fn watch_peers(harness: HostHarness) -> Result<(), Error> {
                     if harness.write_state().peers.remove(&id).is_none() {
                         warn!(id:%; "HostHarness: Removed id that wasn't present");
                     }
+                    harness.notify_state_changed();
                 }
             }
             _ => return Err(format_err!("unknown PeerWatcher.GetNext response")),

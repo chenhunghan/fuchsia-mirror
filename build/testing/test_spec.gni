@@ -309,23 +309,31 @@ if (allowed_host_device_types == []) {
 template("test_spec") {
   testonly = true
 
-  forward_variables_from(invoker, [ "environments" ])
-
-  # Set default environments: Emu for a fuchsia test, and VMs for linux and mac
-  # tests.
-  if (is_fuchsia || is_kernel) {
-    if (!defined(environments)) {
-      environments = basic_envs
-    }
-  } else if (is_linux) {
-    if (!defined(environments)) {
-      environments = [ host_env ]
-    }
+  # The test is to be built, but not run.
+  build_only = defined(invoker.build_only) && invoker.build_only
+  if (build_only) {
+    assert(!defined(environments),
+           "build_only tests should not specify environments")
+    _test_environments = []
   } else {
-    assert(false, "$current_os not supported")
+    if (defined(invoker.environments)) {
+      _test_environments = invoker.environments
+      # assert(
+      #     invoker.environments != [],
+      #     "Test 'environments' must not be empty.  Build-only tests should use 'build_only = true' instead of specifying an empty set of environments.")
+    } else {
+      # Set default environments: Emu for a fuchsia test, and VMs for linux and
+      # mac tests.
+      if (is_fuchsia || is_kernel) {
+        _test_environments = basic_envs
+      } else if (is_linux) {
+        _test_environments = [ host_env ]
+      } else {
+        assert(false, "$current_os not supported")
+      }
+    }
   }
-
-  foreach(env, environments) {
+  foreach(env, _test_environments) {
     empty_scope = {  # Clear from previous iteration
     }
     assert(defined(env.dimensions) && env.dimensions != empty_scope,
@@ -393,14 +401,14 @@ template("test_spec") {
   _expects_ssh = true
   if (defined(invoker.expects_ssh)) {
     _expects_ssh = invoker.expects_ssh
-  } else if (is_linux && environments == [ host_env ]) {
+  } else if (is_linux && _test_environments == [ host_env ]) {
     # If the test is a pure host test, expects_ssh should be false
     # because there is no target to run against.
     _expects_ssh = false
   }
 
   target_envs = []
-  foreach(env, environments) {
+  foreach(env, _test_environments) {
     dims = []  # Clear from previous iteration.
     if (defined(env.dimensions)) {
       dim = {
@@ -574,6 +582,12 @@ template("test_spec") {
     }
   }
 
+  # If we've reached the point where all environments have been filtered out,
+  # and _environments is empty, mark this test as build_only.
+  if (_environments == []) {
+    build_only = true
+  }
+
   test_spec = {
     forward_variables_from(invoker,
                            [
@@ -667,7 +681,7 @@ template("test_spec") {
             rebase_path(pkg_manifest_deps_file, root_build_dir)
       }
     }
-    environments = []  # Clear from previous iteration.
+    build_only = build_only
     environments = _environments
   }
 

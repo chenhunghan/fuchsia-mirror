@@ -205,6 +205,126 @@ pub fn format_size_rs(buf: &mut [u8], bytes: usize) -> &str {
     format_size_fixed_rs(buf, bytes, 0)
 }
 
+/// FormattedBytes is an inline buffer suitable for containing formatted byte sizes.
+///
+/// Matches C++ `pretty::FormattedBytes`.
+#[derive(Clone, Copy)]
+pub struct FormattedBytes {
+    buf: [u8; MAX_FORMAT_SIZE_LEN],
+    len: usize,
+}
+
+impl Default for FormattedBytes {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl FormattedBytes {
+    /// Construct an empty formatted byte size buffer.
+    pub const fn empty() -> Self {
+        Self { buf: [0u8; MAX_FORMAT_SIZE_LEN], len: 0 }
+    }
+
+    /// Construct a string representing the given size, choosing an appropriate unit automatically.
+    pub fn new(bytes: usize) -> Self {
+        let mut res = Self::empty();
+        res.set_size(bytes);
+        res
+    }
+
+    /// Construct a string representing the given size, using the given unit.
+    pub fn with_unit(bytes: usize, unit: SizeUnit) -> Self {
+        let mut res = Self::empty();
+        res.set_size_with_unit(bytes, unit);
+        res
+    }
+
+    /// Update the string to the given size, choosing an appropriate unit automatically.
+    pub fn set_size(&mut self, bytes: usize) -> &mut Self {
+        let s = format_size_rs(&mut self.buf, bytes);
+        self.len = s.len();
+        self
+    }
+
+    /// Update the string to the given size, using the given unit.
+    pub fn set_size_with_unit(&mut self, bytes: usize, unit: SizeUnit) -> &mut Self {
+        let s = format_size_fixed_rs(&mut self.buf, bytes, unit as u8);
+        self.len = s.len();
+        self
+    }
+
+    /// Return the formatted string slice.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+
+    /// Returns the formatted magnitude as a string slice (without unit suffix).
+    pub fn magnitude(&self) -> &str {
+        let s = self.as_str();
+        if s.is_empty() { s } else { &s[..s.len() - 1] }
+    }
+
+    /// Returns the associated `SizeUnit`. In the case of an empty string, `SizeUnit::Auto` is returned.
+    pub fn unit(&self) -> SizeUnit {
+        let s = self.as_str().as_bytes();
+        match s.last() {
+            Some(&last) => SizeUnit::try_from(last).unwrap_or(SizeUnit::Auto),
+            None => SizeUnit::Auto,
+        }
+    }
+}
+
+impl core::ops::Deref for FormattedBytes {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for FormattedBytes {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl core::fmt::Display for FormattedBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl core::fmt::Debug for FormattedBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl kprint::backend::AsKPrintStr for FormattedBytes {
+    #[inline(always)]
+    fn kprint_len(&self) -> core::ffi::c_int {
+        self.len as core::ffi::c_int
+    }
+
+    #[inline(always)]
+    fn kprint_ptr(&self) -> *const core::ffi::c_char {
+        self.buf.as_ptr() as *const core::ffi::c_char
+    }
+}
+
+impl kprint::backend::AsKPrintStr for &FormattedBytes {
+    #[inline(always)]
+    fn kprint_len(&self) -> core::ffi::c_int {
+        self.len as core::ffi::c_int
+    }
+
+    #[inline(always)]
+    fn kprint_ptr(&self) -> *const core::ffi::c_char {
+        self.buf.as_ptr() as *const core::ffi::c_char
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EncodedSize<'a> {
     // All numbers before the first '.'.
@@ -562,5 +682,23 @@ mod tests {
             let res = parse_size_bytes(input);
             assert_eq!(res, None, "input: {}", input);
         }
+    }
+
+    #[test]
+    fn test_formatted_bytes() {
+        let empty = FormattedBytes::empty();
+        assert_eq!(empty.as_str(), "");
+        assert_eq!(empty.magnitude(), "");
+        assert_eq!(empty.unit(), SizeUnit::Auto);
+
+        let fb = FormattedBytes::new(1024 * 1024);
+        assert_eq!(fb.as_str(), "1M");
+        assert_eq!(fb.magnitude(), "1");
+        assert_eq!(fb.unit(), SizeUnit::MiB);
+
+        let fb_unit = FormattedBytes::with_unit(1024 * 1024, SizeUnit::KiB);
+        assert_eq!(fb_unit.as_str(), "1024K");
+        assert_eq!(fb_unit.magnitude(), "1024");
+        assert_eq!(fb_unit.unit(), SizeUnit::KiB);
     }
 }

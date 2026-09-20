@@ -168,6 +168,16 @@ impl FsContext {
     pub fn namespace(&self) -> Arc<Namespace> {
         Arc::clone(&self.state.read().namespace)
     }
+
+    pub fn update_root_after_pivot(&self, old_root: &NamespaceNode, new_root: &NamespaceNode) {
+        let mut state = self.state.write();
+        if state.root.to_passive() == *old_root {
+            state.root = new_root.clone().into_active();
+        }
+        if state.cwd.to_passive() == *old_root {
+            state.cwd = new_root.clone().into_active();
+        }
+    }
 }
 
 #[cfg(test)]

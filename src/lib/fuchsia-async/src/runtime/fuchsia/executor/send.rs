@@ -47,11 +47,18 @@ impl SendExecutor {
         num_threads: u8,
         worker_init: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
         instrument: Option<Arc<dyn TaskInstrument>>,
+        allow_interrupts: bool,
     ) -> Self {
-        let inner = Arc::new(Executor::new(
+        let port = if allow_interrupts {
+            zx::Port::create_with_opts(zx::PortOptions::BIND_TO_INTERRUPT)
+        } else {
+            zx::Port::create()
+        };
+        let inner = Arc::new(Executor::new_with_port(
             ExecutorTime::RealTime,
             /* is_local */ false,
             num_threads,
+            port,
             instrument,
         ));
         let root_scope = ScopeHandle::root(inner.clone());
@@ -186,6 +193,7 @@ pub struct SendExecutorBuilder {
     num_threads: Option<u8>,
     worker_init: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     instrument: Option<Arc<dyn TaskInstrument>>,
+    allow_interrupts: bool,
 }
 
 impl SendExecutorBuilder {
@@ -206,6 +214,12 @@ impl SendExecutorBuilder {
         self
     }
 
+    /// Sets whether the executor should support binding interrupts.
+    pub fn allow_interrupts(mut self, allow_interrupts: bool) -> Self {
+        self.allow_interrupts = allow_interrupts;
+        self
+    }
+
     /// Sets the instrumentation hook.
     pub fn instrument(mut self, instrument: Option<Arc<dyn TaskInstrument>>) -> Self {
         self.instrument = instrument;
@@ -214,7 +228,12 @@ impl SendExecutorBuilder {
 
     /// Builds the `SendExecutor`, consuming this `SendExecutorBuilder`.
     pub fn build(self) -> SendExecutor {
-        SendExecutor::new_inner(self.num_threads.unwrap_or(1), self.worker_init, self.instrument)
+        SendExecutor::new_inner(
+            self.num_threads.unwrap_or(1),
+            self.worker_init,
+            self.instrument,
+            self.allow_interrupts,
+        )
     }
 }
 
@@ -272,5 +291,28 @@ mod tests {
         assert_eq!(NUM_INIT_CALLS.load(Ordering::SeqCst), 2);
         exec.run(async {});
         assert_eq!(NUM_INIT_CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn test_allow_interrupts() {
+        use crate::OnInterrupt;
+        use futures::StreamExt;
+
+        SendExecutorBuilder::new().num_threads(2).allow_interrupts(true).build().run(async {
+            let irq_raw = zx::VirtualInterrupt::create_virtual().unwrap();
+            let irq_clone = irq_raw.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+            let mut irq = std::pin::pin!(OnInterrupt::new(irq_raw));
+
+            let timestamp = zx::BootInstant::from_nanos(42);
+
+            let task = Task::spawn(async move {
+                Timer::new(zx::MonotonicDuration::from_millis(10)).await;
+                irq_clone.trigger(timestamp).unwrap();
+            });
+
+            let result = irq.next().await.unwrap().unwrap();
+            assert_eq!(result, timestamp);
+            task.await;
+        });
     }
 }

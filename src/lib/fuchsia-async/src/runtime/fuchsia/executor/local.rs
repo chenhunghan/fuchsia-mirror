@@ -163,6 +163,7 @@ impl Drop for LocalExecutor {
 pub struct LocalExecutorBuilder {
     port: Option<zx::Port>,
     instrument: Option<Arc<dyn TaskInstrument>>,
+    allow_interrupts: bool,
 }
 
 impl LocalExecutorBuilder {
@@ -177,6 +178,12 @@ impl LocalExecutorBuilder {
         self
     }
 
+    /// Sets whether the executor should support binding interrupts.
+    pub fn allow_interrupts(mut self, allow_interrupts: bool) -> Self {
+        self.allow_interrupts = allow_interrupts;
+        self
+    }
+
     /// Sets the instrumentation hook.
     pub fn instrument(mut self, instrument: Option<Arc<dyn TaskInstrument>>) -> Self {
         self.instrument = instrument;
@@ -185,10 +192,14 @@ impl LocalExecutorBuilder {
 
     /// Builds the `LocalExecutor`, consuming this `LocalExecutorBuilder`.
     pub fn build(self) -> LocalExecutor {
-        match self.port {
-            Some(port) => LocalExecutor::new_with_port(port, self.instrument),
-            None => LocalExecutor::default(),
-        }
+        let port = self.port.unwrap_or_else(|| {
+            if self.allow_interrupts {
+                zx::Port::create_with_opts(zx::PortOptions::BIND_TO_INTERRUPT)
+            } else {
+                zx::Port::create()
+            }
+        });
+        LocalExecutor::new_with_port(port, self.instrument)
     }
 }
 
@@ -461,6 +472,7 @@ pub struct TestExecutorBuilder {
     port: Option<zx::Port>,
     fake_time: bool,
     instrument: Option<Arc<dyn TaskInstrument>>,
+    allow_interrupts: bool,
 }
 
 impl TestExecutorBuilder {
@@ -481,6 +493,12 @@ impl TestExecutorBuilder {
         self
     }
 
+    /// Sets whether the executor should support binding interrupts.
+    pub fn allow_interrupts(mut self, allow_interrupts: bool) -> Self {
+        self.allow_interrupts = allow_interrupts;
+        self
+    }
+
     /// Sets the task instrumentation.
     pub fn instrument(mut self, instrument: Arc<dyn TaskInstrument>) -> Self {
         self.instrument = Some(instrument);
@@ -497,7 +515,13 @@ impl TestExecutorBuilder {
         } else {
             ExecutorTime::RealTime
         };
-        let port = self.port.unwrap_or_else(zx::Port::create);
+        let port = self.port.unwrap_or_else(|| {
+            if self.allow_interrupts {
+                zx::Port::create_with_opts(zx::PortOptions::BIND_TO_INTERRUPT)
+            } else {
+                zx::Port::create()
+            }
+        });
         let inner = Arc::new(Executor::new_with_port(
             time,
             /* is_local */ true,
@@ -874,5 +898,30 @@ mod tests {
     #[test]
     fn test_advance_to_boot() {
         advance_to_with(zx::BootDuration::from_seconds(1));
+    }
+
+    #[test]
+    fn test_allow_interrupts() {
+        use crate::OnInterrupt;
+        use futures::StreamExt;
+
+        let mut executor = LocalExecutorBuilder::new().allow_interrupts(true).build();
+        executor.run_singlethreaded(async {
+            let irq_raw = zx::VirtualInterrupt::create_virtual().unwrap();
+            // Duplicate the handle
+            let irq_clone = irq_raw.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+            let mut irq = std::pin::pin!(OnInterrupt::new(irq_raw));
+
+            let timestamp = zx::BootInstant::from_nanos(42);
+
+            let task = crate::Task::spawn(async move {
+                crate::Timer::new(zx::MonotonicDuration::from_millis(10)).await;
+                irq_clone.trigger(timestamp).unwrap();
+            });
+
+            let result = irq.next().await.unwrap().unwrap();
+            assert_eq!(result, timestamp);
+            task.await;
+        });
     }
 }

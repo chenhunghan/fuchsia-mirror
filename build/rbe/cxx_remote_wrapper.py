@@ -14,8 +14,9 @@ import argparse
 import os
 import subprocess
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any
 
 import cl_utils
 import cxx
@@ -142,11 +143,11 @@ class CxxRemoteAction(object):
         return self.cxx_action.compiler.type
 
     @property
-    def primary_output(self) -> Optional[Path]:
+    def primary_output(self) -> Path | None:
         return self.cxx_action.output_file
 
     @property
-    def depfile(self) -> Optional[Path]:
+    def depfile(self) -> Path | None:
         return self.cxx_action.depfile
 
     def _depfile_exists(self) -> bool:
@@ -453,13 +454,13 @@ class CxxRemoteAction(object):
         return self._main_args.determinism_attempts
 
     @property
-    def miscomparison_export_dir(self) -> Optional[Path]:
+    def miscomparison_export_dir(self) -> Path | None:
         if self._main_args.miscomparison_export_dir:
             return self.working_dir / self._main_args.miscomparison_export_dir
         return None
 
     @property
-    def label(self) -> Optional[str]:
+    def label(self) -> str | None:
         return self._main_args.label
 
     @property

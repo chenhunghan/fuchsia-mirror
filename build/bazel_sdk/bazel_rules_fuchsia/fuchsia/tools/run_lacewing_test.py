@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 
 # `bazel test` incorrectly handles stdout, so logging to stderr will keep our
@@ -21,7 +20,7 @@ def log(*kwargs):
     print(*kwargs, file=sys.stderr)
 
 
-def parse_args() -> Tuple[argparse.Namespace, List[str]]:
+def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Separates relevant arguments from unknown arguments."""
     parser = argparse.ArgumentParser()
 
@@ -62,7 +61,7 @@ def parse_args() -> Tuple[argparse.Namespace, List[str]]:
     return parser.parse_known_args()
 
 
-def write_mobly_config(test_bed: str, ffx: Path, target: Optional[str]) -> Path:
+def write_mobly_config(test_bed: str, ffx: Path, target: str | None) -> Path:
     target = (
         target
         or subprocess.check_output(

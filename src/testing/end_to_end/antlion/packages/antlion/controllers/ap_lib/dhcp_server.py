@@ -60,7 +60,10 @@ class DhcpServer(object):
         self._config_file = f"{working_dir}/dhcpd_{interface}.conf"
         self._lease_file = f"{working_dir}/dhcpd_{interface}.leases"
         self._pid_file = f"{working_dir}/dhcpd_{interface}.pid"
-        self._identifier: int | None = None
+        # Identify the daemon process by command pattern rather than the
+        # subshell PID returned by run_async, allowing ShellCommand to track and
+        # terminate it via ps.
+        self._identifier = f"{self.PROGRAM_FILE}.*{self._config_file}"
 
     # There is a slight timing issue where if the proc filesystem in Linux
     # doesn't get updated in time as when this is called, the NoInterfaceError
@@ -101,7 +104,7 @@ class DhcpServer(object):
 
         base_command = f'cd "{self._working_dir}"; {dhcpd_command}'
         job_str = f'{base_command} > "{self._stdio_log_file}" 2>&1'
-        self._identifier = int(self._runner.run_async(job_str).stdout)
+        self._runner.run_async(job_str)
 
         try:
             self._wait_for_process(timeout=timeout_sec)
@@ -117,18 +120,15 @@ class DhcpServer(object):
 
     def stop(self) -> None:
         """Kills the daemon if it is running."""
-        if self._identifier and self.is_alive():
+        if self.is_alive():
             self._shell.kill(self._identifier)
-            self._identifier = None
 
     def is_alive(self) -> bool:
         """
         Returns:
             True if the daemon is running.
         """
-        if self._identifier:
-            return self._shell.is_alive(self._identifier)
-        return False
+        return self._shell.is_alive(self._identifier)
 
     def get_logs(self) -> str:
         """Pulls the log files from where dhcp server is running.

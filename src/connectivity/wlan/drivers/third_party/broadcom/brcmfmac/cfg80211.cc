@@ -5416,15 +5416,23 @@ zx_status_t brcmf_get_histograms_report(brcmf_if* ifp, histograms_report_t* out_
 zx_status_t brcmf_if_get_iface_stats(net_device* ndev,
                                      fuchsia_wlan_stats::wire::IfaceStats* out_stats,
                                      fidl::AnyArena& arena) {
-  struct brcmf_cfg80211_info* cfg = ndev_to_if(ndev)->drvr->config;
+  if (ndev == nullptr) {
+    return ZX_ERR_INTERNAL;
+  }
 
   std::shared_lock<std::shared_mutex> guard(ndev->if_proto_lock);
-  if (!ndev->if_proto.is_valid()) {
+  if (!ndev->if_proto.is_valid() || !ndev->is_up) {
     BRCMF_IFDBG(WLANIF, ndev, "interface stopped -- skipping get iface stats");
     return ZX_ERR_INTERNAL;
   }
 
   struct brcmf_if* ifp = ndev_to_if(ndev);
+  if (ifp == nullptr || ifp->vif == nullptr || ifp->drvr == nullptr ||
+      ifp->drvr->config == nullptr) {
+    BRCMF_IFDBG(WLANIF, ndev, "interface not ready -- skipping get iface stats");
+    return ZX_ERR_INTERNAL;
+  }
+  struct brcmf_cfg80211_info* cfg = ifp->drvr->config;
 
   if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MFG)) {
     // MFG builds do not support many of the stats iovars.
@@ -5442,7 +5450,8 @@ zx_status_t brcmf_if_get_iface_stats(net_device* ndev,
       brcmf_bus_get_gauges(cfg->pub->bus_if);
   stats_builder.driver_specific_gauges(sdio_gauges);
 
-  if (!brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
+  if (ifp->vif == nullptr ||
+      !brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
     *out_stats = stats_builder.Build();
     return ZX_OK;
   }
@@ -5583,12 +5592,20 @@ zx_status_t brcmf_if_get_iface_stats(net_device* ndev,
 zx_status_t brcmf_if_get_iface_histogram_stats(
     net_device* ndev, fuchsia_wlan_stats::wire::IfaceHistogramStats* out_stats,
     fidl::AnyArena& arena) {
+  if (ndev == nullptr) {
+    return ZX_ERR_INTERNAL;
+  }
+
   std::shared_lock<std::shared_mutex> guard(ndev->if_proto_lock);
-  if (!ndev->if_proto.is_valid()) {
+  if (!ndev->if_proto.is_valid() || !ndev->is_up) {
     BRCMF_IFDBG(WLANIF, ndev, "interface stopped -- skipping get iface histogram stats");
     return ZX_ERR_INTERNAL;
   }
   struct brcmf_if* ifp = ndev_to_if(ndev);
+  if (ifp == nullptr || ifp->vif == nullptr || ifp->drvr == nullptr) {
+    BRCMF_IFDBG(WLANIF, ndev, "interface not ready -- skipping get iface histogram stats");
+    return ZX_ERR_INTERNAL;
+  }
   auto stats_builder = fuchsia_wlan_stats::wire::IfaceHistogramStats::Builder(arena);
 
   ndev->stats.noise_floor_histograms = {};
@@ -5606,7 +5623,8 @@ zx_status_t brcmf_if_get_iface_histogram_stats(
     return ZX_ERR_NOT_CONNECTED;
   }
 
-  if (!brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
+  if (ifp->vif == nullptr ||
+      !brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
     return ZX_ERR_NOT_CONNECTED;
   }
 
@@ -5655,15 +5673,23 @@ zx_status_t brcmf_if_get_iface_histogram_stats(
 zx_status_t brcmf_if_get_signal_report(net_device* ndev,
                                        fuchsia_wlan_stats::wire::SignalReport* out_signal_report,
                                        fidl::AnyArena& arena) {
-  struct brcmf_cfg80211_info* cfg = ndev_to_if(ndev)->drvr->config;
+  if (ndev == nullptr) {
+    return ZX_ERR_INTERNAL;
+  }
 
   std::shared_lock<std::shared_mutex> guard(ndev->if_proto_lock);
-  if (!ndev->if_proto.is_valid()) {
+  if (!ndev->if_proto.is_valid() || !ndev->is_up) {
     BRCMF_IFDBG(WLANIF, ndev, "interface stopped -- skipping get signal report");
     return ZX_ERR_INTERNAL;
   }
 
   struct brcmf_if* ifp = ndev_to_if(ndev);
+  if (ifp == nullptr || ifp->vif == nullptr || ifp->drvr == nullptr ||
+      ifp->drvr->config == nullptr) {
+    BRCMF_IFDBG(WLANIF, ndev, "interface not ready -- skipping get signal report");
+    return ZX_ERR_INTERNAL;
+  }
+  struct brcmf_cfg80211_info* cfg = ifp->drvr->config;
 
   if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MFG)) {
     return ZX_ERR_NOT_SUPPORTED;
@@ -5671,7 +5697,8 @@ zx_status_t brcmf_if_get_signal_report(net_device* ndev,
 
   auto stats_builder = fuchsia_wlan_stats::wire::SignalReport::Builder(arena);
 
-  if (!brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
+  if (ifp->vif == nullptr ||
+      !brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
     *out_signal_report = stats_builder.Build();
     return ZX_OK;
   }

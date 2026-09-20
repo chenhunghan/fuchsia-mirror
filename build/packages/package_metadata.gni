@@ -74,8 +74,6 @@ template("generate_package_metadata") {
       "package_barrier",
       "package_names_barrier",
     ]
-
-    assert_no_deps = [ "//build/images/fuchsia" ]
   }
 
   action(target_name) {

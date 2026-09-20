@@ -92,7 +92,9 @@ filegroup(
         # Tests `fx_package()`.
         "//src/security/bin/root_ssl_certificates",
         # Tests `fx_component()`.
-        "//src/developer/build_info:build-info",
+        "//src/developer/build_info:build-info-component",
+        # Tests `fx_package()` with a C++ binary.
+        "//src/developer/build_info:build-info-service",
         # Build libraries that support next-generation FIDL bindings for Rust.
         # TODO(https://fxbug.dev/454452299): Replace these build-only tests with:
         # * A `test_suite()` containing all the test targets in the package once the tests build.

@@ -7,8 +7,9 @@ import shlex
 import sys
 import tempfile
 import unittest
+from collections.abc import Collection, Sequence
 from pathlib import Path
-from typing import Any, Collection, Sequence
+from typing import Any
 from unittest import mock
 
 import cl_utils

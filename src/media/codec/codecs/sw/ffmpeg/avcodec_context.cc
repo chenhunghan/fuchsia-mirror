@@ -86,6 +86,13 @@ int AvCodecContext::SendPacket(const CodecPacket* codec_packet) {
   AVPacket* packet = av_packet_alloc();
   ZX_ASSERT(packet);
 
+  // Because packet->buf is left as nullptr (av_packet_alloc() zero-initializes the struct),
+  // avcodec_send_packet() -> av_packet_ref() allocates a new FFmpeg heap buffer of size
+  // packet->size + AV_INPUT_BUFFER_PADDING_SIZE, zeroes the trailing AV_INPUT_BUFFER_PADDING_SIZE
+  // bytes, and copies packet->size bytes from packet->data via a single memcpy() before any
+  // bitstream filtering or decoding occurs. This ensures both the required FFmpeg input padding
+  // and protection against TOCTOU if the client concurrently modifies the shared input VMO.
+  ZX_DEBUG_ASSERT(!packet->buf);
   packet->data = codec_packet->buffer()->base() + codec_packet->start_offset();
   packet->size = codec_packet->valid_length_bytes();
 

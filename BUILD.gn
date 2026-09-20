@@ -179,6 +179,7 @@ _fx_config_lines = [
   "FUCHSIA_BOARD_NAME=${board_name}",
   "FUCHSIA_ZBI_COMPRESSION=zstd",
   "HOST_OUT_DIR='${_host_out_dir}'",
+  "MAX_BUILD_CONCURRENCY=${max_build_concurrency}",
 ]
 write_file("$root_build_dir/fx.config", _fx_config_lines)
 generated_file("default_toolchain_name.txt") {

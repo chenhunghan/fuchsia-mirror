@@ -2,15 +2,52 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{Result, bail};
 use async_trait::async_trait;
-use errors::ffx_bail;
 use fdomain_fuchsia_kernel as fstats;
 use fdomain_fuchsia_power_metrics::{self as fmetrics, CpuLoad, Metric};
 use ffx_cpu_load_args as args_mod;
-use ffx_writer::SimpleWriter;
+use ffx_writer::{ToolIO, VerifiedMachineWriter};
 use fho::{FfxMain, FfxTool};
+use serde::Serialize;
 use target_holders::{RemoteControlProxyHolder, moniker};
+
+/// Machine-readable output for `ffx profile cpu-load`.
+#[derive(Serialize, schemars::JsonSchema, Debug, PartialEq)]
+pub struct CpuLoadOutput {
+    /// Load percentages per CPU.
+    pub cpu_loads: Vec<CpuLoadEntry>,
+    /// Total load across all CPUs.
+    pub total: f32,
+}
+
+impl From<&[f32]> for CpuLoadOutput {
+    fn from(cpu_loads: &[f32]) -> Self {
+        let entries = cpu_loads
+            .iter()
+            .enumerate()
+            .map(|(cpu, &load_pct)| CpuLoadEntry { cpu, load_pct })
+            .collect();
+        let total = cpu_loads.iter().sum::<f32>();
+        Self { cpu_loads: entries, total }
+    }
+}
+
+/// Load percentage for an individual CPU core.
+#[derive(Serialize, schemars::JsonSchema, Debug, PartialEq)]
+pub struct CpuLoadEntry {
+    /// CPU index.
+    pub cpu: usize,
+    /// Percentage load on the CPU (0.0 to 100.0).
+    pub load_pct: f32,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum MeasureError {
+    #[error("Duration must be > 0")]
+    ZeroDuration,
+    #[error("FIDL error: {0}")]
+    Fidl(#[from] fidl::Error),
+}
 
 #[derive(FfxTool)]
 pub struct CpuLoadTool {
@@ -25,27 +62,35 @@ fho::embedded_plugin!(CpuLoadTool);
 
 #[async_trait(?Send)]
 impl FfxMain for CpuLoadTool {
-    type Writer = SimpleWriter;
+    type Writer = VerifiedMachineWriter<Option<CpuLoadOutput>>;
 
     type Error = ::fho::Error;
 
     async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
         let CpuLoadTool { cmd, rcs_proxy, cpu_logger, .. } = self;
         match (cmd.subcommand, cmd.duration) {
-            (Some(subcommand), None) => match subcommand {
-                args_mod::SubCommand::Start(start_cmd) => start(cpu_logger, start_cmd).await?,
-                args_mod::SubCommand::Stop(_) => stop(cpu_logger).await?,
-            },
-            (None, Some(duration)) => {
-                let stats_proxy =
-                    match rcs::kernel_stats(&rcs_proxy, std::time::Duration::from_secs(5)).await {
-                        Ok(s) => s,
-                        Err(e) => ffx_bail!("Could not open fuchsia.kernel.Stats: {e}",),
-                    };
-
-                measure(stats_proxy, duration, &mut writer).await?;
+            (Some(subcommand), None) => {
+                match subcommand {
+                    args_mod::SubCommand::Start(start_cmd) => start(cpu_logger, start_cmd).await?,
+                    args_mod::SubCommand::Stop(_) => stop(cpu_logger).await?,
+                }
+                writer.machine(&None)?;
             }
-            _ => ffx_bail!(
+            (None, Some(duration)) => {
+                let stats_proxy = rcs::kernel_stats(&rcs_proxy, std::time::Duration::from_secs(5))
+                    .await
+                    .map_err(|e| fho::user_error!("Could not open fuchsia.kernel.Stats: {e}"))?;
+
+                let cpu_loads =
+                    measure(stats_proxy, duration).await.map_err(|e| fho::user_error!("{e}"))?;
+                let output = CpuLoadOutput::from(cpu_loads.as_slice());
+                if writer.is_machine() {
+                    writer.machine(&Some(output))?;
+                } else {
+                    print_loads(&output, &mut writer)?;
+                }
+            }
+            _ => fho::return_user_error!(
                 "Please specify a duration for immediate load display, or alternatively, utilize \
             the start/stop subcommand to instruct the metrics-logger component to record the \
             CPU usage data on the target."
@@ -55,37 +100,40 @@ impl FfxMain for CpuLoadTool {
     }
 }
 
-pub async fn measure<W: std::io::Write>(
+pub async fn measure(
     stats_proxy: fstats::StatsProxy,
     duration: std::time::Duration,
-    writer: &mut W,
-) -> Result<()> {
+) -> Result<Vec<f32>, MeasureError> {
     if duration.is_zero() {
-        bail!("Duration must be > 0");
+        return Err(MeasureError::ZeroDuration);
     }
 
     let cpu_loads = stats_proxy.get_cpu_load(duration.as_nanos() as i64).await?;
-    print_loads(cpu_loads, writer)?;
-
-    Ok(())
+    Ok(cpu_loads)
 }
 
-/// Prints a vector of CPU load values in the following format:
+/// Prints CPU load values in the following format:
 ///     CPU 0: 0.66%
 ///     CPU 1: 1.56%
 ///     CPU 2: 0.83%
 ///     CPU 3: 0.71%
 ///     Total: 3.76%
-fn print_loads<W: std::io::Write>(cpu_load_pcts: Vec<f32>, writer: &mut W) -> Result<()> {
-    for (i, load_pct) in cpu_load_pcts.iter().enumerate() {
-        writeln!(writer, "CPU {}: {:.2}%", i, load_pct)?;
+fn print_loads<W: std::io::Write>(
+    cpu_loads: &CpuLoadOutput,
+    writer: &mut W,
+) -> std::io::Result<()> {
+    for entry in &cpu_loads.cpu_loads {
+        writeln!(writer, "CPU {}: {:.2}%", entry.cpu, entry.load_pct)?;
     }
-    writeln!(writer, "Total: {:.2}%", cpu_load_pcts.iter().sum::<f32>())?;
+    writeln!(writer, "Total: {:.2}%", cpu_loads.total)?;
 
     Ok(())
 }
 
-pub async fn start(cpu_logger: fmetrics::RecorderProxy, cmd: args_mod::StartCommand) -> Result<()> {
+pub async fn start(
+    cpu_logger: fmetrics::RecorderProxy,
+    cmd: args_mod::StartCommand,
+) -> fho::Result<()> {
     let interval_ms = cmd.interval.as_millis() as u32;
 
     // Dispatch to Recorder.StartLogging or Recorder.StartLoggingForever,
@@ -100,7 +148,8 @@ pub async fn start(cpu_logger: fmetrics::RecorderProxy, cmd: args_mod::StartComm
                 cmd.output_to_syslog,
                 false,
             )
-            .await?
+            .await
+            .map_err(|e| fho::user_error!("Failed to call Recorder/StartLogging: {e}"))?
     } else {
         cpu_logger
             .start_logging_forever(
@@ -109,33 +158,40 @@ pub async fn start(cpu_logger: fmetrics::RecorderProxy, cmd: args_mod::StartComm
                 cmd.output_to_syslog,
                 false,
             )
-            .await?
+            .await
+            .map_err(|e| fho::user_error!("Failed to call Recorder/StartLoggingForever: {e}"))?
     };
 
     match result {
-        Err(fmetrics::RecorderError::InvalidSamplingInterval) => ffx_bail!(
+        Err(fmetrics::RecorderError::InvalidSamplingInterval) => fho::return_user_error!(
             "Recorder.StartLogging received an invalid sampling interval. \n\
             Please check if `interval` meets the following requirements: \n\
             1) Must be smaller than `duration` if `duration` is specified; \n\
             2) Must not be smaller than 500ms if `output_to_syslog` is enabled."
         ),
-        Err(fmetrics::RecorderError::AlreadyLogging) => ffx_bail!(
+        Err(fmetrics::RecorderError::AlreadyLogging) => fho::return_user_error!(
             "Ffx cpu-load logging is already active. Use \"stop\" subcommand to stop the active \
             logging manually."
         ),
-        Err(fmetrics::RecorderError::TooManyActiveClients) => ffx_bail!(
+        Err(fmetrics::RecorderError::TooManyActiveClients) => fho::return_user_error!(
             "Recorder is running too many clients. Retry after any other client is stopped."
         ),
         Err(fmetrics::RecorderError::Internal) => {
-            ffx_bail!("Recorder encountered an internal error.")
+            fho::return_user_error!("Recorder encountered an internal error.")
         }
         _ => Ok(()),
     }
 }
 
-pub async fn stop(cpu_logger: fmetrics::RecorderProxy) -> Result<()> {
-    if !cpu_logger.stop_logging("ffx_cpu").await? {
-        ffx_bail!("Stop logging returned false; Check if logging is already inactive.");
+pub async fn stop(cpu_logger: fmetrics::RecorderProxy) -> fho::Result<()> {
+    let stopped = cpu_logger
+        .stop_logging("ffx_cpu")
+        .await
+        .map_err(|e| fho::user_error!("Failed to call Recorder/StopLogging: {e}"))?;
+    if !stopped {
+        fho::return_user_error!(
+            "Stop logging returned false; Check if logging is already inactive."
+        );
     }
     Ok(())
 }
@@ -172,7 +228,10 @@ mod tests {
     async fn test_invalid_args() {
         let client = fdomain_local::local_client_empty();
         let (proxy, _) = client.create_proxy_and_stream::<fstats::StatsMarker>();
-        assert!(measure(proxy, Duration::from_secs(0), &mut std::io::stdout()).await.is_err());
+        assert_matches!(
+            measure(proxy, Duration::from_secs(0)).await,
+            Err(MeasureError::ZeroDuration)
+        );
     }
 
     /// Tests that the input parameter for duration is correctly converted between seconds and
@@ -195,7 +254,7 @@ mod tests {
             }
         });
 
-        let _ = measure(proxy, Duration::from_secs(1), &mut std::io::stdout()).await.unwrap();
+        let _ = measure(proxy, Duration::from_secs(1)).await.unwrap();
 
         match duration_request_receiver.next().await {
             Some(duration_request) => {
@@ -207,23 +266,14 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_cpu_load_output() {
-        let client = fdomain_local::local_client_empty();
-        let proxy = fake_async_proxy(client, move |req| async move {
-            let data = vec![0.66f32, 1.56, 0.83, 0.71];
-            match req {
-                fstats::StatsRequest::GetCpuLoad { responder, .. } => {
-                    let _ = responder.send(&data.clone());
-                }
-                request => panic!("Unexpected request: {:?}", request),
-            }
-        });
-
         let mut writer = Vec::new();
-        let _ = measure(proxy, Duration::from_secs(1), &mut writer).await.unwrap();
+        let data = vec![0.66f32, 1.56, 0.83, 0.71];
+        let output = CpuLoadOutput::from(data.as_slice());
+        let _ = print_loads(&output, &mut writer).unwrap();
 
-        let output = String::from_utf8(writer).expect("valid utf8 output");
+        let output_str = String::from_utf8(writer).expect("valid utf8 output");
         assert_eq!(
-            output,
+            output_str,
             "\
 CPU 0: 0.66%
 CPU 1: 1.56%
@@ -232,6 +282,25 @@ CPU 3: 0.71%
 Total: 3.76%
 ",
         );
+    }
+
+    #[fuchsia::test]
+    fn test_cpu_load_output_json_serialization() {
+        let none_output: Option<CpuLoadOutput> = None;
+        assert_eq!(serde_json::to_value(&none_output).unwrap(), serde_json::json!(null));
+
+        let data = vec![0.66f32, 1.56, 0.83, 0.71];
+        let measure_output = CpuLoadOutput::from(data.as_slice());
+        let expected_measure = serde_json::json!({
+            "cpu_loads": [
+                { "cpu": 0, "load_pct": 0.66f32 },
+                { "cpu": 1, "load_pct": 1.56f32 },
+                { "cpu": 2, "load_pct": 0.83f32 },
+                { "cpu": 3, "load_pct": 0.71f32 }
+            ],
+            "total": 3.76f32
+        });
+        assert_eq!(serde_json::to_value(&Some(&measure_output)).unwrap(), expected_measure);
     }
 
     /// Confirms that the start logging request is dispatched to FIDL requests as expected.

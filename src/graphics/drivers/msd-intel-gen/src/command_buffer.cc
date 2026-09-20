@@ -200,7 +200,7 @@ bool CommandBuffer::MapResourcesGpu(std::shared_ptr<AddressSpace> address_space,
                                     std::vector<std::shared_ptr<GpuMapping>>& mappings) {
   TRACE_DURATION("magma", "MapResourcesGpu");
 
-  for (auto res : exec_resources_) {
+  for (const auto& res : exec_resources_) {
     std::shared_ptr<GpuMapping> mapping =
         address_space->FindGpuMapping(res.buffer->platform_buffer(), res.offset, res.length);
     if (!mapping)

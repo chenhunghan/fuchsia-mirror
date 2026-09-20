@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/board.gni")
-
 declare_args() {
   # The list of environment names to include in "basic_envs".
   basic_env_names = [ "emu" ]
@@ -40,6 +38,7 @@ host_device_types = {
   ampere_altra = "AmpereAltraMax-M128-30"
   ampere_one = "AmpereOne-A192-32X"
   gcp_c4a_highmem_96_bm = "GCP_C4A_HIGHMEM_96_BM"
+  lattepanda_sigma_cell = "LATTEPANDA_SIGMA_CELL"
 }
 
 ### Individual test environments
@@ -314,6 +313,18 @@ _all_named_fuchsia_envs += [
   },
 ]
 
+# Iris devices that are hosted by a LattePanda Sigma "Fuchsia cell". Use this
+# instead of `iris_env` for tests that require a cell testbed.
+#
+# This is deliberately not added to `_all_named_fuchsia_envs`, so that it is
+# not swept into `all_fuchsia_envs` and does not pull unrelated tests onto it.
+iris_cell_env = {
+  dimensions = {
+    device_type = device_types.iris
+    host_device_type = host_device_types.lattepanda_sigma_cell
+  }
+}
+
 luis_env = {
   dimensions = {
     device_type = device_types.luis
@@ -438,11 +449,12 @@ _all_named_fuchsia_envs += [
   },
 ]
 
+# Create environments for the target arch
 qemu_1cpu_env = {
   forward_variables_from(qemu_env, "*")
   emulator = {
     name = "1cpu"
-    device = "${board_name}-emu-min"
+    device = "${target_cpu}-emu-min"
   }
 }
 

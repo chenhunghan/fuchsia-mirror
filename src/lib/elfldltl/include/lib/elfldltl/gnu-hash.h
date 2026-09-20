@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <concepts>
 #include <cstdint>
 #include <iterator>
 #include <optional>
@@ -91,12 +92,12 @@ constexpr uint32_t kGnuNoHash = uint32_t{};
 //  * Otherwise (i.e. the low bit is one), the lookup has failed.
 //
 
-template <class Elf>
+template <ElfApi Elf>
 class GnuHash {
  public:
-  using Addr = typename Elf::Addr;
-  using Word = typename Elf::Word;
-  using size_type = typename Elf::size_type;
+  using Addr = Elf::Addr;
+  using Word = Elf::Word;
+  using size_type = Elf::size_type;
 
   constexpr explicit GnuHash(std::span<const Addr> table) : GnuHash(table, *GetSizes(table)) {}
 
@@ -186,8 +187,8 @@ class GnuHash {
     [[unlikely]] return 0;  // Table didn't end with an end marker.
   }
 
-  // This is roughly the size of the hash table, though not exactly equivalent to
-  // std::distance(begin(), end()) of the AllBuckets() range.
+  // This is roughly the size of the hash table, though not exactly equivalent
+  // to std::distance(begin(), end()) of the AllBuckets() range.
   constexpr size_t size() const {
     uint32_t chain_start = AbsoluteBucketChainStart(chain_index_bias_);
     return (tables_.size() * kBucketsPerAddr) - chain_start;
@@ -233,7 +234,7 @@ class GnuHash {
 
   static constexpr uint32_t kAddrBits = sizeof(Addr) * 8;
 
-  static constexpr bool kLittle = std::is_same_v<Word, typename Elf32<ElfData::k2Lsb>::Word>;
+  static constexpr bool kLittle = std::same_as<Word, Elf32<ElfData::k2Lsb>::Word>;
 
   // End marker bit in the first or second uint32_t within the word.
   static constexpr uint64_t kFirstEnd = uint64_t{1} << (kLittle ? 0 : 32);

@@ -65,7 +65,7 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
     uint8_t legacy_pin;                 // Pin for the legacy interrupt, mirrors kInterruptPin.
     zx_time_t legacy_irq_period_start;  // Timestamp of the current second we're monitoring for
                                         // IRQ floods.
-    bool legacy_disabled;               // Whether  the legacy vector has been disabled
+    bool legacy_disabled{false};        // Whether the legacy vector has been disabled
     zx::msi msi_allocation;             // The MSI allocation object for MSI & MSI-X
     uint64_t irqs_in_period;  // Current count of interrupts per fpci::InterruptMode::kLegacyNoack
                               // period.
@@ -214,7 +214,7 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
       __TA_EXCLUDES(dev_lock_);
   zx::result<zx::interrupt> MapInterrupt(uint32_t which_irq) __TA_EXCLUDES(dev_lock_);
   zx_status_t DisableInterrupts() __TA_REQUIRES(dev_lock_);
-  zx_status_t EnableLegacy(bool needs_ack) __TA_REQUIRES(dev_lock_);
+  zx_status_t EnableLegacy() __TA_REQUIRES(dev_lock_);
   zx_status_t EnableMsi(uint32_t irq_cnt) __TA_REQUIRES(dev_lock_);
   zx_status_t EnableMsix(uint32_t irq_cnt) __TA_REQUIRES(dev_lock_);
   zx_status_t DisableLegacy() __TA_REQUIRES(dev_lock_);
@@ -224,6 +224,8 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   // Signals the device's zx::interrupt, effectively triggering an interrupt for the device
   // driver.
   zx_status_t SignalLegacyIrq(zx_instant_boot_t timestamp) __TA_REQUIRES(dev_lock_);
+  // Legacy IRQs are automatically re-armed via ZX_VIRTUAL_INTERRUPT_UNTRIGGERED;
+  // AckLegacyIrq is a no-op.
   zx_status_t AckLegacyIrq() __TA_REQUIRES(dev_lock_);
   void EnableLegacyIrq() __TA_REQUIRES(dev_lock_);
   void DisableLegacyIrq() __TA_REQUIRES(dev_lock_);

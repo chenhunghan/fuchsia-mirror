@@ -7,19 +7,19 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("power_driver-dml") {
+  dml = "meta/power_driver.dml"
+  driver_name = "power_driver"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/power_driver.bind"
+  dml_label = ":power_driver-dml"
   bind_output = "power_driver.bindbc"
   deps = [ "//examples/drivers/bind/bindlib:gizmo.example" ]
 }
 
-fuchsia_component_manifest("component-manifest") {
-  component_name = "power_driver"
-  manifest = "meta/power_driver.cml"
-}
-
 fuchsia_driver_component("component") {
-  cm_label = ":component-manifest"
+  dml_label = ":power_driver-dml"
   deps = [
     ":bind",
     ":driver",
@@ -28,7 +28,7 @@ fuchsia_driver_component("component") {
 }
 
 fuchsia_structured_config_cpp_elf_lib("component-config") {
-  cm_label = ":component-manifest"
+  cm_label = ":power_driver-dml_manifest"
 }
 
 fuchsia_cc_driver("driver") {

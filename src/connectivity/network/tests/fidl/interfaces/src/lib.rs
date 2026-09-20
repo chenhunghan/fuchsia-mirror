@@ -13,7 +13,7 @@ use itertools::Itertools as _;
 use net_declare::{fidl_ip, fidl_subnet, net_subnet_v4, net_subnet_v6, std_ip};
 use net_types::ip::{Ip, IpVersion};
 use netemul::{RealmTcpListener as _, RealmTcpStream as _, RealmUdpSocket as _};
-use netstack_testing_common::realms::{Netstack, Netstack3, NetstackVersion, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, Result, interfaces};
 use netstack_testing_macros::netstack_test;
 use std::collections::{HashMap, HashSet};
@@ -29,13 +29,12 @@ use fidl_fuchsia_net_routes_ext::FidlRouteIpExt;
 use fidl_fuchsia_net_routes_ext::admin::FidlRouteAdminIpExt;
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn watcher_existing<N: Netstack>(name: &str) {
+async fn watcher_existing(name: &str) {
     // This test is limited to mostly IPv4 because IPv6 LL addresses are
     // subject to DAD and hard to test with Existing events.
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Expectation {
@@ -167,11 +166,8 @@ async fn watcher_existing<N: Netstack>(name: &str) {
         // assigned state later.
         iface.set_link_up(true).await.expect("bring device up");
 
-        let port_identity_koid = if N::VERSION.is_netstack3() {
-            Some(iface.endpoint().get_port_identity_koid().await.expect("get id event"))
-        } else {
-            None
-        };
+        let port_identity_koid =
+            Some(iface.endpoint().get_port_identity_koid().await.expect("get id event"));
 
         let addr = fidl_fuchsia_net::Subnet {
             addr: fidl_fuchsia_net::IpAddress::Ipv4(fidl_fuchsia_net::Ipv4Address {
@@ -216,11 +212,8 @@ async fn watcher_existing<N: Netstack>(name: &str) {
     // The netstacks report the loopback interface as NIC 1.
     assert_eq!(expectations.insert(1, Expectation::Loopback(1)), None);
 
-    // When an interface goes online in NS2, the consequences (such as address
-    // assignment state changing to ASSIGNED) are observed before the interface
-    // online itself, which means that it is possible to get here and for a new
-    // interface watcher to observe the interface that is added most recently to
-    // be offline. Guard against this by waiting for all interfaces to be online.
+    // Guard against a newly created interface watcher observing a recently
+    // added interface as offline by waiting for all interfaces to be online.
     fidl_fuchsia_net_interfaces_ext::wait_interface(
         fidl_fuchsia_net_interfaces_ext::event_stream_from_state::<
             fidl_fuchsia_net_interfaces_ext::AllInterest,
@@ -258,10 +251,9 @@ async fn watcher_existing<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn watcher_after_state_closed<N: Netstack>(name: &str) {
+async fn watcher_after_state_closed(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     // New scope so when we get back the WatcherProxy, the StateProxy is closed.
     let stream = {
@@ -281,60 +273,48 @@ async fn watcher_after_state_closed<N: Netstack>(name: &str) {
     )
     .await
     .expect("collect interfaces");
-    let expected = match N::VERSION {
-        NetstackVersion::Netstack3
-        | NetstackVersion::Netstack2 { tracing: false, fast_udp: false } => std::iter::once((
-            1,
-            fidl_fuchsia_net_interfaces_ext::PropertiesAndState {
-                properties: fidl_fuchsia_net_interfaces_ext::Properties {
-                    id: 1.try_into().expect("should be nonzero"),
-                    name: "lo".to_owned(),
-                    port_class: fidl_fuchsia_net_interfaces_ext::PortClass::Loopback,
-                    online: true,
-                    addresses: vec![
-                        fidl_fuchsia_net_interfaces_ext::Address {
-                            addr: fidl_subnet!("127.0.0.1/8"),
-                            valid_until:
-                                fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
-                            preferred_lifetime_info:
-                                fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
-                            assignment_state: fnet_interfaces::AddressAssignmentState::Assigned,
-                        },
-                        fidl_fuchsia_net_interfaces_ext::Address {
-                            addr: fidl_subnet!("::1/128"),
-                            valid_until:
-                                fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
-                            preferred_lifetime_info:
-                                fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
-                            assignment_state: fnet_interfaces::AddressAssignmentState::Assigned,
-                        },
-                    ],
-                    has_default_ipv4_route: false,
-                    has_default_ipv6_route: false,
-                    port_identity_koid: None,
-                },
-                state: (),
+    let expected = std::iter::once((
+        1,
+        fidl_fuchsia_net_interfaces_ext::PropertiesAndState {
+            properties: fidl_fuchsia_net_interfaces_ext::Properties {
+                id: 1.try_into().expect("should be nonzero"),
+                name: "lo".to_owned(),
+                port_class: fidl_fuchsia_net_interfaces_ext::PortClass::Loopback,
+                online: true,
+                addresses: vec![
+                    fidl_fuchsia_net_interfaces_ext::Address {
+                        addr: fidl_subnet!("127.0.0.1/8"),
+                        valid_until:
+                            fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
+                        preferred_lifetime_info:
+                            fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
+                        assignment_state: fnet_interfaces::AddressAssignmentState::Assigned,
+                    },
+                    fidl_fuchsia_net_interfaces_ext::Address {
+                        addr: fidl_subnet!("::1/128"),
+                        valid_until:
+                            fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
+                        preferred_lifetime_info:
+                            fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
+                        assignment_state: fnet_interfaces::AddressAssignmentState::Assigned,
+                    },
+                ],
+                has_default_ipv4_route: false,
+                has_default_ipv6_route: false,
+                port_identity_koid: None,
             },
-        ))
-        .collect(),
-        v @ (NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-        | NetstackVersion::ProdNetstack2
-        | NetstackVersion::ProdNetstack3) => {
-            panic!(
-                "netstack_test should only be parameterized with Netstack2 or Netstack3: got {:?}",
-                v
-            );
-        }
-    };
+            state: (),
+        },
+    ))
+    .collect();
     assert_eq!(interfaces, expected);
 }
 
 /// Tests that adding an interface causes an interface changed event.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_add_remove_interface<N: Netstack>(name: &str) {
+async fn test_add_remove_interface(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
 
     let iface = device.into_interface_in_realm(&realm).await.expect("add device");
@@ -369,18 +349,10 @@ async fn test_add_remove_interface<N: Netstack>(name: &str) {
 /// Tests that including all addresses includes temporary and unavailable
 /// addresses.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn test_include_all_addresses<N: Netstack, I: Ip>(name: &str) {
-    match (N::VERSION, I::VERSION) {
-        // Netstack2 doesn't support `AddressParameters.perform_dad`.
-        // Skip the test.
-        (NetstackVersion::Netstack2 { .. }, IpVersion::V4) => return,
-        (_, _) => {}
-    }
-
+async fn test_include_all_addresses<I: Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let interface_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
@@ -517,11 +489,10 @@ async fn test_include_all_addresses<N: Netstack, I: Ip>(name: &str) {
 
 /// Tests that adding/removing a default route causes an interface changed event.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn test_add_remove_default_route<N: Netstack, I: net_types::ip::Ip>(name: &str) {
+async fn test_add_remove_default_route<I: net_types::ip::Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     // Add an interface and watch for its addition.
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
@@ -749,15 +720,14 @@ async fn check_default_routes_in_all_tables<I: Ip + FidlRouteAdminIpExt + FidlRo
 /// corresponding Netstack interface is deleted.
 /// if `enabled` is `true`, enables the interface before closing the device.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case("disabled", false; "disabled")]
 #[test_case("enabled", true ; "enabled")]
-async fn test_close_interface<N: Netstack>(test_name: &str, sub_test_name: &str, enabled: bool) {
+async fn test_close_interface(test_name: &str, sub_test_name: &str, enabled: bool) {
     let name = format!("{}_{}", test_name, sub_test_name);
     let name = name.as_str();
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
 
     let iface = device.into_interface_in_realm(&realm).await.expect("add device");
@@ -796,10 +766,9 @@ async fn test_close_interface<N: Netstack>(test_name: &str, sub_test_name: &str,
 
 /// Tests races between device link down and close.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_down_close_race<N: Netstack>(name: &str) {
+async fn test_down_close_race(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let interface_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
         .expect("connect to protocol");
@@ -853,12 +822,11 @@ async fn test_down_close_race<N: Netstack>(name: &str) {
 
 /// Tests races between data traffic and closing a device.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_close_data_race<N: Netstack>(name: &str) {
+async fn test_close_data_race(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let net = sandbox.create_network("net").await.expect("create network");
     let fake_ep = net.create_fake_endpoint().expect("create fake endpoint");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
 
     // NOTE: We only run this test with IPv4 sockets since we only care about
     // exciting the tx path, the domain is irrelevant.
@@ -971,10 +939,9 @@ async fn test_close_data_race<N: Netstack>(name: &str) {
 /// Tests that when an interface is enabled and removed, no disable event is
 /// observed before the remove event.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_remove_enabled_interface<N: Netstack>(name: &str) {
+async fn test_remove_enabled_interface(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
 
     let interface_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
@@ -1051,10 +1018,9 @@ async fn test_remove_enabled_interface<N: Netstack>(name: &str) {
 /// Tests that toggling interface enabled repeatedly results in every change
 /// in the boolean value being observable.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_watcher_online_edges<N: Netstack>(name: &str) {
+async fn test_watcher_online_edges(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
 
     let interface_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
@@ -1114,7 +1080,7 @@ async fn test_watcher_online_edges<N: Netstack>(name: &str) {
     // number of iterations.  Note that the raciness is intentional: the
     // interface may be enabled/disabled less than the number of iterations.
     let toggle_online_fut = {
-        // Both NS2 and NS3 have event queue sizes of 128. Because events are
+        // The Netstack's event queue size is 128. Because events are
         // not observed (aka watched) as soon as they occur in this test, it's
         // possible to fill the event queues in the Netstack, causing it to drop
         // events. Keeping the number of iterations <= 50 prevents this (each
@@ -1205,10 +1171,9 @@ async fn test_watcher_online_edges<N: Netstack>(name: &str) {
 /// Tests that competing interface change events are reported by
 /// fuchsia.net.interfaces/Watcher in the correct order.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_watcher_race<N: Netstack>(name: &str) {
+async fn test_watcher_race(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let interface_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
         .expect("connect to protocol");
@@ -1400,15 +1365,11 @@ async fn test_watcher_race<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(fidl_subnet!("abcd::1/64"))]
 #[test_case(fidl_subnet!("1.2.3.4/24"))]
-async fn addresses_while_offline<N: Netstack>(
-    name: &str,
-    addr_with_prefix: fidl_fuchsia_net::Subnet,
-) {
+async fn addresses_while_offline(name: &str, addr_with_prefix: fidl_fuchsia_net::Subnet) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let device = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface = realm
         .install_endpoint(device, Default::default())
@@ -1498,10 +1459,9 @@ async fn addresses_while_offline<N: Netstack>(
 
 /// Test interface changes are reported through the interface watcher.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn watcher<N: Netstack>(name: &str) {
+async fn watcher(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     type Interest = fnet_interfaces_ext::AllInterest;
     let blocking_stream = realm
@@ -1593,11 +1553,8 @@ async fn watcher<N: Netstack>(name: &str) {
     dev.set_link_up(true).await.expect("bring device up");
 
     let id = dev.id();
-    let port_identity_koid = if N::VERSION.is_netstack3() {
-        Some(dev.endpoint().get_port_identity_koid().await.expect("get id event").raw_koid())
-    } else {
-        None
-    };
+    let port_identity_koid =
+        Some(dev.endpoint().get_port_identity_koid().await.expect("get id event").raw_koid());
 
     let want = fidl_fuchsia_net_interfaces::Event::Added(fidl_fuchsia_net_interfaces::Properties {
         id: Some(id),
@@ -1870,11 +1827,10 @@ async fn watcher<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_readded_address_present<N: Netstack>(name: &str) {
+async fn test_readded_address_present(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let network = sandbox.create_network(name).await.expect("create network");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let interface = realm.join_network(&network, name).await.expect("join network");
 
     const SRC_IP: fidl_fuchsia_net::Subnet = fidl_subnet!("192.168.0.1/24");
@@ -1939,15 +1895,11 @@ enum LifetimeToUpdate {
 // hidden from clients of interface watcher (because the interface is offline)
 // does not cause null changes to be emitted via interface watcher.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(LifetimeToUpdate::Preferred ; "updating preferred lifetime")]
 #[test_case(LifetimeToUpdate::Valid ; "updating valid lifetime")]
-async fn test_lifetime_change_on_hidden_addr<N: Netstack>(
-    name: &str,
-    lifetime_to_update: LifetimeToUpdate,
-) {
+async fn test_lifetime_change_on_hidden_addr(name: &str, lifetime_to_update: LifetimeToUpdate) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let interface = sandbox
         .create_endpoint(name)
         .await

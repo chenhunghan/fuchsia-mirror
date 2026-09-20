@@ -162,11 +162,12 @@ open protocol Composite {
     compose fuchsia.hardware.audio.signalprocessing.Connector;
 
     /// Resets the hardware including all DAI interconnects and signal processing.
-    /// As a result, all channels obtained by `CreateRingBuffer` will be closed.
+    /// As a result, all channels obtained by `CreateRingBuffer` or `CreatePacketStream` will be
+    /// closed.
     ///
     /// `Reset` returns when the hardware is fully reset. At this point, a client would need to
     /// reconfigure any DAI interconnects, select a signal processing topology and reconfigure
-    /// any processing elements, and reconstruct any ring buffers.
+    /// any processing elements, and reconstruct any ring buffers and packet streams.
     ///
     /// If the driver can't successfully reset the hardware, it will return an error and then close
     /// the protocol channel, in this case the client may obtain a new protocol channel and retry.
@@ -265,10 +266,10 @@ open protocol Composite {
     }) error DriverError;
 
     /// `CreatePacketStream` is sent by clients to select a packet-stream format for the
-    /// `PACKET_STREAM` processing element specified by `processing_element_id`. The format is based
-    /// on information that the driver provides in `GetPacketStreamFormats`, what is supported by
-    /// the client, and any other requirement. The returned `packet_stream` channel is used to
-    /// access and control the packet stream protocol served by the driver.
+    /// `PACKET_STREAM` processing element specified by `processing_element_id`. The format is
+    /// based on information that the driver provides in `GetPacketStreamFormats`, what is
+    /// supported by the client, and any other requirement. The returned `packet_stream_control`
+    /// channel is used to access and control the packet stream protocol served by the driver.
     ///
     /// Returns `INVALID_ARGS` if the `processing_element_id` does not match an id returned by
     /// `GetElements`.
@@ -277,7 +278,7 @@ open protocol Composite {
     /// Returns `SHOULD_WAIT` if the server cannot create a packet stream for this element/format
     /// at this time, but it should be able to at some future time. This request can be retried.
     /// Returns `NOT_SUPPORTED` if the driver does not support packet streams, or if the specified
-    ///`format` is not supported.
+    /// `format` is not supported.
     @available(added=HEAD)
     flexible CreatePacketStream(resource struct {
         processing_element_id ElementId;

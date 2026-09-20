@@ -785,12 +785,31 @@ def get_interface_based_on_ip(runner: Runner, desired_ip_address: str) -> str:
 
 
 def renew_linux_ip_address(runner: Runner, interface: str) -> None:
-    runner.run(f"sudo ip link set {interface} down")
+    # Ensure the interface is not empty, so we don't accidentally target _all_ interfaces.
+    if not interface:
+        raise ValueError("Interface name must not be empty.")
+
+    # If dhcpcd is managing this interface (common on Raspberry Pi OS), release
+    # its lease so it stops managing the interface and does not race with dhclient.
+    try:
+        runner.run(f"sudo dhcpcd -k {interface}")
+    except CalledProcessError:
+        # dhcpcd may not be installed or running on this device.
+        pass
+
+    # Ensure interface is UP.
     runner.run(f"sudo ip link set {interface} up")
-    runner.run(f"sudo dhclient -r {interface}")
+    # Release any existing lease on the DHCP server and stop the running
+    # dhclient daemon to prevent multiple competing daemons.
+    try:
+        runner.run(f"sudo dhclient -r {interface}")
+    except CalledProcessError:
+        # No prior dhclient process or lease to release.
+        pass
     # Flush existing IP addresses to ensure stale leases from previous networks
     # are removed, preventing MultipleAddresses errors when a new lease is assigned.
     runner.run(f"sudo ip addr flush dev {interface}")
+    # Negotiate a fresh lease for the current network scope and start a new daemon.
     runner.run(f"sudo dhclient {interface}")
 
 

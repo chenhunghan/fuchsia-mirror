@@ -20,7 +20,10 @@ const TOTAL_RESOURCES_GERRIT_COMPONENT_NAME: &str = "Platform Resources";
 const RESOURCES_CREEP_BUDGET: &u64 = &2097152; // 2.0 MiB
 
 /// Verifies that the product budget is not exceeded.
-pub async fn verify_product_budgets(args: ProductSizeCheckArgs) -> Result<bool> {
+pub async fn verify_product_budgets<W: std::io::Write>(
+    writer: &mut W,
+    args: ProductSizeCheckArgs,
+) -> Result<bool> {
     let assembled_system = if args.assembly_manifest.starts_with("gs://") {
         let (bucket, object) = split_gs_url(args.assembly_manifest.as_str())?;
         let output_path = gcs_download(bucket, object, args.auth.clone())
@@ -76,10 +79,11 @@ pub async fn verify_product_budgets(args: ProductSizeCheckArgs) -> Result<bool> 
             })?;
         let other_breakdown = SizeBreakdown::from_contents(other_blobfs_contents);
         let diff = breakdown.diff(&other_breakdown);
-        diff.print();
+        diff.print(writer).context("Failed to write product budget diff output")?;
     } else if args.verbose {
-        breakdown.print();
-        println!("Total size: {} bytes", size.consumed_bytes);
+        breakdown.print(writer).context("Failed to write product budget breakdown output")?;
+        writeln!(writer, "Total size: {} bytes", size.consumed_bytes)
+            .context("Failed to write product budget output")?;
     }
 
     if let Some(gerrit_output) = args.gerrit_output {
@@ -105,28 +109,35 @@ pub async fn verify_product_budgets(args: ProductSizeCheckArgs) -> Result<bool> 
     }
 
     if max_contents_size.is_none() && args.verbose {
-        println!(
+        writeln!(
+            writer,
             "Skipping size checks because maximum_contents_size is not specified for this product."
-        );
+        )
+        .context("Failed to write product budget output")?;
     }
 
     if let Some(visualization_dir) = args.visualization_dir {
         generate_visualization(&visualization_dir, &breakdown)?;
         if args.verbose {
-            println!("Wrote visualization to {}", visualization_dir.join("index.html"));
+            writeln!(writer, "Wrote visualization to {}", visualization_dir.join("index.html"))
+                .context("Failed to write product budget output")?;
         }
     }
 
     if !contents_fit {
-        println!(
+        writeln!(
+            writer,
             "BlobFS contents size ({}) exceeds max_contents_size ({}).",
             size.consumed_bytes,
             max_contents_size.unwrap(), // Value is always present when budget is exceeded.
-        );
+        )
+        .context("Failed to write product budget output")?;
         if !args.verbose {
-            println!(
+            writeln!(
+                writer,
                 "Run with --verbose to view the size breakdown of all packages and blobs, or run `fx size-check` in-tree."
-            );
+            )
+            .context("Failed to write product budget output")?;
         }
     }
 

@@ -36,10 +36,7 @@
             ],
         },
         {
-            protocol: [
-                "fuchsia.net.policy.properties.DefaultNetworkWatcher",
-                "fuchsia.net.policy.socketproxy.FuchsiaNetworks",
-            ],
+            protocol: [ "fuchsia.net.policy.properties.DefaultNetworkWatcher" ],
             from: "#socket-proxy",
             to: [ "#netcfg" ],
         },
@@ -58,7 +55,6 @@
         {
             protocol: [
                 "fuchsia.net.policy.properties.DefaultNetworkWatcher",
-                "fuchsia.net.policy.socketproxy.FuchsiaNetworks",
                 "fuchsia.net.policy.socketproxy.StarnixNetworks",
             ],
             from: "#socket-proxy",
@@ -80,6 +76,10 @@
             protocol: "fuchsia.posix.socket.raw.Provider",
             from: "#netstack",
             as: "fuchsia.posix.socket.raw.Provider_Unproxied",
+        },
+        {
+            protocol: [ "fuchsia.net.reachability.Monitor" ],
+            from: "#netcfg",
         },
     ],
 }

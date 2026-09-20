@@ -15,7 +15,6 @@ import os
 import re
 import subprocess
 import sys
-from typing import Tuple
 
 UNITS = {"B": 1, "KB": 2**10, "MB": 2**20, "GB": 2**30, "TB": 2**40}
 
@@ -27,7 +26,7 @@ def parse_size(string: str) -> int:
     return int(float(number) * UNITS[unit])
 
 
-def parse_job(value: str) -> Tuple[str, int]:
+def parse_job(value: str) -> tuple[str, int]:
     (k, v) = value.split("=", 1)
     return (k, parse_size(v))
 

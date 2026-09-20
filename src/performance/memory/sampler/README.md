@@ -106,10 +106,10 @@ pattern, they will tend to show up on profiles.
 
 `memory_sampler` produces profiles under roughly three conditions:
 
-  1. A partial profile once the recorded allocation data reaches a
-     certain size, to reduce memory use. This can be somewhat
-     unpredictable, because it depends on the (de)allocation patterns
-     and call sites.
+  1. A partial profile once the number of recorded stack traces that can
+     be reclaimed reaches a threshold, to reduce memory use. This can be
+     somewhat unpredictable, because it depends on the (de)allocation
+     patterns and call sites.
 
   2. A partial profile at least once every 12 hours.
 
@@ -157,21 +157,21 @@ performance knobs follow:
     `memory_sampler` is unable to handle the amount of messages it receives,
     this would cause the kernel to kill the instrumented process (because of a
     buffer exhaustion in the FIDL channel).
-  * `memory_sampler::sampler_service::DEAD_ALLOCATIONS_PROFILE_THRESHOLD`: the
-    amount of observed allocations before filing a partial report. Reducing this
-    number decreases the memory footprint `memory_sampler`, at the expense of
-    storage space and bandwidth (because more, smaller profiles get filed as a
-    result).
-  * `memory_sampler::sampler_service::MAX_DURATION_BETWEEN_PROFILES`:
-    the maximum elpased time between two partial profiles. Reducing
+  * `memory_sampler::sampler_service::RECLAIMABLE_STACK_TRACES_PROFILE_THRESHOLD`:
+    the number of recorded stack traces that triggers a partial report. Reducing
+    this number decreases the memory footprint of `memory_sampler`, at the
+    expense of storage space and bandwidth (because more, smaller profiles get
+    filed as a result).
+  * `memory_sampler::sampler_service::MAX_DURATION_BETWEEN_PARTIAL_PROFILES`:
+    the maximum elapsed time between two partial profiles. Reducing
     this duration will increase the frequency of partial profiles,
     which should in turn reduce the memory consumption of the
     profiler.
 
 Note also that `memory_sampler` comes with built-in throttling of filed
 profiles, to limit the rate of filing crash reports; in an `eng` build,
-`feedback` does not upload any profile, so it is safe to modify
-`memory_sampler::crash_reporter::setup_crash_reporter` to file profiles more
-often (both to reduce latency between capture and consumption of profiles, as
-well as to increase the sampling rate without significantly increasing
-`memory_sampler`'s memory footprint).
+`feedback` does not upload any profile, so it is safe to reduce
+`memory_sampler::crash_reporter::MIN_DURATION_BETWEEN_SNAPSHOTS_HOURS` to file
+profiles more often (both to reduce latency between capture and consumption of
+profiles, as well as to increase the sampling rate without significantly
+increasing `memory_sampler`'s memory footprint).

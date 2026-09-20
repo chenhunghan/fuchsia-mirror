@@ -5,14 +5,6 @@
 import("fuchsia_test_package.gni")
 import("fuchsia_unittest_component.gni")
 
-# The GN parameters accepted by `fuchsia_unittest_package`.
-fuchsia_unittest_package_parameters = [
-  "disable_elf_binaries_checks",
-  "package_name",
-  "visibility",
-  "subpackages",
-]
-
 # Defines a package that contains a component that launches a test.
 # See: https://fuchsia.dev/fuchsia-src/development/components/build
 #
@@ -131,7 +123,13 @@ template("fuchsia_unittest_package") {
     _test_specs.has_generated_manifest = !defined(invoker.manifest)
 
     fuchsia_test_package(target_name) {
-      forward_variables_from(invoker, fuchsia_unittest_package_parameters)
+      forward_variables_from(invoker,
+                             [
+                               "disable_elf_binaries_checks",
+                               "package_name",
+                               "visibility",
+                               "subpackages",
+                             ])
       test_specs = _test_specs
       test_components = [ ":$component_target" ]
     }

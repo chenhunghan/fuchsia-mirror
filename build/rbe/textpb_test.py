@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 import unittest
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import textpb
 

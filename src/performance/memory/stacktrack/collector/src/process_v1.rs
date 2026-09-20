@@ -129,7 +129,7 @@ mod tests {
     use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_memory_stacktrack_process as fstacktrack_process;
     use futures::pin_mut;
-    use itertools::assert_equal;
+    use itertools::{Itertools, assert_equal};
     use stacktrack_vmo::threads_table_v1::StacktrackWriter;
     use zx::Task;
 
@@ -170,7 +170,7 @@ mod tests {
 
     // Asserts that the given list of executable regions correctly describes the self process.
     fn assert_executable_regions_valid_for_process_self(
-        actual: &[stacktrack_snapshot::ExecutableRegion],
+        actual: &std::collections::HashMap<u64, stacktrack_snapshot::ExecutableRegion>,
     ) {
         // Enumerate the expected executable regions.
         let expected = find_executable_regions(&fuchsia_runtime::process_self())
@@ -183,12 +183,14 @@ mod tests {
                     region.vaddr.unwrap(),
                     region.build_id.unwrap().value,
                 )
-            });
+            })
+            .sorted_by_key(|(addr, _, _, _)| *addr);
 
         // Convert the actual regions to the same format, so that they can be compared.
         let actual = actual
             .iter()
-            .map(|region| (region.address, region.size, region.vaddr, region.build_id.clone()));
+            .map(|(address, region)| (*address, region.size, region.vaddr, region.build_id.clone()))
+            .sorted_by_key(|(addr, _, _, _)| *addr);
 
         // Assert that both iterators return the same elements.
         assert_equal(actual, expected);
@@ -267,8 +269,7 @@ mod tests {
 
         // Verify stack traces.
         assert_eq!(received_snapshot.stack_traces.len(), 1);
-        let stack_trace = &received_snapshot.stack_traces[0];
-        assert_eq!(stack_trace.thread_koid, koid.raw_koid());
+        let stack_trace = received_snapshot.stack_traces.get(&koid.raw_koid()).unwrap();
         assert_eq!(stack_trace.frames.len(), 2);
         assert_eq!(stack_trace.frames[0].program_address, 0x1111);
         assert_eq!(stack_trace.frames[0].frame_pointer, 0x2222);

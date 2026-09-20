@@ -34,15 +34,15 @@ typedef unsigned short u_short;
 #endif
 
 #ifndef __dead2
-#define __dead2
+#define __dead2 __attribute__((noreturn))
 #endif
 
 #ifndef __nonstring
-#define __nonstring
+#define __nonstring __attribute__((nonstring))
 #endif
 
 #ifndef __printflike
-#define __printflike(a, b)
+#define __printflike(a, b) __attribute__((format(printf, a, b)))
 #endif
 
 #ifndef powerof2

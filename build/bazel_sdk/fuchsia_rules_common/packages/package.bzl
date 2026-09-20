@@ -335,7 +335,7 @@ def common_build_fuchsia_package_impl(
     # Sanity check that we are not trying to put 2 different resources at the same mountpoint
     resource_dest_to_srcs = {}
     for resource in package_resources:
-        resource_dest_to_srcs.setdefault(resource.dest, []).append(resource)
+        resource_dest_to_srcs.setdefault(resource.dest, []).append(resource.src.path)
     for dest, srcs in resource_dest_to_srcs.items():
         if len(srcs) > 1:
             fail(

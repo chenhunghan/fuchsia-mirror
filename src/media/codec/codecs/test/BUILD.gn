@@ -9,10 +9,27 @@ group("test") {
   testonly = true
   deps = [
     ":chunk_input_stream_tests",
+    ":codec_adapter_lc3_test",
     ":codec_adapter_sw_test",
     ":output_sink_tests",
     ":timestamp_extrapolator_tests",
   ]
+}
+
+cc_test_executable("codec_adapter_lc3_test_bin") {
+  output_name = "codec_adapter_lc3_test"
+  testonly = true
+
+  sources = [ "codec_adapter_lc3_test.cc" ]
+
+  deps = [
+    "//src/lib/fxl/test:gtest_main",
+    "//src/media/codec/codecs/sw/lc3:codec_adapter_lc3",
+  ]
+}
+
+fuchsia_unittest_package("codec_adapter_lc3_test") {
+  deps = [ ":codec_adapter_lc3_test_bin" ]
 }
 
 cc_test_executable("codec_adapter_sw_test_bin") {

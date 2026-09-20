@@ -227,13 +227,7 @@ zx::result<fhidbus::wire::HidBootProtocol> I8042Device::Identify() {
 
 void I8042Device::GetInputReportsReader(GetInputReportsReaderRequestView request,
                                         GetInputReportsReaderCompleter::Sync& completer) {
-  std::scoped_lock lock(hid_lock_);
-  zx_status_t status = input_report_readers_.CreateReader(dispatcher_, std::move(request->reader));
-  if (status == ZX_OK) {
-#ifdef PS2_TEST
-    sync_completion_signal(&next_reader_wait_);
-#endif
-  }
+  ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
 }
 
 void I8042Device::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,

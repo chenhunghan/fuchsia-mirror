@@ -6,7 +6,7 @@ use itertools::Itertools;
 use regex_lite::Regex;
 use starnix_core::mm::{
     MemoryAccessor, MemoryAccessorExt, MemoryManager, MemoryStats, PAGE_SIZE, ProcMapsFile,
-    ProcSmapsFile, ProcSmapsRollupFile,
+    ProcPagemapFile, ProcSmapsFile, ProcSmapsRollupFile,
 };
 use starnix_core::security;
 use starnix_core::task::{
@@ -266,8 +266,8 @@ impl FsNodeOps for TaskDirectoryNode {
             b"wchan" => Box::new(BytesFile::new_node(b"0".to_vec())),
             b"clear_refs" => Box::new(ClearRefsFile::new_node(tid)),
             b"pagemap" => {
-                Box::new(PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, |_| {
-                    Ok(StubEmptyFile::new(bug_ref!("https://fxbug.dev/452096300")))
+                Box::new(PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, |task| {
+                    Ok(ProcPagemapFile::new(task.tid.clone()))
                 }))
             }
             b"task" => Box::new(TaskListDirectory::new_node(tid.get_task()?.pid.clone())),

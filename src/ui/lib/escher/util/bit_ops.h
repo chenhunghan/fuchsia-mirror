@@ -88,8 +88,11 @@ inline void ForEachBitRange(uint32_t value, const T& func) {
     uint32_t range = CountTrailingOnes(value >> bit);
     func(bit, range);
     // Prepare for the next iteration by zeroing out the non-zero range that
-    // was just found.
-    value &= ~((1u << (bit + range)) - 1);
+    // was just found.  |bit + range| is 32 when the range extends to the
+    // most-significant bit; shifting a 32-bit value by 32 is undefined
+    // behavior (and on x86 is a no-op, which would loop forever), so compute
+    // the mask in 64 bits.
+    value &= static_cast<uint32_t>(~((uint64_t{1} << (bit + range)) - 1));
   }
 }
 

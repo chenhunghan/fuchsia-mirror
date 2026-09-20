@@ -174,15 +174,8 @@ class Ufs : public fdf::DriverBase2, public scsi::Controller {
   fdf::Logger &driver_logger() override { return logger(); }
   const ufs_config::Config &config() const { return config_; }
 
-  bool UseNewInterface() const override { return true; }
-  size_t BlockOpSize() override { return 0; }
   zx_status_t ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
                                  iovec data) override;
-  void ExecuteCommandAsync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
-                           uint32_t block_size_bytes, scsi::DeviceOp *device_op,
-                           iovec data = {nullptr, 0}) override {
-    ZX_PANIC("ExecuteCommandAsync should not be called when UseNewInterface() is true");
-  }
   void ExecuteCommandsAsync(uint8_t target, uint16_t lun,
                             std::span<scsi::ScsiRequest> batch) override;
 

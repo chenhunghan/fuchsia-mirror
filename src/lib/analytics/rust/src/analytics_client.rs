@@ -20,23 +20,31 @@ cfg_if! {
     }
 }
 
+use std::sync::OnceLock;
+
 const DOMAIN: &str = "www.google-analytics.com";
 const ENDPOINT: &str = "/mp/collect";
 
 pub struct GA4AnalyticsClient {
-    client: HttpsClient,
+    client: OnceLock<HttpsClient>,
     ga4_key: String,
     ga4_product_code: String,
 }
 
 impl GA4AnalyticsClient {
     pub fn new(ga4_key: String, ga4_product_code: String) -> Self {
-        Self { client: new_https_client(), ga4_key, ga4_product_code }
+        Self { client: OnceLock::new(), ga4_key, ga4_product_code }
     }
 
     #[cfg(test)]
     fn new_with_client(ga4_key: String, ga4_product_code: String, client: HttpsClient) -> Self {
-        Self { client, ga4_key, ga4_product_code }
+        let cell = OnceLock::new();
+        let _ = cell.set(client);
+        Self { client: cell, ga4_key, ga4_product_code }
+    }
+
+    fn client(&self) -> &HttpsClient {
+        self.client.get_or_init(new_https_client)
     }
 
     fn get_url(&self) -> String {
@@ -56,7 +64,7 @@ impl GA4AnalyticsClient {
             .uri(url)
             .header("Content-Type", "application/json")
             .body(Body::from(post_body))?;
-        let res = self.client.request(req).await;
+        let res = self.client().request(req).await;
         Ok(match res {
             Ok(mut res) => {
                 log::trace!("GA 4 Analytics response: {}", res.status());
@@ -101,7 +109,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Validate the request
-        let req = client.client.take_last_request().expect("Request should not be empty.");
+        let req = client.client().take_last_request().expect("Request should not be empty.");
         // Validate the request method
         assert_eq!(*req.method(), Method::POST);
         // Validate the request URI

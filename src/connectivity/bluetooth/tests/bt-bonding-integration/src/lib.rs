@@ -63,14 +63,6 @@ const TEST_ADDR2: Address = Address::Public([1, 2, 3, 4, 5, 6]);
 const TEST_NAME1: &str = "Name1";
 const TEST_NAME2: &str = "Name2";
 
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-bonding-integration-tests#meta/bt-bonding-integration-tests-component.cm"
-)]
-async fn test_restore_no_bonds_succeeds(harness: HostHarness) {
-    let errors = restore_bonds(&harness, vec![]).await.unwrap();
-    assert_eq!(errors, vec![]);
-}
-
 // Tests initializing bonded LE devices.
 #[test_harness::run_singlethreaded_test(
     test_component = "fuchsia-pkg://fuchsia.com/bt-bonding-integration-tests#meta/bt-bonding-integration-tests-component.cm"
@@ -97,69 +89,4 @@ async fn test_restore_bonded_devices_success(harness: HostHarness) {
 
     let _ = host::expectation::peer(&harness, expected1).await.unwrap();
     let _ = host::expectation::peer(&harness, expected2).await.unwrap();
-}
-
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-bonding-integration-tests#meta/bt-bonding-integration-tests-component.cm"
-)]
-async fn test_restore_bonded_devices_no_ltk_fails(harness: HostHarness) {
-    // Peers should be initially empty.
-    assert_eq!(harness.write_state().peers().len(), 0);
-
-    // Inserting a bonded device without a LTK should fail.
-    let bond_data = new_le_bond_data(&TEST_ID1, &TEST_ADDR1, TEST_NAME1, false /* no LTK */);
-    let errors = restore_bonds(&harness, vec![bond_data.clone()]).await.unwrap();
-    assert_eq!(errors, vec![bond_data]);
-    assert_eq!(harness.write_state().peers().len(), 0);
-}
-
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-bonding-integration-tests#meta/bt-bonding-integration-tests-component.cm"
-)]
-async fn test_restore_bonded_devices_duplicate_entry(harness: HostHarness) {
-    // Peers should be initially empty.
-    assert_eq!(harness.write_state().peers().len(), 0);
-
-    // Initialize one entry.
-    let bond_data = new_le_bond_data(&TEST_ID1, &TEST_ADDR1, TEST_NAME1, true /* with LTK */);
-    let errors = restore_bonds(&harness, vec![bond_data]).await.unwrap();
-    assert_eq!(errors, vec![]);
-
-    // We should receive a notification for the newly added device.
-    let expected = expectation::peer::address(TEST_ADDR1)
-        .and(expectation::peer::technology(fidl_fuchsia_bluetooth_sys::TechnologyType::LowEnergy))
-        .and(expectation::peer::bonded(true));
-    let _ = host::expectation::peer(&harness, expected.clone()).await.unwrap();
-
-    // Adding an entry with the existing id should fail.
-    let bond_data = new_le_bond_data(&TEST_ID1, &TEST_ADDR2, TEST_NAME2, true /* with LTK */);
-    let errors = restore_bonds(&harness, vec![bond_data.clone()]).await.unwrap();
-    assert_eq!(errors, vec![bond_data]);
-
-    // Adding an entry with a different ID but existing address should fail.
-    let bond_data = new_le_bond_data(&TEST_ID2, &TEST_ADDR1, TEST_NAME1, true /* with LTK */);
-    let errors = restore_bonds(&harness, vec![bond_data.clone()]).await.unwrap();
-    assert_eq!(errors, vec![bond_data]);
-}
-
-// Tests that adding a list of bonding data with malformed content succeeds for the valid entries
-// but reports an error.
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-bonding-integration-tests#meta/bt-bonding-integration-tests-component.cm"
-)]
-async fn test_restore_bonded_devices_invalid_entry(harness: HostHarness) {
-    // Peers should be initially empty.
-    assert_eq!(harness.write_state().peers().len(), 0);
-
-    // Add one entry with no LTK (invalid) and one with (valid). This should create an entry for the
-    // valid device but report an error for the invalid entry.
-    let no_ltk = new_le_bond_data(&TEST_ID1, &TEST_ADDR1, TEST_NAME1, false);
-    let with_ltk = new_le_bond_data(&TEST_ID2, &TEST_ADDR2, TEST_NAME2, true);
-    let errors = restore_bonds(&harness, vec![no_ltk.clone(), with_ltk]).await.unwrap();
-    assert_eq!(errors, vec![no_ltk]);
-
-    let expected = expectation::peer::address(TEST_ADDR2)
-        .and(expectation::peer::technology(fidl_fuchsia_bluetooth_sys::TechnologyType::LowEnergy))
-        .and(expectation::peer::bonded(true));
-    let _ = host::expectation::peer(&harness, expected.clone()).await.unwrap();
 }

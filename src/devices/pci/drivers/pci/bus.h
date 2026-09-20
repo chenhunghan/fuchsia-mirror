@@ -9,6 +9,7 @@
 #include <fuchsia/hardware/pciroot/c/banjo.h>
 #include <fuchsia/hardware/pciroot/cpp/banjo.h>
 #include <lib/async/cpp/irq.h>
+#include <lib/async/cpp/wait.h>
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/ddk/device.h>
 #include <lib/driver/mmio/cpp/mmio.h>
@@ -46,12 +47,18 @@ struct BusScanEntry {
   uint8_t max_functions = kDefaultMaxFunctions;
 };
 
-// A list of pci::Device which share the same legacy IRQ and are configured to use legacy irqs.
-using SharedIrqList = std::vector<pci::Device*>;
+// Tracks a device sharing a physical legacy IRQ vector along with the wait
+// object that monitors virtual interrupt servicing (untriggering) by the client.
+struct SharedDevice {
+  pci::Device* device = nullptr;
+  async::Wait wait;
+};
+using SharedDeviceList = std::vector<std::unique_ptr<SharedDevice>>;
+
 struct SharedVector {
   zx::interrupt interrupt;
   async::Irq irq_handler;
-  SharedIrqList list;
+  SharedDeviceList list;
 };
 
 using LegacyIrqs = std::unordered_map<uint32_t, pci_legacy_irq>;
@@ -91,7 +98,8 @@ class Bus : public PciBusType,
   zx_status_t GetBti(const pci::Device* device, uint32_t index, zx::bti* bti)
       __TA_EXCLUDES(devices_lock_) final;
   uint16_t GetSegmentGroup() final;
-  zx_status_t AddToSharedIrqList(pci::Device* device, uint32_t vector)
+  zx_status_t AddToSharedIrqList(pci::Device* device, uint32_t vector,
+                                 zx::unowned_interrupt irq_handle)
       __TA_EXCLUDES(devices_lock_) final;
   zx_status_t RemoveFromSharedIrqList(pci::Device* device, uint32_t vector)
       __TA_EXCLUDES(devices_lock_) final;
@@ -111,6 +119,10 @@ class Bus : public PciBusType,
   const PciFidl::BoardConfiguration& board_config() { return board_config_; }
   void HandleLegacyIrq(async_dispatcher_t* dispatcher, async::Irq* irq, zx_status_t status,
                        const zx_packet_interrupt_t* interrupt, uint32_t vector);
+  // Invoked on dispatcher_ when a device driver acknowledges its virtual interrupt.
+  static void HandleDeviceLegacyIrqUntriggered(async_dispatcher_t* dispatcher, async::Wait* wait,
+                                               zx_status_t status, const zx_packet_signal_t* signal,
+                                               pci::Device* device);
 
  private:
   // Map an ecam VMO for Bus and Config use.

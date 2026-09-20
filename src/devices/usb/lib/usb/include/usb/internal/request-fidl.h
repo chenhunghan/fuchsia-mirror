@@ -433,9 +433,10 @@ class FidlRequest {
       return ZX_OK;
     }
 
-    zx_status_t status = zx_cache_flush(reinterpret_cast<void*>(static_cast<uintptr_t>(mapped->addr) +
-                                                         *buffer.offset() + offset_in_region),
-                                 flush_size, options);
+    zx_status_t status =
+        zx_cache_flush(reinterpret_cast<void*>(static_cast<uintptr_t>(mapped->addr) +
+                                               *buffer.offset() + offset_in_region),
+                       flush_size, options);
     if (status != ZX_OK) {
       return status;
     }
@@ -580,8 +581,8 @@ class FidlRequest {
                reinterpret_cast<void*>(static_cast<uintptr_t>(pinned.mapped.addr)),
                std::min((*request_.data())[idx].size().value(), pinned.mapped.size));
 
-        zx_status_t status = zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(pinned.mapped.addr),
-                                                   pinned.mapped.size);
+        zx_status_t status = zx::vmar::root_self()->unmap(
+            reinterpret_cast<uintptr_t>(pinned.mapped.addr), pinned.mapped.size);
         ZX_DEBUG_ASSERT(status == ZX_OK);
       }
 

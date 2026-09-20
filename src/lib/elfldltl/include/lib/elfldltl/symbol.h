@@ -11,7 +11,6 @@
 #include <ranges>
 #include <span>
 #include <string_view>
-#include <type_traits>
 
 #include "abi-span.h"
 #include "compat-hash.h"
@@ -99,7 +98,7 @@ class SymbolName : public std::string_view {
   constexpr uint32_t gnu_hash() const { return SymbolName(*this).gnu_hash(); }
 
   template <class SymbolInfoType, typename Filter>
-  constexpr const typename SymbolInfoType::Sym* Lookup(const SymbolInfoType& si, Filter&& filter) {
+  constexpr const SymbolInfoType::Sym* Lookup(const SymbolInfoType& si, Filter&& filter) {
     // DT_GNU_HASH format is superior when available.  Modern systems should
     // default to --hash-style=gnu or --hash-style=both so it's available.
     if (auto gnu = si.gnu_hash()) {
@@ -116,8 +115,7 @@ class SymbolName : public std::string_view {
 
   // A const object can't update its cache, but constexpr will already have it.
   template <class SymbolInfoType, typename Filter>
-  constexpr const typename SymbolInfoType::Sym* Lookup(const SymbolInfoType& si,
-                                                       Filter&& filter) const {
+  constexpr const SymbolInfoType::Sym* Lookup(const SymbolInfoType& si, Filter&& filter) const {
     // The copy is mutable in case we don't already have cached hash values.
     return SymbolName(*this).Lookup(si, std::forward<Filter>(filter));
   }
@@ -133,21 +131,27 @@ class SymbolName : public std::string_view {
   }
 
  private:
+  using HashStringFn = uint32_t(std::string_view);
+
+  // Precompute only in constexpr.
+  template <HashStringFn& Hash, uint32_t NoHash>
+  static constexpr uint32_t InitialHash(std::string_view name) {
+    if consteval {
+      return Hash(name);
+    } else {
+      return NoHash;
+    }
+  }
+
   constexpr SymbolName& ChangeName(std::string_view name) {
     std::string_view::operator=(name);
-    compat_hash_ = kCompatNoHash;
-    gnu_hash_ = kGnuNoHash;
-    if (std::is_constant_evaluated()) {  // Precompute in constexpr.
-      compat_hash();
-      gnu_hash();
-    }
+    compat_hash_ = InitialHash<CompatHashString, kCompatNoHash>(name);
+    gnu_hash_ = InitialHash<GnuHashString, kGnuNoHash>(name);
     return *this;
   }
 
-  uint32_t compat_hash_ =  // Precompute in constexpr.
-      std::is_constant_evaluated() ? CompatHashString(*this) : kCompatNoHash;
-  uint32_t gnu_hash_ =  // Precompute in constexpr.
-      std::is_constant_evaluated() ? GnuHashString(*this) : kGnuNoHash;
+  uint32_t compat_hash_ = InitialHash<CompatHashString, kCompatNoHash>(*this);
+  uint32_t gnu_hash_ = InitialHash<GnuHashString, kGnuNoHash>(*this);
 };
 
 // This type can be used as a constructor tag to zero-construct an object whose
@@ -206,14 +210,14 @@ concept SymbolFilterApi = std::invocable<T, const Sym&> &&  //
 // It's primarily used for hash table lookup via SymbolName::Lookup, but can
 // also be used to enumerate the symbol table or the hash tables.  It holds
 // non-owning pointers into target data normally found in the RODATA segment.
-template <class ElfLayout, class AbiTraits = LocalAbiTraits>
+template <ElfApi ElfLayout, class AbiTraits = LocalAbiTraits>
 class SymbolInfo {
  public:
   using Elf = ElfLayout;
-  using Word = typename Elf::Word;
-  using Addr = typename Elf::Addr;
-  using size_type = typename Elf::size_type;
-  using Sym = typename Elf::Sym;
+  using Word = Elf::Word;
+  using Addr = Elf::Addr;
+  using size_type = Elf::size_type;
+  using Sym = Elf::Sym;
 
   using CompatHash = ::elfldltl::CompatHash<Elf>;  // compat-hash.h
   using GnuHash = ::elfldltl::GnuHash<Elf>;        // gnu-hash.h
@@ -335,7 +339,7 @@ class SymbolInfo {
   // This enumerates all the symbols referenced by the hash table (if present).
   // It returns false as soon as the callback returns false, otherwise true.
   template <SymbolFilterApi<Sym> F>
-    requires(kLocal)
+    requires kLocal
   constexpr bool OnSymbols(F&& f) const {
     if (auto hash = gnu_hash()) {
       return std::ranges::all_of(HashedSymbols(*hash), std::forward<F>(f));
@@ -373,7 +377,7 @@ class SymbolInfo {
 
   // Return the CompatHash object (see compat-hash.h) if DT_HASH is valid.
   constexpr std::optional<CompatHash> compat_hash() const
-    requires(kLocal)
+    requires kLocal
   {
     if (CompatHash::Valid(compat_hash_)) {
       return CompatHash(compat_hash_);
@@ -383,7 +387,7 @@ class SymbolInfo {
 
   // Return the GnuHash object (see gnu-hash.h) if DT_GNU_HASH is valid.
   constexpr std::optional<GnuHash> gnu_hash() const
-    requires(kLocal)
+    requires kLocal
   {
     if (GnuHash::Valid(gnu_hash_)) {
       return GnuHash(gnu_hash_);
@@ -460,7 +464,7 @@ class SymbolInfo {
   // view will never be used.
   static constexpr AbiStringView<Elf, AbiTraits> EmptyStrtab() {
     AbiStringView<Elf, AbiTraits> empty;
-    if constexpr (std::is_constructible_v<AbiStringView<Elf, AbiTraits>, std::string_view>) {
+    if constexpr (std::constructible_from<AbiStringView<Elf, AbiTraits>, std::string_view>) {
       using namespace std::literals;
       empty = "\0"sv;
     }
@@ -525,7 +529,7 @@ class SymbolInfo {
 
 // This constructs a SymbolInfo that just contains a single undefined symbol.
 // It can be used with a resolver function (see link.h and resolve.h).
-template <class Elf>
+template <ElfApi Elf>
 class SymbolInfoForSingleLookup : public SymbolInfo<Elf> {
  public:
   using typename SymbolInfo<Elf>::Sym;

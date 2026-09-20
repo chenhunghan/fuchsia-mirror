@@ -15,6 +15,7 @@
 #include <zircon/types.h>
 
 #include <fbl/alloc_checker.h>
+#include <kernel/ffi.h>
 #include <ktl/algorithm.h>
 #include <ktl/iterator.h>
 #include <ktl/utility.h>
@@ -1862,6 +1863,9 @@ uint64_t VmMapping::TrimmedObjectRangeLocked(uint64_t offset, uint64_t len) cons
     DEBUG_ASSERT(stream_size_res);
     size_t stream_size = stream_size_res.value();
     DEBUG_ASSERT(stream_size <= vmo_size);
+    if (vmo_offset >= stream_size) {
+      return 0;
+    }
     trim_len = stream_size - vmo_offset;
   }
 
@@ -1869,7 +1873,8 @@ uint64_t VmMapping::TrimmedObjectRangeLocked(uint64_t offset, uint64_t len) cons
 }
 
 extern "C" {
-fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(VmMapping* mapping);
+FFI_ALWAYS_INLINE fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(
+    VmMapping* mapping);
 void cpp_vm_mapping_free(VmMapping* mapping);
 zx_status_t cpp_vm_mapping_destroy(VmMapping* mapping);
 const fbl::RefPtr<VmAspace>* cpp_vm_mapping_aspace(VmMapping* mapping);
@@ -1886,7 +1891,9 @@ zx_status_t cpp_vm_mapping_debug_protect(VmMapping* mapping, vaddr_t base, size_
 const VmObject* cpp_vm_mapping_vmo(VmMapping* mapping);
 zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping, VmMapping** out_mapping);
 
-fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(VmMapping* mapping) {
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(
+    VmMapping* mapping) {
   return mapping;
 }
 void cpp_vm_mapping_free(VmMapping* mapping) { delete mapping; }

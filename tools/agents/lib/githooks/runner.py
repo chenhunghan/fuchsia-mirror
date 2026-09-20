@@ -182,7 +182,7 @@ def run_pre_commit_hook(
 
 
 def run_commit_msg_hook(
-    msg_file_path: str | Path | None = None,
+    msg_file_path: str | Path,
     *,
     repo_dir: Path | None = None,
     checker_fn: Callable[
@@ -208,14 +208,10 @@ def run_commit_msg_hook(
         active_reporter.finish()
         return 1
 
-    if msg_file_path:
-        msg_path = Path(msg_file_path)
-        msg_file = (
-            msg_path if msg_path.is_absolute() else (repo_root / msg_path)
-        ).resolve()
-    else:
-        git_dir = paths.get_git_dir(repo_root)
-        msg_file = (git_dir / "COMMIT_EDITMSG").resolve()
+    msg_path = Path(msg_file_path)
+    msg_file = (
+        msg_path if msg_path.is_absolute() else (repo_root / msg_path)
+    ).resolve()
 
     if not msg_file.is_file():
         active_reporter.on_error(f"Commit message file not found: {msg_file}")
@@ -264,9 +260,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commit_msg_parser.add_argument(
         "msg_file",
-        nargs="?",
-        default=None,
-        help="Path to commit message file (optional).",
+        help="Path to commit message file.",
     )
 
     return parser

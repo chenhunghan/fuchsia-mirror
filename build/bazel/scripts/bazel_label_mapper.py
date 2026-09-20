@@ -6,8 +6,8 @@
 
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 _SCRIPT_DIR = os.path.dirname(__file__)
 sys.path.insert(0, _SCRIPT_DIR)

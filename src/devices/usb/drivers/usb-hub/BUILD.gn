@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("usb-hub-dml") {
+  dml = "meta/usb-hub.dml"
+  driver_name = "usb-hub"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/usb-hub.bind"
+  dml_label = ":usb-hub-dml"
   bind_output = "usb-hub.bindbc"
   deps = [ "//src/devices/bind/fuchsia.usb" ]
 }
@@ -51,6 +56,7 @@ fuchsia_cc_driver("usb-hub-driver") {
 }
 
 fuchsia_driver_component("usb-hub") {
+  dml_label = ":usb-hub-dml"
   visibility = [
     ":*",
     "//src/devices/usb:drivers",
@@ -58,7 +64,6 @@ fuchsia_driver_component("usb-hub") {
   info = "meta/usb-hub-info.json"
   component_name = "usb-hub"
   deps = [ ":usb-hub-driver" ]
-  manifest = "meta/usb-hub.cml"
 }
 
 fuchsia_driver_package("package") {

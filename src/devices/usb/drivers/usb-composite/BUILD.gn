@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("usb-composite-dml") {
+  dml = "meta/usb-composite.dml"
+  driver_name = "usb-composite"
+}
+
 driver_bind_rules("usb_composite_bind") {
-  rules = "meta/usb-composite.bind"
+  dml_label = ":usb-composite-dml"
   bind_output = "usb-composite.bindbc"
   tests = "meta/bind_tests.json"
   deps = [ "//src/devices/bind/fuchsia.usb" ]
@@ -54,10 +59,10 @@ fuchsia_cc_driver("usb-composite-driver") {
 }
 
 fuchsia_driver_component("usb-composite") {
+  dml_label = ":usb-composite-dml"
   info = "meta/usb-composite-info.json"
   component_name = "usb-composite"
   deps = [ ":usb-composite-driver" ]
-  manifest = "meta/usb-composite.cml"
 }
 
 fuchsia_driver_package("package") {

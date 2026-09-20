@@ -71,7 +71,7 @@ fuchsia_test_package("loopback-socket-benchmarks-with-tracing-pkg-netstack3") {
   # Prevent this test from being run as a target-side test, since it's kicked
   # off by the dart wrapper.
   test_specs = {
-    environments = []
+    build_only = true
   }
 }
 
@@ -92,94 +92,6 @@ benchmark_test_configs = [
     ]
   },
 ]
-
-# The Go runtime on Fuchsia does not support RISC-V.
-if (target_cpu != "riscv64") {
-  fuchsia_unittest_component("loopback-socket-benchmarks") {
-    manifest = "meta/loopback-socket-benchmarks.cml"
-    deps = [
-      ":loopback_socket_benchmarks",
-      "//src/connectivity/network/netstack:component",
-    ]
-  }
-
-  fuchsia_unittest_component("loopback-socket-benchmarks-with-fast-udp") {
-    manifest = "meta/loopback-socket-benchmarks-with-fast-udp.cml"
-    deps = [
-      ":loopback_socket_benchmarks",
-      "//src/connectivity/network/netstack:component-with-fast-udp",
-    ]
-  }
-
-  fuchsia_test_package("loopback-socket-benchmarks-tests-netstack2") {
-    test_components = [
-      ":loopback-socket-benchmarks",
-      ":loopback-socket-benchmarks-with-fast-udp",
-    ]
-  }
-
-  benchmark_test_configs += [
-    {
-      package = ":loopback-socket-benchmarks-tests-netstack2"
-      tests = [
-        {
-          name = "loopback_socket_benchmarks_test"
-          component = "loopback-socket-benchmarks"
-          expected_metric_names_filepath = "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.network.socket.loopback.txt"
-        },
-        {
-          name = "loopback_socket_benchmarks_with_fast_udp"
-          component = "loopback-socket-benchmarks-with-fast-udp"
-          expected_metric_names_filepath = "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.network.socket.loopback.fastudp.txt"
-        },
-      ]
-    },
-  ]
-
-  fuchsia_unittest_component("loopback-socket-benchmarks-with-tracing") {
-    manifest = "meta/loopback-socket-benchmarks-with-tracing.cml"
-    deps = [
-      ":loopback_socket_benchmarks",
-      "//src/connectivity/network/netstack:component-with-tracing-dropin",
-    ]
-    test_type = "system"
-  }
-
-  # TODO(https://fxbug.dev/42069075): Delete this once Fast UDP is the default.
-  fuchsia_unittest_component(
-      "loopback-socket-benchmarks-with-fast-udp-tracing") {
-    manifest = "meta/loopback-socket-benchmarks-with-fast-udp-tracing.cml"
-    deps = [
-      ":loopback_socket_benchmarks",
-      "//src/connectivity/network/netstack:component-with-fast-udp-tracing",
-    ]
-    test_type = "system"
-  }
-
-  fuchsia_test_package(
-      "loopback-socket-benchmarks-with-tracing-pkg-netstack2") {
-    test_components = [
-      ":loopback-socket-benchmarks-with-tracing",
-      ":loopback-socket-benchmarks-with-fast-udp-tracing",
-    ]
-
-    # Prevent this test from being run as a target-side test, since it's kicked
-    # off by the dart wrapper.
-    test_specs = {
-      environments = []
-    }
-  }
-
-  ns2_test_targets = [
-    ":loopback-socket-benchmarks-with-tracing-pkg-netstack2",
-    ":loopback-socket-benchmarks-tests-netstack2",
-  ]
-  ns2_benchmark_targets =
-      [ ":loopback-socket-benchmarks-with-tracing-pkg-netstack2" ]
-} else {
-  ns2_benchmark_targets = []
-  ns2_test_targets = []
-}
 
 # TODO(https://fxbug.dev/359323478): Figure out a better way to disable these tests on Minfs without
 # relying on a global GN argument.
@@ -291,10 +203,10 @@ if (target_cpu != "riscv64" && !is_asan && data_filesystem_format != "minfs") {
 all_test_targets = [
                      ":loopback-socket-benchmarks-tests",
                      ":loopback-socket-benchmarks-with-tracing-pkg-netstack3",
-                   ] + ns2_test_targets + starnix_benchmarks
+                   ] + starnix_benchmarks
 all_benchmark_targets =
     [ ":loopback-socket-benchmarks-with-tracing-pkg-netstack3" ] +
-    ns2_benchmark_targets + starnix_benchmarks
+    starnix_benchmarks
 
 foreach(test_config, benchmark_test_configs) {
   foreach(test, test_config.tests) {

@@ -154,13 +154,14 @@ func (cf ClassifiedFile) HasLicenses() bool {
 
 // ComplianceError represents a violation found during the Validation Stage (Policy Engine).
 type ComplianceError struct {
-	CheckName string
-	LicenseID string
-	Project   string
-	FilePath  string
-	StartLine int
-	EndLine   int
-	Issue     string
+	CheckName    string
+	LicenseID    string
+	Project      string
+	FilePath     string
+	StartLine    int
+	EndLine      int
+	Issue        string
+	Replacements []string
 }
 
 // Discoverer defines the contract for Stage 1: Filesystem Crawler.

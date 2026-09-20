@@ -11,8 +11,10 @@ use crate::kernel::timer::{Timer, ZX_CLOCK_BOOT};
 use crate::platform_rs::timer::{
     DurationBoot, DurationUnknown, InstantBoot, InstantUnknown, current_boot_time,
 };
+use core::pin::Pin;
 use core::ptr::with_exposed_provenance_mut;
 use debug::dprintf;
+use lazy_init::LazyInit;
 use regio::{Mmio, MmioPtr, RwSafe};
 #[cfg(ktest)]
 use unittest as _;
@@ -263,45 +265,9 @@ pub struct GenericWatchdog32 {
     lock: ksync::KMutex<ksync::RawSpinlock>,
 }
 
-struct WatchdogHolder(core::cell::UnsafeCell<core::mem::MaybeUninit<GenericWatchdog32>>);
+unsafe impl Sync for GenericWatchdog32 {}
 
-// SAFETY: Synchronization is managed by `GenericWatchdog32`'s internal spinlock (`lock`).
-unsafe impl Sync for WatchdogHolder {}
-
-static G_WATCHDOG: WatchdogHolder =
-    WatchdogHolder(core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()));
-
-impl WatchdogHolder {
-    /// Initializes `G_WATCHDOG` in place during early single-threaded boot.
-    ///
-    /// # Safety
-    /// Must only be called once during early single-threaded boot before multiple CPUs or threads are active.
-    #[inline]
-    unsafe fn init_in_place(&self) {
-        use pin_init::InPlaceWrite as _;
-        // SAFETY: Called once during early boot; `self.0.get()` points to valid static uninitialized memory.
-        unsafe {
-            let uninit_mut: &'static mut core::mem::MaybeUninit<GenericWatchdog32> =
-                &mut *self.0.get();
-            let initializer = pin_init::pin_init!(GenericWatchdog32 {
-                inner: ksync::KCell::new(GenericWatchdog32Inner::new()),
-                lock <- ksync::KSpinlock::init(),
-            });
-            let _ = uninit_mut.write_pin_init(initializer);
-        }
-    }
-}
-
-impl core::ops::Deref for WatchdogHolder {
-    type Target = GenericWatchdog32;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: `G_WATCHDOG` is initialized in `generic_32bit_watchdog_early_init` prior to any reference
-        // or usage, and lives in static storage forever.
-        unsafe { &*self.0.get().cast::<GenericWatchdog32>() }
-    }
-}
+static G_WATCHDOG: LazyInit<GenericWatchdog32> = LazyInit::uninit();
 
 /// Callback invoked from Zircon timer tick when the pet timer expires.
 ///
@@ -357,19 +323,24 @@ impl crate::pdev_watchdog::WatchdogOps for GenericWatchdog32 {
     }
 }
 
-/// Early single-threaded initialization routine for the generic 32-bit watchdog driver.
+/// Early initialization routine for the generic 32-bit watchdog driver.
 ///
 /// # Safety
 ///
 /// `config` must be a valid pointer to a `DcfgGeneric32Watchdog` structure.
-/// This must only be called once during early single-threaded boot before multiple CPUs or threads are active.
+/// Initialization must be serialized with respect to any other access.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn generic_32bit_watchdog_early_init(config: *const DcfgGeneric32Watchdog) {
     if config.is_null() {
         return;
     }
-    // SAFETY: Called once during early single-threaded boot before any references to G_WATCHDOG.
-    unsafe { G_WATCHDOG.init_in_place() };
+    // SAFETY: Initialization is serialized with respect to any other access.
+    let _ = unsafe {
+        Pin::static_ref(&G_WATCHDOG).init_pin(pin_init::pin_init!(GenericWatchdog32 {
+            inner: ksync::KCell::new(GenericWatchdog32Inner::new()),
+            lock <- ksync::KSpinlock::init(),
+        }))
+    };
     let is_ok = {
         ksync::lock!(let mut guard = G_WATCHDOG.lock_lock());
         // SAFETY: `config` is checked to be non-null and guaranteed by caller to point to a valid `DcfgGeneric32Watchdog`.
@@ -379,7 +350,7 @@ pub unsafe extern "C" fn generic_32bit_watchdog_early_init(config: *const DcfgGe
         inner.early_init_result.is_ok()
     };
     if is_ok {
-        crate::pdev_watchdog::register_watchdog(&*G_WATCHDOG);
+        crate::pdev_watchdog::register_watchdog(G_WATCHDOG.get());
     }
 }
 

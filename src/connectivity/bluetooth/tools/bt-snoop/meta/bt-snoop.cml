@@ -19,7 +19,10 @@
     use: [
         { service: "fuchsia.hardware.bluetooth.Service" },
         {
-            protocol: [ "fuchsia.feedback.CrashReporter" ],
+            protocol: [
+                "fuchsia.feedback.CrashReporter",
+                "fuchsia.firmware.crash.Reporter",
+            ],
             availability: "optional",
         },
     ],

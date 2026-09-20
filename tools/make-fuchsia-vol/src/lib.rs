@@ -11,7 +11,7 @@ use fatfs::{FsOptions, NullTimeProvider, OemCpConverter, TimeProvider};
 use gpt::partition_types::{OperatingSystem, Type as PartType};
 use gpt::{DiskDevice, GptDisk};
 use product_bundle::{LoadedProductBundle, ProductBundle};
-use rand::{RngCore, SeedableRng};
+use rand::{Rng as _, SeedableRng as _};
 use rand_xorshift::XorShiftRng;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -621,13 +621,18 @@ fn check_args(args: &mut TopLevel) -> Result<(), Error> {
                 Arch::X64 => build_dir.join("kernel.efi_x64"),
                 Arch::Arm64 => build_dir.join("kernel.efi_arm64"),
             };
-            args.bootloader = Some(bootloader_dir.join("fuchsia-efi.efi"));
-        } else {
+            let candidate = bootloader_dir.join("fuchsia-efi.efi");
+            if candidate.exists() || args.product_bundle.is_none() {
+                args.bootloader = Some(candidate);
+            }
+        } else if args.product_bundle.is_none() {
             bail!("Missing --bootloader");
         }
     }
 
-    dependencies.push(args.bootloader.as_ref().unwrap());
+    if let Some(bootloader) = &args.bootloader {
+        dependencies.push(bootloader);
+    }
 
     ensure!(args.zbi.is_some(), "Missing --zbi");
     dependencies.push(args.zbi.as_ref().unwrap());
@@ -735,6 +740,30 @@ fn add_partition<D: DiskDevice>(
     Ok(part_range(disk, part_id))
 }
 
+fn read_bootloader_from_product_bundle(
+    product_bundle_dir: &Utf8Path,
+    bootloader_name: &str,
+) -> Result<Vec<u8>, Error> {
+    let ProductBundle::V2(pb) = LoadedProductBundle::try_load_from(product_bundle_dir)?.into();
+    if pb.partitions.bootloader_partitions.is_empty() {
+        bail!("product bundle has no bootloader partitions");
+    }
+    for bootloader_part in &pb.partitions.bootloader_partitions {
+        let Ok(esp_file) = File::open(&bootloader_part.image) else {
+            continue;
+        };
+        let Ok(fs) = fatfs::FileSystem::new(esp_file, FsOptions::new()) else {
+            continue;
+        };
+        if let Ok(mut file) = fs.root_dir().open_file(&format!("EFI/BOOT/{}", bootloader_name)) {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            return Ok(bytes);
+        }
+    }
+    bail!("Could not find EFI/BOOT/{} in any bootloader partition", bootloader_name);
+}
+
 fn write_esp_content<TP: TimeProvider, OCC: OemCpConverter>(
     part: impl Read + Write + Seek,
     args: &TopLevel,
@@ -751,6 +780,14 @@ fn write_esp_content<TP: TimeProvider, OCC: OemCpConverter>(
             Arch::Arm64 => "bootaa64.efi",
         };
 
+        let bootloader_bytes = if let Some(bootloader) = &args.bootloader {
+            read_file(bootloader)?
+        } else if let Some(product_bundle_dir) = &args.product_bundle {
+            read_bootloader_from_product_bundle(product_bundle_dir, bootloader_name)?
+        } else {
+            bail!("Missing --bootloader");
+        };
+
         root_dir.create_dir("EFI")?;
         root_dir.create_dir("EFI/Google")?;
         root_dir.create_dir("EFI/Google/GSetup")?;
@@ -761,7 +798,7 @@ fn write_esp_content<TP: TimeProvider, OCC: OemCpConverter>(
         root_dir.create_dir("EFI/BOOT")?;
         root_dir
             .create_file(&format!("EFI/BOOT/{}", bootloader_name))?
-            .write_all(&read_file(args.bootloader.as_ref().unwrap())?)?;
+            .write_all(&bootloader_bytes)?;
 
         if args.no_abr {
             root_dir

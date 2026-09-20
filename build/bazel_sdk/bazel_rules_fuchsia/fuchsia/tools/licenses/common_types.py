@@ -4,7 +4,8 @@
 """Common definitions used in license processing"""
 
 import json
-from typing import Any, Callable, Dict, List, Set, Type
+from collections.abc import Callable
+from typing import Any
 
 
 class LicenseException(Exception):
@@ -19,7 +20,7 @@ class LicenseException(Exception):
 class DictReader:
     """Helper class for reading keyed values from JSON dictionaries."""
 
-    def __init__(self, dictionary: Dict[str, Any], location):
+    def __init__(self, dictionary: dict[str, Any], location):
         if not isinstance(dictionary, dict):
             raise LicenseException(
                 f"Expected dict but {type(dictionary)}", location
@@ -45,7 +46,7 @@ class DictReader:
     def get(
         self,
         key: str,
-        expected_type: Type = str,
+        expected_type: type = str,
         verify: Callable[[Any], str] = None,
     ):
         """Get the dictionary value by 'key'.
@@ -68,7 +69,7 @@ class DictReader:
         self,
         key,
         default: Any,
-        expected_type: Type = str,
+        expected_type: type = str,
         verify: Callable[[Any], str] = None,
         accept_none: bool = False,
     ):
@@ -133,12 +134,12 @@ class DictReader:
             output = list(unique_output.values())
         return [DictReader(v, self._key_location(key)) for v in output]
 
-    def get_string_list(self, key) -> List[str]:
+    def get_string_list(self, key) -> list[str]:
         return self.get_or(
             key, expected_type=list, default=[], verify=_verify_string_list
         )
 
-    def get_string_set(self, key) -> Set[str]:
+    def get_string_set(self, key) -> set[str]:
         """Reads a list of strings and converts to a Set"""
         return set(self.get_string_list(key))
 
@@ -159,7 +160,7 @@ def _verify_string_list(value):
     return None
 
 
-def trim_long_str_list(items: List, max_len: int) -> List:
+def trim_long_str_list(items: list, max_len: int) -> list:
     """If items is longer than max_len, will trim it and leave a tombstone message at the end"""
     l = len(items)
     if l > max_len:

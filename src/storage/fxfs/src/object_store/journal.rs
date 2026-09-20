@@ -22,11 +22,12 @@ mod reader;
 pub mod super_block;
 mod writer;
 
-use crate::checksum::{Checksum, Checksums, ChecksumsV38};
+use crate::checksum::{Checksum, Checksums};
 use crate::errors::FxfsError;
 use crate::filesystem::{
     ApplyContext, ApplyMode, FlushReason, ForceMajor, FxFilesystem, SyncOptions,
 };
+use crate::hooks::HooksHandle;
 use crate::log::*;
 use crate::lsm_tree::types::LayerIterator;
 use crate::object_handle::{ObjectHandle as _, ReadObjectHandle};
@@ -44,10 +45,8 @@ use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use crate::object_store::transaction::{
-    AllocatorMutation, LockKey, Mutation, MutationV40, MutationV41, MutationV43, MutationV46,
-    MutationV47, MutationV49, MutationV50, MutationV54, MutationV55, MutationV56, MutationV57,
-    ObjectMutationIterator, ObjectStoreMutation, Options, TRANSACTION_MAX_JOURNAL_USAGE,
-    Transaction, lock_keys,
+    AllocatorMutation, LockKey, Mutation, MutationV56, MutationV57, ObjectMutationIterator,
+    ObjectStoreMutation, Options, TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
 };
 use crate::object_store::{
     AssocObj, AttributeId, DataObjectHandle, Extent, HandleOptions, HandleOwner, INVALID_OBJECT_ID,
@@ -55,9 +54,7 @@ use crate::object_store::{
 };
 use crate::range::RangeExt;
 use crate::round::round_div;
-use crate::serialized_types::{
-    LATEST_VERSION, Migrate, Version, Versioned, migrate_nodefault, migrate_to_version,
-};
+use crate::serialized_types::{LATEST_VERSION, Migrate, Version, Versioned, migrate_to_version};
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use core::iter::Iterator;
 use event_listener::Event;
@@ -165,143 +162,6 @@ pub enum JournalRecordV56 {
     DataChecksums(Range<u64>, crate::checksum::ChecksumsV38, bool),
 }
 
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Clone, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV56)]
-pub enum JournalRecordV55 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV55 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, crate::checksum::ChecksumsV38, bool),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV55)]
-#[migrate_nodefault]
-pub enum JournalRecordV54 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV54 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, crate::checksum::ChecksumsV38, bool),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV54)]
-#[migrate_nodefault]
-pub enum JournalRecordV50 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV50 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38, bool),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV50)]
-pub enum JournalRecordV49 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV49 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38, bool),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV49)]
-pub enum JournalRecordV47 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV47 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38, bool),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV47)]
-pub enum JournalRecordV46 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV46 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38, bool),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV46)]
-pub enum JournalRecordV43 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV43 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38, bool),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV43)]
-pub enum JournalRecordV42 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV41 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38, bool),
-}
-
-#[derive(Serialize, Deserialize, TypeFingerprint, Versioned)]
-pub enum JournalRecordV41 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV41 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38),
-}
-
-impl From<JournalRecordV41> for JournalRecordV42 {
-    fn from(record: JournalRecordV41) -> Self {
-        match record {
-            JournalRecordV41::EndBlock => Self::EndBlock,
-            JournalRecordV41::Mutation { object_id, mutation } => {
-                Self::Mutation { object_id, mutation: mutation.into() }
-            }
-            JournalRecordV41::Commit => Self::Commit,
-            JournalRecordV41::Discard(offset) => Self::Discard(offset),
-            JournalRecordV41::DidFlushDevice(offset) => Self::DidFlushDevice(offset),
-            JournalRecordV41::DataChecksums(range, sums) => {
-                // At the time of writing the only extents written by real systems are CoW extents
-                // so the new bool is always true.
-                Self::DataChecksums(range, sums, true)
-            }
-        }
-    }
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(JournalRecordV41)]
-pub enum JournalRecordV40 {
-    EndBlock,
-    Mutation { object_id: u64, mutation: MutationV40 },
-    Commit,
-    Discard(u64),
-    DidFlushDevice(u64),
-    DataChecksums(Range<u64>, ChecksumsV38),
-}
-
 pub(super) fn journal_handle_options() -> HandleOptions {
     HandleOptions { skip_journal_checks: true, ..Default::default() }
 }
@@ -313,6 +173,7 @@ pub(super) fn journal_handle_options() -> HandleOptions {
 /// ability to have mutations that are to be applied atomically together.
 pub struct Journal {
     objects: Arc<ObjectManager>,
+    hooks: Arc<HooksHandle>,
     handle: OnceLock<DataObjectHandle<ObjectStore>>,
     super_block_manager: SuperBlockManager,
     inner: Mutex<Inner>,
@@ -354,6 +215,9 @@ struct Inner {
 
     // Disable compactions.
     disable_compactions: bool,
+
+    // When true, compactions are paused.
+    compactions_paused: bool,
 
     // True if compactions are running.
     compaction_running: bool,
@@ -506,10 +370,15 @@ impl<S: HandleOwner> JournalHandle for DataObjectHandle<S> {
 
 #[fxfs_trace::trace]
 impl Journal {
-    pub fn new(objects: Arc<ObjectManager>, options: JournalOptions) -> Journal {
+    pub fn new(
+        objects: Arc<ObjectManager>,
+        options: JournalOptions,
+        hooks: Arc<HooksHandle>,
+    ) -> Journal {
         let starting_checksum = rand::random_range(1..u64::MAX);
         Journal {
             objects: objects,
+            hooks,
             handle: OnceLock::new(),
             super_block_manager: SuperBlockManager::new(),
             inner: Mutex::new(Inner {
@@ -523,6 +392,7 @@ impl Journal {
                 terminate: false,
                 terminate_reason: None,
                 disable_compactions: false,
+                compactions_paused: false,
                 compaction_running: false,
                 sync_waker: None,
                 flushed_offset: 0,
@@ -1719,7 +1589,7 @@ impl Journal {
     /// Waits for there to be sufficient space in the journal.
     pub async fn check_journal_space(&self) -> Result<(), Error> {
         loop {
-            debug_assert_not_too_long!({
+            let listener = {
                 let inner = self.inner.lock();
                 if inner.terminate {
                     // If the flush error is set, this will never make progress, since we can't
@@ -1729,24 +1599,26 @@ impl Journal {
                         .as_ref()
                         .map(|e| format!("Journal closed with error: {:?}", e))
                         .unwrap_or_else(|| "Journal closed".to_string());
-                    break Err(anyhow!(FxfsError::JournalFlushError).context(context));
+                    return Err(anyhow!(FxfsError::JournalFlushError).context(context));
                 }
                 if self.objects.last_end_offset()
                     - inner.super_block_header.journal_checkpoint.file_offset
                     < inner.reclaim_size
                 {
-                    break Ok(());
+                    return Ok(());
                 }
                 if inner.image_builder_mode.is_some() {
-                    break Ok(());
+                    return Ok(());
                 }
                 if inner.disable_compactions {
-                    break Err(
+                    return Err(
                         anyhow!(FxfsError::JournalFlushError).context("Compactions disabled")
                     );
                 }
                 self.reclaim_event.listen()
-            });
+            };
+            self.hooks.on_waiting_for_journal_space();
+            debug_assert_not_too_long!(listener);
         }
     }
 
@@ -1852,6 +1724,7 @@ impl Journal {
                     if compact_fut.is_none()
                         && !inner.terminate
                         && !inner.disable_compactions
+                        && !inner.compactions_paused
                         && inner.image_builder_mode.is_none()
                         && journal_bytes > inner.reclaim_size / 2
                     {
@@ -2037,6 +1910,27 @@ impl Journal {
                 }
                 self.reclaim_event.listen()
             });
+        }
+    }
+
+    pub async fn pause_compactions(&self) {
+        loop {
+            debug_assert_not_too_long!({
+                let mut inner = self.inner.lock();
+                inner.compactions_paused = true;
+                if !inner.compaction_running {
+                    return;
+                }
+                self.reclaim_event.listen()
+            });
+        }
+    }
+
+    pub fn resume_compactions(&self) {
+        let mut inner = self.inner.lock();
+        inner.compactions_paused = false;
+        if let Some(waker) = inner.flush_waker.take() {
+            waker.wake();
         }
     }
 

@@ -14,9 +14,11 @@
 #include <zircon/syscalls.h>
 #include <zircon/time.h>
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstddef>
 #include <cstring>
+#include <optional>
 #include <utility>
 
 #include <fbl/alloc_checker.h>
@@ -111,5 +113,28 @@ std::string_view DisplayInfo::GetManufacturerName() const { return {}; }
 std::string DisplayInfo::GetMonitorName() const { return {}; }
 
 std::string DisplayInfo::GetMonitorSerial() const { return {}; }
+
+std::optional<zx::duration> DisplayInfo::GetCommittedModeVsyncInterval() const {
+  if (committed_mode_id == display::kInvalidModeId) {
+    return std::nullopt;
+  }
+
+  const auto mode_it = std::find_if(
+      preferred_modes.begin(), preferred_modes.end(),
+      [&](const display::ModeAndId& mode_and_id) { return mode_and_id.id() == committed_mode_id; });
+  if (mode_it == preferred_modes.end()) {
+    return std::nullopt;
+  }
+
+  const int32_t refresh_rate_millihertz = mode_it->mode().refresh_rate_millihertz();
+  if (refresh_rate_millihertz <= 0) {
+    return std::nullopt;
+  }
+
+  // 1 millihertz is 1e-3 Hz, so the period in nanoseconds is 1e12 divided by
+  // the refresh rate in millihertz.
+  static constexpr int64_t kNanosecondsPerMillihertzPeriod = 1'000'000'000'000;
+  return zx::nsec(kNanosecondsPerMillihertzPeriod / refresh_rate_millihertz);
+}
 
 }  // namespace display_coordinator

@@ -8,7 +8,7 @@ import dataclasses
 import logging
 import os
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,7 +100,7 @@ class GnLabel:
         return other
 
     @staticmethod
-    def check_types_in_list(list: List["GnLabel"]) -> List["GnLabel"]:
+    def check_types_in_list(list: list["GnLabel"]) -> list["GnLabel"]:
         """Asserts that all values in `list` are of type GnLabel"""
         for v in list:
             GnLabel.check_type(v)

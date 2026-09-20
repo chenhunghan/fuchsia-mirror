@@ -43,7 +43,7 @@ class DecodedModuleInMemory : public DecodedModule<ElfLayout, SegmentContainer, 
   using typename Base::Module;
   using typename Base::Phdr;
   using typename Base::size_type;
-  using Region = typename LoadInfo::Region;
+  using Region = LoadInfo::Region;
 
   // This is the successful return value of DecodeFromMemory, below.  Some
   // or all of these things may be useless to some callers, but the startup

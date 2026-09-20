@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("framebuffer-bochs-display-dml") {
+  dml = "meta/framebuffer-bochs-display.dml"
+  driver_name = "framebuffer-bochs-display"
+}
+
 driver_bind_rules("framebuffer-bochs-display-bind") {
-  rules = "meta/framebuffer-bochs-display.bind"
+  bind_output = "framebuffer-bochs-display.bindbc"
+  dml_label = ":framebuffer-bochs-display-dml"
   tests = "meta/framebuffer-bochs-display-bind-tests.json"
 
   deps = [
@@ -41,10 +47,10 @@ fuchsia_cc_driver("driver") {
 }
 
 fuchsia_driver_component("framebuffer-bochs-display") {
+  dml_label = ":framebuffer-bochs-display-dml"
   component_name = "framebuffer-bochs-display"
   deps = [ ":driver" ]
   info = "meta/framebuffer-bochs-display-info.json"
-  manifest = "meta/framebuffer-bochs-display.cml"
 }
 
 fuchsia_driver_package("package") {

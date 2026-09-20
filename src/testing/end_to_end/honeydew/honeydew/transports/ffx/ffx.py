@@ -438,7 +438,6 @@ class FFX:
         capture_output: bool = True,
         log_output: bool = True,
         include_target: bool = True,
-        include_target_name: bool = False,
         machine: MachineFormat = MachineFormat.JSON,
         log_status_on_failure: bool = True,
         disable_controlmaster: bool = False,
@@ -458,8 +457,6 @@ class FFX:
                 or spammy output.
             include_target: If set to True, `ffx -t {target} {cmd}` will be run.
                 Otherwise, `ffx {cmd}` will be run.
-            include_target_name: If set to True, `ffx -t {target-query} {cmd}` will be run.
-                Otherwise, `ffx -t {target-address} {cmd}` will be run.
             machine: Specifies the machine format used for the ffx command (defaults
                 to "json")
             log_status_on_failure: Whether to run diagnostic triage ('ffx target status')
@@ -478,7 +475,6 @@ class FFX:
         ffx_cmd: list[str] = self.generate_ffx_cmd(
             cmd=cmd,
             include_target=include_target,
-            include_target_name=include_target_name,
             machine=machine,
             disable_controlmaster=disable_controlmaster,
         )
@@ -681,7 +677,6 @@ class FFX:
         else:
             self.run(
                 cmd=_FFX_CMDS["TARGET_WAIT"],
-                include_target_name=include_target_name,
                 disable_controlmaster=True,
             )
 
@@ -762,7 +757,6 @@ class FFX:
         self,
         cmd: list[str],
         include_target: bool = True,
-        include_target_name: bool = False,
         machine: MachineFormat = MachineFormat.JSON,
         disable_controlmaster: bool = False,
         config_overrides: dict[str, Any] | None = None,
@@ -772,8 +766,6 @@ class FFX:
         Args:
             cmd: FFX command.
             include_target: True to include "-t <target>", False otherwise.
-            include_target_name: If set to True, `ffx -t {target-query} {cmd}` will be run.
-                Otherwise, `ffx -t {target-address} {cmd}` will be run.
             machine: Specifies the machine format used for the ffx command (defaults
                 to "json")
             disable_controlmaster: boolean value of controlmaster.
@@ -789,13 +781,8 @@ class FFX:
         ffx_args.extend(["--strict"])
 
         if include_target:
-            if include_target_name:
-                # Use the unresolved target query
-                ffx_args.extend(["-t", f"{self._query}"])
-            else:
-                # Use the resolved target query
-                target = self.get_target_address()
-                ffx_args.extend(["-t", f"{target}"])
+            target = self.get_target_address()
+            ffx_args.extend(["-t", f"{target}"])
 
         # Don't add "--machine" if the machine type is already specified
         if "--machine" not in cmd:

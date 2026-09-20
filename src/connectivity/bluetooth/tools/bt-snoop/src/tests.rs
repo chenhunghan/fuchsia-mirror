@@ -27,7 +27,7 @@ use crate::{
     handle_client_request, register_new_client,
 };
 
-use crate::core_dump::CRASH_REPORT_DEBOUNCE_DURATION;
+use crate::core_dump::{CRASH_REPORT_DEBOUNCE_DURATION, CoreDumpCollector};
 use crate::{CrashState, HandlePacketOutcome, handle_packet};
 use fidl_fuchsia_hardware_bluetooth as hardware_bt;
 use std::collections::HashMap;
@@ -601,6 +601,75 @@ async fn test_process_vendor_connection_success() {
 }
 
 #[fuchsia::test(allow_stalls = false)]
+async fn test_process_vendor_connection_retains_rate_limiting_timestamp() {
+    let inspect = Inspector::default();
+    let mut snoopers = ConcurrentSnooperPacketFutures::new();
+    let mut logs = PacketLogs::new(
+        10,
+        100_000,
+        100_000,
+        Duration::new(10, 0),
+        inspect.root().create_child("packet_log"),
+    );
+    let mut subscribers = SubscriptionManager::new();
+    let mut crash_states = HashMap::new();
+    let (vendor_proxy, mut vendor_stream) =
+        fidl::endpoints::create_proxy_and_stream::<hardware_bt::VendorMarker>();
+
+    let path = "test_dev";
+    let prior_crash_time = fuchsia_async::MonotonicInstant::now();
+    let _ = crash_states.insert(
+        path.to_string(),
+        CrashState {
+            parameters: hardware_bt::VendorCrashParameters::default(),
+            last_report_local_time: Some(prior_crash_time),
+            collector: None,
+            tentative_report_file_time: None,
+        },
+    );
+
+    let process_fut = crate::process_vendor_connection(
+        path,
+        &vendor_proxy,
+        &mut snoopers,
+        &mut crash_states,
+        &mut logs,
+        &mut subscribers,
+    );
+
+    let stream_fut = async move {
+        let Some(Ok(hardware_bt::VendorRequest::GetCrashParameters { responder })) =
+            vendor_stream.next().await
+        else {
+            panic!("Expected GetCrashParameters");
+        };
+        responder
+            .send(Ok(&hardware_bt::VendorCrashParameters {
+                program_name: Some("test".to_string()),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        let Some(Ok(hardware_bt::VendorRequest::OpenSnoop { responder })) =
+            vendor_stream.next().await
+        else {
+            panic!("Expected OpenSnoop");
+        };
+        let (snoop_client, _snoop_stream) =
+            fidl::endpoints::create_endpoints::<hardware_bt::SnoopMarker>();
+        responder.send(Ok(snoop_client)).unwrap();
+    };
+
+    futures::future::join(process_fut, stream_fut).await;
+
+    assert!(crash_states.contains_key("test_dev"));
+    let state = crash_states.get("test_dev").unwrap();
+    assert_eq!(state.last_report_local_time, Some(prior_crash_time));
+    assert_eq!(state.parameters.program_name, Some("test".to_string()));
+    assert!(state.collector.is_none());
+}
+
+#[fuchsia::test(allow_stalls = false)]
 async fn test_process_vendor_connection_unsupported_error() {
     let inspect = Inspector::default();
     let mut snoopers = ConcurrentSnooperPacketFutures::new();
@@ -880,7 +949,44 @@ fn test_handle_packet_channel_closed() {
         handle_packet(&device_id, None, &mut subscribers, &mut logs, None, &mut crash_states);
 
     assert!(matches!(outcome, HandlePacketOutcome::ChannelClosed));
-    assert!(!crash_states.contains_key(&device_id));
+    assert!(crash_states.contains_key(&device_id));
+    assert!(crash_states.get(&device_id).unwrap().collector.is_none());
+}
+
+#[fuchsia::test(allow_stalls = false)]
+async fn test_handle_packet_channel_closed_dump_ready() {
+    let inspect = Inspector::default();
+    let mut logs = PacketLogs::new(
+        10,
+        100_000,
+        100_000,
+        Duration::new(10, 0),
+        inspect.root().create_child("packet_log"),
+    );
+    let mut subscribers = SubscriptionManager::new();
+    let device_id = "test_device".to_string();
+    let mut crash_states = HashMap::new();
+    let collector =
+        CoreDumpCollector::new("test_prog".to_string(), "test_sig".to_string()).unwrap();
+    let crash_time = fuchsia_async::MonotonicInstant::now();
+    let _ = crash_states.insert(
+        device_id.clone(),
+        CrashState {
+            parameters: hardware_bt::VendorCrashParameters::default(),
+            last_report_local_time: Some(crash_time),
+            collector: Some(collector),
+            tentative_report_file_time: Some(crash_time + zx::MonotonicDuration::from_seconds(5)),
+        },
+    );
+
+    let outcome =
+        handle_packet(&device_id, None, &mut subscribers, &mut logs, None, &mut crash_states);
+
+    assert!(matches!(outcome, HandlePacketOutcome::DumpReady(_)));
+    let state = crash_states.get(&device_id).expect("CrashState retained");
+    assert_eq!(state.last_report_local_time, Some(crash_time));
+    assert!(state.collector.is_none());
+    assert!(state.tentative_report_file_time.is_none());
 }
 
 #[fuchsia::test(allow_stalls = false)]

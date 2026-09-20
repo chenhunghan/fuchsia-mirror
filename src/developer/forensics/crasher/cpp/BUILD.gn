@@ -54,5 +54,5 @@ test("crasher_test") {
 fuchsia_test("tests") {
   package = "..:crasher_test"
   component = ":cpp_crasher_test"
-  environments = []  # don't run it on any bots
+  build_only = true  # don't run it on any bots
 }

@@ -8,6 +8,11 @@ import("//build/cpp/library_headers.gni")
 
 library_headers("headers") {
   headers = [ "lib/btree.h" ]
+  public_deps = [
+    # The re-exported implementation headers use #include
+    # <fbl/packed_pointer.h> and #include <fbl/ref_ptr.h>.
+    "//zircon/system/ulib/fbl",
+  ]
 }
 
 source_set("btree") {

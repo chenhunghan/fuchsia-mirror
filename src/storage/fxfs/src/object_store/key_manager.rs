@@ -93,6 +93,11 @@ impl<V> Cache<V> {
         self.permanent.clear();
     }
 
+    fn clear_cached(&mut self) {
+        self.hash.clear();
+        self.pending_purge.clear();
+    }
+
     fn remove(&mut self, key: u64) {
         self.hash.remove(&key);
         self.pending_purge.remove(&key);
@@ -472,6 +477,13 @@ impl KeyManager {
         inner.keys.clear();
         inner.unwrapping.clear();
     }
+
+    /// Clears only non-permanent cached keys, leaving permanent store keys intact.
+    pub fn clear_cached_keys(&self) {
+        let mut inner = self.inner.lock();
+        inner.keys.clear_cached();
+        inner.purge_task.take();
+    }
 }
 
 fn to_result(find_key_result: FindKeyResult) -> Result<Arc<dyn Cipher>, FxfsError> {
@@ -834,5 +846,31 @@ mod tests {
             .0
             .is_err()
         );
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_clear_cached_keys() {
+        TestExecutor::advance_to(MonotonicInstant::from_nanos(0)).await;
+
+        let manager = Arc::new(KeyManager::new());
+        // Key 1: permanent key (stored in `permanent`)
+        manager.insert(1, Arc::new(vec![(0, CipherHolder::Cipher(cipher(0)))].into()), true);
+        // Keys 2 & 3: non-permanent keys (initially stored in `hash`)
+        manager.insert(2, Arc::new(vec![(0, CipherHolder::Cipher(cipher(0)))].into()), false);
+        manager.insert(3, Arc::new(vec![(0, CipherHolder::Cipher(cipher(0)))].into()), false);
+
+        // Advance 1 purge period so keys 2 and 3 move from `hash` into `pending_purge`.
+        TestExecutor::advance_to(MonotonicInstant::after(PURGE_TIMEOUT.into())).await;
+
+        // Touch key 2 to promote it back to active `hash`, leaving key 3 in `pending_purge`.
+        assert!(manager.get(2).await.expect("get failed").is_some());
+
+        manager.clear_cached_keys();
+
+        // Permanent key 1 must be preserved; non-permanent keys 2 (`hash`) and 3 (`pending_purge`)
+        // must be evicted.
+        assert!(manager.get(1).await.expect("get failed").is_some());
+        assert!(manager.get(2).await.expect("get failed").is_none());
+        assert!(manager.get(3).await.expect("get failed").is_none());
     }
 }

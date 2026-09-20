@@ -80,7 +80,7 @@ enum Command {
         #[arg(short = 'w', long = "width", default_value = "1000")]
         /// Width of the display
         width: u32,
-        #[arg(short = 'h', long = "height", default_value = "1000")]
+        #[arg(short = 'H', long = "height", default_value = "1000")]
         /// Height of the display
         height: u32,
         #[arg(short = 'c', long = "tap_event_count", default_value = "1")]
@@ -107,7 +107,7 @@ enum Command {
         #[arg(short = 'w', long = "width", default_value = "1000")]
         /// Width of the display
         width: u32,
-        #[arg(short = 'h', long = "height", default_value = "1000")]
+        #[arg(short = 'H', long = "height", default_value = "1000")]
         /// Height of the display
         height: u32,
         #[arg(alias = "mc", long = "move_event_count", default_value = "100")]

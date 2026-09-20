@@ -125,6 +125,7 @@ fn crash<I: TestDualStackIpExt + IpExt>() {
             Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)),
             REMOTE_PORT.into(),
             Buf::new([1], ..),
+            Default::default(),
         )
         .unwrap();
 

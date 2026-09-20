@@ -229,6 +229,25 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
             to_deallocate.len() as u64 * CHUNK_SIZE
         );
     }
+
+    /// Immediately clears all cached chunks.
+    pub fn clear(&self) {
+        let mut to_deallocate = Vec::new();
+        {
+            let mut chunks = self.chunks.lock();
+            for chunk in chunks.iter_mut() {
+                if matches!(chunk, Chunk::Present(_) | Chunk::Expired(_)) {
+                    to_deallocate.push(std::mem::take(chunk));
+                }
+            }
+        }
+        log::debug!(
+            "COH {}: Clearing {} cached chunks ({} bytes)",
+            self.source.object_id(),
+            to_deallocate.len(),
+            to_deallocate.len() as u64 * CHUNK_SIZE
+        );
+    }
 }
 
 impl<S: ReadObjectHandle> ObjectHandle for CachingObjectHandle<S> {
@@ -518,5 +537,39 @@ mod tests {
             .read(CHUNK_SIZE.get() as usize)
             .await
             .expect_err("Chunk was not purged");
+    }
+
+    #[fuchsia::test]
+    async fn test_chunk_clearing() {
+        let device = Arc::new(FakeDevice::new(1024, 512));
+        let source = Arc::new(FakeSource::new(device, (CHUNK_SIZE + 4096) as usize));
+        source.start();
+        let caching_object_handle =
+            CachingObjectHandle::new(source.clone() as Arc<dyn ReadObjectHandle>);
+
+        let chunk1 = caching_object_handle.read(0).await.unwrap();
+        caching_object_handle.read(CHUNK_SIZE.get() as usize).await.unwrap();
+        assert!(caching_object_handle.try_read(0).is_some());
+        assert!(caching_object_handle.try_read(CHUNK_SIZE.get() as usize).is_some());
+
+        source.allow_reads(false);
+
+        // A single clear() should immediately evict all cached chunks from the handle.
+        caching_object_handle.clear();
+        assert!(caching_object_handle.try_read(0).is_none());
+        assert!(caching_object_handle.try_read(CHUNK_SIZE.get() as usize).is_none());
+
+        // Existing CachedChunk references remain valid until dropped.
+        assert_eq!(&*chunk1, make_buf(1, CHUNK_SIZE.get() as usize));
+
+        // Verify that calling clear() while a read is in-flight (Pending) does not break the
+        // pending read.
+        source.allow_reads(true);
+        source.started.store(false, Ordering::SeqCst);
+        let mut pending_fut = std::pin::pin!(caching_object_handle.read(0));
+        assert!(futures::poll!(&mut pending_fut).is_pending());
+        caching_object_handle.clear();
+        source.start();
+        assert_eq!(&*pending_fut.await.unwrap(), make_buf(3, CHUNK_SIZE.get() as usize));
     }
 }

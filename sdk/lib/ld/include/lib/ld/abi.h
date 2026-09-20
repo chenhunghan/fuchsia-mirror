@@ -38,11 +38,11 @@ namespace ld::abi {
 template <class Elf = elfldltl::Elf<>, class AbiTraits = elfldltl::LocalAbiTraits>
 struct Abi {
   // Aliases to avoid using `typename` all over the place.
-  using Word = typename Elf::Word;
-  using Addr = typename Elf::Addr;
-  using Phdr = typename Elf::Phdr;
-  using LinkMap = typename Elf::template LinkMap<AbiTraits>;
-  using RDebug = typename Elf::template RDebug<AbiTraits>;
+  using Word = Elf::Word;
+  using Addr = Elf::Addr;
+  using Phdr = Elf::Phdr;
+  using LinkMap = Elf::template LinkMap<AbiTraits>;
+  using RDebug = Elf::template RDebug<AbiTraits>;
 
   // All pointer members in Abi and inner types must use Ptr<T> in place of T*.
   template <typename T>
@@ -131,13 +131,13 @@ struct Abi {
   elfldltl::TlsLayout<Elf> static_tls_layout;
 
   // Maps a dynamic TLS module ID to a 0-based index for dynamic TLS allocations.
-  static constexpr typename Elf::size_type dynamic_tls_index(
-      typename Elf::size_type tls_module_id, typename Elf::size_type max_static_tls_modid) {
+  static constexpr Elf::size_type dynamic_tls_index(Elf::size_type tls_module_id,
+                                                    Elf::size_type max_static_tls_modid) {
     assert(tls_module_id > max_static_tls_modid);
     return tls_module_id - max_static_tls_modid - 1;
   }
 
-  constexpr typename Elf::size_type dynamic_tls_index(typename Elf::size_type tls_module_id) const {
+  constexpr Elf::size_type dynamic_tls_index(Elf::size_type tls_module_id) const {
     return dynamic_tls_index(tls_module_id, static_tls_modules.size());
   }
 

@@ -11,12 +11,13 @@
 
 #include "abi-ptr.h"
 #include "gnu-hash.h"
+#include "layout.h"
 
 namespace elfldltl {
 
 // This provides an optimized type for holding a DT_SONAME / DT_NEEDED string.
 // It always hashes the string to make equality comparisons faster.
-template <class Elf = Elf<>, AbiPtrTraitsApi<const char, Elf> AbiTraits = LocalAbiTraits>
+template <ElfApi Elf = Elf<>, AbiPtrTraitsApi<const char, Elf> AbiTraits = LocalAbiTraits>
 class Soname {
  public:
   static constexpr bool kLocal = AbiPtrLocalTraitsApi<AbiTraits, const char, Elf>;
@@ -106,8 +107,8 @@ class Soname {
   // Soname as cheap as passing std::string_view.  This limits lengths to 4GiB,
   // which is far more than the practical limit.
   AbiPtr<const char, Elf, AbiTraits> name_;
-  typename Elf::Word size_ = 0;
-  typename Elf::Word hash_ = 0;
+  Elf::Word size_ = 0;
+  Elf::Word hash_ = 0;
 
  public:
   // <lib/ld/remote-abi-transcriber.h> introspection API.  These aliases must

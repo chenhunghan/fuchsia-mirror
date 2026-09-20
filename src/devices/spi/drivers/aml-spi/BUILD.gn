@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-spi-dml") {
+  dml = "meta/aml-spi.dml"
+  driver_name = "aml-spi"
+}
+
 driver_bind_rules("aml_spi_bind") {
-  rules = "meta/aml-spi.bind"
+  dml_label = ":aml-spi-dml"
   bind_output = "aml-spi.bindbc"
   tests = "meta/bind_tests.json"
 
@@ -110,10 +115,10 @@ fuchsia_cc_driver("aml-spi-driver") {
 }
 
 fuchsia_driver_component("aml-spi") {
+  dml_label = ":aml-spi-dml"
   info = "meta/aml-spi-info.json"
   component_name = "aml-spi"
   deps = [ ":aml-spi-driver" ]
-  manifest = "meta/aml-spi.cml"
 }
 
 fuchsia_driver_package("package") {

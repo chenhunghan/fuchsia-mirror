@@ -8,8 +8,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("ahci-dml") {
+  dml = "meta/ahci.dml"
+  driver_name = "ahci"
+}
+
 driver_bind_rules("ahci_bind") {
-  rules = "meta/ahci.bind"
+  dml_label = ":ahci-dml"
   tests = "meta/tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -33,7 +38,7 @@ fuchsia_driver_component("ahci") {
   component_name = "ahci"
   deps = [ ":ahci-driver" ]
   info = "meta/ahci-info.json"
-  manifest = "meta/ahci.cml"
+  dml_label = ":ahci-dml"
 }
 
 fuchsia_driver_package("package") {

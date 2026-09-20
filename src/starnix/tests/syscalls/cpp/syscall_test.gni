@@ -7,7 +7,7 @@ import("//src/starnix/build/args.gni")
 import("//src/starnix/build/starnix_container_config_component.gni")
 import("//src/starnix/tests/build/starnix_linux_test_component.gni")
 
-template("_resource_from_executables") {
+template("resource_from_executables") {
   _executables = invoker.executables
   _toolchain = invoker.toolchain
   _resources = []
@@ -219,23 +219,37 @@ template("syscall_test") {
     }
   }
 
-  _resource_from_executables_target_name =
-      "${target_name}_resource_from_executables"
-  _resource_from_executables(_resource_from_executables_target_name) {
-    executables = _test_executables
-    toolchain = target_linux_toolchain
+  _is_machina = defined(invoker.test_target_kernel) &&
+                invoker.test_target_kernel == "linux"
+
+  if (!_is_machina) {
+    _resource_from_executables_target_name =
+        "${target_name}_resource_from_executables"
+    resource_from_executables(_resource_from_executables_target_name) {
+      executables = _test_executables
+      toolchain = target_linux_toolchain
+    }
   }
 
   starnix_linux_test_component(target_name) {
     test_label = ":${_test_binary_name}"
     test_binary = _test_binary_name
     manifest = _manifest_file
-    deps = [
-      ":${_manifest_label}",
-      ":${_resource_from_executables_target_name}",
-    ]
-    foreach(_resource, _test_resources) {
-      deps += [ "${_resource}($target_linux_toolchain)" ]
+    deps = [ ":${_manifest_label}" ]
+    if (_is_machina) {
+      not_needed([
+                   "_test_executables",
+                   "_test_resources",
+                 ])
+
+      # Machina tests use the unified dependency target
+      deps += [ "//src/starnix/tests/syscalls:unified_syscall_deps" ]
+    } else {
+      # Starnix tests bundle only their granular per-test dependencies
+      deps += [ ":${_resource_from_executables_target_name}" ]
+      foreach(_resource, _test_resources) {
+        deps += [ "${_resource}($target_linux_toolchain)" ]
+      }
     }
     uses_expectations = true
     generated_expectations = ":syscalls_cpp_test_expectations"
@@ -247,10 +261,10 @@ template("syscall_test") {
     }
   }
 
-  if (current_cpu == "arm64") {
+  if (current_cpu == "arm64" && !_is_machina) {
     _resource_from_executables_target_name_arch32 =
         "${target_name}_resource_from_executables_arch32"
-    _resource_from_executables(_resource_from_executables_target_name_arch32) {
+    resource_from_executables(_resource_from_executables_target_name_arch32) {
       executables = _test_executables
       toolchain = target_linux_arch32_toolchain
     }

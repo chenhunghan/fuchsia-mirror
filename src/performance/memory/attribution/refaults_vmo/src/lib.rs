@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+pub mod atomic_vec;
+pub use atomic_vec::AtomicBitVec;
+
 use memory_mapped_vmo::MemoryMappedVmo;
 use std::sync::atomic::{AtomicU64, Ordering};
 use zx::Rights;

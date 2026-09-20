@@ -102,7 +102,7 @@ class ElfNoteSegment {
  public:
   using Bytes = ElfNote::Bytes;
 
-  using Nhdr = typename LayoutBase<Data>::Nhdr;
+  using Nhdr = LayoutBase<Data>::Nhdr;
 
   class iterator {
    public:
@@ -291,7 +291,7 @@ class PhdrFileNoteObserver
   constexpr PhdrFileNoteObserver(const PhdrFileNoteObserver&) = default;
   constexpr PhdrFileNoteObserver(PhdrFileNoteObserver&&) noexcept = default;
 
-  template <class Elf>
+  template <ElfApi Elf>
   explicit constexpr PhdrFileNoteObserver(Elf&& elf, File& file, Allocator allocator,
                                           Callback... callback)
       : Base{std::forward<Callback>(callback)...}, file_(&file), allocator_(std::move(allocator)) {
@@ -347,7 +347,7 @@ class PhdrFileNoteObserver
 // `fit::result<fit::failed, bool>(ElfNote)`) are moved or copied so they can
 // safely be temporaries.  Use std::ref or std::cref to make the
 // PhdrFileNoteObserver object hold a callback by reference instead.
-template <class Elf, class File, typename Allocator, typename... Callback>
+template <ElfApi Elf, class File, typename Allocator, typename... Callback>
 PhdrFileNoteObserver(Elf&&, File&, Allocator&&, Callback&&...)
     -> PhdrFileNoteObserver<std::decay_t<Elf>::kData, File, std::decay_t<Allocator>,
                             std::decay_t<Callback>...>;
@@ -369,7 +369,7 @@ class PhdrMemoryNoteObserver
   constexpr PhdrMemoryNoteObserver(const PhdrMemoryNoteObserver&) = default;
   constexpr PhdrMemoryNoteObserver(PhdrMemoryNoteObserver&&) noexcept = default;
 
-  template <class Elf>
+  template <ElfApi Elf>
   explicit constexpr PhdrMemoryNoteObserver(Elf&& elf, Memory& memory, Callback... callback)
       : Base{std::forward<Callback>(callback)...}, memory_(&memory) {
     static_assert(std::decay_t<Elf>::kData == Data);
@@ -418,7 +418,7 @@ class PhdrMemoryNoteObserver
 };
 
 // Deduction guide, as for PhdrFileNoteObserver but with no allocator argument.
-template <class Elf, class Memory, typename... Callback>
+template <ElfApi Elf, class Memory, typename... Callback>
 PhdrMemoryNoteObserver(Elf&&, Memory&, Callback&&...)
     -> PhdrMemoryNoteObserver<std::decay_t<Elf>::kData, Memory, std::decay_t<Callback>...>;
 

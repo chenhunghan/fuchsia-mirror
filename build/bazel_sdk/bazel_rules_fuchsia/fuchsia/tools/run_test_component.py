@@ -6,7 +6,6 @@
 import argparse
 import os
 import subprocess
-from typing import List, Tuple
 
 from fuchsia.tools.fuchsia_task_lib import *
 
@@ -14,7 +13,7 @@ from fuchsia.tools.fuchsia_task_lib import *
 class FuchsiaTaskRunTestComponent(FuchsiaTask):
     def parse_known_args(
         self, parser: ScopedArgumentParser
-    ) -> Tuple[argparse.Namespace, List[str]]:
+    ) -> tuple[argparse.Namespace, list[str]]:
         """Parses arguments."""
 
         parser.add_argument(

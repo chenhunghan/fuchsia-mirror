@@ -22,6 +22,7 @@ if (is_host) {
       "src/rust_generator.rs",
       "src/workarounds.rs",
     ]
+    inputs = [ "dml.schema.json" ]
     deps = [
       "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust",
       "//src/devices/board/lib/dml-config",

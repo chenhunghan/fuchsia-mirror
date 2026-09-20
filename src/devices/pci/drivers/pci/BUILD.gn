@@ -34,6 +34,7 @@ source_set("user_pci") {
   ]
 
   deps = [
+    "//sdk/lib/driver/legacy-bind-constants",
     "//sdk/lib/driver/metadata/cpp",
     "//src/devices/bind/fuchsia.acpi:fuchsia.acpi_cpp",
   ]
@@ -71,8 +72,14 @@ source_set("user_pci") {
   configs += [ "//build/config:Wno-conversion" ]
 }
 
+fuchsia_driver_dml("pci-dml") {
+  dml = "meta/pci.dml"
+  driver_name = "pci"
+}
+
 driver_bind_rules("pci_bind") {
-  rules = "meta/pci.bind"
+  bind_output = "bus-pci.bindbc"
+  dml_label = ":pci-dml"
   tests = "meta/pci_bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia.pci",

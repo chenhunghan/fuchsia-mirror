@@ -28,6 +28,19 @@ json_merge(
 test_suite(
     name = "tests",
     tests = [
+        "//src/developer/ffx/lib/arg_parsing:lib_test",
+        "//src/developer/ffx/lib/buildid:lib_test",
         "//src/developer/ffx/lib/compat_info:lib_test",
+        "//src/developer/ffx/lib/daemonize:lib_test",
+        "//src/developer/ffx/lib/errors:lib_test",
+        "//src/developer/ffx/lib/logging:lib_test",
+        "//src/developer/ffx/lib/metrics:lib_test",
+        "//src/developer/ffx/lib/netext:lib_test",
+        "//src/developer/ffx/lib/port_picker:lib_test",
+        "//src/developer/ffx/lib/safe_string:lib_test",
+        "//src/developer/ffx/lib/target_errors:lib_test",
+        "//src/developer/ffx/lib/termio:termio_test",
+        "//src/developer/ffx/lib/traceable_error:lib_test",
+        "//src/developer/ffx/lib/version:lib_test",
     ],
 )

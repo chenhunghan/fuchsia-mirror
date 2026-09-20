@@ -637,7 +637,13 @@ zx_status_t SdmmcBlockDevice::ReadWriteAttempt(std::vector<block_server::Request
     rw_multiple_block.use_inline_crypto =
         first_request.operation.read.options.inline_crypto.is_enabled;
     rw_multiple_block.slot = first_request.operation.read.options.inline_crypto.slot;
-    rw_multiple_block.dun = first_request.operation.read.options.inline_crypto.dun;
+    if (first_request.operation.read.options.inline_crypto.is_enabled &&
+        first_request.operation.read.options.inline_crypto.dun >
+            std::numeric_limits<uint32_t>::max()) {
+      return ZX_ERR_OUT_OF_RANGE;
+    }
+    rw_multiple_block.dun =
+        static_cast<uint32_t>(first_request.operation.read.options.inline_crypto.dun);
 
     rw_multiple_block.buffers.Allocate(arena, 1);
     auto buffer_region =
@@ -1406,6 +1412,21 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
         status != ZX_OK) {
       fdf::warn("Invalid request range.");
       partition.SendReply(request.request_id, zx::make_result(status));
+      continue;
+    }
+    bool crypto_out_of_range = false;
+    if (request.operation.tag == block_server::Operation::Tag::Read) {
+      crypto_out_of_range =
+          request.operation.read.options.inline_crypto.is_enabled &&
+          request.operation.read.options.inline_crypto.dun > std::numeric_limits<uint32_t>::max();
+    } else if (request.operation.tag == block_server::Operation::Tag::Write) {
+      crypto_out_of_range =
+          request.operation.write.options.inline_crypto.is_enabled &&
+          request.operation.write.options.inline_crypto.dun > std::numeric_limits<uint32_t>::max();
+    }
+    if (crypto_out_of_range) {
+      fdf::warn("Inline crypto DUN out of 32-bit range.");
+      partition.SendReply(request.request_id, zx::error(ZX_ERR_OUT_OF_RANGE));
       continue;
     }
     switch (request.operation.tag) {

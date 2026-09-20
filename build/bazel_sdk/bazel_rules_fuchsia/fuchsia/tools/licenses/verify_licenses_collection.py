@@ -8,7 +8,6 @@ import argparse
 import dataclasses
 import shutil
 import sys
-from typing import List
 
 from fuchsia.tools.licenses.common_types import *
 
@@ -20,8 +19,8 @@ class UnlicensedTargetInfo:
     label: str
     build_file_path: str
     rule_kind: str
-    unlicensed_resources: List[str]
-    rule_attr_names: List[str]
+    unlicensed_resources: list[str]
+    rule_attr_names: list[str]
 
     def from_json_dict(input: DictReader) -> "UnlicensedTargetInfo":
         return UnlicensedTargetInfo(

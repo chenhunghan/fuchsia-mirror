@@ -196,6 +196,7 @@ template("rustc_staticlib") {
                              "enforce_source_listing",
                              "features",
                              "inputs",
+                             "lint_config",
                              "output_dir",
                              "rustenv",
                              "sources",

@@ -372,8 +372,7 @@ void Tcs3400::HandlePoll() {
 
 void Tcs3400::GetInputReportsReader(GetInputReportsReaderRequestView request,
                                     GetInputReportsReaderCompleter::Sync& completer) {
-  readers_.CreateReader(dispatcher(), std::move(request->reader));
-  OnNextReader();
+  ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
 }
 
 void Tcs3400::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,

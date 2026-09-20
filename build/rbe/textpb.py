@@ -11,8 +11,9 @@ import dataclasses
 import enum
 import re
 import sys
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
 
 class TokenType(enum.Enum):

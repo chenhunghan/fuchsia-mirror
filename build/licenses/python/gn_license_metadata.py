@@ -8,12 +8,12 @@ import dataclasses
 import json
 import logging
 import os
-from typing import Any, Dict, List, Tuple, TypeAlias
+from typing import Any, TypeAlias
 
 from gn_label import GnLabel
 
-AnyDict: TypeAlias = Dict[Any, Any]
-AnyList: TypeAlias = List[Any]
+AnyDict: TypeAlias = dict[Any, Any]
+AnyList: TypeAlias = list[Any]
 OptionalPath: TypeAlias = str | None
 
 
@@ -23,7 +23,7 @@ class GnLicenseMetadata:
 
     target_label: GnLabel
     public_package_name: str
-    license_files: Tuple[GnLabel, ...]
+    license_files: tuple[GnLabel, ...]
 
     @staticmethod
     def is_license_metadata_dict(dict: AnyDict) -> bool:
@@ -63,8 +63,8 @@ class GnApplicableLicensesMetadata:
 
     target_label: GnLabel
     target_type: str
-    license_labels: Tuple[GnLabel, ...]
-    third_party_resources: Tuple[GnLabel, ...]
+    license_labels: tuple[GnLabel, ...]
+    third_party_resources: tuple[GnLabel, ...]
 
     @staticmethod
     def is_applicable_licenses_metadata_dict(dict: AnyDict) -> bool:
@@ -112,11 +112,11 @@ class GnLicenseMetadataDB:
     """An in-memory DB of licensing GN metadata"""
 
     """GnLicenseMetadata by the license's GN label"""
-    licenses_by_label: Dict[GnLabel, GnLicenseMetadata] = dataclasses.field(
+    licenses_by_label: dict[GnLabel, GnLicenseMetadata] = dataclasses.field(
         default_factory=dict
     )
     """GnApplicableLicensesMetadata by the target label they apply to"""
-    applicable_licenses_by_target: Dict[
+    applicable_licenses_by_target: dict[
         GnLabel, GnApplicableLicensesMetadata
     ] = dataclasses.field(default_factory=dict)
 

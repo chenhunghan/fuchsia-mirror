@@ -70,6 +70,13 @@ FuchsiaUnstrippedBinaryInfo, make_fuchsia_unstripped_binary_info = provider(
     init = _fuchsia_unstripped_binary_info_init,
 )
 
+FuchsiaUnstrippedBinariesInfo = provider(
+    doc = "Contains information about a list of unstripped Fuchsia binaries.",
+    fields = {
+        "binaries": "A list of FuchsiaUnstrippedBinaryInfo instances.",
+    },
+)
+
 FuchsiaCollectedUnstrippedBinariesInfo = provider(
     doc = "Contains information about a set of unstripped ELF binaries.",
     fields = {

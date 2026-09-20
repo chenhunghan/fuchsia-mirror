@@ -68,7 +68,7 @@ class FileState(object):
         self._exclude_suffixes = tuple(exclude_suffixes)
         self._git_binary = git_binary
         self._input_files: set[Path] = set()
-        self._sorted_input_files: T.Optional[list[str]] = None
+        self._sorted_input_files: list[str] | None = None
         self._hstate = hashlib.new(_HASH)
 
     def hash_source_path(self, source_path: Path) -> None:

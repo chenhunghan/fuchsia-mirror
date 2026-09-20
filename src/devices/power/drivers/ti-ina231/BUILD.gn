@@ -31,8 +31,13 @@ source_set("common") {
   ]
 }
 
+fuchsia_driver_dml("ti-ina231-dml") {
+  dml = "meta/ti-ina231.dml"
+  driver_name = "ti-ina231"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/ti-ina231.bind"
+  dml_label = ":ti-ina231-dml"
   bind_output = "ti-ina231.bindbc"
   tests = "meta/ti-ina231-bind-test.json"
   deps = [
@@ -54,13 +59,13 @@ fuchsia_cc_driver("ti-ina231-driver") {
 }
 
 fuchsia_driver_component("ti-ina231") {
+  dml_label = ":ti-ina231-dml"
   info = "meta/ti-ina231-info.json"
   component_name = "ti-ina231"
   deps = [
     ":bind",
     ":ti-ina231-driver",
   ]
-  manifest = "meta/ti-ina231.cml"
 }
 
 fuchsia_driver_package("package") {

@@ -297,7 +297,7 @@ fn normalize(a: u128) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt as _, SeedableRng as _};
 
     use rand_xorshift::XorShiftRng;
 

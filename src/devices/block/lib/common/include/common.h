@@ -5,7 +5,6 @@
 #ifndef SRC_DEVICES_BLOCK_LIB_COMMON_INCLUDE_COMMON_H_
 #define SRC_DEVICES_BLOCK_LIB_COMMON_INCLUDE_COMMON_H_
 
-#include <fuchsia/hardware/block/driver/cpp/banjo.h>
 #include <zircon/types.h>
 
 #include "sdk/lib/driver/logging/cpp/logger.h"
@@ -42,18 +41,6 @@ inline zx_status_t CheckIoRange(uint64_t block_offset, uint32_t transfer_blocks,
     return ZX_ERR_OUT_OF_RANGE;
   }
   return CheckIoRange(block_offset, transfer_blocks, total_block_count, logger);
-}
-
-// Check that the data arguments are cleared for a flush request.
-inline zx_status_t CheckFlushValid(const block_read_write& rw, fdf::Logger& logger) {
-  if (rw.vmo || rw.length || rw.offset_dev || rw.offset_vmo) {
-    logger.log(fdf::ERROR,
-               "Flush request has data arguments: rw.vmo = {}, rw.length = {}, rw.offset_dev = {}, "
-               "rw.offset_vmo = {}.",
-               rw.vmo, rw.length, rw.offset_dev, rw.offset_vmo);
-    return ZX_ERR_INVALID_ARGS;
-  }
-  return ZX_OK;
 }
 
 inline uint32_t ReadFromBigEndian24(const uint8_t* ptr) {

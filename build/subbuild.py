@@ -15,7 +15,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger("subbuild.py")
 
@@ -70,7 +69,7 @@ def write_file_if_changed(path: Path, content: str) -> bool:
 
 
 def command_args_to_string(
-    args: list[str], env: Optional[Dict[str, str]], cwd: Optional[Path | str]
+    args: list[str], env: dict[str, str] | None, cwd: Path | str | None
 ) -> str:
     elements = []
     if cwd:
@@ -89,8 +88,8 @@ def command_args_to_string(
 def run_command(
     args: list[str],
     capture_output: bool = False,
-    env: Optional[Dict[str, str]] = None,
-    cwd: Optional[Path | str] = None,
+    env: dict[str, str] | None = None,
+    cwd: Path | str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a command.
 
@@ -118,8 +117,8 @@ def run_command(
 def run_checked_command(
     args: list[str],
     capture_output: bool,
-    env: Optional[Dict[str, str]] = None,
-    cwd: Optional[Path | str] = None,
+    env: dict[str, str] | None = None,
+    cwd: Path | str | None = None,
 ) -> bool:
     """Run a command, return True if succeeds, False otherwise.
 
@@ -255,7 +254,7 @@ def main() -> int:
     if not args.verbose:
         ninja_cmd_prefix.append("--quiet")
 
-    def label_partition(target_label: str) -> Tuple[str, str]:
+    def label_partition(target_label: str) -> tuple[str, str]:
         """Split an GN label into a (dir, name) pair."""
         # Expected format is //<dir>:<name>
         path, colon, name = target_label.partition(":")

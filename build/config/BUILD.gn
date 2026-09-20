@@ -804,10 +804,6 @@ config("default_warnings") {
   }
 
   configs = [
-    # TODO(https://fxbug.dev/415133536): Disable "-Wunterminated-string-initialization"
-    # until all instances are fixed.
-    ":Wno-unterminated-string-initialization",
-
     # TODO(https://fxbug.dev/42073532): //third_party/spirv* need this but they
     # need it added to BUILD.gn files not in fuchsia.git
     ":Wno-deprecated-this-capture",
@@ -1160,31 +1156,7 @@ config("Wno-conversion") {
     "//zircon/third_party/uapp/fsck-msdosfs:*",
     "//zircon/third_party/uapp/mkfs-msdosfs:*",
     "//zircon/third_party/ulib/cksum:*",
-    "//zircon/third_party/ulib/musl:*",
-    "//zircon/third_party/ulib/musl/ldso",
-    "//zircon/third_party/ulib/musl/src/complex",
-    "//zircon/third_party/ulib/musl/src/dirent",
-    "//zircon/third_party/ulib/musl/src/env",
-    "//zircon/third_party/ulib/musl/src/internal",
-    "//zircon/third_party/ulib/musl/src/ipc",
-    "//zircon/third_party/ulib/musl/src/legacy",
-    "//zircon/third_party/ulib/musl/src/locale",
-    "//zircon/third_party/ulib/musl/src/math",
-    "//zircon/third_party/ulib/musl/src/multibyte",
-    "//zircon/third_party/ulib/musl/src/network",
-    "//zircon/third_party/ulib/musl/src/passwd",
-    "//zircon/third_party/ulib/musl/src/prng",
-    "//zircon/third_party/ulib/musl/src/process",
-    "//zircon/third_party/ulib/musl/src/regex",
-    "//zircon/third_party/ulib/musl/src/sched",
-    "//zircon/third_party/ulib/musl/src/stdio",
-    "//zircon/third_party/ulib/musl/src/stdlib",
-    "//zircon/third_party/ulib/musl/src/string:*",
-    "//zircon/third_party/ulib/musl/src/time",
-    "//zircon/third_party/ulib/musl/src/unistd",
-    "//zircon/third_party/ulib/musl/third_party/complex",
-    "//zircon/third_party/ulib/musl/third_party/math",
-    "//zircon/third_party/ulib/musl/third_party/tre",
+    "//zircon/third_party/ulib/musl/*",
     "//zircon/tools/lz4:*",
   ]
 }
@@ -1565,6 +1537,14 @@ config("Wno-nontrivial-memaccess") {
 # TODO(https://fxbug.dev/415133536): Disable "-Wunterminated-string-initialization"
 # until all instances are fixed.
 config("Wno-unterminated-string-initialization") {
+  visibility = [
+    "//third_party/acpica-migrating/*",
+    "//third_party/acpica/*",
+    "//third_party/mesa-migrating/*",
+    "//third_party/openssh-portable/*",
+    "//tools/vboot_reference/*",
+    "//vendor/third_party/oemcrypto/*",
+  ]
   cflags_c = [ "-Wno-unterminated-string-initialization" ]
 }
 

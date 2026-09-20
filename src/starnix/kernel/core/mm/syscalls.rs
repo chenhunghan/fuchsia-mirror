@@ -797,7 +797,6 @@ mod tests {
     use crate::mm::memory::MemoryObject;
     use crate::testing::*;
     use starnix_uapi::errors::EEXIST;
-    use starnix_uapi::file_mode::Access;
     use starnix_uapi::{MREMAP_FIXED, MREMAP_MAYMOVE, PROT_READ};
 
     #[::fuchsia::test]
@@ -1340,7 +1339,6 @@ mod tests {
                     0,
                     2 * (*PAGE_SIZE as usize),
                     ProtectionFlags::READ,
-                    Access::rwx(),
                     MappingOptions::empty(),
                     MappingName::None,
                 )

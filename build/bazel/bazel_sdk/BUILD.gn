@@ -46,7 +46,7 @@ bazel_input_directory("ninja_generated_in_tree_idk_for_test.bazel_input") {
 # targets of those symlinks exist.
 bazel_action("in_tree_fuchsia_sdk") {
   command = "build"
-  bazel_targets = [ ":in_tree_fuchsia_sdk" ]
+  bazel_target = ":in_tree_fuchsia_sdk"
   final_symlink_outputs = [
     {
       bazel = "{{BAZEL_TARGET_OUT_DIR}}/fuchsia_sdk.stamp"

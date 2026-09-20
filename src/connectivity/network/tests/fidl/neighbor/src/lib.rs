@@ -19,9 +19,7 @@ use netemul::{RealmUdpSocket as _, TestInterface, TestNetwork, TestRealm, TestSa
 use netstack_testing_common::Result;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
 use netstack_testing_common::nud::FrameMetadata;
-use netstack_testing_common::realms::{
-    Netstack, Netstack3, NetstackVersion, TestRealmExt as _, TestSandboxExt as _,
-};
+use netstack_testing_common::realms::{Netstack3, TestRealmExt as _, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 use test_case::test_case;
 
@@ -44,7 +42,7 @@ struct NeighborRealm<'a> {
 ///
 /// Returns the created realm, ep, the first observed assigned IPv6
 /// address, and the id of the loopback interface.
-async fn create_realm<'a, N: Netstack>(
+async fn create_realm<'a>(
     sandbox: &'a TestSandbox,
     network: &'a TestNetwork<'a>,
     test_name: &'a str,
@@ -53,7 +51,7 @@ async fn create_realm<'a, N: Netstack>(
     mac: fidl_fuchsia_net::MacAddress,
 ) -> NeighborRealm<'a> {
     let realm = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_{}", test_name, variant_name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_{}", test_name, variant_name))
         .expect("failed to create realm");
     let ep = realm
         .join_network_with(
@@ -106,12 +104,12 @@ async fn create_realm<'a, N: Netstack>(
 
 /// Helper function that creates two realms in the same `network` with
 /// default test parameters. Returns a tuple of realms `(alice, bob)`.
-async fn create_neighbor_realms<'a, N: Netstack>(
+async fn create_neighbor_realms<'a>(
     sandbox: &'a TestSandbox,
     network: &'a TestNetwork<'a>,
     test_name: &'a str,
 ) -> (NeighborRealm<'a>, NeighborRealm<'a>) {
-    let alice = create_realm::<N>(
+    let alice = create_realm(
         sandbox,
         network,
         test_name,
@@ -120,7 +118,7 @@ async fn create_neighbor_realms<'a, N: Netstack>(
         ALICE_MAC,
     )
     .await;
-    let bob = create_realm::<N>(
+    let bob = create_realm(
         sandbox,
         network,
         test_name,
@@ -359,12 +357,11 @@ async fn assert_entries<
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn neigh_list_entries<N: Netstack>(name: &str) {
+async fn neigh_list_entries(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let (alice, bob) = create_neighbor_realms::<N>(&sandbox, &network, name).await;
+    let (alice, bob) = create_neighbor_realms(&sandbox, &network, name).await;
     // Apply the NUD flake workaround, since we expect all neighbor resolution
     // to succeed in this test case.
     alice.ep.apply_nud_flake_workaround().await.expect("nud flake workaround");
@@ -475,13 +472,7 @@ async fn neigh_list_entries<N: Netstack>(name: &str) {
             // state is STALE when NS3 no longer consults the neighbor table
             // when sending the NA message which causes a state transition from
             // STALE to DELAY.
-            match N::VERSION {
-                NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-                | NetstackVersion::ProdNetstack2 => fidl_fuchsia_net_neighbor::EntryState::Stale,
-                NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => {
-                    fidl_fuchsia_net_neighbor::EntryState::Delay
-                }
-            },
+            fidl_fuchsia_net_neighbor::EntryState::Delay,
             Some(ALICE_MAC),
         ),
     );
@@ -559,7 +550,6 @@ async fn next_solicitation_resolution(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     |controller, id| {
         controller.clear_entries(id, fidl_fuchsia_net::IpVersion::V4)
@@ -568,7 +558,7 @@ async fn next_solicitation_resolution(
 )]
 #[test_case(|controller, id| controller.add_entry(id, &BOB_IP, &BOB_MAC); "add_entry")]
 #[test_case(|controller, id| controller.remove_entry(id, &BOB_IP); "remove_entry")]
-async fn neigh_wrong_interface<N: Netstack>(
+async fn neigh_wrong_interface(
     name: &str,
     fidl_method: fn(
         &fidl_fuchsia_net_neighbor::ControllerProxy,
@@ -580,7 +570,7 @@ async fn neigh_wrong_interface<N: Netstack>(
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let NeighborRealm { realm, ep, ipv6: _, loopback_id } = create_realm::<N>(
+    let NeighborRealm { realm, ep, ipv6: _, loopback_id } = create_realm(
         &sandbox,
         &network,
         name,
@@ -607,9 +597,8 @@ async fn neigh_wrong_interface<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn neigh_clear_entries<N: Netstack, I: Ip>(name: &str) {
+async fn neigh_clear_entries<I: Ip>(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
@@ -618,7 +607,7 @@ async fn neigh_clear_entries<N: Netstack, I: Ip>(name: &str) {
     let fake_ep = network.create_fake_endpoint().expect("failed to create fake endpoint");
     let mut solicit_stream = netstack_testing_common::nud::create_metadata_stream(&fake_ep);
 
-    let (alice, bob) = create_neighbor_realms::<N>(&sandbox, &network, name).await;
+    let (alice, bob) = create_neighbor_realms(&sandbox, &network, name).await;
     // Apply the NUD flake workaround, since we expect all neighbor resolution
     // to succeed in this test case.
     alice.ep.apply_nud_flake_workaround().await.expect("nud flake workaround");
@@ -710,7 +699,6 @@ async fn neigh_clear_entries<N: Netstack, I: Ip>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(fidl_ip!("255.255.255.255"); "ipv4_limited_broadcast")]
 #[test_case(fidl_ip!("127.0.0.1"); "ipv4_loopback")]
 #[test_case(fidl_ip!("::1"); "ipv6_loopback")]
@@ -719,14 +707,14 @@ async fn neigh_clear_entries<N: Netstack, I: Ip>(name: &str) {
 #[test_case(fidl_ip!("0.0.0.0"); "ipv4_unspecified")]
 #[test_case(fidl_ip!("::"); "ipv6_unspecified")]
 #[test_case(fidl_ip!("::ffff:0:1"); "ipv6_mapped")]
-async fn neigh_add_remove_entry_invalid_addr<N: Netstack>(
+async fn neigh_add_remove_entry_invalid_addr(
     name: &str,
     invalid_addr: fidl_fuchsia_net::IpAddress,
 ) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let alice = create_realm::<N>(
+    let alice = create_realm(
         &sandbox,
         &network,
         name,
@@ -762,17 +750,13 @@ async fn neigh_add_remove_entry_invalid_addr<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(fidl_mac!("ff:ff:ff:ff:ff:ff"); "broadcast_mac")]
 #[test_case(fidl_mac!("01:00:00:00:00:00"); "multicast_mac")]
-async fn neigh_add_entry_invalid_mac<N: Netstack>(
-    name: &str,
-    invalid_mac: fidl_fuchsia_net::MacAddress,
-) {
+async fn neigh_add_entry_invalid_mac(name: &str, invalid_mac: fidl_fuchsia_net::MacAddress) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let alice = create_realm::<N>(
+    let alice = create_realm(
         &sandbox,
         &network,
         name,
@@ -804,12 +788,11 @@ async fn neigh_add_entry_invalid_mac<N: Netstack>(
 // neigh_add_remove_entry since that test is a superset of this test but it
 // doesn't yet pass due to the lack of fuchsia.net.neighbor/EntryIterator.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn neigh_remove_entry_not_found<N: Netstack>(name: &str) {
+async fn neigh_remove_entry_not_found(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let alice = create_realm::<N>(
+    let alice = create_realm(
         &sandbox,
         &network,
         name,
@@ -831,9 +814,8 @@ async fn neigh_remove_entry_not_found<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn neigh_add_remove_entry<N: Netstack, I: Ip>(name: &str) {
+async fn neigh_add_remove_entry<I: Ip>(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
@@ -848,7 +830,7 @@ async fn neigh_add_remove_entry<N: Netstack, I: Ip>(name: &str) {
             })
         });
 
-    let (alice, bob) = create_neighbor_realms::<N>(&sandbox, &network, name).await;
+    let (alice, bob) = create_neighbor_realms(&sandbox, &network, name).await;
     // Apply the NUD flake workaround, since we expect all neighbor resolution
     // to succeed in this test case.
     alice.ep.apply_nud_flake_workaround().await.expect("nud flake workaround");
@@ -947,12 +929,11 @@ async fn neigh_add_remove_entry<N: Netstack, I: Ip>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn neigh_unreachable_entries<N: Netstack>(name: &str) {
+async fn neigh_unreachable_entries(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let alice = create_realm::<N>(
+    let alice = create_realm(
         &sandbox,
         &network,
         name,
@@ -1000,30 +981,19 @@ async fn neigh_unreachable_entries<N: Netstack>(name: &str) {
         [
             ItemMatch::Added(want_incomplete_entry.clone()),
             // TODO(https://fxbug.dev/42082448): Expect the entry to change to sentinel
-            // state for NS3 instead of being removed entirely.
-            match N::VERSION {
-                NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-                | NetstackVersion::ProdNetstack2 => ItemMatch::Changed(EntryMatch {
-                    interface: alice.ep.id(),
-                    neighbor: BOB_IP,
-                    state: fidl_fuchsia_net_neighbor::EntryState::Unreachable,
-                    mac: None,
-                }),
-                NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => {
-                    ItemMatch::Removed(want_incomplete_entry)
-                }
-            },
+            // state instead of being removed entirely.
+            ItemMatch::Removed(want_incomplete_entry),
         ],
     )
     .await;
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn cant_hang_twice<N: Netstack>(name: &str) {
+async fn cant_hang_twice(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
 
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create realm");
 
     let view = realm
         .connect_to_protocol::<fidl_fuchsia_net_neighbor::ViewMarker>()
@@ -1052,12 +1022,11 @@ async fn cant_hang_twice<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn channel_is_closed_if_not_polled<N: Netstack>(name: &str) {
+async fn channel_is_closed_if_not_polled(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let alice = create_realm::<N>(
+    let alice = create_realm(
         &sandbox,
         &network,
         name,
@@ -1124,12 +1093,11 @@ async fn channel_is_closed_if_not_polled<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn remove_device_clears_neighbors<N: Netstack>(name: &str) {
+async fn remove_device_clears_neighbors(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let NeighborRealm { realm, ep, ipv6: _, loopback_id: _ } = create_realm::<N>(
+    let NeighborRealm { realm, ep, ipv6: _, loopback_id: _ } = create_realm(
         &sandbox,
         &network,
         name,
@@ -1181,11 +1149,10 @@ async fn remove_device_clears_neighbors<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 // Verify that the `fuchsia.net.neighbor/EntryIterator` connection "survives"
 // a large burst of neighbor events. In particular, when a neighbor with many
 // addresses disconnects.
-async fn neighbor_with_many_addresses_disconnects<N: Netstack>(name: &str) {
+async fn neighbor_with_many_addresses_disconnects(name: &str) {
     // Use the three /24 `TEST-NET` IPv4 subnets, for a total of 768 addresses.
     const NEIGHBOR_SUBNETS: [fidl_fuchsia_net::Ipv4AddressWithPrefix; 3] = [
         fidl_ip_v4_with_prefix!("192.0.2.0/24"),
@@ -1196,7 +1163,7 @@ async fn neighbor_with_many_addresses_disconnects<N: Netstack>(name: &str) {
     let sandbox = TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
 
-    let NeighborRealm { realm, ep, ipv6: _, loopback_id: _ } = create_realm::<N>(
+    let NeighborRealm { realm, ep, ipv6: _, loopback_id: _ } = create_realm(
         &sandbox,
         &network,
         name,
@@ -1295,7 +1262,7 @@ async fn neigh_probe_dynamic_entry<I: Ip>(name: &str) {
     let fake_ep = network.create_fake_endpoint().expect("failed to create fake endpoint");
     let mut solicit_stream = netstack_testing_common::nud::create_metadata_stream(&fake_ep);
 
-    let (alice, bob) = create_neighbor_realms::<Netstack3>(&sandbox, &network, name).await;
+    let (alice, bob) = create_neighbor_realms(&sandbox, &network, name).await;
     // Apply the NUD flake workaround, since we expect all neighbor resolution
     // to succeed in this test case.
     alice.ep.apply_nud_flake_workaround().await.expect("nud flake workaround");
@@ -1361,7 +1328,7 @@ async fn neigh_probe_static_entry<I: Ip>(name: &str) {
     let fake_ep = network.create_fake_endpoint().expect("failed to create fake endpoint");
     let mut solicit_stream = netstack_testing_common::nud::create_metadata_stream(&fake_ep);
 
-    let (alice, bob) = create_neighbor_realms::<Netstack3>(&sandbox, &network, name).await;
+    let (alice, bob) = create_neighbor_realms(&sandbox, &network, name).await;
 
     let alice_controller = alice
         .realm

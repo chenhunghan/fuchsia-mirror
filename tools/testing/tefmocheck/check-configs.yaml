@@ -104,11 +104,6 @@ failure_mode_checks:
   string: "Failed to parse edid (0 bytes) \"Failed to validate base edid\""
   log_types: ["syslogType"]
 
-# For https://fxbug.dev/42056605 dwc2 bug that breaks usb cdc networking
-- kind: "string_in_log"
-  string: "diepint.timeout"
-  log_types: ["serialLogType"]
-  skip_all_passed_tests: true
 
 # For devices which, typically as a result of wear, fail to read any copy of the
 # sys_config partition, give up on booting the intended slot, boot the R slot, and

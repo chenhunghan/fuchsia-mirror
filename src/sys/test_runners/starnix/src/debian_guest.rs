@@ -3,39 +3,42 @@
 // found in the LICENSE file.
 
 use anyhow::{Context, Error, anyhow, bail};
-use cm_types::NamespacePath;
-use fidl::endpoints::{ClientEnd, Proxy};
-use fidl_fuchsia_component_runner as frunner;
+use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_io as fio;
-use fidl_fuchsia_virtualization::GuestConfig;
+use fidl_fuchsia_virtualization::{BlockSpec, GuestConfig};
 use fidl_fuchsia_virtualization_guest_interaction::{
     CommandListenerEvent, CommandListenerMarker, EnvironmentVariable, GuestType,
     InteractiveGuestMarker, InteractiveGuestProxy,
 };
 use fuchsia_async::{DurationExt, TimeoutExt};
 use fuchsia_component::client::connect_to_protocol;
-use fuchsia_fs::directory;
-use futures::{StreamExt, TryStreamExt};
-use namespace::Namespace;
+use futures::TryStreamExt;
 use std::cell::OnceCell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 const EXECUTE_TIMEOUT_SECONDS: i64 = 180;
 
-// TODO(https://fxbug.dev/436831317): Execute within a proper working directory.
-pub const GUEST_TEST_ROOT: &str = "/";
-pub const GUEST_DATA_PATH: &str = "/data/";
-pub const HOST_DATA_PATH: &str = "data";
+#[derive(Debug)]
+pub struct DataMount {
+    /// The block spec for this data mount.
+    pub block_spec: BlockSpec,
+    /// An executable shell script for mounting this data mount.
+    pub mount_script_file: ClientEnd<fio::FileMarker>,
+}
+
+impl DataMount {
+    pub fn new(block_spec: BlockSpec, mount_script_file: ClientEnd<fio::FileMarker>) -> Self {
+        Self { block_spec, mount_script_file }
+    }
+}
 
 pub struct DebianGuest {
     instance_name: String,
     /// The proxy for interacting with the guest. This should be accessed by the `interactive_guest`
     /// helper function, to aid with locking and ensuring that the guest is ready for interaction.
     guest_proxy: OnceCell<Mutex<InteractiveGuestProxy>>,
-    /// Tracks if test data dependencies have already been pushed to the guest.
-    // TODO(https://fxbug.dev/438284662): Better state / lifecycle management.
-    deps_pushed: OnceCell<bool>,
+    data_mount: Mutex<Option<DataMount>>,
 }
 
 impl DebianGuest {
@@ -47,20 +50,32 @@ impl DebianGuest {
     /// # Arguments
     /// * `instance_name` - An instance name, which serves as the tag for log output.
     pub fn new(instance_name: String) -> DebianGuest {
-        DebianGuest { instance_name, guest_proxy: OnceCell::new(), deps_pushed: OnceCell::new() }
+        DebianGuest { instance_name, guest_proxy: OnceCell::new(), data_mount: Mutex::new(None) }
+    }
+
+    /// Configures an optional data mount to attach to the guest upon initialization. Note that if the
+    /// DebianGuest is already running, configuring this has no effect unless the guest is rebooted.
+    /// Upon first initiatization, the provided block will be mounted and the executable script run.
+    pub fn configure_data_mount(&self, data_mount: DataMount) {
+        *self.data_mount.lock().unwrap() = Some(data_mount);
     }
 
     /// Gets a handle to the proxy, while also lazily bootstrapping the guest if necessary.
     async fn interactive_guest(&self) -> InteractiveGuestProxy {
-        // Note that the OnceCell::get_or_init function doesn't play nicely with async init
-        // functions, and I'm too lazy for an OSRB review for the async_once_cell. So we'll do
-        // some manually juggling here to initialize the "ole fashioned way.""
         match self.guest_proxy.get() {
             Some(proxy_mutex) => proxy_mutex.lock().unwrap().clone(),
             None => {
                 log::info!(tag = self.instance_name.as_str();
                     "Interaction requested, lazily starting the guest instance."
                 );
+
+                let (mount_block, mount_script) = self
+                    .data_mount
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .map(|data_mount| (vec![data_mount.block_spec], data_mount.mount_script_file))
+                    .unzip();
 
                 let mut cfg = GuestConfig::default();
                 cfg.virtio_gpu = Some(false);
@@ -70,6 +85,7 @@ impl DebianGuest {
                 cfg.virtio_balloon = Some(false);
                 cfg.virtio_mem = Some(false);
                 cfg.default_net = Some(false);
+                cfg.block_devices = mount_block;
 
                 let guest_proxy = connect_to_protocol::<InteractiveGuestMarker>()
                     .expect("Error connecting to InteractiveGuest");
@@ -77,17 +93,40 @@ impl DebianGuest {
                     .start(GuestType::Debian, &self.instance_name, cfg)
                     .await
                     .expect("Debian guest failed to start!");
+                log::info!(tag = self.instance_name.as_str(); "Guest instance started successfully.");
 
                 let return_proxy = guest_proxy.clone();
-
                 let proxy_mutex = Mutex::new(guest_proxy);
                 self.guest_proxy
                     .set(proxy_mutex)
                     .expect("Unexpected race condition while bootstrapping the guest proxy.");
 
+                // The initialization of the mount requires interacting with the guest_proxy, and
+                // will recursively call interactive_guest() to obtain said proxy. Therefore, the
+                // mounting needs to be done only after the previous initialization logic finishes.
+                if let Some(mount_script) = mount_script {
+                    Box::pin(self.initialize_mount(mount_script))
+                        .await
+                        .expect("Failed to initialize guest data mount!");
+                }
+
                 return_proxy
             }
         }
+    }
+
+    async fn initialize_mount(
+        &self,
+        mount_script: ClientEnd<fio::FileMarker>,
+    ) -> Result<(), Error> {
+        const GUEST_MOUNT_SCRIPT_PATH: &str = "/tmp/mount_syscall_deps.sh";
+
+        self.push_data_to_guest(mount_script, Path::new(GUEST_MOUNT_SCRIPT_PATH)).await?;
+        self.execute(&format!("/bin/sh {}", GUEST_MOUNT_SCRIPT_PATH), &[], None, None, None)
+            .await?;
+
+        log::info!(tag = self.instance_name.as_str(); "Mount initializated successfully.");
+        Ok(())
     }
 
     /// Pushes data from `source` to the guest at `destination`.
@@ -97,7 +136,7 @@ impl DebianGuest {
     /// * `destination` - The destination path in the guest's filesystem.
     pub async fn push_data_to_guest(
         &self,
-        source: ClientEnd<fidl_fuchsia_io::FileMarker>,
+        source: ClientEnd<fio::FileMarker>,
         destination: &Path,
     ) -> Result<(), Error> {
         log::info!(tag = self.instance_name.as_str(); "Pushing data to guest (destination: {})", destination.display());
@@ -167,13 +206,12 @@ impl DebianGuest {
         stdout: Option<zx::Socket>,
         stderr: Option<zx::Socket>,
     ) -> Result<i32, Error> {
-        log::info!(tag = self.instance_name.as_str(); "Executing command on guest: {})", command);
-
+        log::info!(tag = self.instance_name.as_str(); "Executing command on guest: {}", command);
+        let guest_proxy = self.interactive_guest().await;
         let (command_listener_client, command_listener_server) =
             fidl::endpoints::create_proxy::<CommandListenerMarker>();
 
-        self.interactive_guest()
-            .await
+        guest_proxy
             .execute_command(command, env_vars, stdin, stdout, stderr, command_listener_server)
             .context("FIDL call to ExecuteCommand failed")?;
 
@@ -234,110 +272,5 @@ impl DebianGuest {
                 Ok(())
             }
         }
-    }
-
-    pub fn are_deps_pushed(&self) -> bool {
-        self.deps_pushed.get().is_some()
-    }
-
-    /// Expected to be called once and only once.
-    pub fn mark_deps_pushed(&self) {
-        self.deps_pushed.set(true).expect(
-            "Unexpected state management, test dependencies are expected to be pushed once, and only once.",
-        );
-    }
-
-    /// Gets the absolute guest filepath for test results given a unique filename.
-    pub fn get_test_output_path(guest_output_filename: &str) -> PathBuf {
-        Path::new(GUEST_TEST_ROOT).join(guest_output_filename)
-    }
-
-    /// Gets the absolute guest filepath for the test binary given the host source location.
-    pub fn get_test_binary_path(source_location: &str) -> Result<PathBuf, Error> {
-        let binary_name = Path::new(source_location)
-            .file_name()
-            .ok_or_else(|| anyhow!("Binary path format was unexpected."))?;
-        Ok(Path::new(GUEST_TEST_ROOT).join(binary_name))
-    }
-
-    /// Pushes the test binary and all data dependencies to the guest if not already pushed.
-    pub async fn push_test_dependencies(
-        &self,
-        mut test_component_ns: Namespace,
-        test_start_info: &frunner::ComponentStartInfo,
-    ) -> Result<PathBuf, Error> {
-        let test_pkg_dir = test_component_ns
-            .remove(&NamespacePath::new("/pkg")?)
-            .ok_or_else(|| anyhow!("Could not find /pkg in namespace!"))?
-            .into_proxy();
-
-        if !self.are_deps_pushed() {
-            self.push_data_deps(&test_pkg_dir).await?;
-        }
-
-        self.push_test_binary(test_start_info, &test_pkg_dir).await
-    }
-
-    /// Pushes data dependencies from `/pkg/data` to the guest's `/data/`.
-    pub async fn push_data_deps(&self, pkg_dir_proxy: &fio::DirectoryProxy) -> Result<(), Error> {
-        let data_dir = match directory::open_directory(
-            pkg_dir_proxy,
-            HOST_DATA_PATH,
-            fio::PERM_READABLE,
-        )
-        .await
-        {
-            Ok(dir) => dir,
-            Err(e) => {
-                log::info!("No data directory found at {}: {:?}", HOST_DATA_PATH, e);
-                self.mark_deps_pushed();
-                return Ok(());
-            }
-        };
-
-        let mut entries = directory::readdir_recursive(&data_dir, None);
-        while let Some(entry) = entries.next().await {
-            let entry = entry.context("Failed to read dir entry")?;
-            if entry.kind == directory::DirentKind::File {
-                let file_name = entry.name;
-                // Skip test binaries in data/tests/ (which are pushed separately by push_test_binary).
-                if file_name.starts_with("tests/") {
-                    continue;
-                }
-
-                let source_file = directory::open_file(&data_dir, &file_name, fio::PERM_READABLE)
-                    .await
-                    .with_context(|| format!("Failed to open dep file: {}", file_name))?;
-
-                let source = source_file
-                    .into_client_end()
-                    .map_err(|s| anyhow!("Failed to convert source file to client end: {:?}", s))?;
-
-                let guest_dest = format!("{}{}", GUEST_DATA_PATH, file_name);
-                self.push_data_to_guest(source, Path::new(&guest_dest)).await?;
-            }
-        }
-
-        self.mark_deps_pushed();
-        Ok(())
-    }
-
-    /// Pushes the test binary from ComponentStartInfo to the Debian guest.
-    pub async fn push_test_binary(
-        &self,
-        test_start_info: &frunner::ComponentStartInfo,
-        pkg_dir_proxy: &fio::DirectoryProxy,
-    ) -> Result<PathBuf, Error> {
-        let host_binary_location = runner::get_program_binary(test_start_info)?;
-        let guest_dest = Self::get_test_binary_path(&host_binary_location)?;
-
-        let source =
-            directory::open_file(pkg_dir_proxy, host_binary_location.as_str(), fio::PERM_READABLE)
-                .await?
-                .into_client_end()
-                .map_err(|_| anyhow!("Converting test bin file to client end failed"))?;
-
-        self.push_data_to_guest(source, &guest_dest).await?;
-        Ok(guest_dest)
     }
 }

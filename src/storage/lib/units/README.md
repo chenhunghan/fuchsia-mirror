@@ -25,17 +25,18 @@ bit shifts and masks while providing overflow-safe alignment helpers.
 
 * **[`GenericBlockSize<T: BlockSizeSpec>`](src/lib.rs)**: A power-of-two block
   size parameterized by a [`BlockSizeSpec`](src/lib.rs) that supplies the
-  bitmask (`size - 1`).
-* **[`BlockSize`](src/lib.rs)** (`GenericBlockSize<ValueBlockSize>`): A dynamic
-  or constant block size backed by a 32-bit mask (`ValueBlockSize`), supporting
-  power-of-two sizes up to 4 GiB (`1 << 32`).
+  size, bitmask, and shift.
+* **[`BlockSize`](src/lib.rs)** (`GenericBlockSize<MaskShiftSpec>`): A dynamic
+  or constant block size backed by a packed mask-shift (`MaskShiftSpec`),
+  supporting power-of-two sizes up to 4 GiB (`1 << 32`).
   * Predefined constants: `SIZE_512B`, `SIZE_1KIB`, `SIZE_2KIB`, `SIZE_4KIB`,
     `SIZE_8KIB`, `SIZE_16KIB`, `SIZE_32KIB`, `SIZE_64KIB`, `SIZE_128KIB`,
     `SIZE_256KIB`, `SIZE_512KIB`, `SIZE_1MIB`.
 * **[`PAGE_SIZE`](src/page.rs)** *(Fuchsia targets)*: A
   `GenericBlockSize<PageSizeSpec>` representing the Fuchsia system memory page
-  size. It lazily caches `zx::system_get_page_size() - 1` in a relaxed atomic
-  on first use to avoid repeated syscalls/vDSO lookups.
+  size. It lazily caches the `MaskShiftSpec` representation of
+  `zx::system_get_page_size()` in a relaxed atomic on first use to avoid
+  repeated syscalls/vDSO lookups.
 
 ### Why is `GenericBlockSize<T>` Generic Over `BlockSizeSpec`?
 
@@ -54,7 +55,7 @@ specification type `T`, subsystems can define distinct types such as
 `FxfsBlockSize`, `DeviceBlockSize`, `JournalBlockSize`, or `LayerBlockSize`.
 
 In this hierarchy, **[`BlockSize`](src/lib.rs)**
-(`GenericBlockSize<ValueBlockSize>`) acts as a **universal block size**: it
+(`GenericBlockSize<MaskShiftSpec>`) acts as a **universal block size**: it
 represents a runtime power-of-two block size when you need to align values or
 perform block arithmetic, but do not need (or cannot statically know) a
 domain-specific type tag.

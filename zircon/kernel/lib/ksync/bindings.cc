@@ -53,6 +53,17 @@ constexpr size_t kExpectedSpinlockAlign =
 static_assert(alignof(SystemSpinlockType) == kExpectedSpinlockAlign,
               "Rust KSpinlock alignment mismatch with C++ alignment");
 
+#if WITH_LOCK_DEP
+using SystemMonitoredSpinlockType = lockdep::LockDep<void, MonitoredSpinLock>;
+#else
+using SystemMonitoredSpinlockType = MonitoredSpinLock;
+#endif
+
+static_assert(sizeof(SystemMonitoredSpinlockType) == kExpectedSpinlockSize,
+              "Rust KMonitoredSpinlock size mismatch with C++ size");
+static_assert(alignof(SystemMonitoredSpinlockType) == kExpectedSpinlockAlign,
+              "Rust KMonitoredSpinlock alignment mismatch with C++ alignment");
+
 static_assert(sizeof(lockdep::AcquiredLockEntry) == 40, "AcquiredLockEntry size mismatch");
 static_assert(alignof(lockdep::AcquiredLockEntry) == 8,
               "AcquiredLockEntry alignment must be exactly 8 bytes.");
@@ -116,6 +127,17 @@ void cpp_spinlock_release_irqrestore(LockPtr<SpinLock> lock, void* entry_storage
                                      interrupt_saved_state_t state);
 void cpp_spinlock_acquire_no_irqsave(LockPtr<SpinLock> lock, void* entry_storage);
 void cpp_spinlock_release_no_irqrestore(LockPtr<SpinLock> lock, void* entry_storage);
+void cpp_monitored_spinlock_init(LockPtr<MonitoredSpinLock> lock, const void* class_id);
+void cpp_monitored_spinlock_destroy(LockPtr<MonitoredSpinLock> lock);
+interrupt_saved_state_t cpp_monitored_spinlock_acquire_irqsave(LockPtr<MonitoredSpinLock> lock,
+                                                               void* entry_storage,
+                                                               const char* name);
+void cpp_monitored_spinlock_release_irqrestore(LockPtr<MonitoredSpinLock> lock, void* entry_storage,
+                                               interrupt_saved_state_t state);
+void cpp_monitored_spinlock_acquire_no_irqsave(LockPtr<MonitoredSpinLock> lock, void* entry_storage,
+                                               const char* name);
+void cpp_monitored_spinlock_release_no_irqrestore(LockPtr<MonitoredSpinLock> lock,
+                                                  void* entry_storage);
 void cpp_brwlock_pi_init(LockPtr<BrwLockPi> lock, const void* class_id);
 void cpp_brwlock_pi_destroy(LockPtr<BrwLockPi> lock);
 void cpp_brwlock_pi_acquire_read(LockPtr<BrwLockPi> lock, void* entry_storage);
@@ -265,6 +287,83 @@ FFI_ALWAYS_INLINE void cpp_spinlock_acquire_no_irqsave(LockPtr<SpinLock> lock, v
 
 FFI_ALWAYS_INLINE void cpp_spinlock_release_no_irqrestore(
     LockPtr<SpinLock> lock, void* entry_storage) TA_NO_THREAD_SAFETY_ANALYSIS {
+#if WITH_LOCK_DEP
+  if (entry_storage != nullptr) {
+    auto* entry = static_cast<lockdep::AcquiredLockEntry*>(entry_storage);
+    lockdep::ThreadLockState::Get(lockdep::LockFlagsIrqSafe)->Release(entry);
+    entry->~AcquiredLockEntry();
+  }
+  lock->lock().Release();
+#else
+  lock->Release();
+#endif
+}
+
+FFI_ALWAYS_INLINE void cpp_monitored_spinlock_init(LockPtr<MonitoredSpinLock> lock,
+                                                   const void* class_id) {
+#if WITH_LOCK_DEP
+  new (lock) LockInitHelper<MonitoredSpinLock>(reinterpret_cast<lockdep::LockClassId>(class_id));
+#else
+  new (lock) MonitoredSpinLock();
+#endif
+}
+
+FFI_ALWAYS_INLINE void cpp_monitored_spinlock_destroy(LockPtr<MonitoredSpinLock> lock) {
+#if WITH_LOCK_DEP
+  using LockType = lockdep::Lock<MonitoredSpinLock>;
+  lock->~LockType();
+#else
+  lock->~MonitoredSpinLock();
+#endif
+}
+
+FFI_ALWAYS_INLINE interrupt_saved_state_t
+cpp_monitored_spinlock_acquire_irqsave(LockPtr<MonitoredSpinLock> lock, void* entry_storage,
+                                       const char* name) TA_NO_THREAD_SAFETY_ANALYSIS {
+  interrupt_saved_state_t state = arch_interrupt_save();
+#if WITH_LOCK_DEP
+  if (entry_storage != nullptr) {
+    auto* entry = new (entry_storage) lockdep::AcquiredLockEntry(&lock->lock(), lock->id(), 0);
+    lockdep::ThreadLockState::Get(lockdep::LockFlagsIrqSafe)->Acquire(entry);
+  }
+  lock->lock().Acquire(name);
+#else
+  lock->Acquire(name);
+#endif
+  return state;
+}
+
+FFI_ALWAYS_INLINE void cpp_monitored_spinlock_release_irqrestore(
+    LockPtr<MonitoredSpinLock> lock, void* entry_storage,
+    interrupt_saved_state_t state) TA_NO_THREAD_SAFETY_ANALYSIS {
+#if WITH_LOCK_DEP
+  if (entry_storage != nullptr) {
+    auto* entry = static_cast<lockdep::AcquiredLockEntry*>(entry_storage);
+    lockdep::ThreadLockState::Get(lockdep::LockFlagsIrqSafe)->Release(entry);
+    entry->~AcquiredLockEntry();
+  }
+  lock->lock().ReleaseIrqRestore(state);
+#else
+  lock->ReleaseIrqRestore(state);
+#endif
+}
+
+FFI_ALWAYS_INLINE void cpp_monitored_spinlock_acquire_no_irqsave(
+    LockPtr<MonitoredSpinLock> lock, void* entry_storage,
+    const char* name) TA_NO_THREAD_SAFETY_ANALYSIS {
+#if WITH_LOCK_DEP
+  if (entry_storage != nullptr) {
+    auto* entry = new (entry_storage) lockdep::AcquiredLockEntry(&lock->lock(), lock->id(), 0);
+    lockdep::ThreadLockState::Get(lockdep::LockFlagsIrqSafe)->Acquire(entry);
+  }
+  lock->lock().Acquire(name);
+#else
+  lock->Acquire(name);
+#endif
+}
+
+FFI_ALWAYS_INLINE void cpp_monitored_spinlock_release_no_irqrestore(
+    LockPtr<MonitoredSpinLock> lock, void* entry_storage) TA_NO_THREAD_SAFETY_ANALYSIS {
 #if WITH_LOCK_DEP
   if (entry_storage != nullptr) {
     auto* entry = static_cast<lockdep::AcquiredLockEntry*>(entry_storage);

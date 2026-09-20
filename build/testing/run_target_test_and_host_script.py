@@ -10,7 +10,6 @@ import pathlib
 import subprocess
 import sys
 import unittest
-from typing import List
 
 # These are variables will be substituted with the real values at run time.
 # We do not know where the test artifacts are stored until after `ffx test`
@@ -20,7 +19,7 @@ VARIABLE_SUBSTITUTION = {"{test_artifact_dir}": ""}
 
 
 def run_target_test(
-    ffx_bin: str, test_url: str, outdir: str, ffx_test_args: List[str]
+    ffx_bin: str, test_url: str, outdir: str, ffx_test_args: list[str]
 ) -> subprocess.CompletedProcess:
     """Runs 'ffx test run <url> --output-directory outdir [args]'"""
 
@@ -76,7 +75,7 @@ def do_variable_substitution(input: str) -> str:
 
 
 def run_host_script(
-    script_bin: str, script_args: List[str]
+    script_bin: str, script_args: list[str]
 ) -> subprocess.CompletedProcess:
     """Runs the host script."""
     substituted_args = []

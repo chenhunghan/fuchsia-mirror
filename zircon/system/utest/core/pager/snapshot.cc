@@ -14,7 +14,7 @@
 
 #include <zxtest/zxtest.h>
 
-#include "helpers.h"
+#include "../vmo/helpers.h"
 #include "test_thread.h"
 #include "userpager.h"
 

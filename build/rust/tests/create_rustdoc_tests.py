@@ -6,6 +6,7 @@
 import json
 import textwrap
 from argparse import ArgumentParser, Namespace
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -13,7 +14,6 @@ from shutil import rmtree
 from subprocess import run
 from sys import argv
 from tempfile import TemporaryDirectory
-from typing import Collection, Iterable, Optional
 
 # better errors when running local tests
 use_lxml = False
@@ -175,13 +175,13 @@ class Merge(Enum):
 
 @dataclass(frozen=True)
 class CrateConfig:
-    merge: Optional[Merge] = None
+    merge: Merge | None = None
     parts_out_dir: bool = False
     include_parts_dir: frozenset["Crate"] = frozenset()
     enable_index_page: bool = False
     separate_out_dir: bool = False
     extra_flags: tuple[str] = tuple()
-    examples: Optional[tuple["Crate", str]] = None  # crate, path
+    examples: tuple["Crate", str] | None = None  # crate, path
 
 
 @dataclass(frozen=True)

@@ -2140,9 +2140,9 @@ class Vim3PartitionerTests : public GptDevicePartitionerTests {
     ASSERT_OK(zx::vmo::create(block_size_, 0, &vmo));
     for (size_t block = 0; block < 2; ++block) {
       ASSERT_NO_FATAL_FAILURE(device->Read(vmo, block_size_, block, 0));
-      char data[block_size_];
-      ASSERT_OK(vmo.read(data, 0, block_size_));
-      EXPECT_EQ(std::string_view(data, strlen(kDummyBootloaderHeader)),
+      std::vector<char> data(block_size_);
+      ASSERT_OK(vmo.read(data.data(), 0, block_size_));
+      EXPECT_EQ(std::string_view(data.data(), strlen(kDummyBootloaderHeader)),
                 std::string_view(kDummyBootloaderHeader));
     }
   }

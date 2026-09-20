@@ -412,6 +412,151 @@ TEST(FutexTest, WaitRestartableOnSignal) {
   EXPECT_TRUE(helper.WaitForChildren());
 }
 
+void NoopSignalHandler(int) {}
+
+// The flavor of FUTEX_WAIT to exercise. Each of them is backed by a different kind of waiter
+// inside the kernel, so each needs its own coverage.
+struct WakeRaceTestCase {
+  const char *name;
+  int wait_op;
+  int wake_op;
+  uint32_t bitset;
+  // Whether the wait takes an absolute CLOCK_REALTIME deadline rather than a relative one.
+  bool absolute_realtime_deadline;
+};
+
+class FutexWakeRaceTest : public ::testing::TestWithParam<WakeRaceTestCase> {};
+
+// A FUTEX_WAKE that reports having woken a waiter must really wake it up, even when the waiter is
+// interrupted by a signal at the same time.
+//
+// A kernel that resolves this race in favor of the interruption loses the wake: the waiter goes
+// back to sleep while the waker believes it has been woken and stops retrying. This is what made
+// the LTP pidfd_send_signal01 test flaky, see https://fxbug.dev/559170416.
+TEST_P(FutexWakeRaceTest, ReportedWakeIsNotLost) {
+  const WakeRaceTestCase &params = GetParam();
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&params] {
+    struct sigaction action = {};
+    action.sa_handler = NoopSignalHandler;
+    // Deliberately no SA_RESTART: the interrupted wait is restarted by userspace, just like the
+    // checkpoints of the LTP test suite do.
+    sigemptyset(&action.sa_mask);
+    SAFE_SYSCALL(sigaction(SIGUSR1, &action, nullptr));
+
+    const pid_t pid = getpid();
+    // The futex word never changes, so a waiter can only be released by a FUTEX_WAKE.
+    std::atomic<uint32_t> futex_word(0);
+
+    // How long a waiter sleeps before giving up. A waiter that hits this deadline has lost its
+    // wake, and the timeout also bounds how long a failing iteration takes to join.
+    constexpr int kWaitTimeoutSeconds = 5;
+    // Polling budget, in milliseconds, for a wake to be reported and then observed.
+    constexpr int kMaxRetries = 5000;
+    constexpr int kIterations = 200;
+
+    for (int i = 0; i < kIterations; ++i) {
+      std::atomic<pid_t> waiter_tid(0);
+      std::atomic<bool> woken(false);
+
+      std::thread waiter([&params, &futex_word, &waiter_tid, &woken]() {
+        waiter_tid.store(static_cast<pid_t>(syscall(SYS_gettid)));
+        for (;;) {
+          struct timespec timeout = {};
+          if (params.absolute_realtime_deadline) {
+            clock_gettime(CLOCK_REALTIME, &timeout);
+            timeout.tv_sec += kWaitTimeoutSeconds;
+          } else {
+            timeout.tv_sec = kWaitTimeoutSeconds;
+          }
+          long result =
+              syscall(SYS_futex, &futex_word, params.wait_op, 0, &timeout, nullptr, params.bitset);
+          if (result == 0) {
+            woken.store(true);
+            return;
+          }
+          // Anything but an interruption (in particular a timeout) means the wake was lost.
+          if (errno != EINTR) {
+            return;
+          }
+        }
+      });
+
+      while (waiter_tid.load() == 0) {
+        sched_yield();
+      }
+
+      // The waiter always returns, at the latest when its deadline expires, so the thread can be
+      // joined on every path out of this lambda. Reporting failures by returning rather than with
+      // ASSERT_* is what keeps a still-joinable thread from tripping std::terminate.
+      const bool keep_going = [&]() {
+        if (!test_helper::WaitForTaskState(pid, waiter_tid.load(), [](std::string_view state) {
+              return state.find(" S ") != std::string_view::npos;
+            })) {
+          ADD_FAILURE() << "waiter never blocked at iteration " << i;
+          return false;
+        }
+
+        // Interrupt the waiter and immediately try to wake it, so that the wake races with the
+        // interruption.
+        SAFE_SYSCALL(syscall(SYS_tgkill, pid, waiter_tid.load(), SIGUSR1));
+
+        long woken_count = SAFE_SYSCALL(
+            syscall(SYS_futex, &futex_word, params.wake_op, 1, nullptr, nullptr, params.bitset));
+        // The waiter may have been dequeued by the interruption before it could be woken. Retry
+        // until a waiter is reported as woken, exactly like tst_checkpoint_wake() does.
+        for (int retry = 0; woken_count == 0 && retry < kMaxRetries; ++retry) {
+          usleep(1000);
+          woken_count = SAFE_SYSCALL(
+              syscall(SYS_futex, &futex_word, params.wake_op, 1, nullptr, nullptr, params.bitset));
+        }
+        if (woken_count != 1) {
+          ADD_FAILURE() << "no waiter woken at iteration " << i;
+          return false;
+        }
+
+        // A waiter was reported as woken, so the waiter must return from its wait.
+        for (int retry = 0; !woken.load() && retry < kMaxRetries; ++retry) {
+          usleep(1000);
+        }
+        if (!woken.load()) {
+          ADD_FAILURE() << "FUTEX_WAKE reported a wake that never happened at iteration " << i;
+          return false;
+        }
+        return true;
+      }();
+
+      waiter.join();
+      if (!keep_going) {
+        break;
+      }
+    }
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    FutexTest, FutexWakeRaceTest,
+    ::testing::Values(
+        WakeRaceTestCase{.name = "Shared",
+                         .wait_op = FUTEX_WAIT,
+                         .wake_op = FUTEX_WAKE,
+                         .bitset = FUTEX_BITSET_MATCH_ANY,
+                         .absolute_realtime_deadline = false},
+        WakeRaceTestCase{.name = "Private",
+                         .wait_op = FUTEX_WAIT_PRIVATE,
+                         .wake_op = FUTEX_WAKE_PRIVATE,
+                         .bitset = FUTEX_BITSET_MATCH_ANY,
+                         .absolute_realtime_deadline = false},
+        // A realtime deadline parks the caller on a different kind of waiter inside the kernel.
+        WakeRaceTestCase{.name = "PrivateBitsetRealtime",
+                         .wait_op = FUTEX_WAIT_BITSET_PRIVATE | FUTEX_CLOCK_REALTIME,
+                         .wake_op = FUTEX_WAKE_BITSET_PRIVATE,
+                         .bitset = 0x5a5a5a5a,
+                         .absolute_realtime_deadline = true}),
+    [](const ::testing::TestParamInfo<WakeRaceTestCase> &info) { return info.param.name; });
+
 TEST(FutexTest, CanRequeueAllWaiters) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {

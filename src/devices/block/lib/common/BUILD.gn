@@ -7,10 +7,7 @@ import("//build/test.gni")
 
 library_headers("headers") {
   headers = [ "common.h" ]
-  public_deps = [
-    "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_cpp",
-    "//sdk/lib/driver/logging/cpp",
-  ]
+  public_deps = [ "//sdk/lib/driver/logging/cpp" ]
 }
 
 source_set("common") {

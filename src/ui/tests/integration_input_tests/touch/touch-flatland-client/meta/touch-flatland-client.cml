@@ -12,7 +12,7 @@
             protocol: [
                 "fuchsia.element.GraphicalPresenter",
                 "fuchsia.ui.composition.Allocator",
-                "fuchsia.ui.composition.Flatland",
+                "fuchsia.ui.composition.FlatlandFactory",
                 "fuchsia.ui.test.input.TestAppStatusListener",
                 "fuchsia.ui.test.input.TouchInputListener",
             ],

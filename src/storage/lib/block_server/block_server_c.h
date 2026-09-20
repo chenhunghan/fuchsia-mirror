@@ -63,7 +63,7 @@ using RequestId = uintptr_t;
 struct InlineCryptoOptions {
   bool is_enabled;
   uint8_t slot;
-  uint32_t dun;
+  uint64_t dun;
 };
 
 struct ReadOptions {

@@ -13,7 +13,7 @@ use packet::Buf;
 use test_case::test_case;
 use test_util::assert_lt;
 
-use netstack3_base::testutil::{TestIpExt, set_logger_for_test};
+use netstack3_base::testutil::{FakeSendToken, TestIpExt, set_logger_for_test};
 use netstack3_core::IpExt;
 use netstack3_core::device::{BatchSize, DeviceId, EthernetLinkDevice};
 use netstack3_core::testutil::{CtxPairExt as _, FakeBindingsCtx, FakeCtxBuilder};
@@ -40,9 +40,9 @@ fn loopback_holds_metadata<I: IpExt + TestIpExt>(connected: bool) {
     let message = Buf::new(TEST_MESSAGE.to_vec(), ..);
     if connected {
         api.connect(&socket, remote, TEST_PORT.into()).unwrap();
-        api.send(&socket, message).unwrap();
+        api.send(&socket, message, FakeSendToken::default()).unwrap();
     } else {
-        api.send_to(&socket, remote, TEST_PORT.into(), message).unwrap();
+        api.send_to(&socket, remote, TEST_PORT.into(), message, FakeSendToken::default()).unwrap();
     }
 
     // send buffer utilization is held over loopback.
@@ -70,6 +70,7 @@ fn neighbor_resolution_holds_metadata<I: IpExt + TestIpExt>() {
         Some(ZonedAddr::Unzoned(remote_addr)),
         TEST_PORT.into(),
         Buf::new(TEST_MESSAGE.to_vec(), ..),
+        FakeSendToken::default(),
     )
     .unwrap();
 
@@ -104,6 +105,7 @@ fn holds_in_tx_queue<I: IpExt + TestIpExt>() {
         Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)),
         TEST_PORT.into(),
         Buf::new(TEST_MESSAGE.to_vec(), ..),
+        FakeSendToken::default(),
     )
     .unwrap();
     assert_eq!(api.send_buffer_available(&socket), sndbuf_before);
@@ -119,6 +121,7 @@ fn holds_in_tx_queue<I: IpExt + TestIpExt>() {
         Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)),
         TEST_PORT.into(),
         Buf::new(TEST_MESSAGE.to_vec(), ..),
+        FakeSendToken::default(),
     )
     .unwrap();
     assert_lt!(api.send_buffer_available(&socket), sndbuf_before);

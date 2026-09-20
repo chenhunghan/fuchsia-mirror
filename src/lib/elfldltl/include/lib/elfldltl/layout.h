@@ -74,7 +74,7 @@ struct LayoutBase {
   };
 
   template <typename T>
-  using Unsigned = typename UnsignedType<T>::type;
+  using Unsigned = UnsignedType<T>::type;
 
   using Byte = Unsigned<uint8_t>;
   using Half = Unsigned<uint16_t>;
@@ -210,7 +210,7 @@ struct Layout<ElfClass::k32, Data> : public LayoutBase<Data> {
   using typename LayoutBase<Data>::Half;
   using typename LayoutBase<Data>::Word;
 
-  using Addr = typename LayoutBase<Data>::template Unsigned<uint32_t>;
+  using Addr = LayoutBase<Data>::template Unsigned<uint32_t>;
 
   struct Phdr : public PhdrBase {
     EnumField<ElfPhdrType, kSwap> type;
@@ -246,7 +246,7 @@ struct Layout<ElfClass::k64, Data> : public LayoutBase<Data> {
   using typename LayoutBase<Data>::Half;
   using typename LayoutBase<Data>::Word;
 
-  using Addr = typename LayoutBase<Data>::template Unsigned<uint64_t>;
+  using Addr = LayoutBase<Data>::template Unsigned<uint64_t>;
 
   struct Phdr : public PhdrBase {
     EnumField<ElfPhdrType, kSwap> type;
@@ -299,9 +299,9 @@ struct Elf : private Layout<Class, Data> {
   using typename Layout<Class, Data>::Xword;
   using typename Layout<Class, Data>::Addr;
 
-  using size_type = typename Addr::value_type;
+  using size_type = Addr::value_type;
 
-  using Addend = typename Addr::Signed;
+  using Addend = Addr::Signed;
 
   static constexpr auto kAddressBits = kAddrBits<Addr>;
 
@@ -605,8 +605,17 @@ using AllFormats = Template<Elf64<ElfData::k2Lsb>, Elf32<ElfData::k2Lsb>,  //
                             Elf64<ElfData::k2Msb>, Elf32<ElfData::k2Msb>>;
 
 template <typename T>
-struct IsAnyLayout {
+struct IsAnyElf {
   template <class... Elf>
+  using type = std::bool_constant<(std::same_as<T, Elf> || ...)>;
+};
+
+template <typename T>
+concept ElfApi = static_cast<bool>(AllFormats<IsAnyElf<T>::template type>{});
+
+template <typename T>
+struct IsAnyLayout {
+  template <ElfApi... Elf>
   using type = std::bool_constant<(Elf::template kIsLayout<T> || ...)>;
 };
 

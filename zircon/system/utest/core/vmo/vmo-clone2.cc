@@ -18,12 +18,14 @@
 
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <zxtest/zxtest.h>
 
 #include "helpers.h"
 
 namespace vmo_test {
+namespace {
 
 // Some tests below rely on sampling the memory statistics and having only the
 // page allocations directly incurred by the test code happen during the test.
@@ -106,10 +108,11 @@ void CheckContigState(const zx::bti& bti, const zx::vmo& vmo) {
 }
 
 // Helper function for CallPermutations
-template <typename T>
-void CallPermutationsHelper(T fn, uint32_t count, uint32_t perm[], bool elts[], uint32_t idx) {
+using PermutationsTestFn = void(uint32_t[]);
+void CallPermutationsHelper(PermutationsTestFn* fn, uint32_t count, std::vector<uint32_t>& perm,
+                            std::vector<bool>& elts, uint32_t idx) {
   if (idx == count) {
-    ASSERT_NO_FATAL_FAILURE(fn(perm));
+    ASSERT_NO_FATAL_FAILURE(fn(perm.data()));
     return;
   }
   for (unsigned i = 0; i < count; i++) {
@@ -127,10 +130,9 @@ void CallPermutationsHelper(T fn, uint32_t count, uint32_t perm[], bool elts[], 
 }
 
 // Function which invokes |fn| with all the permutations of [0...count-1].
-template <typename T>
-void CallPermutations(T fn, uint32_t count) {
-  uint32_t perm[count];
-  bool elts[count];
+void CallPermutations(PermutationsTestFn* fn, uint32_t count) {
+  std::vector<uint32_t> perm(count);
+  std::vector<bool> elts(count);
 
   for (unsigned i = 0; i < count; i++) {
     perm[i] = 0;
@@ -1082,8 +1084,7 @@ class VmoCloneResizeTests : public VmoClone2TestCase {
       ASSERT_OK(result.status_value());
       zx::resource iommu_resource = std::move(result.value());
 
-      ASSERT_OK(
-          zx::iommu::create(iommu_resource, ZX_IOMMU_TYPE_STUB, &desc, sizeof(desc), &iommu));
+      ASSERT_OK(zx::iommu::create(iommu_resource, ZX_IOMMU_TYPE_STUB, &desc, sizeof(desc), &iommu));
       ASSERT_NO_FAILURES(bti =
                              vmo_test::CreateNamedBti(iommu, 0, 0xdeadbeef, "VmoCloneResizeTests"));
       ASSERT_OK(zx::vmo::create_contiguous(bti, 4 * zx_system_get_page_size(), 0, &vmo));
@@ -2227,4 +2228,5 @@ TEST_F(VmoClone2TestCase, SnapshotAtLeastOnWriteSliceInChain) {
   ASSERT_NO_FATAL_FAILURE(VmoCheck(clone2, kNewerData));
 }
 
+}  // namespace
 }  // namespace vmo_test

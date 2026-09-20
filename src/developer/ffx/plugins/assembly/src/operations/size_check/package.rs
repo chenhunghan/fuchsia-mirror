@@ -93,15 +93,20 @@ struct BudgetResult {
 }
 
 /// Verifies that no package budget is exceeded.
-pub fn verify_package_budgets(ctx: &EnvironmentContext, args: PackageSizeCheckArgs) -> Result<()> {
+pub fn verify_package_budgets<W: std::io::Write>(
+    writer: &mut W,
+    ctx: &EnvironmentContext,
+    args: PackageSizeCheckArgs,
+) -> Result<bool> {
     let sdk_tools = SdkToolProvider::try_new(ctx).context("Getting SDK tools")?;
-    verify_budgets_with_tools(args, Box::new(sdk_tools))
+    verify_budgets_with_tools(writer, args, Box::new(sdk_tools))
 }
 
-fn verify_budgets_with_tools(
+fn verify_budgets_with_tools<W: std::io::Write>(
+    writer: &mut W,
     args: PackageSizeCheckArgs,
     tools: Box<dyn ToolProvider>,
-) -> Result<()> {
+) -> Result<bool> {
     let blob_size_calculator = BlobSizeCalculator::new(tools, args.blobfs_layout);
 
     // Read the budget configuration file.
@@ -131,26 +136,34 @@ fn verify_budgets_with_tools(
     let over_budget = results.iter().filter(|e| e.used_bytes > e.budget_bytes).count();
 
     if over_budget > 0 {
-        println!("FAILED: {over_budget} package set(s) over budget");
+        writeln!(writer, "FAILED: {over_budget} package set(s) over budget")
+            .context("Failed to write package budget output")?;
     }
     if args.verbose || over_budget > 0 {
         // Order the results by package set name.
         results.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
 
-        println!("{:<40} {:>10} {:>10} {:>10}", "Package Sets", "Size", "Budget", "Remaining");
+        writeln!(
+            writer,
+            "{:<40} {:>10} {:>10} {:>10}",
+            "Package Sets", "Size", "Budget", "Remaining"
+        )
+        .context("Failed to write package budget output")?;
         for result in &results {
             // Only print the component usage if it went over budget or verbose output is
             // requested.
             if !args.verbose && result.used_bytes <= result.budget_bytes {
                 continue;
             }
-            println!(
+            writeln!(
+                writer,
                 "{:<40} {:>10} {:>10} {:>10}",
                 result.name,
                 result.used_bytes,
                 result.budget_bytes,
                 result.budget_bytes as i64 - result.used_bytes as i64
-            );
+            )
+            .context("Failed to write package budget output")?;
             // Only print the package breakdown if verbose output is requested.
             if !args.verbose {
                 continue;
@@ -169,15 +182,17 @@ fn verify_budgets_with_tools(
                 .collect::<Result<BTreeMap<_, _>>>()?;
 
             for (key, value) in package_breakdown.iter() {
-                println!("    {:<36} {:>10}", key, value.proportional_size);
+                writeln!(writer, "    {:<36} {:>10}", key, value.proportional_size)
+                    .context("Failed to write package budget output")?;
             }
         }
         if let Some(out_path) = &args.gerrit_output {
-            println!("Report written to {out_path}");
+            writeln!(writer, "Report written to {out_path}")
+                .context("Failed to write package budget output")?;
         }
     }
 
-    Ok(())
+    Ok(over_budget == 0)
 }
 
 /// Reads each mentioned package manifest.
@@ -449,7 +464,7 @@ mod tests {
         }
     }
 
-    fn assert_failed<E>(err: Result<(), E>, prefix: &str)
+    fn assert_failed<T, E>(err: Result<T, E>, prefix: &str)
     where
         E: std::fmt::Display,
     {
@@ -483,6 +498,7 @@ mod tests {
         let test_fs = TestFs::new();
         test_fs.write("size_budgets.json", json!({}));
         let err = verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -501,6 +517,7 @@ mod tests {
         let test_fs = TestFs::new();
         test_fs.write("blobs.json", json!([]));
         let err = verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -511,7 +528,7 @@ mod tests {
             },
             Box::new(FakeToolProvider::default()),
         );
-        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.as_ref().unwrap_err().exit_code(), 1);
         assert_failed(err, "Unable to open file:");
     }
 
@@ -538,6 +555,7 @@ mod tests {
         );
         test_fs.write("blobs.json", json!([]));
         verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -575,6 +593,7 @@ mod tests {
             }]),
         );
         let res = verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -615,6 +634,7 @@ mod tests {
             }]),
         );
         verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -678,6 +698,7 @@ mod tests {
             }]),
         );
         verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -781,6 +802,7 @@ mod tests {
             }]),
         );
         verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -906,6 +928,7 @@ mod tests {
 
         test_fs.write("blobs.json", json!([]));
         let err = verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::Compact,
                 budgets: test_fs.path("size_budgets.json"),
@@ -979,6 +1002,7 @@ mod tests {
                 .unwrap();
             }));
         verify_budgets_with_tools(
+            &mut std::io::sink(),
             PackageSizeCheckArgs {
                 blobfs_layout: BlobfsLayout::DeprecatedPadded,
                 budgets: test_fs.path("size_budgets.json"),
@@ -1139,5 +1163,83 @@ mod tests {
         ];
         assert_eq!(results, expected_result);
         Ok(())
+    }
+
+    #[test]
+    fn test_verify_budgets_with_tools_return_fits() {
+        let test_fs = TestFs::new();
+        test_fs.write(
+            "package_manifest.json",
+            json!({
+                "version": "1",
+                "repository": "testrepository.com",
+                "package": {
+                    "name": "my-pkg",
+                    "version": "0"
+                },
+                "blobs": [{
+                    "source_path": "first_blob",
+                    "path": "path/in/pkg",
+                    "merkle": "0e56473237b6b2ce39358c11a0fbd2f89902f246d966898d7d787c9025124d51",
+                    "size": 100i32
+                }]
+            }),
+        );
+        test_fs.write(
+            "size_budgets.json",
+            json!({"package_set_budgets": [{
+                "name": "Software Delivery",
+                "budget_bytes": 10i32,
+                "creep_budget_bytes": 2i32,
+                "packages": [test_fs.path("package_manifest.json")],
+            }]}),
+        );
+        test_fs.write(
+            "blobs.json",
+            json!([{
+                "merkle": "0e56473237b6b2ce39358c11a0fbd2f89902f246d966898d7d787c9025124d51",
+                "size": 100i32
+            }]),
+        );
+        // Over budget: used_bytes (100) > budget_bytes (10)
+        let fits = verify_budgets_with_tools(
+            &mut std::io::sink(),
+            PackageSizeCheckArgs {
+                blobfs_layout: BlobfsLayout::Compact,
+                budgets: test_fs.path("size_budgets.json"),
+                blob_sizes: [test_fs.path("blobs.json")].to_vec(),
+                gerrit_output: None,
+                verbose: false,
+                verbose_json_output: None,
+            },
+            Box::new(FakeToolProvider::default()),
+        )
+        .unwrap();
+        assert!(!fits);
+
+        // Under budget: budget_bytes (1000) > used_bytes (100)
+        test_fs.write(
+            "size_budgets.json",
+            json!({"package_set_budgets": [{
+                "name": "Software Delivery",
+                "budget_bytes": 1000i32,
+                "creep_budget_bytes": 2i32,
+                "packages": [test_fs.path("package_manifest.json")],
+            }]}),
+        );
+        let fits = verify_budgets_with_tools(
+            &mut std::io::sink(),
+            PackageSizeCheckArgs {
+                blobfs_layout: BlobfsLayout::Compact,
+                budgets: test_fs.path("size_budgets.json"),
+                blob_sizes: [test_fs.path("blobs.json")].to_vec(),
+                gerrit_output: None,
+                verbose: false,
+                verbose_json_output: None,
+            },
+            Box::new(FakeToolProvider::default()),
+        )
+        .unwrap();
+        assert!(fits);
     }
 }

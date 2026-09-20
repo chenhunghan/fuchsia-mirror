@@ -112,8 +112,15 @@ pub fn build_profile<'a>(
     dead_allocations: HashMap<Rc<StackTrace>, DeadAllocationCounter>,
     deallocations: HashMap<Rc<StackTrace>, DeallocationCounter>,
     stack_traces: &'a HashSet<Rc<StackTrace>>,
+    is_lossy: bool,
 ) -> pproto::Profile {
     let mut st = StringTable::new();
+    let mut comments = Vec::new();
+    if is_lossy {
+        comments.push(st.intern(
+            "WARNING: Socket buffer saturated. Dropped allocation and deallocation datagrams. Residual memory may exhibit phantom leaks, and cumulative allocation volumes are under-reported and skewed.",
+        ));
+    }
     let mut pprof = pproto::Profile {
         // This table describes the types of values contained in each sample.
         sample_type: vec![
@@ -139,6 +146,7 @@ pub fn build_profile<'a>(
             unit: st.intern("bytes"),
         }),
         period: 1,
+        comment: comments,
         ..pproto::Profile::default()
     };
 
@@ -436,6 +444,7 @@ mod test {
             dead_allocations.clone(),
             deallocations.clone(),
             &Default::default(),
+            false,
         );
 
         // Check that the profile contains one mapping per segment.
@@ -467,5 +476,20 @@ mod test {
         assert_eq!(profile.sample[0].value, vec![3, 25, 3, 25, 0, 0]);
         assert_eq!(profile.sample[1].value, vec![0, 0, 5, 21, 0, 0]);
         assert_eq!(profile.sample[2].value, vec![0, 0, 0, 0, 13, 20]);
+    }
+
+    #[fuchsia::test]
+    fn test_build_profile_lossy_comment() {
+        let profile = build_profile(
+            [].iter(),
+            [].iter(),
+            HashMap::new(),
+            HashMap::new(),
+            &Default::default(),
+            true,
+        );
+        assert_eq!(profile.comment.len(), 1);
+        let comment_str = &profile.string_table[profile.comment[0] as usize];
+        assert!(comment_str.contains("WARNING: Socket buffer saturated"));
     }
 }

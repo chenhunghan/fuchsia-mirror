@@ -213,6 +213,47 @@ class ControllerTest : public zxtest::Test {
     client_.Bind(std::move(endpoints.client));
   }
 
+  class SyncReaderV2EventHandler
+      : public fidl::WireSyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+   public:
+    explicit SyncReaderV2EventHandler(
+        fit::function<
+            void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+            callback)
+        : callback_(std::move(callback)) {}
+
+    void OnInputReports(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*
+                            event) override {
+      last_report_stamp = event->last_report_stamp;
+      if (callback_) {
+        callback_(event);
+      }
+    }
+
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+    uint64_t last_report_stamp = 0;
+
+   private:
+    fit::function<void(
+        fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+        callback_;
+  };
+
+  static zx_status_t ReadAndAcknowledgeOneEvent(
+      fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader,
+      fit::function<
+          void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+          callback) {
+    SyncReaderV2EventHandler handler(std::move(callback));
+    fidl::Status result = reader.HandleOneEvent(handler);
+    if (!result.ok()) {
+      return result.status();
+    }
+    return reader->AcknowledgeReports(handler.last_report_stamp).status();
+  }
+
  protected:
   Fake8042 i8042_;
   std::shared_ptr<MockDevice> root_ = MockDevice::FakeRootParent();
@@ -260,51 +301,63 @@ TEST_F(ControllerTest, KeyboardPressTest) {
   zx_device* dev = controller_dev_->GetLatestChild();
   auto keyboard = dev->GetDeviceContext<i8042::I8042Device>();
 
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader;
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader;
   {
-    auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-    auto result = client_->GetInputReportsReader(std::move(endpoints.server));
+    fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+        fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+    fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+        client_->GetInputReportsReaderV2(std::move(endpoints.server), 10);
     ASSERT_OK(result.status());
-    reader =
-        fidl::WireSyncClient<fuchsia_input_report::InputReportsReader>(std::move(endpoints.client));
+    reader = fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>(
+        std::move(endpoints.client));
     ASSERT_OK(keyboard->WaitForNextReader(zx::duration::infinite()));
   }
   {
     i8042_.SendDataAndIrq(false, 0x2);
 
-    auto result = reader->ReadInputReports();
-    ASSERT_OK(result.status());
-    ASSERT_FALSE(result.value().is_error());
-    auto& reports = result.value().value()->reports;
+    bool got_report = false;
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+          ASSERT_EQ(1u, reports.size());
 
-    ASSERT_EQ(1, reports.size());
+          const fuchsia_input_report::wire::InputReport& report = reports[0];
+          ASSERT_TRUE(report.has_event_time());
+          ASSERT_TRUE(report.has_keyboard());
+          const fuchsia_input_report::wire::KeyboardInputReport& keyboard_report =
+              report.keyboard();
 
-    auto& report = reports[0];
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_keyboard());
-    auto& keyboard_report = report.keyboard();
-
-    ASSERT_TRUE(keyboard_report.has_pressed_keys3());
-    ASSERT_EQ(keyboard_report.pressed_keys3().size(), 1);
-    EXPECT_EQ(keyboard_report.pressed_keys3()[0], fuchsia_input::wire::Key::kKey1);
+          ASSERT_TRUE(keyboard_report.has_pressed_keys3());
+          ASSERT_EQ(keyboard_report.pressed_keys3().size(), 1u);
+          EXPECT_EQ(keyboard_report.pressed_keys3()[0], fuchsia_input::wire::Key::kKey1);
+          got_report = true;
+        });
+    ASSERT_OK(status);
+    EXPECT_TRUE(got_report);
   }
   {
     i8042_.SendDataAndIrq(false, i8042::kKeyUp | 0x2);
 
-    auto result = reader->ReadInputReports();
-    ASSERT_OK(result.status());
-    ASSERT_FALSE(result.value().is_error());
-    auto& reports = result.value().value()->reports;
+    bool got_report = false;
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+          ASSERT_EQ(1u, reports.size());
 
-    ASSERT_EQ(1, reports.size());
+          const fuchsia_input_report::wire::InputReport& report = reports[0];
+          ASSERT_TRUE(report.has_event_time());
+          ASSERT_TRUE(report.has_keyboard());
+          const fuchsia_input_report::wire::KeyboardInputReport& keyboard_report =
+              report.keyboard();
 
-    auto& report = reports[0];
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_keyboard());
-    auto& keyboard_report = report.keyboard();
-
-    ASSERT_TRUE(keyboard_report.has_pressed_keys3());
-    EXPECT_EQ(keyboard_report.pressed_keys3().size(), 0);
+          ASSERT_TRUE(keyboard_report.has_pressed_keys3());
+          EXPECT_EQ(keyboard_report.pressed_keys3().size(), 0u);
+          got_report = true;
+        });
+    ASSERT_OK(status);
+    EXPECT_TRUE(got_report);
   }
 }
 
@@ -350,13 +403,15 @@ TEST_F(ControllerTest, MouseMoveTest) {
   zx_device* dev = controller_dev_->GetLatestChild();
   auto mouse = dev->GetDeviceContext<i8042::I8042Device>();
 
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader;
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader;
   {
-    auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-    auto result = client_->GetInputReportsReader(std::move(endpoints.server));
+    fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+        fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+    fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+        client_->GetInputReportsReaderV2(std::move(endpoints.server), 10);
     ASSERT_OK(result.status());
-    reader =
-        fidl::WireSyncClient<fuchsia_input_report::InputReportsReader>(std::move(endpoints.client));
+    reader = fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>(
+        std::move(endpoints.client));
     ASSERT_OK(mouse->WaitForNextReader(zx::duration::infinite()));
   }
 
@@ -364,23 +419,27 @@ TEST_F(ControllerTest, MouseMoveTest) {
   i8042_.SendData(0x70) /* rel_x */;
   i8042_.SendDataAndIrq(true, 0x10 /* rel_y */);
 
-  auto result = reader->ReadInputReports();
-  ASSERT_OK(result.status());
-  ASSERT_FALSE(result.value().is_error());
-  auto& reports = result.value().value()->reports;
+  bool got_report = false;
+  zx_status_t status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+        ASSERT_EQ(1u, reports.size());
 
-  ASSERT_EQ(1, reports.size());
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-  auto& report = reports[0];
-  ASSERT_TRUE(report.has_event_time());
-  ASSERT_TRUE(report.has_mouse());
-  auto& mouse_report = report.mouse();
-
-  ASSERT_TRUE(mouse_report.has_pressed_buttons());
-  ASSERT_EQ(mouse_report.pressed_buttons().size(), 1);
-  EXPECT_EQ(mouse_report.pressed_buttons()[0], 0x1);
-  ASSERT_TRUE(mouse_report.has_movement_x());
-  EXPECT_EQ(mouse_report.movement_x(), 0x70);
-  ASSERT_TRUE(mouse_report.has_movement_y());
-  EXPECT_EQ(mouse_report.movement_y(), -16);
+        ASSERT_TRUE(mouse_report.has_pressed_buttons());
+        ASSERT_EQ(mouse_report.pressed_buttons().size(), 1u);
+        EXPECT_EQ(mouse_report.pressed_buttons()[0], 0x1);
+        ASSERT_TRUE(mouse_report.has_movement_x());
+        EXPECT_EQ(mouse_report.movement_x(), 0x70);
+        ASSERT_TRUE(mouse_report.has_movement_y());
+        EXPECT_EQ(mouse_report.movement_y(), -16);
+        got_report = true;
+      });
+  ASSERT_OK(status);
+  EXPECT_TRUE(got_report);
 }

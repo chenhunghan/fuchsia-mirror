@@ -10,6 +10,28 @@ use anyhow::Context;
 use serde_json::Value;
 use std::path::Path;
 
+fn check_no_legacy_pci_fields(val: &Value) -> Result<(), anyhow::Error> {
+    if let Some(obj) = val.as_object() {
+        for key in ["pci_class", "pci_subclass", "pci_interface"] {
+            if obj.contains_key(key) {
+                anyhow::bail!(
+                    "Legacy flat PCI field '{}' is no longer supported. Use structured 'pci: {{ ... }}' instead.",
+                    key
+                );
+            }
+        }
+        if let Some(bind) = obj.get("bind").or_else(|| obj.get("requirements")) {
+            check_no_legacy_pci_fields(bind)?;
+        }
+        if let Some(one_of) = obj.get("one_of").and_then(|v| v.as_array()) {
+            for item in one_of {
+                check_no_legacy_pci_fields(item)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow::Error> {
     let driver_dml = load_driver_dml(Path::new(&args.input_file))?;
     let driver_name = &driver_dml.name;
@@ -77,8 +99,16 @@ pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow
                     "DML does not support string 'program.bind'. Bind rules should be specified as a structured object or under 'use' for composite drivers."
                 );
             }
+            check_no_legacy_pci_fields(bind_val)?;
             bind_config = serde_json::from_value(bind_val.clone())
                 .context("Failed to parse structured 'requirements' block in DML program")?;
+            if bind_config.protocol.is_none() {
+                if let Some(usb) = &bind_config.usb {
+                    if let Some(bp) = &usb.bind_protocol {
+                        bind_config.protocol = Some(bp.clone());
+                    }
+                }
+            }
             has_explicit_bind_block = true;
         }
     }
@@ -88,6 +118,7 @@ pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow
     let mut primary_use_entry = None;
 
     for entry_val in &driver_dml.use_entries {
+        check_no_legacy_pci_fields(entry_val)?;
         let mut entry = entry_val.clone();
         if let Some(obj) = entry.as_object_mut() {
             for key in ["service", "protocol"] {
@@ -145,10 +176,20 @@ pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow
                             if is_banjo { "Banjo".to_string() } else { "Zircon".to_string() }
                         });
 
-                    let bind = bind_val
+                    if let Some(v) = &bind_val {
+                        check_no_legacy_pci_fields(v)?;
+                    }
+
+                    let mut bind = bind_val
                         .map(|v| serde_json::from_value::<DmlBind>(v))
                         .transpose()
                         .context("Failed to parse 'bind' block in use entry")?;
+
+                    if let Some(b) = &mut bind {
+                        if b.match_name == Some(true) && b.node_name.is_none() {
+                            b.node_name = Some(serde_json::Value::String(parent_name.to_string()));
+                        }
+                    }
 
                     if primary {
                         if has_explicit_bind_block {
@@ -235,11 +276,13 @@ pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow
             service,
             banjo: banjo_name,
             transport: Some(transport),
+            pci: None,
+            usb: None,
+            acpi: None,
+            node_name: None,
+            match_name: None,
             one_of: None,
             rules: None,
-            pci_class: None,
-            pci_subclass: None,
-            pci_interface: None,
         };
 
         if let Some(b) = bind {
@@ -250,11 +293,18 @@ pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow
             primary_bind.vid = b.vid;
             primary_bind.pid = b.pid;
             primary_bind.did = b.did;
+            primary_bind.pci = b.pci;
+            primary_bind.usb = b.usb.clone();
+            if b.usb.as_ref().and_then(|u| u.bind_protocol.as_ref()).is_some()
+                && primary_bind.protocol.is_none()
+            {
+                primary_bind.protocol = b.usb.as_ref().and_then(|u| u.bind_protocol.clone());
+            }
+            primary_bind.acpi = b.acpi;
+            primary_bind.node_name = b.node_name.clone();
+            primary_bind.match_name = b.match_name;
             primary_bind.one_of = b.one_of;
             primary_bind.rules = b.rules;
-            primary_bind.pci_class = b.pci_class;
-            primary_bind.pci_subclass = b.pci_subclass;
-            primary_bind.pci_interface = b.pci_interface;
             if primary_bind.protocol.is_none() {
                 primary_bind.protocol = b.protocol;
             }
@@ -749,6 +799,252 @@ mod tests {
         assert!(
             res.unwrap_err().to_string().contains("DML does not support string 'program.bind'")
         );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compile_driver_pci_primary() {
+        let temp_dir = std::env::temp_dir().join("test_temp_compile_driver_pci_primary");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let dml_content = r#"{
+            name: "sample_pci_driver",
+            use: [
+                {
+                    service: "fuchsia.hardware.pci.Service",
+                    name: "pci",
+                    primary: true,
+                    bind: {
+                        pci: {
+                            vid: "fuchsia.pci.BIND_PCI_VID.GOOGLE",
+                            did: "0x0042",
+                        },
+                    },
+                },
+            ],
+        }"#;
+
+        let dml_path = temp_dir.join("sample.dml");
+        std::fs::write(&dml_path, dml_content).unwrap();
+
+        let bind_path = temp_dir.join("sample.bind");
+        let cml_path = temp_dir.join("sample.cml");
+
+        let args = CompileDriverArgs {
+            input_file: dml_path.to_str().unwrap().to_string(),
+            h_output: None,
+            cc_output: None,
+            rs_output: None,
+            cml_output: Some(cml_path.to_str().unwrap().to_string()),
+            bind_output: Some(bind_path.to_str().unwrap().to_string()),
+            namespace: None,
+        };
+
+        compile_driver(&args, "2026").unwrap();
+
+        let bind_content = std::fs::read_to_string(&bind_path).unwrap();
+        assert!(bind_content.contains("primary parent \"pci\" {\n  fuchsia.Service == \"fuchsia.hardware.pci.Service\";\n  fuchsia.BIND_PCI_VID == fuchsia.pci.BIND_PCI_VID.GOOGLE;\n  fuchsia.BIND_PCI_DID == 0x0042;\n}"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compile_driver_usb_non_composite() {
+        let temp_dir = std::env::temp_dir().join("test_temp_compile_driver_usb_non_composite");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let dml_content = r#"{
+            name: "sample_usb_driver",
+            program: {
+                bind: {
+                    usb: {
+                        vid: "0x1234",
+                        pid: "0x5678",
+                        bind_protocol: "fuchsia.usb.BIND_USB_PROTOCOL.INTERFACE",
+                    },
+                },
+            },
+        }"#;
+
+        let dml_path = temp_dir.join("sample.dml");
+        std::fs::write(&dml_path, dml_content).unwrap();
+
+        let bind_path = temp_dir.join("sample.bind");
+
+        let args = CompileDriverArgs {
+            input_file: dml_path.to_str().unwrap().to_string(),
+            h_output: None,
+            cc_output: None,
+            rs_output: None,
+            cml_output: None,
+            bind_output: Some(bind_path.to_str().unwrap().to_string()),
+            namespace: None,
+        };
+
+        compile_driver(&args, "2026").unwrap();
+
+        let bind_content = std::fs::read_to_string(&bind_path).unwrap();
+        assert!(
+            bind_content
+                .contains("fuchsia.BIND_PROTOCOL == fuchsia.usb.BIND_USB_PROTOCOL.INTERFACE;")
+        );
+        assert!(bind_content.contains("fuchsia.BIND_USB_VID == 0x1234;"));
+        assert!(bind_content.contains("fuchsia.BIND_USB_PID == 0x5678;"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compile_driver_legacy_pci_class_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_compile_driver_legacy_pci_class_error");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. In use entry
+        let dml_content_use = r#"{
+            name: "sample_pci_driver",
+            use: [
+                {
+                    service: "fuchsia.hardware.pci.Service",
+                    name: "pci",
+                    primary: true,
+                    bind: {
+                        pci_class: "0x01",
+                    },
+                },
+            ],
+        }"#;
+
+        let dml_path = temp_dir.join("sample.dml");
+        std::fs::write(&dml_path, dml_content_use).unwrap();
+
+        let args = CompileDriverArgs {
+            input_file: dml_path.to_str().unwrap().to_string(),
+            h_output: None,
+            cc_output: None,
+            rs_output: None,
+            cml_output: None,
+            bind_output: None,
+            namespace: None,
+        };
+
+        let res = compile_driver(&args, "2026");
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("Legacy flat PCI field 'pci_class' is no longer supported. Use structured 'pci: { ... }' instead."),
+            "Unexpected error: {err}"
+        );
+
+        // 2. In program.bind
+        let dml_content_program = r#"{
+            name: "sample_pci_driver",
+            program: {
+                bind: {
+                    pci_subclass: "0x02",
+                },
+            },
+        }"#;
+        std::fs::write(&dml_path, dml_content_program).unwrap();
+
+        let res = compile_driver(&args, "2026");
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("Legacy flat PCI field 'pci_subclass' is no longer supported. Use structured 'pci: { ... }' instead."),
+            "Unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compile_driver_match_name() {
+        let temp_dir = std::env::temp_dir().join("test_temp_compile_driver_match_name");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let dml_content = r#"{
+            name: "sample_match_name",
+            use: [
+                {
+                    service: "fuchsia.hardware.gpio.Service",
+                    name: "mic-mute",
+                    bind: {
+                        match_name: true,
+                    },
+                },
+            ],
+        }"#;
+
+        let dml_path = temp_dir.join("sample.dml");
+        std::fs::write(&dml_path, dml_content).unwrap();
+
+        let bind_path = temp_dir.join("sample.bind");
+
+        let args = CompileDriverArgs {
+            input_file: dml_path.to_str().unwrap().to_string(),
+            h_output: None,
+            cc_output: None,
+            rs_output: None,
+            cml_output: None,
+            bind_output: Some(bind_path.to_str().unwrap().to_string()),
+            namespace: None,
+        };
+
+        compile_driver(&args, "2026").unwrap();
+
+        let bind_content = std::fs::read_to_string(&bind_path).unwrap();
+        assert!(bind_content.contains("parent \"mic-mute\" {\n  fuchsia.Service == \"fuchsia.hardware.gpio.Service\";\n  fuchsia.NAME == \"mic-mute\";\n}"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compile_driver_acpi_primary() {
+        let temp_dir = std::env::temp_dir().join("test_temp_compile_driver_acpi_primary");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let dml_content = r#"{
+            name: "sample_acpi_driver",
+            use: [
+                {
+                    service: "fuchsia.hardware.acpi.Service",
+                    name: "acpi",
+                    primary: true,
+                    bind: {
+                        banjo: "fuchsia.acpi.BIND_PROTOCOL.DEVICE",
+                        acpi: {
+                            hid: "PNP0C0A",
+                        },
+                    },
+                },
+            ],
+        }"#;
+
+        let dml_path = temp_dir.join("sample.dml");
+        std::fs::write(&dml_path, dml_content).unwrap();
+
+        let bind_path = temp_dir.join("sample.bind");
+
+        let args = CompileDriverArgs {
+            input_file: dml_path.to_str().unwrap().to_string(),
+            h_output: None,
+            cc_output: None,
+            rs_output: None,
+            cml_output: None,
+            bind_output: Some(bind_path.to_str().unwrap().to_string()),
+            namespace: None,
+        };
+
+        compile_driver(&args, "2026").unwrap();
+
+        let bind_content = std::fs::read_to_string(&bind_path).unwrap();
+        assert!(bind_content.contains("primary parent \"acpi\" {\n  fuchsia.BIND_PROTOCOL == fuchsia.acpi.BIND_PROTOCOL.DEVICE;\n  fuchsia.Service == \"fuchsia.hardware.acpi.Service\";\n  fuchsia.acpi.HID == \"PNP0C0A\";\n}"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

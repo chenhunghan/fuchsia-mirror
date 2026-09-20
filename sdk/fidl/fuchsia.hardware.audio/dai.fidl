@@ -57,7 +57,7 @@ type DaiProperties = table {
 };
 
 /// For an overview see
-/// [Digital Audio Interface](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_dai).
+/// [Digital Audio Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/dai).
 /// # Deprecation
 ///
 /// Not supported anymore, instead use an

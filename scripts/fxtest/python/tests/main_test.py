@@ -3153,6 +3153,201 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                     "Expected to find an error about output directory existing",
                 )
 
+    async def test_previous_stats_analytics(self) -> None:
+        """Test that --previous stats-analytics outputs valid compact JSON."""
+        self._mock_run_command(0)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        with tempfile.TemporaryDirectory() as td:
+            logpath = os.path.join(td, "log.json.gz")
+            flags = args.parse_args(["--simple", "--logpath", logpath])
+            ret = await main.async_main_wrapper(flags)
+            self.assertEqual(ret, 0)
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                ret = main.do_process_previous(
+                    args.parse_args(
+                        [
+                            "-pr",
+                            "stats-analytics",
+                            "--logpath",
+                            logpath,
+                        ]
+                    )
+                )
+                self.assertEqual(ret, 0)
+
+            output_str = stdout.getvalue().strip()
+            payload = json.loads(output_str)
+            self.assertIn("t", payload)
+            self.assertIn("a", payload)
+            self.assertIn("ab", payload)
+            self.assertIn("top", payload)
+            self.assertIn("sum", payload)
+            self.assertIn("sel", payload)
+            self.assertEqual(payload["sel"], "")
+            self.assertEqual(payload["a"], 0)
+            self.assertIsNone(payload["ab"])
+            self.assertIsInstance(payload["top"], list)
+            self.assertIsInstance(payload["sum"], dict)
+            self.assertNotIn(": ", output_str)
+            self.assertNotIn(", ", output_str)
+
+    async def test_previous_stats_analytics_with_selection(self) -> None:
+        """Test that --previous stats-analytics outputs canonical selection."""
+        self._mock_run_command(0)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        bar_test = test_list_file.Test(
+            build=tests_json_file.TestEntry(
+                test=tests_json_file.TestSection(
+                    name="host_x64/bar_test",
+                    label="//src/sys:bar_test(//build/toolchain/host:x64)",
+                    path="host_x64/bar_test",
+                    os="linux",
+                )
+            )
+        )
+        mock_select = mock.AsyncMock(
+            return_value=selection_types.TestSelections(
+                selected=[bar_test],
+                selected_but_not_run=[],
+                best_score={bar_test.name(): 0},
+                group_matches=[],
+                fuzzy_distance_threshold=3,
+            )
+        )
+        patch = mock.patch("selection.select_tests", mock_select)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        with tempfile.TemporaryDirectory() as td:
+            logpath = os.path.join(td, "log.json.gz")
+            flags = args.parse_args(
+                ["--simple", "bar_test", "--logpath", logpath]
+            )
+            ret = await main.async_main_wrapper(flags)
+            self.assertEqual(ret, 0)
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                ret = main.do_process_previous(
+                    args.parse_args(
+                        [
+                            "-pr",
+                            "stats-analytics",
+                            "--logpath",
+                            logpath,
+                        ]
+                    )
+                )
+                self.assertEqual(ret, 0)
+
+            output_str = stdout.getvalue().strip()
+            payload = json.loads(output_str)
+            self.assertIn("sel", payload)
+            self.assertEqual(payload["sel"], "bar_test")
+
+    async def test_save_log_path_to_file(self) -> None:
+        """Tests that --save-log-path-to-file records the log path."""
+        self._mock_run_command(0)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        bar_test = test_list_file.Test(
+            build=tests_json_file.TestEntry(
+                test=tests_json_file.TestSection(
+                    name="host_x64/bar_test",
+                    label="//src/sys:bar_test(//build/toolchain/host:x64)",
+                    path="host_x64/bar_test",
+                    os="linux",
+                )
+            )
+        )
+        mock_select = mock.AsyncMock(
+            return_value=selection_types.TestSelections(
+                selected=[bar_test],
+                selected_but_not_run=[],
+                best_score={bar_test.name(): 0},
+                group_matches=[],
+                fuzzy_distance_threshold=3,
+            )
+        )
+        patch = mock.patch("selection.select_tests", mock_select)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        with tempfile.TemporaryDirectory() as td:
+            logpath = os.path.join(td, "custom.log.json.gz")
+            ptr_file = os.path.join(td, "logpath.ptr")
+            flags = args.parse_args(
+                [
+                    "--simple",
+                    "bar_test",
+                    "--logpath",
+                    logpath,
+                    "--save-log-path-to-file",
+                    ptr_file,
+                ]
+            )
+            ret = await main.async_main_wrapper(flags)
+            self.assertEqual(ret, 0)
+            self.assertTrue(os.path.exists(ptr_file))
+            with open(ptr_file) as f:
+                saved_path = f.read().strip()
+            self.assertEqual(saved_path, os.path.abspath(logpath))
+
+    async def test_save_log_path_to_file_no_log(self) -> None:
+        """Tests that --no-log does not populate --save-log-path-to-file."""
+        self._mock_run_command(0)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        bar_test = test_list_file.Test(
+            build=tests_json_file.TestEntry(
+                test=tests_json_file.TestSection(
+                    name="host_x64/bar_test",
+                    label="//src/sys:bar_test(//build/toolchain/host:x64)",
+                    path="host_x64/bar_test",
+                    os="linux",
+                )
+            )
+        )
+        mock_select = mock.AsyncMock(
+            return_value=selection_types.TestSelections(
+                selected=[bar_test],
+                selected_but_not_run=[],
+                best_score={bar_test.name(): 0},
+                group_matches=[],
+                fuzzy_distance_threshold=3,
+            )
+        )
+        patch = mock.patch("selection.select_tests", mock_select)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        with tempfile.TemporaryDirectory() as td:
+            ptr_file = os.path.join(td, "logpath.ptr")
+            flags = args.parse_args(
+                [
+                    "--simple",
+                    "bar_test",
+                    "--no-log",
+                    "--save-log-path-to-file",
+                    ptr_file,
+                ]
+            )
+            ret = await main.async_main_wrapper(flags)
+            self.assertEqual(ret, 0)
+            self.assertFalse(os.path.exists(ptr_file))
+
     async def test_list_runtime_deps_success(self) -> None:
         """Tests the successful listing of runtime dependencies."""
         deps_path = "path/to/my_deps.json"

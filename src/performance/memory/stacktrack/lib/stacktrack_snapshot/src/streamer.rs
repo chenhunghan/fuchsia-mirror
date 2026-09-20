@@ -173,10 +173,10 @@ mod tests {
         assert_eq!(received_snapshot.page_size, FAKE_PAGE_SIZE);
 
         let mut received_stack_traces: HashMap<u64, &crate::snapshot::StackTrace> =
-            received_snapshot.stack_traces.iter().map(|trace| (trace.thread_koid, trace)).collect();
+            received_snapshot.stack_traces.iter().map(|(koid, trace)| (*koid, trace)).collect();
         assert_eq!(received_snapshot.executable_regions.len(), 1);
-        let region = &received_snapshot.executable_regions[0];
-        assert_eq!(region.address, FAKE_REGION_ADDRESS);
+        let (address, region) = received_snapshot.executable_regions.iter().next().unwrap();
+        assert_eq!(*address, FAKE_REGION_ADDRESS);
         assert_eq!(region.size, FAKE_REGION_SIZE);
         assert_eq!(region.vaddr, FAKE_REGION_VADDR);
         assert_eq!(region.name, FAKE_REGION_NAME);

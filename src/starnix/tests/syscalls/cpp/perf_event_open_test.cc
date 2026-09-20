@@ -923,6 +923,145 @@ TEST(PerfEventOpenTest, MmapFirstRecordPageIsValid) {
   }
 }
 
+TEST(PerfEventOpenTest, ThreadSamplingResolvesLinuxPidTid) {
+  if (test_helper::HasSysAdmin()) {
+    pid_t expected_pid = getpid();
+    std::atomic<pid_t> expected_tid = 0;
+    std::atomic<bool> stop_thread = false;
+
+    std::thread worker([&]() {
+      expected_tid.store(static_cast<pid_t>(syscall(__NR_gettid)), std::memory_order_release);
+      while (!stop_thread.load(std::memory_order_relaxed)) {
+        // Repeatedly issue a cheap syscall to keep the thread busy on CPU so the profiler samples
+        // it.
+        syscall(__NR_getpid);
+      }
+    });
+
+    while (expected_tid.load(std::memory_order_acquire) == 0) {
+      std::this_thread::yield();
+    }
+
+    auto join_worker = [&]() {
+      stop_thread.store(true, std::memory_order_release);
+      if (worker.joinable()) {
+        worker.join();
+      }
+    };
+
+    perf_event_attr attr = example_sampling_attr(PERF_SAMPLE_IP | PERF_SAMPLE_TID |
+                                                 PERF_SAMPLE_CALLCHAIN | PERF_SAMPLE_PERIOD);
+    int32_t file_descriptor =
+        sys_perf_event_open(&attr, example_pid, example_cpu, example_group_fd, example_flags);
+    if (file_descriptor == -1) {
+      join_worker();
+      FAIL() << "sys_perf_event_open failed: " << strerror(errno);
+    }
+
+    int num_pages = 256;
+    size_t data_size = num_pages * getpagesize();
+    size_t buffer_size = getpagesize() + data_size;
+
+    void* address =
+        mmap(nullptr, buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, file_descriptor, 0);
+    if (address == MAP_FAILED) {
+      join_worker();
+      syscall(__NR_close, file_descriptor);
+      FAIL() << "mmap failed: " << strerror(errno);
+    }
+
+    perf_event_mmap_page* metadata = static_cast<perf_event_mmap_page*>(address);
+
+    EXPECT_NE(syscall(__NR_ioctl, file_descriptor, PERF_EVENT_IOC_ENABLE), -1);
+
+    auto start = std::chrono::steady_clock::now();
+    auto duration = std::chrono::milliseconds(sample_duration);
+    while (std::chrono::steady_clock::now() - start < duration) {
+      syscall(__NR_getpid);
+    }
+
+    EXPECT_NE(syscall(__NR_ioctl, file_descriptor, PERF_EVENT_IOC_DISABLE), -1);
+
+    join_worker();
+
+    EXPECT_NE(syscall(__NR_close, file_descriptor), EXIT_FAILURE);
+
+    bool read_samples = false;
+    int retries = 0;
+    uint32_t matched_samples = 0;
+
+    std::atomic_ref<__u64> data_head(metadata->data_head);
+    std::atomic_ref<__u64> data_tail(metadata->data_tail);
+
+    while (!read_samples && retries < read_retries) {
+      if (!read_samples) {
+        if (data_head.load(std::memory_order_acquire) <=
+            data_tail.load(std::memory_order_acquire)) {
+          usleep(poll_duration);
+          retries += 1;
+          continue;
+        } else {
+          read_samples = true;
+        }
+      }
+
+      uint64_t curr_pointer = data_tail.load(std::memory_order_acquire);
+
+      while (curr_pointer < data_head.load(std::memory_order_acquire)) {
+        char* record_start = static_cast<char*>(address) + metadata->data_offset + curr_pointer;
+
+        perf_event_header* header = reinterpret_cast<perf_event_header*>(record_start);
+
+        if (header->size == 0) {
+          break;
+        }
+
+        if (header->type == PERF_RECORD_SAMPLE) {
+          EXPECT_THAT(header->misc, testing::AnyOf(testing::Eq(PERF_RECORD_MISC_KERNEL),
+                                                   testing::Eq(PERF_RECORD_MISC_USER)));
+          EXPECT_GE(header->size, static_cast<uint16_t>(8));
+
+          char* record_details_start = record_start + sizeof(perf_event_header);
+
+          struct perf_record_sample {
+            uint64_t ip;
+            uint32_t pid;
+            uint32_t tid;
+            uint64_t sample_period;
+            uint64_t nr;
+          };
+
+          struct perf_record_sample* record_details =
+              reinterpret_cast<struct perf_record_sample*>(record_details_start);
+          EXPECT_GE(record_details->ip, static_cast<uint64_t>(1));
+          EXPECT_GE(record_details->sample_period, static_cast<uint64_t>(250'000));
+          EXPECT_GE(record_details->nr, static_cast<uint64_t>(1));
+          EXPECT_LT(record_details->nr, static_cast<uint64_t>(200));
+
+          if (record_details->pid == static_cast<uint32_t>(expected_pid) &&
+              record_details->tid == static_cast<uint32_t>(expected_tid.load())) {
+            matched_samples++;
+          }
+        }
+
+        curr_pointer += header->size;
+      }
+
+      EXPECT_EQ(curr_pointer, data_head.load(std::memory_order_relaxed));
+      data_tail.store(curr_pointer, std::memory_order_release);
+    }
+
+    if (retries > 0) {
+      printf("Retried reading sample data %u times\n", retries);
+      EXPECT_TRUE(retries <= read_retries && read_samples);
+    }
+
+    EXPECT_GT(matched_samples, static_cast<uint32_t>(0));
+    EXPECT_GT(data_head.load(std::memory_order_acquire), static_cast<uint64_t>(0));
+    EXPECT_EQ(syscall(__NR_munmap, address, buffer_size), 0);
+  }
+}
+
 TEST(PerfEventOpenTest, InvalidDataTailIgnoredByKernel) {
   if (test_helper::HasSysAdmin()) {
     perf_event_attr attr = example_sampling_attr(PERF_SAMPLE_TIME);

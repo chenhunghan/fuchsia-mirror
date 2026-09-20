@@ -7,8 +7,8 @@ use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
 use crate::task::{CurrentTask, Kernel};
 use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
 use crate::vfs::{
-    DirectoryEntryType, DirentSink, FileHandle, FileObject, FsStr, FsString, LookupContext,
-    NamespaceNode, OpenAccessCheck, RenameFlags, SeekTarget, UnlinkKind,
+    DirectoryEntryType, DirectoryMode, DirentSink, FileHandle, FileObject, FsStr, FsString,
+    LookupContext, NamespaceNode, OpenAccessCheck, RenameFlags, SeekTarget, UnlinkKind,
 };
 use fidl::endpoints::{ClientEnd, ServerEnd};
 use fidl_fuchsia_io as fio;
@@ -750,7 +750,13 @@ impl directory::entry_container::MutableDirectory for StarnixNodeConnection {
         self.spawn_task_async(async move |current_task, file| {
             let kind =
                 if must_be_directory { UnlinkKind::Directory } else { UnlinkKind::NonDirectory };
-            file.name.entry.unlink(current_task, &file.name.mount, name.as_ref(), kind, false)
+            file.name.entry.unlink(
+                current_task,
+                &file.name.mount,
+                name.as_ref(),
+                kind,
+                DirectoryMode::AllowAny,
+            )
         })
         .await?;
         Ok(())

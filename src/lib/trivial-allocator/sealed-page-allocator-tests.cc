@@ -148,7 +148,7 @@ TEST(TrivialAllocatorTests, SealedPageAllocatorMmap) {
 
 TEST(TrivialAllocatorTests, SealedPageAllocatorVmar) {
   ASSERT_NO_FATAL_FAILURE(
-      SealedPageAllocatorTest<trivial_allocator::ZirconVmar>(*zx::vmar::root_self()));
+      SealedPageAllocatorTest<trivial_allocator::ZirconVmar<>>(*zx::vmar::root_self()));
 }
 
 #endif

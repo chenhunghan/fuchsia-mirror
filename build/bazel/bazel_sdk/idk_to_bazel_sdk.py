@@ -180,7 +180,7 @@ class BazelRepositoryAttr(object):
         return None
 
     @property
-    def parent_sdk_local_paths(self) -> T.List[T.Any]:
+    def parent_sdk_local_paths(self) -> list[T.Any]:
         return []
 
     @property
@@ -188,7 +188,7 @@ class BazelRepositoryAttr(object):
         return self._name
 
     @property
-    def visibility_templates(self) -> T.Dict[str, str]:
+    def visibility_templates(self) -> dict[str, str]:
         return {}
 
 
@@ -206,10 +206,10 @@ class BazelRepositoryContext(object):
         self._workspace_root = workspace_root
         self._output_dir = output_dir
         self._attr = BazelRepositoryAttr(name)
-        self._bazel_outputs: T.List[Path] = []
+        self._bazel_outputs: list[Path] = []
         self._buildifier = buildifier
         self._copy_files = copy_files
-        self._depfile_inputs: T.Set[str] = set()
+        self._depfile_inputs: set[str] = set()
 
     @property
     def workspace_root(self) -> Path:
@@ -288,7 +288,7 @@ class BazelRepositoryContext(object):
         self,
         path: BazelPath | str,
         template: BazelPath | str,
-        substitutions: T.Dict[str, str],
+        substitutions: dict[str, str],
         executable: bool = True,
     ) -> None:
         """Implement the repository_ctx.template() function."""
@@ -304,7 +304,7 @@ class BazelRepositoryContext(object):
 
         self.file(path, template_output, executable)
 
-    def execute(self, cmd: T.List[str]) -> "subprocess.CompletedProcess[str]":
+    def execute(self, cmd: list[str]) -> "subprocess.CompletedProcess[str]":
         return subprocess.run(cmd, text=True, capture_output=True)
 
     def resolve_workspace_path(self, path: str) -> str:
@@ -329,7 +329,7 @@ class BazelRepositoryContext(object):
 
         assert False, f"Invalid template file label: {template_label}"
 
-    def copy_files(self, files_to_copy: T.Dict[str, T.List[str]]) -> None:
+    def copy_files(self, files_to_copy: dict[str, list[str]]) -> None:
         """Symlink or copy files from one location to another, replicating the relative directory structure
 
         This replicates the logic of symlink_or_copy_files() in //fuchsia/workspace/utils.bzl
@@ -346,7 +346,7 @@ class BazelRepositoryContext(object):
         )
 
         # Maps destination path to source path.
-        all_copies: T.Dict[Path, Path] = {}
+        all_copies: dict[Path, Path] = {}
 
         for src_root, file in unique_files_to_copy:
             dest_path = self._output_dir / file
@@ -374,7 +374,7 @@ class BazelRepositoryContext(object):
     def report_progress(self, message: str) -> None:
         print(message, file=sys.stdout)
 
-    def run_buildifier(self, args: T.List[str]) -> bool:
+    def run_buildifier(self, args: list[str]) -> bool:
         # We are seeing errors in our infrastructure builds that are saying that
         # files have lint errors but when we look at the contents of those files
         # they seem fine. For now, we will retry buildifier if it fails to see if
@@ -389,7 +389,7 @@ class BazelRepositoryContext(object):
         return False
 
     def _inner_run_buildifier(
-        self, args: T.List[str], report_error: bool
+        self, args: list[str], report_error: bool
     ) -> bool:
         if not self._buildifier:
             return True
@@ -477,13 +477,13 @@ class PythonRuntime(object):
     def label_to_path(self, label: str) -> BazelPath:
         return self._ctx.label_to_path(label)
 
-    def file_copier(self, files_to_copy: T.Dict[str, T.List[str]]) -> None:
+    def file_copier(self, files_to_copy: dict[str, list[str]]) -> None:
         self._ctx.copy_files(files_to_copy)
 
     def workspace_path(self, path: str) -> BazelPath:
         return BazelPath(self._ctx.resolve_workspace_path(path))
 
-    def find_repository_files_by_name(self, file_name: str) -> T.List[str]:
+    def find_repository_files_by_name(self, file_name: str) -> list[str]:
         result = []
         for subpath, subdirs, files in os.walk(self._ctx.output_dir):
             for file in files:
@@ -498,7 +498,7 @@ class PythonRuntime(object):
                     )
         return result
 
-    def run_buildifier(self, args: T.List[str]) -> bool:
+    def run_buildifier(self, args: list[str]) -> bool:
         return self._ctx.run_buildifier(args)
 
 

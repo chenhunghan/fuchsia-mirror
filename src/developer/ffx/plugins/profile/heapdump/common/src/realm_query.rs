@@ -74,5 +74,5 @@ pub async fn connect_to_collector(
         .map_err(|err| {
             ffx_error!("Attempting to connect to moniker {moniker} failed with {err:?}",)
         })?;
-    return Ok(proxy);
+    Ok(proxy)
 }

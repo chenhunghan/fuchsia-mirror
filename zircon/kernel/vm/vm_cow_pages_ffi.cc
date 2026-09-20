@@ -107,8 +107,40 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_add_new_pages_locked(
   return cow->AddNewPagesLocked(start_offset, pages, overwrite, zero, deferred);
 }
 
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_zero_pages_locked(
+    VmCowPages* cow, VmCowRange range, bool dirty_track, VmCowPages::DeferredOps* deferred,
+    MultiPageRequest* page_request, uint64_t* out_zeroed_bytes) TA_NO_THREAD_SAFETY_ANALYSIS {
+  auto [status, zeroed_bytes] = cow->ZeroPagesLocked(range, dirty_track, *deferred, page_request);
+  *out_zeroed_bytes = zeroed_bytes;
+  return status;
+}
+
 FFI_ALWAYS_INLINE uint32_t cpp_vm_cow_pages_debug_get_populated_slots_count(const VmCowPages* cow) {
   return cow->DebugGetPopulatedSlotsCount();
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_debug_is_parent_content(const VmCowPages* cow,
+                                                                uint64_t offset) {
+  return cow->DebugIsParentContent(offset);
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_can_borrow(const VmCowPages* cow) {
+  return cow->can_borrow();
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_can_evict(const VmCowPages* cow) {
+  return cow->can_evict();
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_is_discardable(const VmCowPages* cow) {
+  return cow->is_discardable();
+}
+
+FFI_ALWAYS_INLINE VmCowPages* cpp_vm_cow_pages_upgrade_from_raw(VmCowPages* cow) {
+  if (!cow->AddRefMaybeInDestructor()) {
+    return nullptr;
+  }
+  return cow;
 }
 
 }  // extern "C"

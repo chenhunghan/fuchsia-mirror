@@ -4,9 +4,17 @@
 
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("target_2-dml") {
+  dml = "meta/target_2.dml"
+  driver_name = "target_2"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/target_2.bind"
-  deps = [ "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test" ]
+  dml_label = ":target_2-dml"
+  deps = [
+    "//src/devices/bind/fuchsia",
+    "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test",
+  ]
   bind_output = "target_2.bindbc"
 }
 
@@ -22,8 +30,8 @@ fuchsia_cc_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
+  dml_label = ":target_2-dml"
   testonly = true
-  manifest = "meta/target_2.cml"
   component_name = "target_2"
   deps = [ ":driver" ]
   info = "meta/info.json"

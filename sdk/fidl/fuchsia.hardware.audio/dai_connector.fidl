@@ -4,7 +4,7 @@
 library fuchsia.hardware.audio;
 
 /// For an overview of the DAI protocols see
-/// [Digital Audio Interface](//docs/concepts/drivers/driver_architectures/audio_drivers/audio_dai.md)
+/// [Digital Audio Interface](//docs/development/audio/drivers/dai.md)
 /// # Deprecation
 ///
 /// Not supported anymore, instead use an

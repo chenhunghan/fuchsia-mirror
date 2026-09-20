@@ -70,11 +70,19 @@ fuchsia_component("test_runners") {
   component_name = "starnix_test_runners"
 }
 
+resource("mount_syscall_deps") {
+  sources = [ "data/mount_syscall_deps.sh" ]
+  outputs = [ "data/mount_syscall_deps.sh" ]
+}
+
 fuchsia_component("starnix_test_runner") {
   testonly = true
   manifest = "meta/starnix_test_runner.cml"
   component_name = "starnix_test_runner"
-  deps = [ ":bin" ]
+  deps = [
+    ":bin",
+    ":mount_syscall_deps",
+  ]
 }
 
 fuchsia_component("starnix_unit_test_runner") {
@@ -100,7 +108,10 @@ fuchsia_package("starnix-test-runners") {
 }
 
 fuchsia_unittest_package("starnix-test-runner-tests") {
-  deps = [ ":bin_test" ]
+  deps = [
+    ":bin_test",
+    ":mount_syscall_deps",
+  ]
 
   manifest = "meta/starnix_test_runner_tests.cml"
 

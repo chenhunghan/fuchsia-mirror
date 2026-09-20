@@ -128,6 +128,19 @@ TEST(fdf_arena, InitialBufferContains) {
   arena->Destroy();
 }
 
+TEST(fdf_arena, ContainsOverflow) {
+  fdf_arena* arena;
+  ASSERT_EQ(ZX_OK, fdf_arena::Create(0, 'AREN', &arena));
+
+  void* addr = arena->Allocate(0x10000);
+  EXPECT_NOT_NULL(addr);
+
+  // Address that overflows when size is added.
+  EXPECT_FALSE(arena->Contains(reinterpret_cast<void*>(0xFFFFFFFFFFFFFFF0), 0x20));
+
+  arena->Destroy();
+}
+
 TEST(fdf_arena, FidlArena) {
   fdf::Arena arena('TEST');
 

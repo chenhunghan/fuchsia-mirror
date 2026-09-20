@@ -103,14 +103,29 @@ zr::unsafe_pinned_drop_ffi!(RawMutex, cpp_mutex_destroy);
 pub struct RawMutexPolicy;
 
 impl crate::LockPolicy<RawMutex> for RawMutexPolicy {
+    type AcquireArgs = ();
     type GuardState = ();
+
     #[inline]
-    unsafe fn acquire(lock: &RawMutex, entry: *mut LockEntryStorage) -> Self::GuardState {
+    unsafe fn acquire(
+        lock: &RawMutex,
+        entry: *mut LockEntryStorage,
+        _args: (),
+    ) -> Self::GuardState {
         // SAFETY: The FFI call is safe because the lock is initialized, and the caller guarantees
         // that `entry` points to valid storage for a lockdep entry.
         unsafe {
             cpp_mutex_acquire(lock.as_mut_ptr(), entry as *mut c_void);
         }
+    }
+
+    #[inline]
+    unsafe fn reacquire(
+        lock: &RawMutex,
+        entry: *mut LockEntryStorage,
+        state: &mut Self::GuardState,
+    ) {
+        *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
     #[inline]
@@ -189,13 +204,27 @@ zr::unsafe_pinned_drop_ffi!(RawCriticalMutex, cpp_critical_mutex_destroy);
 pub struct RawCriticalMutexPolicy;
 
 impl crate::LockPolicy<RawCriticalMutex> for RawCriticalMutexPolicy {
+    type AcquireArgs = ();
     type GuardState = bool;
 
     #[inline]
-    unsafe fn acquire(lock: &RawCriticalMutex, entry: *mut LockEntryStorage) -> Self::GuardState {
+    unsafe fn acquire(
+        lock: &RawCriticalMutex,
+        entry: *mut LockEntryStorage,
+        _args: (),
+    ) -> Self::GuardState {
         // SAFETY: The FFI call is safe because the lock is initialized, and the caller guarantees
         // that `entry` points to valid storage for a lockdep entry.
         unsafe { cpp_critical_mutex_acquire(lock.as_mut_ptr(), entry as *mut c_void) }
+    }
+
+    #[inline]
+    unsafe fn reacquire(
+        lock: &RawCriticalMutex,
+        entry: *mut LockEntryStorage,
+        state: &mut Self::GuardState,
+    ) {
+        *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
     #[inline]

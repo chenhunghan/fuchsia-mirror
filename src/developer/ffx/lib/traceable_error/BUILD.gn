@@ -13,16 +13,10 @@ rustc_library("lib") {
   sources = [ "src/lib.rs" ]
 }
 
-group("tests") {
-  testonly = true
-  deps = [ ":lib_test" ]
-}
-
 group("traceable_error") {
   testonly = true
   deps = [
     ":lib",
-    ":tests",
     "//src/developer/ffx/lib/traceable_error/derive:tests",
   ]
 }

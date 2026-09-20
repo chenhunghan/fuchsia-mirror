@@ -11,10 +11,8 @@ using fuchsia;
 primary parent "pdev" {
   if fuchsia.COMPATIBLE == "fuchsia,gpio-buttons" {
       true;
-  } else if fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.platform.BIND_PLATFORM_DEV_DID.BUTTONS {
-      true;
   } else {
-      false;
+      fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.platform.BIND_PLATFORM_DEV_DID.BUTTONS;
   }
 }
 

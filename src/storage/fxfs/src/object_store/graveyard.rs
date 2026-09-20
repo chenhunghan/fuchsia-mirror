@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::errors::FxfsError;
+use crate::filesystem::TruncateGuard;
 use crate::log::*;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::merge::{Merger, MergerIterator};
@@ -129,7 +130,7 @@ impl Graveyard {
                     let res = if let Some(attribute_id) = attribute_id {
                         self.tombstone_attribute(store_id, object_id, attribute_id).await
                     } else {
-                        self.tombstone_object(store_id, object_id).await
+                        self.tombstone_object(store_id, object_id, None).await
                     };
                     if let Err(e) = res {
                         error!(
@@ -233,7 +234,12 @@ impl Graveyard {
 
     /// Immediately tombstones (discards) an object in the graveyard.
     /// NB: Code should generally use |queue_tombstone| instead.
-    pub async fn tombstone_object(&self, store_id: u64, object_id: u64) -> Result<(), Error> {
+    pub async fn tombstone_object(
+        &self,
+        store_id: u64,
+        object_id: u64,
+        truncate_guard: Option<&TruncateGuard<'_>>,
+    ) -> Result<(), Error> {
         let store = self
             .object_manager
             .store(store_id)
@@ -245,15 +251,14 @@ impl Graveyard {
             || store_id == self.object_manager.root_store_object_id()
         {
             Options {
-                skip_journal_checks: true,
                 borrow_metadata_space: true,
                 allocator_reservation: Some(self.object_manager.metadata_reservation()),
                 ..Default::default()
             }
         } else {
-            Options { skip_journal_checks: true, borrow_metadata_space: true, ..Default::default() }
+            Options { borrow_metadata_space: true, ..Default::default() }
         };
-        store.tombstone_object(object_id, options).await
+        store.tombstone_object(object_id, options, truncate_guard).await
     }
 
     /// Immediately tombstones (discards) and attribute in the graveyard.
@@ -275,13 +280,12 @@ impl Graveyard {
             || store_id == self.object_manager.root_store_object_id()
         {
             Options {
-                skip_journal_checks: true,
                 borrow_metadata_space: true,
                 allocator_reservation: Some(self.object_manager.metadata_reservation()),
                 ..Default::default()
             }
         } else {
-            Options { skip_journal_checks: true, borrow_metadata_space: true, ..Default::default() }
+            Options { borrow_metadata_space: true, ..Default::default() }
         };
         store.tombstone_attribute(object_id, attribute_id, options).await
     }
@@ -423,11 +427,17 @@ mod tests {
     use crate::errors::FxfsError;
     use crate::filesystem::{FxFilesystem, FxFilesystemBuilder};
     use crate::fsck::fsck;
+    use crate::hooks::Hooks;
     use crate::object_handle::ObjectHandle;
     use crate::object_store::data_object_handle::WRITE_ATTR_BATCH_SIZE;
-    use crate::object_store::object_record::ObjectValue;
+    use crate::object_store::directory::Directory;
+    use crate::object_store::journal::JournalOptions;
+    use crate::object_store::object_record::{AttributeKey, ObjectValue};
     use crate::object_store::transaction::{Options, lock_keys};
-    use crate::object_store::{AttributeId, HandleOptions, Mutation, ObjectKey};
+    use crate::object_store::volume::root_volume;
+    use crate::object_store::{
+        AttributeId, HandleOptions, LockKey, Mutation, NewChildStoreOptions, ObjectKey, Timestamp,
+    };
     use assert_matches::assert_matches;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
@@ -852,5 +862,133 @@ mod tests {
 
         assert_eq!(handle.read_attr(AttributeId::TEST_ID).await.expect("read_attr failed"), None);
         fsck(fs.clone()).await.expect("fsck failed");
+    }
+
+    async fn populate_store(store: &ObjectStore, graveyard: bool, object_count: usize) {
+        let now = Timestamp::now();
+        let graveyard_id = store.graveyard_directory_object_id();
+        let batch_size = 100;
+        for batch_start in (0..object_count).step_by(batch_size) {
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let count = std::cmp::min(batch_size, object_count - batch_start);
+            for i in 0..count {
+                let oid = 1000 + (batch_start + i) as u64;
+                if graveyard {
+                    transaction.add(
+                        store.store_object_id(),
+                        Mutation::insert_object(
+                            ObjectKey::graveyard_entry(graveyard_id, oid),
+                            ObjectValue::Some,
+                        ),
+                    );
+                }
+                transaction.add(
+                    store.store_object_id(),
+                    Mutation::insert_object(
+                        ObjectKey::object(oid),
+                        ObjectValue::file(1, 0, now, now, now, now, None, None),
+                    ),
+                );
+                transaction.add(
+                    store.store_object_id(),
+                    Mutation::insert_object(
+                        ObjectKey::attribute(oid, AttributeId::DATA, AttributeKey::Attribute),
+                        ObjectValue::attribute(0, false),
+                    ),
+                );
+            }
+            transaction.commit().await.expect("commit failed");
+        }
+        store.flush().await.expect("flush failed");
+    }
+
+    // This test verifies that graveyard operations check for journal space before committing
+    // transactions (skip_journal_checks: false). If compactions are paused, graveyard operations
+    // will throttle when journal space runs low and wait for compactions to free space (invoking
+    // the check space callback), rather than borrowing unbounded metadata space.
+    #[fuchsia::test]
+    async fn test_graveyard_borrowed_metadata_space_fails_compaction() {
+        let reclaim_size = 65536;
+        // 200,000 blocks of 512 bytes = 100 MiB device.
+        let device = DeviceHolder::new(FakeDevice::new(200000, TEST_DEVICE_BLOCK_SIZE));
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fs = FxFilesystemBuilder::new()
+            .hooks(fs_hooks)
+            .journal_options(JournalOptions { reclaim_size, ..Default::default() })
+            .format(true)
+            .open(device)
+            .await
+            .expect("open failed");
+
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let num_stores = 9;
+        let objects_per_store = 2000;
+        let mut stores = Vec::with_capacity(num_stores);
+
+        for s in 0..num_stores {
+            let store = root_volume
+                .new_volume(&format!("test_{s}"), NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+            stores.push(store);
+        }
+
+        // Fill stores 0..n-1 with objects and graveyard markers for them.
+        for store in &stores[0..num_stores - 1] {
+            populate_store(store, true, objects_per_store).await;
+        }
+
+        // Last store is populated with surviving objects.
+        let store_last = &stores[num_stores - 1];
+        populate_store(store_last, false, objects_per_store).await;
+
+        // Force a compaction so the journal is empty before compactions are paused.
+        fs.journal().force_compact().await.expect("force_compact failed");
+
+        // Pause compactions so the graveyard would accumulate journal usage past the reclaim limit
+        // if compactions remain paused.
+        fs.journal().pause_compactions().await;
+
+        // Set a callback which will automatically unblock the journal and resume compactions when
+        // waiting for journal space. The idea is that we don't want background compactions to run
+        // while we are flushing the graveyard, but if the graveyard would block on the journal, we
+        // want to unblock it.
+        let journal_clone = fs.journal().clone();
+        hooks.set_waiting_for_journal_space(move || {
+            journal_clone.resume_compactions();
+        });
+
+        for store in &stores[0..num_stores - 1] {
+            let store_id = store.store_object_id();
+            for oid in 1000..1000 + objects_per_store as u64 {
+                fs.graveyard().queue_tombstone_object(store_id, oid);
+            }
+        }
+        fs.graveyard().flush().await;
+
+        // Perform a transaction to store_last to trigger compaction.  If the graveyard properly
+        // blocked on journal space, that should have triggered a blocking compaction and there
+        // should be enough space.  If the graveyard did not ever block on journal space, this will
+        // fail because there will be too much borrowed metadata space.
+        let root_dir_last = Directory::open(store_last, store_last.root_directory_object_id())
+            .await
+            .expect("open root_dir_last failed");
+        let mut transaction = store_last
+            .new_transaction(
+                lock_keys![LockKey::object(
+                    store_last.store_object_id(),
+                    root_dir_last.object_id()
+                )],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        root_dir_last.create_child_file(&mut transaction, "trigger").await.expect("create failed");
+        transaction.commit().await.expect("commit failed");
+
+        fs.close().await.expect("close failed");
     }
 }

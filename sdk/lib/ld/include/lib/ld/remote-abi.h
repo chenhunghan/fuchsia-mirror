@@ -31,10 +31,10 @@ namespace ld {
 template <class RemoteModule, elfldltl::ElfMachine Machine>
 class RemoteAbi {
  public:
-  using Elf = typename RemoteModule::Elf;
+  using Elf = RemoteModule::Elf;
 
-  using size_type = typename Elf::size_type;
-  using Addr = typename Elf::Addr;
+  using size_type = Elf::size_type;
+  using Addr = Elf::Addr;
   using TlsLayout = elfldltl::TlsLayout<Elf>;
 
   using AbiStub = RemoteAbiStub<Elf, Machine>;
@@ -42,8 +42,8 @@ class RemoteAbi {
   using ModuleList = RemoteModule::List;
 
   using LocalAbi = abi::Abi<Elf>;
-  using LocalAbiModule = typename LocalAbi::Module;
-  using LocalRDebug = typename Elf::template RDebug<elfldltl::LocalAbiTraits>;
+  using LocalAbiModule = LocalAbi::Module;
+  using LocalRDebug = Elf::template RDebug<elfldltl::LocalAbiTraits>;
 
   RemoteAbi() = default;
 
@@ -172,16 +172,16 @@ class RemoteAbi {
 
  private:
   using AbiHeap = RemoteAbiHeap<RemoteModule, elfldltl::RemoteAbiTraits>;
-  using AbiStringPtr = typename AbiHeap::template AbiPtr<const char>;
+  using AbiStringPtr = AbiHeap::template AbiPtr<const char>;
 
   using Abi = abi::Abi<Elf, elfldltl::RemoteAbiTraits>;
-  using AbiModule = typename Abi::Module;
-  using AbiModuleSpan = typename AbiHeap::template AbiSpan<AbiModule>;
-  using AbiTlsModule = typename Abi::TlsModule;
-  using RDebug = typename Elf::template RDebug<elfldltl::RemoteAbiTraits>;
-  using LinkMap = typename Elf::template LinkMap<elfldltl::RemoteAbiTraits>;
-  using LinkMapPtr = typename AbiHeap::template AbiPtr<LinkMap>;
-  using LocalLinkMap = typename Elf::template LinkMap<>;
+  using AbiModule = Abi::Module;
+  using AbiModuleSpan = AbiHeap::template AbiSpan<AbiModule>;
+  using AbiTlsModule = Abi::TlsModule;
+  using RDebug = Elf::template RDebug<elfldltl::RemoteAbiTraits>;
+  using LinkMap = Elf::template LinkMap<elfldltl::RemoteAbiTraits>;
+  using LinkMapPtr = AbiHeap::template AbiPtr<LinkMap>;
+  using LocalLinkMap = Elf::template LinkMap<>;
 
   using AbiTranscriber = RemoteAbiTranscriber<Abi>;
   using ModuleTranscriber = RemoteAbiTranscriber<AbiModule>;

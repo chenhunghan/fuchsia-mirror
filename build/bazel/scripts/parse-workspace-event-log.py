@@ -9,7 +9,6 @@ import os
 import shlex
 import subprocess
 import sys
-from typing import Optional
 
 _SCRIPT_DIR = os.path.dirname(__file__)
 _FUCHSIA_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
@@ -18,7 +17,7 @@ sys.path.insert(0, _SCRIPT_DIR)
 import build_utils
 
 
-def find_default_log_file() -> Optional[str]:
+def find_default_log_file() -> str | None:
     """Find the location of the default log file.
 
     Returns:
@@ -68,7 +67,7 @@ def main() -> int:
     if sys.platform.startswith("win"):
         java_binary += ".exe"
 
-    def find_java_binary(jre_path: str) -> Optional[str]:
+    def find_java_binary(jre_path: str) -> str | None:
         path = os.path.join(jre_path, java_binary)
         return path if os.path.exists(path) else None
 

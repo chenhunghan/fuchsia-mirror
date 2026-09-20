@@ -9,6 +9,7 @@ package(
     default_visibility = ["//visibility:public"],
 )
 
+# @bazel2gn:skip
 rustc_library(
     name = "zx-types",
     srcs = ["src/lib.rs"],

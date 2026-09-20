@@ -69,19 +69,21 @@ impl<S: DatagramSocketSpec> SendBufferTracking<S> {
         &self,
         id: &S::SocketId<SocketI, D>,
         buffer: &B,
+        send_token: S::SendToken,
     ) -> Result<TxMetadata<SocketI, D, S>, SendBufferError> {
         // Always penalize the send buffer by the cost of a fixed header.
         let header_len = match WireI::VERSION {
             IpVersion::V4 => packet_formats::ipv4::HDR_PREFIX_LEN,
             IpVersion::V6 => packet_formats::ipv6::IPV6_FIXED_HDR_LEN,
         } + S::FIXED_HEADER_SIZE;
-        self.prepare_for_send_inner(buffer.len() + header_len, id)
+        self.prepare_for_send_inner(buffer.len() + header_len, id, send_token)
     }
 
     fn prepare_for_send_inner<I: IpExt, D: WeakDeviceIdentifier>(
         &self,
         size: usize,
         id: &S::SocketId<I, D>,
+        send_token: S::SendToken,
     ) -> Result<TxMetadata<I, D, S>, SendBufferError> {
         let Self(tracking) = self;
         // System imposes a limit of isize::max length for a single datagram.
@@ -90,6 +92,7 @@ impl<S: DatagramSocketSpec> SendBufferTracking<S> {
         Ok(TxMetadata {
             socket: S::downgrade_socket_id(id),
             space: ManuallyDrop::new(space),
+            _send_token: send_token,
             checksum_offload_result: None,
         })
     }
@@ -102,6 +105,7 @@ impl<S: DatagramSocketSpec> SendBufferTracking<S> {
 pub struct TxMetadata<I: IpExt, D: WeakDeviceIdentifier, S: DatagramSocketSpec> {
     socket: S::WeakSocketId<I, D>,
     space: ManuallyDrop<SendBufferSpace>,
+    _send_token: S::SendToken,
     checksum_offload_result: Option<ChecksumOffloadResult>,
 }
 
@@ -124,7 +128,7 @@ impl<I: IpExt, D: WeakDeviceIdentifier, S: DatagramSocketSpec> TxMetadata<I, D, 
 
 impl<I: IpExt, D: WeakDeviceIdentifier, S: DatagramSocketSpec> Drop for TxMetadata<I, D, S> {
     fn drop(&mut self) {
-        let Self { socket, space, checksum_offload_result: _ } = self;
+        let Self { socket, space, _send_token: _, checksum_offload_result: _ } = self;
         // Take space out and leave the slot in uninitialized state so drop is
         // not called.
         //

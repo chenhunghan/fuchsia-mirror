@@ -11,6 +11,17 @@ compiler_config("x64") {
     "-march=x86-64-v2",
     "-mtune=generic",
   ]
+  if (toolchain_environment == "kernel") {
+    rust_target_edits = [
+      {
+        key = "cpu"
+        action = "set"
+        value = "x86-64-v2"
+      },
+    ]
+  } else {
+    rustflags = [ "-Ctarget-cpu=x86-64-v2" ]
+  }
 
   # TODO(https://fxbug.dev/42168336): the below is for Skylake through Cascade Lake.
   # Not all x86-64 builds need this.

@@ -4,6 +4,7 @@
 
 #include <fidl/fuchsia.hardware.input/cpp/wire_test_base.h>
 #include <lib/driver/testing/cpp/driver_test.h>
+#include <lib/fit/function.h>
 #include <lib/hid/acer12.h>
 #include <lib/hid/ambient-light.h>
 #include <lib/hid/boot.h>
@@ -11,6 +12,7 @@
 #include <lib/hid/gt92xx.h>
 #include <lib/hid/paradise.h>
 #include <lib/hid/usages.h>
+#include <zircon/assert.h>
 
 #include <gtest/gtest.h>
 #include <sdk/lib/inspect/testing/cpp/inspect.h>
@@ -22,6 +24,62 @@ namespace hid_input_report_dev {
 
 namespace fhidbus = fuchsia_hardware_hidbus;
 namespace finput = fuchsia_hardware_input;
+
+class SyncReaderV2EventHandler
+    : public fidl::WireSyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+ public:
+  using Callback = fit::function<void(
+      fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>;
+
+  explicit SyncReaderV2EventHandler(Callback callback = nullptr) : callback_(std::move(callback)) {}
+
+  void OnInputReports(
+      fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) override {
+    last_report_stamp = event->last_report_stamp;
+    if (callback_) {
+      callback_(event);
+    }
+  }
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+  uint64_t last_report_stamp = 0;
+
+ private:
+  Callback callback_;
+};
+
+class TestReaderV2EventHandler
+    : public fidl::WireAsyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+ public:
+  explicit TestReaderV2EventHandler(async::Loop& loop, size_t quit_after_reports = 1)
+      : loop_(loop), quit_after_reports_(quit_after_reports) {}
+
+  void OnInputReports(
+      fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) override {
+    reports_received_ += event->reports.size();
+    last_stamp_ = event->last_report_stamp;
+    events_received_++;
+    if (reports_received_ >= quit_after_reports_) {
+      loop_.Quit();
+    }
+  }
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+  size_t events_received() const { return events_received_; }
+  size_t reports_received() const { return reports_received_; }
+  uint64_t last_stamp() const { return last_stamp_; }
+
+  void set_quit_after_reports(size_t count) { quit_after_reports_ = count; }
+
+ private:
+  async::Loop& loop_;
+  size_t quit_after_reports_;
+  size_t events_received_ = 0;
+  size_t reports_received_ = 0;
+  uint64_t last_stamp_ = 0;
+};
 
 namespace {
 
@@ -198,21 +256,17 @@ class HidDevTest : public ::testing::Test {
         fidl::ClientEnd<fuchsia_input_report::InputDevice>(std::move(connect_result.value())));
   }
 
-  fidl::ClientEnd<fuchsia_input_report::InputReportsReader> GetReader() {
-    return GetReader(GetSyncClient());
-  }
-  fidl::ClientEnd<fuchsia_input_report::InputReportsReader> GetReader(
-      const fidl::WireSyncClient<fuchsia_input_report::InputDevice>& sync_client) {
-    auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-    auto result = sync_client->GetInputReportsReader(std::move(endpoints.server));
-    EXPECT_OK(result.status());
-    sync_completion_t* next_reader_wait;
-    driver_test().RunInDriverContext([&next_reader_wait](InputReportDriver& driver) {
-      next_reader_wait = &driver.input_report_for_testing().next_reader_wait();
-    });
-    EXPECT_OK(sync_completion_wait(next_reader_wait, ZX_TIME_INFINITE));
-    sync_completion_reset(next_reader_wait);
-    return std::move(endpoints.client);
+  zx_status_t ReadAndAcknowledgeOneEvent(
+      fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader,
+      fit::function<
+          void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+          callback) {
+    SyncReaderV2EventHandler handler(std::move(callback));
+    fidl::Status result = reader.HandleOneEvent(handler);
+    if (!result.ok()) {
+      return result.status();
+    }
+    return reader->AcknowledgeReports(handler.last_report_stamp).status();
   }
 
   fidl::ClientEnd<fuchsia_input_report::InputReportsReaderV2> GetReaderV2(
@@ -359,34 +413,38 @@ TEST_F(HidDevTest, ReadInputReportsTest) {
   });
   ASSERT_TRUE(driver_test().StartDriver().is_ok());
 
-  // GetReader() must be called before SendReport() because SendReport() only sends reports to
+  // GetReaderV2() must be called before SendReport() because SendReport() only sends reports to
   // existing readers.
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader(GetReader());
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      GetReaderV2(kDefaultMaxUnacknowledgedReports));
   SendReport(std::vector<uint8_t>{0xFF, 0x50, 0x70});
 
-  auto result = reader->ReadInputReports();
-  ASSERT_OK(result.status());
-  ASSERT_FALSE(result->is_error());
-  auto& reports = result->value()->reports;
+  bool received = false;
+  zx_status_t status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        ASSERT_EQ(1UL, event->reports.size());
 
-  ASSERT_EQ(1UL, reports.size());
+        const fuchsia_input_report::wire::InputReport& report = event->reports[0];
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse = report.mouse();
 
-  auto& report = reports[0];
-  ASSERT_TRUE(report.has_event_time());
-  ASSERT_TRUE(report.has_mouse());
-  auto& mouse = report.mouse();
+        ASSERT_TRUE(mouse.has_movement_x());
+        ASSERT_EQ(0x50, mouse.movement_x());
 
-  ASSERT_TRUE(mouse.has_movement_x());
-  ASSERT_EQ(0x50, mouse.movement_x());
+        ASSERT_TRUE(mouse.has_movement_y());
+        ASSERT_EQ(0x70, mouse.movement_y());
 
-  ASSERT_TRUE(mouse.has_movement_y());
-  ASSERT_EQ(0x70, mouse.movement_y());
-
-  ASSERT_TRUE(mouse.has_pressed_buttons());
-  const fidl::VectorView<uint8_t>& pressed_buttons = mouse.pressed_buttons();
-  for (size_t i = 0; i < pressed_buttons.size(); i++) {
-    ASSERT_EQ(i + 1, pressed_buttons[i]);
-  }
+        ASSERT_TRUE(mouse.has_pressed_buttons());
+        const fidl::VectorView<uint8_t>& pressed_buttons = mouse.pressed_buttons();
+        for (size_t i = 0; i < pressed_buttons.size(); i++) {
+          ASSERT_EQ(i + 1, pressed_buttons[i]);
+        }
+        received = true;
+      });
+  ASSERT_OK(status);
+  ASSERT_TRUE(received);
 }
 
 TEST_F(HidDevTest, ReadInputReportsHangingGetTest) {
@@ -397,35 +455,19 @@ TEST_F(HidDevTest, ReadInputReportsHangingGetTest) {
   });
   ASSERT_TRUE(driver_test().StartDriver().is_ok());
 
-  fidl::WireClient<fuchsia_input_report::InputReportsReader> reader(
-      GetReader(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
-  // Read the report. This will hang until a report is sent.
-  reader->ReadInputReports().ThenExactlyOnce(
-      [&](fidl::WireUnownedResult<fuchsia_input_report::InputReportsReader::ReadInputReports>&
-              response) {
-        ASSERT_OK(response.status());
-        ASSERT_FALSE(response->is_error());
-        auto& reports = response->value()->reports;
-        ASSERT_EQ(1UL, reports.size());
-
-        auto& report = reports[0];
-        ASSERT_TRUE(report.has_event_time());
-        ASSERT_TRUE(report.has_mouse());
-        auto& mouse = report.mouse();
-
-        ASSERT_TRUE(mouse.has_movement_x());
-        ASSERT_EQ(0x50, mouse.movement_x());
-
-        ASSERT_TRUE(mouse.has_movement_y());
-        ASSERT_EQ(0x70, mouse.movement_y());
-        driver_test().runtime().Quit();
-      });
-  driver_test().runtime().RunUntilIdle();
+  async::Loop loop = async::Loop(&kAsyncLoopConfigNeverAttachToThread);
+  fidl::ClientEnd<fuchsia_input_report::InputReportsReaderV2> client_end =
+      GetReaderV2(kDefaultMaxUnacknowledgedReports);
+  TestReaderV2EventHandler event_handler(loop);
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(client_end), loop.dispatcher(), &event_handler);
 
   // Send the report.
   SendReport(std::vector<uint8_t>{0xFF, 0x50, 0x70});
 
-  driver_test().runtime().Run();
+  loop.Run();
+  ASSERT_EQ(1u, event_handler.events_received());
+  ASSERT_EQ(1u, event_handler.reports_received());
 }
 
 TEST_F(HidDevTest, CloseReaderWithOutstandingRead) {
@@ -436,16 +478,14 @@ TEST_F(HidDevTest, CloseReaderWithOutstandingRead) {
   });
   ASSERT_TRUE(driver_test().StartDriver().is_ok());
 
-  fidl::WireClient<fuchsia_input_report::InputReportsReader> reader(
-      GetReader(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  async::Loop loop = async::Loop(&kAsyncLoopConfigNeverAttachToThread);
+  fidl::ClientEnd<fuchsia_input_report::InputReportsReaderV2> client_end =
+      GetReaderV2(kDefaultMaxUnacknowledgedReports);
+  TestReaderV2EventHandler event_handler(loop);
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(client_end), loop.dispatcher(), &event_handler);
 
-  // Queue a report.
-  reader->ReadInputReports().ThenExactlyOnce(
-      [&](fidl::WireUnownedResult<fuchsia_input_report::InputReportsReader::ReadInputReports>&
-              result) { ASSERT_TRUE(result.is_canceled()); });
-  driver_test().runtime().RunUntilIdle();
-
-  // Unbind the reader now that the report is waiting.
+  // Unbind the reader.
   reader = {};
 }
 
@@ -484,7 +524,8 @@ TEST_F(HidDevTest, SensorTest) {
   ASSERT_EQ(sensor_desc.values()[3].type, fuchsia_input_report::wire::SensorType::kLightGreen);
   ASSERT_EQ(sensor_desc.values()[3].axis.unit.type, fuchsia_input_report::wire::UnitType::kNone);
 
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader(GetReader(sync_client));
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      GetReaderV2(sync_client, kDefaultMaxUnacknowledgedReports));
 
   // Create the report.
   ambient_light_input_rpt_t report_data = {};
@@ -502,24 +543,25 @@ TEST_F(HidDevTest, SensorTest) {
   SendReport(ToBinaryVector(report_data));
 
   // Get the report.
-  auto report_result = reader->ReadInputReports();
-  ASSERT_OK(report_result.status());
+  zx_status_t status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+        ASSERT_EQ(1UL, reports.size());
 
-  const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-      report_result->value()->reports;
-  ASSERT_EQ(1UL, reports.size());
+        ASSERT_TRUE(reports[0].has_sensor());
+        const fuchsia_input_report::wire::SensorInputReport& sensor_report = reports[0].sensor();
+        EXPECT_TRUE(sensor_report.has_values());
+        EXPECT_EQ(4UL, sensor_report.values().size());
 
-  ASSERT_TRUE(reports[0].has_sensor());
-  const fuchsia_input_report::wire::SensorInputReport& sensor_report = reports[0].sensor();
-  EXPECT_TRUE(sensor_report.has_values());
-  EXPECT_EQ(4UL, sensor_report.values().size());
-
-  // Check the report.
-  // These will always match the ordering in the descriptor.
-  EXPECT_EQ(kIlluminanceTestVal, sensor_report.values()[0]);
-  EXPECT_EQ(kRedTestVal, sensor_report.values()[1]);
-  EXPECT_EQ(kBlueTestVal, sensor_report.values()[2]);
-  EXPECT_EQ(kGreenTestVal, sensor_report.values()[3]);
+        // Check the report.
+        // These will always match the ordering in the descriptor.
+        EXPECT_EQ(kIlluminanceTestVal, sensor_report.values()[0]);
+        EXPECT_EQ(kRedTestVal, sensor_report.values()[1]);
+        EXPECT_EQ(kBlueTestVal, sensor_report.values()[2]);
+        EXPECT_EQ(kGreenTestVal, sensor_report.values()[3]);
+      });
+  ASSERT_OK(status);
 }
 
 TEST_F(HidDevTest, GetTouchInputReportTest) {
@@ -530,8 +572,9 @@ TEST_F(HidDevTest, GetTouchInputReportTest) {
   });
   ASSERT_TRUE(driver_test().StartDriver().is_ok());
 
-  // Get an InputReportsReader.
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader(GetReader());
+  // Get an InputReportsReaderV2.
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      GetReaderV2(kDefaultMaxUnacknowledgedReports));
 
   // Spoof send a report.
   paradise_touch_t touch_report = {};
@@ -545,24 +588,25 @@ TEST_F(HidDevTest, GetTouchInputReportTest) {
   SendReport(ToBinaryVector(touch_report));
 
   // Get the report.
-  auto report_result = reader->ReadInputReports();
-  ASSERT_OK(report_result.status());
+  zx_status_t touch_status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+        ASSERT_EQ(1UL, reports.size());
 
-  const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-      report_result->value()->reports;
-  ASSERT_EQ(1UL, reports.size());
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
+        const fuchsia_input_report::wire::TouchInputReport& touch = report.touch();
+        ASSERT_TRUE(touch.has_contacts());
+        ASSERT_EQ(1UL, touch.contacts().size());
+        const fuchsia_input_report::wire::ContactInputReport& contact = touch.contacts()[0];
 
-  const auto& report = reports[0];
-  const auto& touch = report.touch();
-  ASSERT_TRUE(touch.has_contacts());
-  ASSERT_EQ(1UL, touch.contacts().size());
-  const auto& contact = touch.contacts()[0];
+        ASSERT_TRUE(contact.has_position_x());
+        ASSERT_EQ(2500, contact.position_x());
 
-  ASSERT_TRUE(contact.has_position_x());
-  ASSERT_EQ(2500, contact.position_x());
-
-  ASSERT_TRUE(contact.has_position_y());
-  ASSERT_EQ(5000, contact.position_y());
+        ASSERT_TRUE(contact.has_position_y());
+        ASSERT_EQ(5000, contact.position_y());
+      });
+  ASSERT_OK(touch_status);
 }
 
 TEST_F(HidDevTest, GetTouchPadDescTest) {
@@ -593,8 +637,9 @@ TEST_F(HidDevTest, KeyboardTest) {
   });
   ASSERT_TRUE(driver_test().StartDriver().is_ok());
 
-  // Get an InputReportsReader.
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader(GetReader());
+  // Get an InputReportsReaderV2.
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      GetReaderV2(kDefaultMaxUnacknowledgedReports));
 
   // Spoof send a report.
   hid_boot_kbd_report keyboard_report = {};
@@ -605,19 +650,20 @@ TEST_F(HidDevTest, KeyboardTest) {
   SendReport(ToBinaryVector(keyboard_report));
 
   // Get the report.
-  auto report_result = reader->ReadInputReports();
-  ASSERT_OK(report_result.status());
+  zx_status_t kbd_status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+        ASSERT_EQ(1UL, reports.size());
 
-  const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-      report_result->value()->reports;
-  ASSERT_EQ(1UL, reports.size());
-
-  const auto& report = reports[0];
-  const auto& keyboard = report.keyboard();
-  ASSERT_EQ(3UL, keyboard.pressed_keys3().size());
-  EXPECT_EQ(fuchsia_input::wire::Key::kA, keyboard.pressed_keys3()[0]);
-  EXPECT_EQ(fuchsia_input::wire::Key::kUp, keyboard.pressed_keys3()[1]);
-  EXPECT_EQ(fuchsia_input::wire::Key::kB, keyboard.pressed_keys3()[2]);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
+        const fuchsia_input_report::wire::KeyboardInputReport& keyboard = report.keyboard();
+        ASSERT_EQ(3UL, keyboard.pressed_keys3().size());
+        EXPECT_EQ(fuchsia_input::wire::Key::kA, keyboard.pressed_keys3()[0]);
+        EXPECT_EQ(fuchsia_input::wire::Key::kUp, keyboard.pressed_keys3()[1]);
+        EXPECT_EQ(fuchsia_input::wire::Key::kB, keyboard.pressed_keys3()[2]);
+      });
+  ASSERT_OK(kbd_status);
 }
 
 TEST_F(HidDevTest, KeyboardOutputReportTest) {
@@ -688,7 +734,21 @@ TEST_F(HidDevTest, ConsumerControlTest) {
   ASSERT_EQ(consumer_control_desc.buttons()[4],
             fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
 
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader(GetReader(sync_client));
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      GetReaderV2(sync_client, kDefaultMaxUnacknowledgedReports));
+
+  // Check the initial report.
+  zx_status_t init_status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        ASSERT_EQ(1UL, event->reports.size());
+        ASSERT_TRUE(event->reports[0].has_consumer_control());
+        const fuchsia_input_report::wire::ConsumerControlInputReport& report =
+            event->reports[0].consumer_control();
+        EXPECT_TRUE(report.has_pressed_buttons());
+        EXPECT_EQ(0UL, report.pressed_buttons().size());
+      });
+  ASSERT_OK(init_status);
 
   // Create another report.
   struct buttons_input_rpt report = {};
@@ -699,36 +759,25 @@ TEST_F(HidDevTest, ConsumerControlTest) {
 
   SendReport(ToBinaryVector(report));
 
-  // Get the report.
-  auto report_result = reader->ReadInputReports();
-  ASSERT_OK(report_result.status());
-
-  const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-      report_result->value()->reports;
-  ASSERT_EQ(2UL, reports.size());
-
-  // Check the initial report.
-  {
-    ASSERT_TRUE(reports[0].has_consumer_control());
-    const auto& report = reports[0].consumer_control();
-    EXPECT_TRUE(report.has_pressed_buttons());
-    EXPECT_EQ(0UL, report.pressed_buttons().size());
-  }
-
   // Check the second report.
-  {
-    ASSERT_TRUE(reports[1].has_consumer_control());
-    const auto& report = reports[1].consumer_control();
-    EXPECT_TRUE(report.has_pressed_buttons());
-    EXPECT_EQ(3UL, report.pressed_buttons().size());
+  zx_status_t report_status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        ASSERT_EQ(1UL, event->reports.size());
+        ASSERT_TRUE(event->reports[0].has_consumer_control());
+        const fuchsia_input_report::wire::ConsumerControlInputReport& report =
+            event->reports[0].consumer_control();
+        EXPECT_TRUE(report.has_pressed_buttons());
+        EXPECT_EQ(3UL, report.pressed_buttons().size());
 
-    EXPECT_EQ(report.pressed_buttons()[0],
-              fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
-    EXPECT_EQ(report.pressed_buttons()[1],
-              fuchsia_input_report::wire::ConsumerControlButton::kFactoryReset);
-    EXPECT_EQ(report.pressed_buttons()[2],
-              fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
-  }
+        EXPECT_EQ(report.pressed_buttons()[0],
+                  fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+        EXPECT_EQ(report.pressed_buttons()[1],
+                  fuchsia_input_report::wire::ConsumerControlButton::kFactoryReset);
+        EXPECT_EQ(report.pressed_buttons()[2],
+                  fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
+      });
+  ASSERT_OK(report_status);
 }
 
 TEST_F(HidDevTest, ConsumerControlTwoClientsTest) {
@@ -747,33 +796,33 @@ TEST_F(HidDevTest, ConsumerControlTwoClientsTest) {
   // Open the device.
   auto client = GetSyncClient();
 
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader1(GetReader(client));
-  {
-    auto report_result = reader1->ReadInputReports();
-    ASSERT_OK(report_result.status());
-    const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-        report_result->value()->reports;
-    ASSERT_EQ(1UL, reports.size());
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader1(
+      GetReaderV2(client, kDefaultMaxUnacknowledgedReports));
+  zx_status_t status1 = ReadAndAcknowledgeOneEvent(
+      reader1,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        ASSERT_EQ(1UL, event->reports.size());
+        ASSERT_TRUE(event->reports[0].has_consumer_control());
+        const fuchsia_input_report::wire::ConsumerControlInputReport& report =
+            event->reports[0].consumer_control();
+        EXPECT_TRUE(report.has_pressed_buttons());
+        EXPECT_EQ(0UL, report.pressed_buttons().size());
+      });
+  ASSERT_OK(status1);
 
-    ASSERT_TRUE(reports[0].has_consumer_control());
-    const auto& report = reports[0].consumer_control();
-    EXPECT_TRUE(report.has_pressed_buttons());
-    EXPECT_EQ(0UL, report.pressed_buttons().size());
-  }
-
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> reader2(GetReader(client));
-  {
-    auto report_result = reader2->ReadInputReports();
-    ASSERT_OK(report_result.status());
-    const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-        report_result->value()->reports;
-    ASSERT_EQ(1UL, reports.size());
-
-    ASSERT_TRUE(reports[0].has_consumer_control());
-    const auto& report = reports[0].consumer_control();
-    EXPECT_TRUE(report.has_pressed_buttons());
-    EXPECT_EQ(0UL, report.pressed_buttons().size());
-  }
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader2(
+      GetReaderV2(client, kDefaultMaxUnacknowledgedReports));
+  zx_status_t status2 = ReadAndAcknowledgeOneEvent(
+      reader2,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        ASSERT_EQ(1UL, event->reports.size());
+        ASSERT_TRUE(event->reports[0].has_consumer_control());
+        const fuchsia_input_report::wire::ConsumerControlInputReport& report =
+            event->reports[0].consumer_control();
+        EXPECT_TRUE(report.has_pressed_buttons());
+        EXPECT_EQ(0UL, report.pressed_buttons().size());
+      });
+  ASSERT_OK(status2);
 
   // Create another report.
   struct buttons_input_rpt report = {};
@@ -785,42 +834,43 @@ TEST_F(HidDevTest, ConsumerControlTwoClientsTest) {
   SendReport(std::vector<uint8_t>(reinterpret_cast<uint8_t*>(&report),
                                   reinterpret_cast<uint8_t*>(&report) + sizeof(report)));
 
-  {
-    auto report_result = reader1->ReadInputReports();
-    ASSERT_OK(report_result.status());
-    const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-        report_result->value()->reports;
-    ASSERT_EQ(1UL, reports.size());
-    ASSERT_TRUE(reports[0].has_consumer_control());
-    const auto& report = reports[0].consumer_control();
-    EXPECT_TRUE(report.has_pressed_buttons());
-    EXPECT_EQ(3UL, report.pressed_buttons().size());
+  zx_status_t status3 = ReadAndAcknowledgeOneEvent(
+      reader1,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        ASSERT_EQ(1UL, event->reports.size());
+        ASSERT_TRUE(event->reports[0].has_consumer_control());
+        const fuchsia_input_report::wire::ConsumerControlInputReport& report =
+            event->reports[0].consumer_control();
+        EXPECT_TRUE(report.has_pressed_buttons());
+        EXPECT_EQ(3UL, report.pressed_buttons().size());
 
-    EXPECT_EQ(report.pressed_buttons()[0],
-              fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
-    EXPECT_EQ(report.pressed_buttons()[1],
-              fuchsia_input_report::wire::ConsumerControlButton::kFactoryReset);
-    EXPECT_EQ(report.pressed_buttons()[2],
-              fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
-  }
-  {
-    auto report_result = reader2->ReadInputReports();
-    ASSERT_OK(report_result.status());
-    const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports =
-        report_result->value()->reports;
-    ASSERT_EQ(1UL, reports.size());
-    ASSERT_TRUE(reports[0].has_consumer_control());
-    const auto& report = reports[0].consumer_control();
-    EXPECT_TRUE(report.has_pressed_buttons());
-    EXPECT_EQ(3UL, report.pressed_buttons().size());
+        EXPECT_EQ(report.pressed_buttons()[0],
+                  fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+        EXPECT_EQ(report.pressed_buttons()[1],
+                  fuchsia_input_report::wire::ConsumerControlButton::kFactoryReset);
+        EXPECT_EQ(report.pressed_buttons()[2],
+                  fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
+      });
+  ASSERT_OK(status3);
 
-    EXPECT_EQ(report.pressed_buttons()[0],
-              fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
-    EXPECT_EQ(report.pressed_buttons()[1],
-              fuchsia_input_report::wire::ConsumerControlButton::kFactoryReset);
-    EXPECT_EQ(report.pressed_buttons()[2],
-              fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
-  }
+  zx_status_t status4 = ReadAndAcknowledgeOneEvent(
+      reader2,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        ASSERT_EQ(1UL, event->reports.size());
+        ASSERT_TRUE(event->reports[0].has_consumer_control());
+        const fuchsia_input_report::wire::ConsumerControlInputReport& report =
+            event->reports[0].consumer_control();
+        EXPECT_TRUE(report.has_pressed_buttons());
+        EXPECT_EQ(3UL, report.pressed_buttons().size());
+
+        EXPECT_EQ(report.pressed_buttons()[0],
+                  fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+        EXPECT_EQ(report.pressed_buttons()[1],
+                  fuchsia_input_report::wire::ConsumerControlButton::kFactoryReset);
+        EXPECT_EQ(report.pressed_buttons()[2],
+                  fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
+      });
+  ASSERT_OK(status4);
 }
 
 TEST_F(HidDevTest, TouchLatencyMeasurements) {
@@ -899,38 +949,6 @@ TEST_F(HidDevTest, InspectDeviceTypes) {
     EXPECT_STREQ(device_types->value().c_str(), "touch,touch,mouse");
   });
 }
-
-class TestReaderV2EventHandler
-    : public fidl::WireAsyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
- public:
-  explicit TestReaderV2EventHandler(async::Loop& loop, size_t quit_after_reports = 1)
-      : loop_(loop), quit_after_reports_(quit_after_reports) {}
-
-  void OnInputReports(
-      fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) override {
-    reports_received_ += event->reports.size();
-    last_stamp_ = event->last_report_stamp;
-    events_received_++;
-    if (reports_received_ >= quit_after_reports_) {
-      loop_.Quit();
-    }
-  }
-  void handle_unknown_event(
-      fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
-
-  size_t events_received() const { return events_received_; }
-  size_t reports_received() const { return reports_received_; }
-  uint64_t last_stamp() const { return last_stamp_; }
-
-  void set_quit_after_reports(size_t count) { quit_after_reports_ = count; }
-
- private:
-  async::Loop& loop_;
-  size_t quit_after_reports_;
-  size_t events_received_ = 0;
-  size_t reports_received_ = 0;
-  uint64_t last_stamp_ = 0;
-};
 
 TEST_F(HidDevTest, ReaderV2) {
   driver_test().RunInEnvironmentTypeContext([](InputReportTestEnvironment& env) {

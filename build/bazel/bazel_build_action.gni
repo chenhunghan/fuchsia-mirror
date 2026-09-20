@@ -71,10 +71,6 @@ import("//build/bazel/bazel_action.gni")
 #
 #     Each scope uses the following schema:
 #
-#       bazel_target  (optional)
-#          A Bazel target label generating the directory. Must be reachable from
-#          one of the bazel_targets labels. Defaults to bazel_targets[0].
-#
 #       bazel_dir  (required)
 #          A path string to the location of the directory, relative to the
 #          Bazel workspace. This can use the same substitution expressions
@@ -107,8 +103,7 @@ import("//build/bazel/bazel_action.gni")
 #
 #          package_label: (required)
 #             A bazel label to a fuchsia_package() or fuchsia_test_package()
-#             target. This target must be reachable from one of the labels
-#             listed in the top-level bazel_targets argument.
+#             target. This target must be reachable from the bazel_target argument.
 #
 #          archive: (required)
 #             output path for the package's archive, relative to $target_out_dir.
@@ -210,7 +205,7 @@ template("bazel_build_action") {
   }
 
   bazel_action(target_name) {
-    bazel_targets = [ invoker.bazel_target ]
+    bazel_target = invoker.bazel_target
     command = "build"
 
     forward_variables_from(invoker, "*", [ "bazel_target" ])

@@ -8,7 +8,6 @@
 #include <fidl/fuchsia.boot.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.driver.framework/cpp/fidl.h>
 #include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
-#include <fidl/fuchsia.hardware.interconnect/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.power/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.dci/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/wire.h>
@@ -59,6 +58,10 @@ class PlatformExtension {
   virtual zx::result<> Start() = 0;
   virtual zx::result<> Suspend() = 0;
   virtual zx::result<> Resume() = 0;
+  virtual bool PowersDownCoreOnDisconnect() const { return true; }
+  virtual zx::result<> SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed speed) {
+    return zx::ok();
+  }
 };
 
 // Some platforms support fully powering down the dwc3 core. When powered down, accessing the MMIO
@@ -534,11 +537,15 @@ class Dwc3 : public fdf::DriverBase2,
 
   // Returns true if PHY power is on and the controller has been started by the client.
   bool is_active() const { return power_on_ && controller_started_; }
+  fuchsia_hardware_usb_descriptor::UsbSpeed connection_speed() const { return connection_speed_; }
 
   // True if the EndTransfer core command can be polled via CmdAct instead of waiting on a
   // CommandComplete endpoint irq event. Only available to core versions >= 3.10a. Set during
   // initialization based on core version.
   bool poll_end_xfer_{false};
+
+  fuchsia_hardware_usb_descriptor::UsbSpeed connection_speed_{
+      fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined};
 
   Ep0 ep0_;
   UserEndpointCollection user_endpoints_;
@@ -547,7 +554,6 @@ class Dwc3 : public fdf::DriverBase2,
   std::unique_ptr<PlatformExtension> platform_extension_;
 
   fidl::SyncClient<fuchsia_hardware_usb_phy::UsbPhy> phy_;
-  fidl::SyncClient<fuchsia_hardware_interconnect::Path> interconnect_client_;
   fidl::Client<fuchsia_hardware_usb_phy::ConnectionWatcher> connection_watcher_;
   zx::eventpair connection_lease_;
 

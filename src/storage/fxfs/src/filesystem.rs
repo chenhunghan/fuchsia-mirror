@@ -451,7 +451,11 @@ impl FxFilesystemBuilder {
         }
 
         let objects = Arc::new(ObjectManager::new(self.on_new_store));
-        let journal = Arc::new(Journal::new(objects.clone(), self.journal_options));
+        let journal = Arc::new(Journal::new(
+            objects.clone(),
+            self.journal_options,
+            self.options.hooks.clone(),
+        ));
 
         let image_builder_mode = self.options.image_builder_mode;
 
@@ -1072,6 +1076,14 @@ impl FxFilesystem {
         TruncateGuard(self.lock_manager().write_lock(keys).await)
     }
 
+    pub async fn truncate_guard_owned(
+        self: &Arc<Self>,
+        store_id: u64,
+        object_id: u64,
+    ) -> TruncateGuard<'static> {
+        self.truncate_guard(store_id, object_id).await.into_owned(self.clone())
+    }
+
     async fn populate_stores_node(&self) -> Result<Inspector, Error> {
         let inspector = fuchsia_inspect::Inspector::default();
         let root = inspector.root();
@@ -1095,6 +1107,12 @@ impl FxFilesystem {
 /// A wrapper around a guard that needs to be taken when truncating an object.
 #[allow(dead_code)]
 pub struct TruncateGuard<'a>(WriteGuard<'a>);
+
+impl<'a> TruncateGuard<'a> {
+    pub fn into_owned(self, fs: Arc<FxFilesystem>) -> TruncateGuard<'static> {
+        TruncateGuard(self.0.into_owned(fs))
+    }
+}
 
 /// Helper method for making a new filesystem.
 pub async fn mkfs(device: DeviceHolder) -> Result<DeviceHolder, Error> {
@@ -1481,7 +1499,7 @@ mod tests {
 
         // Finally tombstone the object.
         root_store
-            .tombstone_object(object.object_id(), Options::default())
+            .tombstone_object(object.object_id(), Options::default(), None)
             .await
             .expect("tombstone failed");
 
@@ -2608,7 +2626,7 @@ mod tests {
                 .expect("delete failed");
             transaction.commit().await.expect("commit failed");
             fs.root_store()
-                .tombstone_object(handle.object_id(), Options::default())
+                .tombstone_object(handle.object_id(), Options::default(), None)
                 .await
                 .expect("tombstone failed");
         }

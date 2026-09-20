@@ -48,7 +48,7 @@ mod vmo_rs {
     use fbl::{RefPtr, Vector};
     use page::SIZE as PAGE_SIZE_USIZE;
     use pin_init::stack_pin_init;
-    use rand::Rng;
+    use rand::RngExt as _;
     use unittest::{
         assert_eq, assert_false, assert_ge, assert_le, assert_lt, assert_ok, assert_true,
         expect_eq, expect_false, expect_gt, expect_le, expect_ne, expect_ok, expect_true,
@@ -1337,21 +1337,21 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Rotate the queues and check the page moves.
         pmm::page_queues().rotate_reclaim_queues();
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(1, queue.0);
+        expect_eq!(1, queue);
 
         // Touching the page should move it back to the first queue.
         unwrap_ok!(vmo.get_page_blocking(0, fault::flag::SW_FAULT));
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Touching pages in a child should also move the page to the front of the queues.
         let child = unwrap_ok!(vmo.create_clone(
@@ -1366,17 +1366,17 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
         pmm::page_queues().rotate_reclaim_queues();
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(1, queue.0);
+        expect_eq!(1, queue);
         unwrap_ok!(child.get_page_blocking(0, fault::flag::SW_FAULT));
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
     }
 
     /// Tests memory attribution under various cloning behaviors.
@@ -2277,7 +2277,7 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) };
         expect_true!(queue.is_some());
-        expect_eq!(0, queue.unwrap().0);
+        expect_eq!(0, queue.unwrap());
 
         // Now simulate a write to the page. This should move the page to the dirty queue.
         assert_ok!(vmo.dirty_pages(0, PAGE_SIZE));
@@ -2320,7 +2320,7 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) };
         expect_true!(queue.is_some());
-        expect_eq!(0, queue.unwrap().0);
+        expect_eq!(0, queue.unwrap());
 
         // Eviction should fail still because we hinted AlwaysNeed previously.
         // SAFETY: It is sound to attempt to reclaim `page` at offset 0.
@@ -2334,7 +2334,7 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) };
         expect_true!(queue.is_some());
-        expect_eq!(0, queue.unwrap().0);
+        expect_eq!(0, queue.unwrap());
 
         // Eviction should succeed if we ignore the hint.
         // SAFETY: It is sound to reclaim `page` at offset 0.
@@ -2353,7 +2353,7 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) };
         expect_true!(queue.is_some());
-        expect_eq!(0, queue.unwrap().0);
+        expect_eq!(0, queue.unwrap());
 
         // Hint DontNeed on the page. This should move the page to the Isolate queue.
         assert_ok!(vmo.hint_range(0, PAGE_SIZE, EvictionHint::DontNeed));
@@ -2568,21 +2568,21 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) };
         expect_true!(queue.is_some());
-        expect_eq!(0, queue.unwrap().0);
+        expect_eq!(0, queue.unwrap());
 
         // Rotate the queues and check the page moves.
         pmm::page_queues().rotate_reclaim_queues();
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) };
         expect_true!(queue.is_some());
-        expect_eq!(1, queue.unwrap().0);
+        expect_eq!(1, queue.unwrap());
 
         // Accessing the page should move it back to the first queue.
         unwrap_ok!(vmo.get_page_blocking(0, fault::flag::SW_FAULT));
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) };
         expect_true!(queue.is_some());
-        expect_eq!(0, queue.unwrap().0);
+        expect_eq!(0, queue.unwrap());
 
         // Now simulate a write to the page. This should move the page to the dirty queue.
         unwrap_ok!(vmo.dirty_pages(0, PAGE_SIZE));
@@ -2622,7 +2622,7 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Now simulate a write to the page. This should move the page to the dirty queue.
         assert_ok!(vmo.dirty_pages(0, PAGE_SIZE));
@@ -2676,14 +2676,14 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // We should be able to rotate the page as usual.
         pmm::page_queues().rotate_reclaim_queues();
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(1, queue.0);
+        expect_eq!(1, queue);
 
         // Another write moves the page back to the Dirty queue.
         assert_ok!(vmo.dirty_pages(0, PAGE_SIZE));
@@ -2700,7 +2700,7 @@ mod vmo_rs {
         // SAFETY: `page` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(page) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // We should now be able to evict the page.
         // SAFETY: It is sound to reclaim `page` at offset 0.
@@ -2829,7 +2829,7 @@ mod vmo_rs {
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Hint that first page is not needed.
         assert_ok!(vmo.hint_range(0, PAGE_SIZE, EvictionHint::DontNeed));
@@ -2852,7 +2852,7 @@ mod vmo_rs {
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // We should not be able to evict the page.
         // SAFETY: `pages[0]` is attached to `vmo` at offset 0.
@@ -2888,21 +2888,21 @@ mod vmo_rs {
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Verify that the page can be rotated as normal.
         pmm::page_queues().rotate_reclaim_queues();
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(1, queue.0);
+        expect_eq!(1, queue);
 
         // Touching the page should move it back to the first queue.
         unwrap_ok!(vmo.get_page_blocking(0, fault::flag::SW_FAULT));
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // We should be able to evict first page when told to override the hint.
         // SAFETY: `pages[0]` is attached to `vmo` at offset 0.
@@ -2976,11 +2976,11 @@ mod vmo_rs {
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
         // SAFETY: `pages[1]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[1]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Create a clone.
         let clone = unwrap_ok!(vmo.create_clone(
@@ -3013,7 +3013,7 @@ mod vmo_rs {
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Evicting the page should fail.
         // SAFETY: `pages[0]` is attached to `vmo` at offset 0.
@@ -3053,7 +3053,7 @@ mod vmo_rs {
         // SAFETY: `pages[0]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[0]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Evicting the page should fail.
         // SAFETY: `pages[0]` is attached to `vmo` at offset 0.
@@ -3153,7 +3153,7 @@ mod vmo_rs {
         // SAFETY: `pages[1]` is attached to `vmo`.
         let queue = unsafe { pmm::page_queues().debug_page_is_reclaim(pages[1]) }
             .expect("page is in reclaim queue");
-        expect_eq!(0, queue.0);
+        expect_eq!(0, queue);
 
         // Hint DontNeed through clone 3.
         assert_ok!(clone3.hint_range(PAGE_SIZE, PAGE_SIZE, EvictionHint::DontNeed));
@@ -3322,7 +3322,7 @@ mod vmo_rs {
 
         // Reclamation should drop the number of committed pages.
         expect_true!(make_private_attribution_counts(PAGE_SIZE, 0) == vmo.get_attributed_memory());
-        expect_true!(verify_continuous_attribution_bytes(&vmo, alloc_size));
+        expect_true!(verify_continuous_attribution_bytes(&vmo, PAGE_SIZE));
         // SAFETY: It is sound to reclaim `page` at offset 0.
         assert_eq!(unsafe { reclaim(&vmo, page, 0, EvictionAction::FollowHint) }, 1);
         expect_true!(attribution::zero() == vmo.get_attributed_memory());

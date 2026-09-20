@@ -13,6 +13,7 @@ import (
 
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/config"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate"
 )
 
 func TestPolicyRenderer_Run(t *testing.T) {
@@ -24,6 +25,10 @@ func TestPolicyRenderer_Run(t *testing.T) {
 		{
 			CheckName: config.PolicyCheckAllProjectsMustHaveALicense,
 			Project:   "src/foo/bar",
+		},
+		{
+			CheckName: validate.PolicyNoReadme,
+			Project:   "third_party/no_readme_lib",
 		},
 		{
 			CheckName: config.PolicyCheckAllLicenseTextsMustBeRecognized,
@@ -55,5 +60,16 @@ func TestPolicyRenderer_Run(t *testing.T) {
 	}
 	if !strings.Contains(string(content2), "third_party/some_lib/LICENSE") {
 		t.Errorf("Expected config to contain 'third_party/some_lib/LICENSE', got:\n%s", string(content2))
+	}
+
+	// 3. Verify missing readme exception
+	baseName3 := cfg.FindProjectBasename("third_party/no_readme_lib")
+	expectedConfig3 := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "policy_exceptions", validate.PolicyNoReadme, baseName3+".json")
+	content3, err := os.ReadFile(expectedConfig3)
+	if err != nil {
+		t.Fatalf("Failed to read generated policy exception config at %s: %v", expectedConfig3, err)
+	}
+	if !strings.Contains(string(content3), "third_party/no_readme_lib") {
+		t.Errorf("Expected config to contain 'third_party/no_readme_lib', got:\n%s", string(content3))
 	}
 }

@@ -11,8 +11,9 @@ import dataclasses
 import json
 import os
 import sys
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Sequence
+from typing import Any
 
 import tablefmt
 
@@ -149,7 +150,7 @@ def build_metric_row(
     data_source: dict[str, int],  # [action_category]: number
     column_headers: Sequence[str],
     include_header: bool = True,
-    formatter: Optional[Callable[[int], str]] = None,
+    formatter: Callable[[int], str] | None = None,
 ) -> Sequence[Sequence[str | int]]:
     """Construct one 1xN array (row) of data."""
     row = tablefmt.create_row(len(column_headers) + 1)

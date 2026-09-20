@@ -11,8 +11,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-hrtimer-dml") {
+  dml = "meta/aml-hrtimer.dml"
+  driver_name = "aml-hrtimer"
+}
+
 driver_bind_rules("aml-hrtimer-bind") {
-  rules = "meta/aml-hrtimer.bind"
+  dml_label = ":aml-hrtimer-dml"
   bind_output = "aml-hrtimer.bindbc"
   tests = "meta/bind-tests.json"
   deps = [
@@ -35,7 +40,7 @@ fuchsia_component_manifest("aml-hrtimer-manifest") {
 }
 
 fuchsia_driver_component("aml-hrtimer") {
-  cm_label = ":aml-hrtimer-manifest"
+  dml_label = ":aml-hrtimer-dml"
   deps = [ ":aml-hrtimer-driver" ]
   info = "meta/aml-hrtimer-info.json"
 }

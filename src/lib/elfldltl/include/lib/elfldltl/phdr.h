@@ -18,6 +18,7 @@
 #include "diagnostics.h"
 #include "internal/no_unique_address.h"
 #include "internal/phdr-error.h"
+#include "layout.h"
 #include "memory.h"
 
 namespace elfldltl {
@@ -41,10 +42,10 @@ constexpr auto ReadPhdrsFromFile(
     Allocator&& allocator, const Ehdr& ehdr) {
   using namespace std::literals::string_view_literals;
 
-  using Elf = typename Ehdr::ElfLayout;
-  using size_type = typename Elf::size_type;
-  using Phdr = typename Elf::Phdr;
-  using Shdr = typename Elf::Shdr;
+  using Elf = Ehdr::ElfLayout;
+  using size_type = Elf::size_type;
+  using Phdr = Elf::Phdr;
+  using Shdr = Elf::Shdr;
 
   const size_type phoff = ehdr.phoff;
   auto read_phdrs = [&](size_t phnum) {
@@ -211,10 +212,10 @@ constexpr bool DecodePhdr(Diagnostics&& diagnostics, const Phdr& phdr,
   return ok;
 }
 
-template <class Elf>
+template <ElfApi Elf>
 class PhdrNullObserver : public PhdrObserver<PhdrNullObserver<Elf>, ElfPhdrType::kNull> {
  public:
-  using Phdr = typename Elf::Phdr;
+  using Phdr = Elf::Phdr;
 
   template <class Diagnostics>
   constexpr bool Observe(Diagnostics& diagnostics, PhdrTypeMatch<ElfPhdrType::kNull> type,
@@ -231,10 +232,10 @@ class PhdrNullObserver : public PhdrObserver<PhdrNullObserver<Elf>, ElfPhdrType:
 // A class of observer corresponding to the simpler segment metadata types:
 // it merely stores any program header that it sees at the provided reference,
 // complaining if it observes more than one segment of the same type.
-template <class Elf, ElfPhdrType Type>
+template <ElfApi Elf, ElfPhdrType Type>
 class PhdrSingletonObserver : public PhdrObserver<PhdrSingletonObserver<Elf, Type>, Type> {
  public:
-  using Phdr = typename Elf::Phdr;
+  using Phdr = Elf::Phdr;
 
   explicit PhdrSingletonObserver(std::optional<Phdr>& phdr) : phdr_(phdr) {}
 
@@ -267,12 +268,12 @@ class PhdrSingletonObserver : public PhdrObserver<PhdrSingletonObserver<Elf, Typ
 // executable; if CanBeExecutable is false, then Finish() gives an error if no
 // header is found or if it reports that the stack is executable (i.e., if
 // PF_X is set).
-template <class Elf, bool CanBeExecutable = false>
+template <ElfApi Elf, bool CanBeExecutable = false>
 class PhdrStackObserver : public PhdrSingletonObserver<Elf, ElfPhdrType::kStack> {
  private:
   using Base = PhdrSingletonObserver<Elf, ElfPhdrType::kStack>;
-  using size_type = typename Elf::size_type;
-  using Phdr = typename Elf::Phdr;
+  using size_type = Elf::size_type;
+  using Phdr = Elf::Phdr;
 
  public:
   // There is only one constructor, but its signature is dependent on
@@ -335,11 +336,11 @@ class PhdrStackObserver : public PhdrSingletonObserver<Elf, ElfPhdrType::kStack>
 
 // A generic metadata, singleton observer that validates constraints around
 // sizes, offset, address, and segment entry type.
-template <class Elf, ElfPhdrType Type, typename EntryType = std::byte>
+template <ElfApi Elf, ElfPhdrType Type, typename EntryType = std::byte>
 class PhdrMetadataObserver : public PhdrSingletonObserver<Elf, Type> {
  private:
   using Base = PhdrSingletonObserver<Elf, Type>;
-  using Phdr = typename Elf::Phdr;
+  using Phdr = Elf::Phdr;
 
  public:
   using Base::Base;
@@ -380,19 +381,19 @@ class PhdrMetadataObserver : public PhdrSingletonObserver<Elf, Type> {
   }
 };
 
-template <class Elf>
+template <ElfApi Elf>
 using PhdrDynamicObserver = PhdrMetadataObserver<Elf, ElfPhdrType::kDynamic, typename Elf::Dyn>;
 
-template <class Elf>
+template <ElfApi Elf>
 using PhdrInterpObserver = PhdrMetadataObserver<Elf, ElfPhdrType::kInterp>;
 
-template <class Elf>
+template <ElfApi Elf>
 using PhdrEhFrameHdrObserver = PhdrMetadataObserver<Elf, ElfPhdrType::kEhFrameHdr>;
 
-template <class Elf>
+template <ElfApi Elf>
 using PhdrRelroObserver = PhdrSingletonObserver<Elf, ElfPhdrType::kRelro>;
 
-template <class Elf>
+template <ElfApi Elf>
 using PhdrTlsObserver = PhdrSingletonObserver<Elf, ElfPhdrType::kTls>;
 
 // PT_LOAD validation policy. Subsequent values extend previous ones.
@@ -438,13 +439,13 @@ struct PhdrLoadNoCallback {
 };
 
 // A PT_LOAD observer for a given metadata policy.
-template <class Elf, PhdrLoadPolicy Policy = PhdrLoadPolicy::kBasic,
+template <ElfApi Elf, PhdrLoadPolicy Policy = PhdrLoadPolicy::kBasic,
           typename Callback = PhdrLoadNoCallback>
 class PhdrLoadObserver
     : public PhdrObserver<PhdrLoadObserver<Elf, Policy, Callback>, ElfPhdrType::kLoad> {
  private:
-  using Phdr = typename Elf::Phdr;
-  using size_type = typename Elf::size_type;
+  using Phdr = Elf::Phdr;
+  using size_type = Elf::size_type;
 
  public:
   // `vaddr_start` and `vaddr_size` are updated to track the size of the
@@ -605,7 +606,7 @@ class PhdrLoadObserver
 };
 
 // This acts as a deduction guide with partial explicit specialization.
-template <class Elf, PhdrLoadPolicy Policy = PhdrLoadPolicy::kBasic, typename T>
+template <ElfApi Elf, PhdrLoadPolicy Policy = PhdrLoadPolicy::kBasic, typename T>
 constexpr auto MakePhdrLoadObserver(typename Elf::size_type page_size,
                                     typename Elf::size_type& vaddr_start,
                                     typename Elf::size_type& vaddr_size, T&& callback) {

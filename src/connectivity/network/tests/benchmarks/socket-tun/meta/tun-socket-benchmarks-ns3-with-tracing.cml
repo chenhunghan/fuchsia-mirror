@@ -4,9 +4,6 @@
 {
     include: [ "//src/connectivity/network/tests/benchmarks/socket-tun/meta/tracing.shard.cml" ],
     program: {
-        args: [
-            "--tracing",
-            "--netstack3",
-        ],
+        args: [ "--tracing" ],
     },
 }

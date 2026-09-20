@@ -176,6 +176,7 @@ template("rustc_cdylib") {
                              "edition",
                              "enforce_source_listing",
                              "inputs",
+                             "lint_config",
                              "metadata",
                              "runtime_deps",
                              "rustenv",

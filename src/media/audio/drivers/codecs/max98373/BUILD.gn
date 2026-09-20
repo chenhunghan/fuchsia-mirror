@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("max98373-dml") {
+  dml = "meta/max98373.dml"
+  driver_name = "max98373"
+}
+
 driver_bind_rules("max98373-bind") {
-  rules = "meta/max98373.bind"
+  bind_output = "max98373.bindbc"
+  dml_label = ":max98373-dml"
   tests = "meta/tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -42,10 +48,10 @@ fuchsia_cc_driver("max98373-driver") {
 }
 
 fuchsia_driver_component("max98373") {
+  dml_label = ":max98373-dml"
   component_name = "max98373"
   deps = [ ":max98373-driver" ]
   info = "meta/max98373-info.json"
-  manifest = "meta/max98373.cml"
 }
 
 fuchsia_driver_package("package") {

@@ -17,9 +17,7 @@ use net_declare::fidl_mac;
 use netstack_testing_common::devices::{
     add_pure_ip_interface, create_ip_tun_port, create_tun_device, install_device,
 };
-use netstack_testing_common::realms::{
-    Netstack, Netstack3, TestRealmExt as _, TestSandboxExt as _,
-};
+use netstack_testing_common::realms::{Netstack3, TestRealmExt as _, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 use std::collections::HashMap;
 
@@ -30,10 +28,9 @@ async fn get_loopback_id(realm: &netemul::TestRealm<'_>) -> u64 {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_admin_unknown<N: Netstack>(name: &str) {
+async fn get_admin_unknown(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let id = get_loopback_id(&realm).await;
 
@@ -53,10 +50,9 @@ async fn get_admin_unknown<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_admin_loopback<N: Netstack>(name: &str) {
+async fn get_admin_loopback(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let root_interfaces =
         realm.connect_to_protocol::<fnet_root::InterfacesMarker>().expect("connect to protocol");
 
@@ -70,10 +66,9 @@ async fn get_admin_loopback<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_admin_netemul_endpoint<N: Netstack>(name: &str) {
+async fn get_admin_netemul_endpoint(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let root_interfaces =
         realm.connect_to_protocol::<fnet_root::InterfacesMarker>().expect("connect to protocol");
     let device = sandbox.create_endpoint(name).await.expect("create netemul endpoint");
@@ -104,10 +99,9 @@ async fn get_mac(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_mac_not_found<N: Netstack>(name: &str) {
+async fn get_mac_not_found(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let root_interfaces =
         realm.connect_to_protocol::<fnet_root::InterfacesMarker>().expect("connect to protocol");
 
@@ -120,10 +114,9 @@ async fn get_mac_not_found<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_mac_loopback<N: Netstack>(name: &str) {
+async fn get_mac_loopback(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let root_interfaces =
         realm.connect_to_protocol::<fnet_root::InterfacesMarker>().expect("connect to protocol");
 
@@ -136,10 +129,9 @@ async fn get_mac_loopback<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_mac_pure_ip<N: Netstack>(name: &str) {
+async fn get_mac_pure_ip(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let root_interfaces =
         realm.connect_to_protocol::<fnet_root::InterfacesMarker>().expect("connect to protocol");
 
@@ -157,10 +149,9 @@ async fn get_mac_pure_ip<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_mac_netemul_endpoint<N: Netstack>(name: &str) {
+async fn get_mac_netemul_endpoint(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let root_interfaces =
         realm.connect_to_protocol::<fnet_root::InterfacesMarker>().expect("connect to protocol");
 
@@ -181,10 +172,9 @@ async fn get_mac_netemul_endpoint<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_port<N: Netstack>(name: &str) {
+async fn get_port(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let debug_interfaces =
         realm.connect_to_protocol::<fnet_debug::InterfacesMarker>().expect("connect to protocol");
 
@@ -217,20 +207,18 @@ async fn get_port<N: Netstack>(name: &str) {
 // call completes. Checking the output in syslog would be too much of a change
 // detector.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn log_debug_info_to_syslog<N: Netstack>(name: &str) {
+async fn log_debug_info_to_syslog(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let diagnostics =
         realm.connect_to_protocol::<fnet_debug::DiagnosticsMarker>().expect("connect to protocol");
     diagnostics.log_debug_info_to_syslog().await.expect("calling log_debug_info_to_syslog");
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_process_handle_for_inspection<N: Netstack>(name: &str) {
+async fn get_process_handle_for_inspection(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let diagnostics =
         realm.connect_to_protocol::<fnet_debug::DiagnosticsMarker>().expect("connect to protocol");
     let process =

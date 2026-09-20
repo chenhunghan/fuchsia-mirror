@@ -12,7 +12,7 @@ use ffx_profile_heapdump_common::{
     PProfProfileBuilder, check_snapshot_error, connect_to_collector,
 };
 use ffx_profile_heapdump_download_args::DownloadCommand;
-use ffx_writer::SimpleWriter;
+use ffx_writer::VerifiedMachineWriter;
 use fho::{AvailabilityFlag, FfxMain, FfxTool};
 use target_holders::RemoteControlProxyHolder;
 
@@ -29,12 +29,13 @@ fho::embedded_plugin!(DownloadTool);
 
 #[async_trait(?Send)]
 impl FfxMain for DownloadTool {
-    type Writer = SimpleWriter;
+    type Writer = VerifiedMachineWriter<()>;
 
     type Error = ::fho::Error;
 
-    async fn main(self, _writer: Self::Writer) -> fho::Result<()> {
+    async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
         download(&self.context, self.remote_control, self.cmd).await?;
+        writer.machine(&())?;
         Ok(())
     }
 }

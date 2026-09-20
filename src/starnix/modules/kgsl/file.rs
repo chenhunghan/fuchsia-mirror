@@ -671,7 +671,7 @@ impl FileOps for KgslFile {
 
     fn mmap(
         &self,
-        file: &FileObject,
+        _file: &FileObject,
         current_task: &CurrentTask,
         addr: starnix_core::mm::DesiredAddress,
         memory_offset: u64, // Callers encode the buffer ID using this field.
@@ -696,7 +696,6 @@ impl FileOps for KgslFile {
             0,
             length,
             prot_flags,
-            file.max_access_for_memory_mapping(),
             mapping_options,
             MappingName::None,
         )

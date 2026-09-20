@@ -115,31 +115,33 @@ if (is_host) {
   }
 }
 
-rustc_library("fdio") {
-  sources = [
-    "src/fdio_sys.rs",
-    "src/lib.rs",
-    "src/spawn_builder.rs",
-  ]
-  edition = "2024"
-  rustflags = [ "-Dunused_results" ]
-  test_deps = [
-    "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:assert_matches",
-    "//third_party/rust_crates:libc",
-    "//third_party/rust_crates:rand",
-    "//third_party/rust_crates:tempfile",
-  ]
-  version = "0.2.0"
-  visibility = [ "*" ]
-  with_unit_tests = true
-  deps = [
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/lib/fdio",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia-runtime",
-    "//third_party/rust_crates:bitflags",
-    "//third_party/rust_crates:thiserror",
-  ]
+if (is_fuchsia) {
+  rustc_library("fdio") {
+    sources = [
+      "src/fdio_sys.rs",
+      "src/lib.rs",
+      "src/spawn_builder.rs",
+    ]
+    edition = "2024"
+    rustflags = [ "-Dunused_results" ]
+    test_deps = [
+      "//src/lib/fuchsia-async",
+      "//third_party/rust_crates:assert_matches",
+      "//third_party/rust_crates:libc",
+      "//third_party/rust_crates:rand",
+      "//third_party/rust_crates:tempfile",
+    ]
+    version = "0.2.0"
+    visibility = [ "*" ]
+    with_unit_tests = true
+    deps = [
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+      "//sdk/lib/fdio",
+      "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia-runtime",
+      "//third_party/rust_crates:bitflags",
+      "//third_party/rust_crates:thiserror",
+    ]
+  }
 }

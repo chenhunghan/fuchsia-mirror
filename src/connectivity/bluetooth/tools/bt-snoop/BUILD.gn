@@ -13,6 +13,7 @@ rustc_binary("bin") {
   deps = [
     "//sdk/fidl/fuchsia.bluetooth.snoop:fuchsia.bluetooth.snoop_rust",
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+    "//sdk/fidl/fuchsia.firmware.crash:fuchsia.firmware.crash_rust",
     "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
     "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
     "//sdk/rust/zx",

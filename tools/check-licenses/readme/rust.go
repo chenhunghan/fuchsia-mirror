@@ -47,6 +47,10 @@ func ParseCargoToml(path string) ([]*Readme, error) {
 
 	// 1. Handle standalone package
 	if cargo.Package != nil {
+		if cargo.Package.Name == "fuchsia-third-party" {
+			// Top-level container manifest for third_party/rust_crates, not a 3P crate.
+			return nil, nil
+		}
 		url := cargo.Package.Repository
 		if url == "" {
 			url = cargo.Package.Homepage

@@ -97,6 +97,7 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 			if cf.IsLicenseFile {
 				if len(cf.Matches) == 0 {
 					if !v.isPolicyExceptionAllowed(PolicyUnrecognizedLicense, relPath) {
+						relProjRoot := v.formatRelProject(cf.ProjectRoot)
 						metrics.ValidationErrors.Inc(PolicyUnrecognizedLicense)
 						err := pipeline.ComplianceError{
 							CheckName: PolicyUnrecognizedLicense,
@@ -105,13 +106,14 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 							Issue: fmt.Sprintf(
 								"Unrecognized license text: no SPDX ID could be matched.\n\n"+
 									"Details:\n"+
+									"  - Project: %s\n"+
 									"  - File: %s\n\n"+
 									"Remediation:\n"+
 									"  If this file is an exception, allow it by running:\n"+
 									"    fx check-licenses policy add -bug BUG_ID AllLicenseTextsMustBeRecognized %s\n\n"+
 									"Documentation:\n"+
 									"  https://fuchsia.dev/fuchsia-src/contribute/governance/policy/open-source-licensing-policies",
-								relPath, relPath),
+								relProjRoot, relPath, relPath),
 						}
 						select {
 						case <-ctx.Done():
@@ -143,6 +145,15 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 						ext := strings.ToLower(filepath.Ext(cf.Path))
 						if v.CopyrightExtensions[ext] {
 							metrics.ValidationErrors.Inc(PolicyFuchsiaCopyright)
+							var replacements []string
+							if newBytes, err := AddCopyright(cf.Path); err == nil {
+								replacements = []string{string(newBytes)}
+							} else if len(cf.AnalyzedText) > 0 {
+								if newBytes, err := AddCopyrightToBytes(cf.Path, cf.AnalyzedText); err == nil {
+									replacements = []string{string(newBytes)}
+								}
+							}
+							relProjRoot := v.formatRelProject(cf.ProjectRoot)
 							err := pipeline.ComplianceError{
 								CheckName: PolicyFuchsiaCopyright,
 								Project:   cf.ProjectRoot,
@@ -150,6 +161,7 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 								Issue: fmt.Sprintf(
 									"Missing Fuchsia copyright header in first-party source file.\n\n"+
 										"Details:\n"+
+										"  - Project: %s\n"+
 										"  - File: %s\n\n"+
 										"Remediation:\n"+
 										"  Fix this automatically by running:\n"+
@@ -158,7 +170,8 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 										"    fx check-licenses policy add -bug BUG_ID AllFuchsiaAuthorSourceFilesMustHaveCopyrightHeaders %s\n\n"+
 										"Documentation:\n"+
 										"  https://fuchsia.dev/fuchsia-src/contribute/governance/policy/open-source-licensing-policies",
-									relPath, relPath, relPath),
+									relProjRoot, relPath, relPath, relPath),
+								Replacements: replacements,
 							}
 							select {
 							case <-ctx.Done():
@@ -185,8 +198,7 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 					}
 
 					if needsApproval {
-						relProjRoot, _ := filepath.Rel(v.FuchsiaDir, cf.ProjectRoot)
-						relProjRoot = filepath.ToSlash(relProjRoot)
+						relProjRoot := v.formatRelProject(cf.ProjectRoot)
 						if !v.isAllowedLicense(match.SPDXID, relPath, relProjRoot, cf.ProjectRoot) {
 							metrics.ValidationErrors.Inc("UnapprovedLicenseUsage")
 							startLine := match.StartLine
@@ -204,16 +216,15 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 								Issue: fmt.Sprintf(
 									"File was not approved to use license pattern %s.\n\n"+
 										"Details:\n"+
-										"  - License Pattern: %s\n"+
-										"  - Category / Type: %s\n"+
 										"  - Project: %s\n"+
-										"  - File: %s\n\n"+
+										"  - File: %s\n"+
+										"  - License Pattern: %s (%s)\n\n"+
 										"Remediation:\n"+
 										"  To allow this project to use this license, run:\n"+
 										"    fx check-licenses allowlist add -bug BUG_ID %s %s\n\n"+
 										"Documentation:\n"+
 										"  https://fuchsia.dev/fuchsia-src/contribute/governance/policy/open-source-licensing-policies",
-									match.SPDXID, match.SPDXID, match.MatchType, relProjRoot, relPath, match.SPDXID, relProjRoot),
+									match.SPDXID, relProjRoot, relPath, match.SPDXID, match.MatchType, match.SPDXID, relProjRoot),
 							}
 							select {
 							case <-ctx.Done():
@@ -280,6 +291,7 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 				relProjRoot = filepath.ToSlash(relProjRoot)
 				if !v.isPolicyExceptionAllowed(PolicyNoReadme, relProjRoot) {
 					metrics.ValidationErrors.Inc(PolicyNoReadme)
+					virtualReadmeDir := v.virtualReadmeDir(relProjRoot)
 					err := pipeline.ComplianceError{
 						CheckName: PolicyNoReadme,
 						Project:   proj,
@@ -292,12 +304,12 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 								"Remediation:\n"+
 								"  To fix this:\n"+
 								"    - Add a README.fuchsia to %s/README.fuchsia\n"+
-								"    - Or add a virtual README to tools/check-licenses/assets/readmes/%s/README.fuchsia\n"+
+								"    - Or add a virtual README to %s/%s/README.fuchsia\n"+
 								"    - Or allow an exception by running:\n"+
 								"        fx check-licenses policy add -bug BUG_ID AllProjectsMustHaveAReadme %s\n\n"+
 								"Documentation:\n"+
 								"  https://fuchsia.dev/fuchsia-src/development/source_code/third-party-metadata",
-							relProjRoot, relProjRoot, relProjRoot, relProjRoot),
+							relProjRoot, relProjRoot, virtualReadmeDir, relProjRoot, relProjRoot),
 					}
 					select {
 					case <-ctx.Done():
@@ -312,6 +324,15 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 	}()
 
 	return out, nil
+}
+
+func (v *Validator) formatRelProject(projectRoot string) string {
+	relProjRoot, _ := filepath.Rel(v.FuchsiaDir, projectRoot)
+	relProjRoot = filepath.ToSlash(relProjRoot)
+	if relProjRoot == "" || relProjRoot == "." {
+		return "root"
+	}
+	return relProjRoot
 }
 
 func (v *Validator) isPolicyExceptionAllowed(policyName, relPath string) bool {
@@ -341,4 +362,15 @@ func isAllowed(targetMap map[string]map[string]RuleMetadata, key, targetPath str
 		}
 	}
 	return false
+}
+
+func (v *Validator) virtualReadmeDir(projectPath string) string {
+	if v.Config.VirtualReadmeDir != nil {
+		return v.Config.VirtualReadmeDir(projectPath)
+	}
+	cleanPath := strings.TrimPrefix(projectPath, "//")
+	if strings.HasPrefix(cleanPath, "vendor/") || cleanPath == "vendor" {
+		return "vendor/google/tools/check-licenses/assets/readmes"
+	}
+	return "tools/check-licenses/assets/readmes"
 }

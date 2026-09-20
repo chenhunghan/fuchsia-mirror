@@ -38,8 +38,9 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Sequence, Tuple
+from typing import Any
 
 _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
@@ -56,7 +57,7 @@ def msg(text: str):
 
 def _partition(
     iterable: Iterable[Any], predicate: Callable[[Any], bool]
-) -> Tuple[Sequence[Any], Sequence[Any]]:
+) -> tuple[Sequence[Any], Sequence[Any]]:
     """Splits sequence into two sequences based on predicate function."""
     trues = []
     falses = []
@@ -281,16 +282,16 @@ class Action(object):
     """Represents a set of parameters of a single build action."""
 
     command: Sequence[str] = dataclasses.field(default_factory=list)
-    substitutions: Dict[str, str] = dataclasses.field(
+    substitutions: dict[str, str] = dataclasses.field(
         default_factory=dict
     )  # FrozenDict
     label: str = ""
 
     def substitute_command(
         self, tempfile_transform: TempFileTransform
-    ) -> Tuple[Sequence[str], Dict[Path, Path]]:
+    ) -> tuple[Sequence[str], dict[Path, Path]]:
         # renamed_outputs: keys: original file names, values: transformed temporary file names
-        renamed_outputs: Dict[Path, Path] = {}
+        renamed_outputs: dict[Path, Path] = {}
 
         def replace_output_filename(arg: str, prev_opt: str) -> Path:
             arg_path = Path(arg)
@@ -427,7 +428,7 @@ class Action(object):
             return retval
 
         # Backup a copy of all declared outputs.
-        renamed_outputs: Dict[Path, Path] = {}
+        renamed_outputs: dict[Path, Path] = {}
         for out in self.substitutions:
             # TODO(fangism): what do we do about symlinks?
             # TODO(fangism): An output *directory* is unexpected, coming from GN,
@@ -538,7 +539,7 @@ class Action(object):
 
 
 def verify_files_match(
-    fileset: Dict[Path, Path],
+    fileset: dict[Path, Path],
     diff_action: Callable[[Path, Path], Any],
     label: str,
     renamed: bool,

@@ -26,18 +26,27 @@ pub struct Summary {
     #[serde(default)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub cases: HashMap<String, SummaryCase>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_succeeded: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teardown_succeeded: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 impl Summary {
     /// Merges `Summary` read from a file into self. Returns Ok(true) if the file was merged
-    /// successfully, Ok(false) if the file did not exist.
+    /// successfully and `self` changed as a result, Ok(false) if the file did not exist or
+    /// no change was made.
     pub fn maybe_merge_file(&mut self, path: &PathBuf) -> Result<bool, TestOutputError> {
         if let Ok(file) = fs::File::open(&path) {
             let mut reader = BufReader::new(file);
             let summary_from_file: Summary = serde_json::from_reader(&mut reader)
                 .map_err(|e| TestOutputError::SummaryRead { path: path.clone(), source: e })?;
-            self.merge(summary_from_file);
-            Ok(true)
+            Ok(self.merge(summary_from_file))
         } else {
             Ok(false)
         }
@@ -52,19 +61,38 @@ impl Summary {
     }
 
     /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary.
-    fn merge(&mut self, other: Summary) {
-        self.common.merge(other.common);
+    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
+    fn merge(&mut self, other: Summary) -> bool {
+        let mut changed = false;
+
+        changed |= self.common.merge(other.common);
         for (other_case_name, other_case) in other.cases {
             match &mut self.cases.get_mut(other_case_name.as_str()) {
                 Some(case_properties) => {
-                    case_properties.merge(other_case);
+                    changed |= case_properties.merge(other_case);
                 }
                 None => {
                     self.cases.insert(other_case_name, other_case);
+                    changed = true;
                 }
             }
         }
+
+        if other.setup_succeeded.is_some() && other.setup_succeeded != self.setup_succeeded {
+            self.setup_succeeded = other.setup_succeeded;
+            changed = true;
+        }
+        if other.teardown_succeeded.is_some() && other.teardown_succeeded != self.teardown_succeeded
+        {
+            self.teardown_succeeded = other.teardown_succeeded;
+            changed = true;
+        }
+        if other.exit_code.is_some() && other.exit_code != self.exit_code {
+            self.exit_code = other.exit_code;
+            changed = true;
+        }
+
+        changed
     }
 }
 
@@ -77,9 +105,9 @@ pub struct SummaryCase {
 
 impl SummaryCase {
     /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary.
-    fn merge(&mut self, other: SummaryCase) {
-        self.common.merge(other.common);
+    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
+    fn merge(&mut self, other: SummaryCase) -> bool {
+        self.common.merge(other.common)
     }
 }
 
@@ -102,28 +130,35 @@ pub struct SummaryCommonProperties {
 
 impl SummaryCommonProperties {
     /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary.
-    fn merge(&mut self, other: SummaryCommonProperties) {
-        if other.duration != 0 {
+    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
+    fn merge(&mut self, other: SummaryCommonProperties) -> bool {
+        let mut changed = false;
+
+        if other.duration != 0 && other.duration != self.duration {
             self.duration = other.duration;
+            changed = true;
         }
 
-        self.outcome.merge(other.outcome);
+        changed |= self.outcome.merge(other.outcome);
 
         for (other_artifact_name, other_artifact_properties) in other.artifacts {
             match &mut self.artifacts.get_mut(&other_artifact_name) {
                 Some(artifact_properties) => {
-                    artifact_properties.merge(other_artifact_properties);
+                    changed |= artifact_properties.merge(other_artifact_properties);
                 }
                 None => {
                     self.artifacts.insert(other_artifact_name, other_artifact_properties);
+                    changed = true;
                 }
             }
         }
 
         for (other_extension_name, other_extension_properties) in other.extension {
             self.extension.insert(other_extension_name, other_extension_properties);
+            changed = true;
         }
+
+        changed
     }
 }
 
@@ -149,16 +184,21 @@ pub struct SummaryOutcome {
 
 impl SummaryOutcome {
     /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary.
-    fn merge(&mut self, other: SummaryOutcome) {
-        if other.result != SummaryOutcomeResult::NotSpecified {
+    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
+    fn merge(&mut self, other: SummaryOutcome) -> bool {
+        let mut changed = false;
+        if other.result != SummaryOutcomeResult::NotSpecified && other.result != self.result {
             // If other has a specified result, the merge changes self to equal other.
             self.result = other.result;
             self.detail = other.detail;
-        } else if other.detail.is_some() {
+            changed = true;
+        } else if other.detail.is_some() && other.detail != self.detail {
             // Otherwise, if other has detail, the merge changes self's detail to match other's.
             self.detail = other.detail;
+            changed = true;
         }
+
+        changed
     }
 
     /// Merges a case outcome into a test outcome (self).
@@ -281,11 +321,14 @@ pub struct SummaryArtifact {
 
 impl SummaryArtifact {
     /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary.
-    fn merge(&mut self, other: SummaryArtifact) {
-        if !other.artifact_type.is_empty() {
+    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
+    fn merge(&mut self, other: SummaryArtifact) -> bool {
+        let mut changed = false;
+        if !other.artifact_type.is_empty() && other.artifact_type != self.artifact_type {
             self.artifact_type = other.artifact_type;
+            changed = true;
         }
+        changed
     }
 }
 
@@ -391,12 +434,13 @@ fn postprocessor_name<'b>(binary: &'b PathBuf) -> &'b str {
 /// Determines whether `exit_status` indicates the test run ran correctly, but the test itself
 /// failed.
 pub fn is_fail_exit_status(exit_status: std::process::ExitStatus) -> bool {
-    exit_status.into_raw() == FAIL_EXIT_STATUS
+    exit_status.code() == Some(FAIL_EXIT_STATUS) || exit_status.into_raw() == FAIL_EXIT_STATUS
 }
 
 /// Returns an outcome string from an exit status.
 pub fn outcome_from_exit_status(exit_status: std::process::ExitStatus) -> SummaryOutcome {
-    match exit_status.into_raw() {
+    let code = exit_status.code().unwrap_or_else(|| exit_status.into_raw());
+    match code {
         0 => SummaryOutcome { result: SummaryOutcomeResult::Passed, detail: None },
         FAIL_EXIT_STATUS => SummaryOutcome { result: SummaryOutcomeResult::Failed, detail: None },
         status => SummaryOutcome {
@@ -469,20 +513,22 @@ mod tests {
 
         // Non-trivial values from argument take precedent. New artifacts are inserted.
         // Existing artifacts with non-trivial values get updated.
-        under_test.merge(SummaryCommonProperties {
-            duration: 3,
-            outcome: outcome(SummaryOutcomeResult::Failed, "test outcome b"),
-            artifacts: [
-                (PathBuf::from("a"), artifact("new_a_type")),
-                (PathBuf::from("c"), artifact("c_type")),
-            ]
-            .into(),
-            extension: [
-                (String::from("x"), Value::from("new_x_value")),
-                (String::from("z"), Value::from("z_value")),
-            ]
-            .into(),
-        });
+        assert!(
+            under_test.merge(SummaryCommonProperties {
+                duration: 3,
+                outcome: outcome(SummaryOutcomeResult::Failed, "test outcome b"),
+                artifacts: [
+                    (PathBuf::from("a"), artifact("new_a_type")),
+                    (PathBuf::from("c"), artifact("c_type")),
+                ]
+                .into(),
+                extension: [
+                    (String::from("x"), Value::from("new_x_value")),
+                    (String::from("z"), Value::from("z_value")),
+                ]
+                .into(),
+            })
+        );
         assert_eq!(
             under_test,
             SummaryCommonProperties {
@@ -505,12 +551,12 @@ mod tests {
 
         // Trivial values from argument are not copied. For existing artifacts, trivial
         // values from argument are not copied.
-        under_test.merge(SummaryCommonProperties {
+        assert!(under_test.merge(SummaryCommonProperties {
             duration: 0,
             outcome: outcome(SummaryOutcomeResult::NotSpecified, "test outcome c"),
             artifacts: [(PathBuf::from("a"), artifact(""))].into(),
             extension: HashMap::new(),
-        });
+        }));
         assert_eq!(
             under_test,
             SummaryCommonProperties {
@@ -530,6 +576,24 @@ mod tests {
                 .into(),
             }
         );
+
+        // Merging with trivial or identical values does not change self and returns false.
+        let before = under_test.clone();
+        assert!(!under_test.merge(SummaryCommonProperties {
+            duration: 0,
+            outcome: outcome(SummaryOutcomeResult::NotSpecified, "test outcome c"),
+            artifacts: [(PathBuf::from("a"), artifact(""))].into(),
+            extension: HashMap::new(),
+        }));
+        assert_eq!(under_test, before);
+
+        assert!(!under_test.merge(SummaryCommonProperties {
+            duration: 3,
+            outcome: SummaryOutcome::default(),
+            artifacts: [(PathBuf::from("a"), artifact("new_a_type"))].into(),
+            extension: HashMap::new(),
+        }));
+        assert_eq!(under_test, before);
     }
 
     #[fuchsia::test]
@@ -541,33 +605,103 @@ mod tests {
                 (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
             ]
             .into(),
+            ..Default::default()
         };
 
         // Non-trivial values from argument take precedent. New artifacts are inserted.
         // Existing artifacts with non-trivial values get updated.
-        under_test.merge(Summary {
-            common: SummaryCommonProperties::default(),
-            cases: [
-                (String::from("case_a"), case(SummaryOutcomeResult::Failed, "case_a_new_outcome")),
-                (String::from("case_c"), case(SummaryOutcomeResult::Failed, "case_c_outcome")),
-            ]
-            .into(),
-        });
-        assert_eq!(
-            under_test,
-            Summary {
+        assert!(
+            under_test.merge(Summary {
                 common: SummaryCommonProperties::default(),
                 cases: [
                     (
                         String::from("case_a"),
                         case(SummaryOutcomeResult::Failed, "case_a_new_outcome")
                     ),
-                    (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
                     (String::from("case_c"), case(SummaryOutcomeResult::Failed, "case_c_outcome")),
                 ]
-                .into()
-            }
+                .into(),
+                ..Default::default()
+            })
         );
+        let expected = Summary {
+            common: SummaryCommonProperties::default(),
+            cases: [
+                (String::from("case_a"), case(SummaryOutcomeResult::Failed, "case_a_new_outcome")),
+                (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
+                (String::from("case_c"), case(SummaryOutcomeResult::Failed, "case_c_outcome")),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        assert_eq!(under_test, expected);
+
+        // Merging unchanged cases returns false and leaves self unchanged.
+        assert!(
+            !under_test.merge(Summary {
+                common: SummaryCommonProperties::default(),
+                cases: [(
+                    String::from("case_a"),
+                    case(SummaryOutcomeResult::Failed, "case_a_new_outcome")
+                ),]
+                .into(),
+                ..Default::default()
+            })
+        );
+        assert_eq!(under_test, expected);
+    }
+
+    #[fuchsia::test]
+    fn test_merge_lifecycle_fields() {
+        // When self fields are None and other has Some, other's fields take precedent.
+        let mut under_test = Summary {
+            setup_succeeded: None,
+            teardown_succeeded: None,
+            exit_code: None,
+            ..Default::default()
+        };
+        assert!(under_test.merge(Summary {
+            setup_succeeded: Some(true),
+            teardown_succeeded: Some(false),
+            exit_code: Some(0),
+            ..Default::default()
+        }));
+        assert_eq!(under_test.setup_succeeded, Some(true));
+        assert_eq!(under_test.teardown_succeeded, Some(false));
+        assert_eq!(under_test.exit_code, Some(0));
+
+        // When other has None, self fields are preserved.
+        assert!(!under_test.merge(Summary {
+            setup_succeeded: None,
+            teardown_succeeded: None,
+            exit_code: None,
+            ..Default::default()
+        }));
+        assert_eq!(under_test.setup_succeeded, Some(true));
+        assert_eq!(under_test.teardown_succeeded, Some(false));
+        assert_eq!(under_test.exit_code, Some(0));
+
+        // When other has Some with identical values, self fields are preserved and merge returns false.
+        assert!(!under_test.merge(Summary {
+            setup_succeeded: Some(true),
+            teardown_succeeded: Some(false),
+            exit_code: Some(0),
+            ..Default::default()
+        }));
+        assert_eq!(under_test.setup_succeeded, Some(true));
+        assert_eq!(under_test.teardown_succeeded, Some(false));
+        assert_eq!(under_test.exit_code, Some(0));
+
+        // When other has Some, it overwrites existing self fields.
+        assert!(under_test.merge(Summary {
+            setup_succeeded: Some(false),
+            teardown_succeeded: Some(true),
+            exit_code: Some(86),
+            ..Default::default()
+        }));
+        assert_eq!(under_test.setup_succeeded, Some(false));
+        assert_eq!(under_test.teardown_succeeded, Some(true));
+        assert_eq!(under_test.exit_code, Some(86));
     }
 
     #[fuchsia::test]
@@ -590,36 +724,59 @@ mod tests {
             SummaryOutcomeResult::Error,
         ];
 
-        // When other is unspecified, merging leaves self unchanged.
+        // When other is unspecified and detail is none, merging leaves self unchanged.
         for result in &results {
             let mut under_test = outcome(result.clone(), "self");
-            under_test
-                .merge(SummaryOutcome { result: SummaryOutcomeResult::NotSpecified, detail: None });
+            assert!(!under_test.merge(SummaryOutcome {
+                result: SummaryOutcomeResult::NotSpecified,
+                detail: None
+            }));
             assert_eq!(under_test, outcome(result.clone(), "self"));
         }
 
-        // When other's result is specified, merging changes self to equal other.
+        // When other's result is specified:
         for self_result in &results {
             for other_result in &specified_results {
+                // If other has a different result, or same result with a different detail,
+                // merging changes self to equal other.
                 let mut under_test = outcome(self_result.clone(), "self");
                 let other = outcome(other_result.clone(), "other");
-                under_test.merge(other.clone());
+                assert!(under_test.merge(other.clone()));
                 assert_eq!(under_test, other);
 
-                // ...even if other's detail is_none.
+                // If other's result is different, self takes other's result and None detail.
+                // If other's result is the same and other's detail is None, self is unchanged.
                 let mut under_test = outcome(self_result.clone(), "self");
                 let other = SummaryOutcome { result: other_result.clone(), detail: None };
-                under_test.merge(other.clone());
-                assert_eq!(under_test, other);
+                if self_result != other_result {
+                    assert!(under_test.merge(other.clone()));
+                    assert_eq!(under_test, other);
+                } else {
+                    assert!(!under_test.merge(other));
+                    assert_eq!(under_test, outcome(self_result.clone(), "self"));
+                }
             }
         }
 
-        // When other's result is unspecified but details is_some, merging changes self's detail
-        // to equal other's.
-        for result in &results {
+        // When other's result and detail are identical, merging leaves self unchanged.
+        for result in &specified_results {
             let mut under_test = outcome(result.clone(), "self");
-            under_test.merge(outcome(SummaryOutcomeResult::NotSpecified, "other"));
+            let other = outcome(result.clone(), "self");
+            assert!(!under_test.merge(other));
+            assert_eq!(under_test, outcome(result.clone(), "self"));
+        }
+
+        // When other's result is unspecified:
+        for result in &results {
+            // Different detail changes self's detail to other's.
+            let mut under_test = outcome(result.clone(), "self");
+            assert!(under_test.merge(outcome(SummaryOutcomeResult::NotSpecified, "other")));
             assert_eq!(under_test, outcome(result.clone(), "other"));
+
+            // Same detail leaves self unchanged and returns false.
+            let mut under_test = outcome(result.clone(), "self");
+            assert!(!under_test.merge(outcome(SummaryOutcomeResult::NotSpecified, "self")));
+            assert_eq!(under_test, outcome(result.clone(), "self"));
         }
     }
 
@@ -765,6 +922,7 @@ mod tests {
                 (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
             ]
             .into(),
+            ..Default::default()
         };
 
         let temp_dir = tempdir().expect("to create temporary directory");
@@ -860,11 +1018,71 @@ mod tests {
                     (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
                 ]
                 .into(),
+                ..Default::default()
             },
             under_test
         );
 
+        // Merging a file with no new information returns Ok(false).
+        let no_change_file_path = temp_dir.path().join("no_change_summary.json");
+        fs::write(
+            &no_change_file_path,
+            serde_json::to_string_pretty(&json!({
+                "duration": 3,
+                "outcome": {"result": "failed", "detail": "test outcome b"},
+            }))
+            .unwrap(),
+        )
+        .expect("json write succeeds");
+
+        assert_eq!(false, under_test.maybe_merge_file(&no_change_file_path).expect("success"));
+
         temp_dir.close().expect("to close temporary directory");
+    }
+
+    #[fuchsia::test]
+    fn test_summary_maybe_merge_file_with_lifecycle_fields() {
+        let temp_dir = tempdir().expect("to create temporary directory");
+        let file_path = temp_dir.path().join("test_output_summary.json");
+        fs::write(
+            &file_path,
+            serde_json::to_string_pretty(&json!({
+                "outcome": {},
+                "setup_succeeded": false,
+                "teardown_succeeded": true,
+                "exit_code": 1,
+            }))
+            .unwrap(),
+        )
+        .expect("json write succeeds");
+
+        let mut under_test = Summary::default();
+        assert!(under_test.maybe_merge_file(&file_path).expect("success"));
+        assert_eq!(under_test.setup_succeeded, Some(false));
+        assert_eq!(under_test.teardown_succeeded, Some(true));
+        assert_eq!(under_test.exit_code, Some(1));
+
+        // Merging the same file again produces no changes and returns false.
+        assert!(!under_test.maybe_merge_file(&file_path).expect("success"));
+
+        temp_dir.close().expect("to close temporary directory");
+    }
+
+    #[fuchsia::test]
+    fn test_merge_artifact() {
+        let mut under_test = artifact("old_type");
+
+        // Empty type does not change artifact and returns false.
+        assert!(!under_test.merge(artifact("")));
+        assert_eq!(under_test, artifact("old_type"));
+
+        // Same type does not change artifact and returns false.
+        assert!(!under_test.merge(artifact("old_type")));
+        assert_eq!(under_test, artifact("old_type"));
+
+        // Different non-empty type updates artifact and returns true.
+        assert!(under_test.merge(artifact("new_type")));
+        assert_eq!(under_test, artifact("new_type"));
     }
 
     #[test]

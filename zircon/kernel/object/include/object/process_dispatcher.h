@@ -37,8 +37,79 @@
 
 class JobDispatcher;
 class ProcessDispatcher;
+class ThreadDispatcher;
 class VmarMapsInfoWriter;
 class VmoInfoWriter;
+class VmAddressRegionDispatcher;
+
+extern "C" {
+zx_status_t cpp_process_dispatcher_create(
+    JobDispatcher* job, const char* name_ptr, size_t name_len, uint32_t flags,
+    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_handle,
+    ffi::Uninitialized<zx_rights_t>* out_rights,
+    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_vmar_handle,
+    ffi::Uninitialized<zx_rights_t>* out_vmar_rights);
+zx_status_t cpp_process_dispatcher_create_shared(
+    ProcessDispatcher* shared_proc, const char* name_ptr, size_t name_len, uint32_t flags,
+    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_proc_handle,
+    ffi::Uninitialized<zx_rights_t>* out_proc_rights,
+    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_restricted_vmar_handle,
+    ffi::Uninitialized<zx_rights_t>* out_restricted_vmar_rights);
+ProcessDispatcher* cpp_process_dispatcher_current();
+bool cpp_process_dispatcher_is_current(const ProcessDispatcher* process);
+zx_status_t cpp_process_dispatcher_start(ProcessDispatcher* process, ThreadDispatcher* thread,
+                                         zx_vaddr_t pc, zx_vaddr_t sp, Handle* arg_handle,
+                                         uintptr_t arg2);
+void cpp_process_dispatcher_kill(ProcessDispatcher* process, int64_t retcode);
+zx_status_t cpp_process_dispatcher_suspend(ProcessDispatcher* process);
+void cpp_process_dispatcher_resume(ProcessDispatcher* process);
+zx_status_t cpp_process_dispatcher_make_and_add_handle(ProcessDispatcher* process,
+                                                       KernelHandle<Dispatcher>* handle,
+                                                       zx_rights_t rights, zx_handle_t* out_handle);
+zx_status_t cpp_process_dispatcher_make_and_add_handle_from_ref(ProcessDispatcher* process,
+                                                                Dispatcher* dispatcher,
+                                                                zx_rights_t rights,
+                                                                zx_handle_t* out_handle);
+zx_status_t cpp_handle_table_get_dispatcher(zx_handle_t handle,
+                                            ffi::Uninitialized<fbl::RefPtr<Dispatcher>>* out_disp,
+                                            zx_rights_t* out_rights);
+Handle* cpp_process_dispatcher_remove_handle(ProcessDispatcher* process, zx_handle_t handle_value);
+zx_status_t cpp_process_dispatcher_enforce_basic_policy(ProcessDispatcher* process,
+                                                        uint32_t policy);
+int64_t cpp_process_dispatcher_get_timer_slack_policy_amount(const ProcessDispatcher* process);
+void cpp_process_dispatcher_get_timer_slack_policy(const ProcessDispatcher* process,
+                                                   TimerSlack* out_slack);
+void* cpp_process_dispatcher_handle_table_lock(const ProcessDispatcher* process);
+Handle* cpp_process_dispatcher_handle_table_get_handle_locked(ProcessDispatcher* process,
+                                                              zx_handle_t handle_value);
+zx_info_process_t cpp_process_dispatcher_get_info(const ProcessDispatcher* process);
+zx_status_t cpp_process_dispatcher_set_critical_to_job(ProcessDispatcher* process,
+                                                       JobDispatcher* job, bool retcode_nonzero);
+[[noreturn]] void cpp_process_dispatcher_exit_current(int64_t retcode);
+
+JobDispatcher* cpp_process_dispatcher_job(ProcessDispatcher* process);
+
+VmAspace* cpp_process_dispatcher_aspace_at(ProcessDispatcher* process, zx_vaddr_t va);
+
+uintptr_t cpp_process_dispatcher_get_debug_addr(const ProcessDispatcher* process);
+zx_status_t cpp_process_dispatcher_set_debug_addr(ProcessDispatcher* process, uintptr_t addr);
+uintptr_t cpp_process_dispatcher_get_dyn_break_on_load(const ProcessDispatcher* process);
+zx_status_t cpp_process_dispatcher_set_dyn_break_on_load(ProcessDispatcher* process,
+                                                         uintptr_t break_on_load);
+uintptr_t cpp_process_dispatcher_vdso_base_address(const ProcessDispatcher* process);
+#if ARCH_X86
+uintptr_t cpp_process_dispatcher_hw_trace_context_id(const ProcessDispatcher* process);
+#endif
+zx_status_t cpp_process_futex_grow_pool(ProcessDispatcher* process);
+zx_status_t cpp_process_futex_shrink_pool(ProcessDispatcher* process);
+zx_status_t cpp_process_attach_aspace_to_thread(ProcessDispatcher* process, Thread* core_thread);
+zx_koid_t cpp_process_get_job_koid(const ProcessDispatcher* process);
+zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process, ThreadDispatcher* thread,
+                                               bool ensure_initial_thread,
+                                               const UserEntryState* entry);
+void cpp_process_remove_thread(ProcessDispatcher* process, ThreadDispatcher* thread);
+
+}  // extern "C"
 
 namespace internal {
 // Tag for a ProcessDispatcher's parent JobDispatcher's raw job list.
@@ -151,7 +222,7 @@ class ProcessDispatcher final
     return shareable_state_->aspace()->arch_aspace().arch_table_phys();
   }
 
-  uintptr_t vdso_base_address() { return shareable_state_->aspace()->vdso_base_address(); }
+  uintptr_t vdso_base_address() const { return shareable_state_->aspace()->vdso_base_address(); }
 
   void EnumerateAspaceChildren(VmEnumerator* ve) {
     fbl::RefPtr<VmAddressRegion> root_vmar = shareable_state_->aspace()->RootVmar();
@@ -175,7 +246,7 @@ class ProcessDispatcher final
 
   State state() const;
 
-  fbl::RefPtr<JobDispatcher> job();
+  fbl::RefPtr<JobDispatcher> job() const;
 
   [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final;
   [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final;
@@ -336,6 +407,13 @@ class ProcessDispatcher final
 
   // Thread lifecycle support.
   friend class ThreadDispatcher;
+  // The FFI shims below are the entry points used by the Rust ThreadDispatcher for the same
+  // thread lifecycle operations, so they need the same access ThreadDispatcher has.
+  friend zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process,
+                                                        ThreadDispatcher* thread,
+                                                        bool ensure_initial_thread,
+                                                        const UserEntryState* entry);
+  friend void cpp_process_remove_thread(ProcessDispatcher* process, ThreadDispatcher* thread);
   // Takes the given ThreadDispatcher and transitions it from the INITIALIZED state to a runnable
   // state (RUNNING or SUSPENDED depending on whether this process is suspended) by calling
   // ThreadDispatcher::MakeRunnable. The thread is then added to the thread_list_ for this process
@@ -426,65 +504,5 @@ class ProcessDispatcher final
 };
 
 const char* StateToString(ProcessDispatcher::State state);
-
-extern "C" {
-ProcessDispatcher* cpp_process_dispatcher_current();
-bool cpp_process_dispatcher_is_current(const ProcessDispatcher* process);
-zx_status_t cpp_process_dispatcher_start(ProcessDispatcher* process, ThreadDispatcher* thread,
-                                         zx_vaddr_t pc, zx_vaddr_t sp, Handle* arg_handle,
-                                         uintptr_t arg2);
-void cpp_process_dispatcher_kill(ProcessDispatcher* process, int64_t retcode);
-zx_status_t cpp_process_dispatcher_suspend(ProcessDispatcher* process);
-void cpp_process_dispatcher_resume(ProcessDispatcher* process);
-zx_status_t cpp_process_dispatcher_make_and_add_handle(ProcessDispatcher* process,
-                                                       KernelHandle<Dispatcher>* handle,
-                                                       zx_rights_t rights, zx_handle_t* out_handle);
-zx_status_t cpp_process_dispatcher_make_and_add_handle_from_ref(ProcessDispatcher* process,
-                                                                Dispatcher* dispatcher,
-                                                                zx_rights_t rights,
-                                                                zx_handle_t* out_handle);
-zx_status_t cpp_handle_table_get_dispatcher(zx_handle_t handle,
-                                            ffi::Uninitialized<fbl::RefPtr<Dispatcher>>* out_disp,
-                                            zx_rights_t* out_rights);
-Handle* cpp_process_dispatcher_remove_handle(ProcessDispatcher* process, zx_handle_t handle_value);
-zx_status_t cpp_process_dispatcher_enforce_basic_policy(ProcessDispatcher* process,
-                                                        uint32_t policy);
-int64_t cpp_process_dispatcher_get_timer_slack_policy_amount(const ProcessDispatcher* process);
-void cpp_process_dispatcher_get_timer_slack_policy(const ProcessDispatcher* process,
-                                                   TimerSlack* out_slack);
-void* cpp_process_dispatcher_handle_table_lock(const ProcessDispatcher* process);
-Handle* cpp_process_dispatcher_handle_table_get_handle_locked(ProcessDispatcher* process,
-                                                              zx_handle_t handle_value);
-zx_info_process_t cpp_process_dispatcher_get_info(const ProcessDispatcher* process);
-zx_status_t cpp_process_dispatcher_set_critical_to_job(ProcessDispatcher* process,
-                                                       JobDispatcher* job, bool retcode_nonzero);
-zx_status_t cpp_process_dispatcher_create(
-    JobDispatcher* job, const char* name_ptr, size_t name_len, uint32_t flags,
-    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_proc_handle,
-    ffi::Uninitialized<zx_rights_t>* out_proc_rights,
-    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_vmar_handle,
-    ffi::Uninitialized<zx_rights_t>* out_vmar_rights);
-zx_status_t cpp_process_dispatcher_create_shared(
-    ProcessDispatcher* shared_proc, const char* name_ptr, size_t name_len, uint32_t flags,
-    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_proc_handle,
-    ffi::Uninitialized<zx_rights_t>* out_proc_rights,
-    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_restricted_vmar_handle,
-    ffi::Uninitialized<zx_rights_t>* out_restricted_vmar_rights);
-[[noreturn]] void cpp_process_dispatcher_exit_current(int64_t retcode);
-
-JobDispatcher* cpp_process_dispatcher_job(ProcessDispatcher* process);
-
-VmAspace* cpp_process_dispatcher_aspace_at(ProcessDispatcher* process, zx_vaddr_t va);
-
-uintptr_t cpp_process_dispatcher_get_debug_addr(const ProcessDispatcher* process);
-zx_status_t cpp_process_dispatcher_set_debug_addr(ProcessDispatcher* process, uintptr_t addr);
-uintptr_t cpp_process_dispatcher_get_dyn_break_on_load(const ProcessDispatcher* process);
-zx_status_t cpp_process_dispatcher_set_dyn_break_on_load(ProcessDispatcher* process,
-                                                         uintptr_t break_on_load);
-uintptr_t cpp_process_dispatcher_vdso_base_address(ProcessDispatcher* process);
-#if ARCH_X86
-uintptr_t cpp_process_dispatcher_hw_trace_context_id(const ProcessDispatcher* process);
-#endif
-}
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_PROCESS_DISPATCHER_H_

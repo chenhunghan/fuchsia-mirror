@@ -528,27 +528,14 @@ impl Reader for F2fsReader {
 mod test {
     use super::*;
     use crate::dir::FileType;
-    use crate::xattr;
+    use crate::{open_f2fs_test_image, xattr};
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use storage_device::fake_device::FakeDevice;
-
-    fn open_test_image(path: &str) -> FakeDevice {
-        let path = std::path::PathBuf::from(path);
-        println!("path is {path:?}");
-        FakeDevice::from_image(
-            zstd::Decoder::new(std::fs::File::open(&path).expect("open image"))
-                .expect("decompress image"),
-            BLOCK_SIZE as u32,
-        )
-        .expect("open image")
-    }
-
     #[fuchsia::test]
     async fn test_open_fs() {
-        let device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let device = open_f2fs_test_image();
 
         let f2fs = F2fsReader::open_device(Arc::new(device)).await.expect("open ok");
         // Root inode is a known constant.
@@ -579,7 +566,7 @@ mod test {
 
     #[fuchsia::test]
     async fn test_basic_dirs() {
-        let device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let device = open_f2fs_test_image();
 
         let f2fs = F2fsReader::open_device(Arc::new(device)).await.expect("open ok");
         let root_ino = f2fs.root_ino();
@@ -687,7 +674,7 @@ mod test {
 
     #[fuchsia::test]
     async fn test_xattr() {
-        let device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let device = open_f2fs_test_image();
 
         let f2fs = F2fsReader::open_device(Arc::new(device)).await.expect("open ok");
         let sparse_dat =
@@ -737,7 +724,7 @@ mod test {
 
     #[fuchsia::test]
     async fn test_fsverity() {
-        let device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let device = open_f2fs_test_image();
         let mut f2fs = F2fsReader::open_device(Arc::new(device)).await.expect("open ok");
         f2fs.add_key(&[0u8; 64]);
         let verity_files = vec![
@@ -788,7 +775,7 @@ mod test {
         .into_iter()
         .collect();
 
-        let device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let device = open_f2fs_test_image();
 
         let mut f2fs = F2fsReader::open_device(Arc::new(device)).await.expect("open ok");
 
@@ -849,7 +836,7 @@ mod test {
 
     #[fuchsia::test]
     async fn test_summary_block_addr() {
-        let device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let device = open_f2fs_test_image();
         let mut f2fs = F2fsReader::open_device(Arc::new(device)).await.expect("open ok");
 
         // Case 1: No Orphan Flag
@@ -869,7 +856,7 @@ mod test {
 
     #[fuchsia::test]
     async fn test_orphan_inodes() {
-        let device = open_test_image("/pkg/testdata/f2fs.img.zst");
+        let device = open_f2fs_test_image();
         let f2fs = F2fsReader::open_device(Arc::new(device)).await.expect("open ok");
         assert_eq!(f2fs.orphan_inodes().len(), 3);
         for &ino in f2fs.orphan_inodes() {

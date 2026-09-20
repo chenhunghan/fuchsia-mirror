@@ -6,8 +6,13 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("interrupt_handling_driver_rust-dml") {
+  dml = "meta/interrupt_handling_driver_rust.dml"
+  driver_name = "interrupt_handling_driver_rust"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/interrupt_handling_driver_rust.bind"
+  dml_label = ":interrupt_handling_driver_rust-dml"
   bind_output = "interrupt_handling_driver_rust.bindbc"
   deps = [ "//src/devices/bind/fuchsia.gpio" ]
 }
@@ -32,7 +37,7 @@ fuchsia_rust_driver("driver") {
 
 fuchsia_driver_component("component") {
   component_name = "interrupt_handling_driver_rust"
-  manifest = "meta/interrupt_handling_driver_rust.cml"
+  dml_label = ":interrupt_handling_driver_rust-dml"
   deps = [
     ":bind",
     ":driver",

@@ -101,7 +101,7 @@ class TestNinjaOutputsDatabase(unittest.TestCase):
 
     def run_tests_for_class(
         self,
-        db_class: T.Type[gn_ninja_outputs.NinjaOutputsBase],
+        db_class: type[gn_ninja_outputs.NinjaOutputsBase],
         outputs_json: T.Any = _NINJA_OUTPUTS,
     ) -> None:
         db = db_class()

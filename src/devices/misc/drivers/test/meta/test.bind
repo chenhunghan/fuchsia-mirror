@@ -6,9 +6,8 @@
 
 if fuchsia.BIND_PROTOCOL == fuchsia.test.BIND_PROTOCOL.PARENT {
     true;
-} else if fuchsia.BIND_PLATFORM_DEV_VID == fuchsia.test.platform.BIND_PLATFORM_DEV_VID.TEST {
+} else {
+    fuchsia.BIND_PLATFORM_DEV_VID == fuchsia.test.platform.BIND_PLATFORM_DEV_VID.TEST;
     fuchsia.BIND_PLATFORM_DEV_PID == fuchsia.test.platform.BIND_PLATFORM_DEV_PID.LIBDRIVER;
     fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.test.platform.BIND_PLATFORM_DEV_DID.COMPOSITE;
-} else {
-    false;
 }

@@ -278,6 +278,15 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(flags.json, False)
         self.assertIsNone(flags.logpath)
 
+    def test_save_log_path_to_file(self) -> None:
+        flags = args.parse_args(["--save-log-path-to-file", "/tmp/logpath_ptr"])
+        flags.validate()
+        self.assertEqual(flags.save_log_path_to_file, "/tmp/logpath_ptr")
+
+        flags = args.parse_args([])
+        flags.validate()
+        self.assertIsNone(flags.save_log_path_to_file)
+
     def test_e2e(self) -> None:
         flags = args.parse_args(["--only-e2e"])
         flags.validate()

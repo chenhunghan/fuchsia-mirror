@@ -320,96 +320,29 @@ class PmmNode {
   // ranges provided to this method.
   void InitReservedRange(const memalloc::Range& range);
 
-  void FreePageHelperLocked(vm_page* page, bool already_filled) TA_REQ(lock_);
-  void FreeLoanedPageHelperLocked(vm_page* page, bool already_filled) TA_REQ(loaned_list_lock_);
-  void FreeListLocked(VmPageDoublyLinkedList* list, bool already_filled,
-                      PmmOptDelayReuse delay_reuse) TA_REQ(lock_);
-  template <typename F>
-  void FreeLoanedListLocked(VmPageDoublyLinkedList* list, bool already_filled,
-                            PmmOptDelayReuse delay_reuse, F validator) TA_REQ(loaned_list_lock_);
-
-  void SignalFreeMemoryChangeLocked() TA_REQ(lock_);
-  void TripFreePagesLevelLocked() TA_REQ(lock_);
-  void UpdateMemAvailStateLocked() TA_REQ(lock_);
-  void SetMemAvailStateLocked(uint8_t mem_avail_state) TA_REQ(lock_);
-
-  void IncrementFreeCountLocked(uint64_t amount) TA_REQ(lock_) {
-    free_count_.fetch_add(amount, ktl::memory_order_relaxed);
-
-    if (mem_signal_ && free_count_.load(ktl::memory_order_relaxed) > mem_signal_upper_bound_) {
-      SignalFreeMemoryChangeLocked();
-    }
-  }
-  void DecrementFreeCountLocked(uint64_t amount) TA_REQ(lock_) {
-    [[maybe_unused]] uint64_t count = free_count_.fetch_sub(amount, ktl::memory_order_relaxed);
-    DEBUG_ASSERT(count >= amount);
-
-    if (should_wait_ == ShouldWaitState::OnceLevelTripped &&
-        free_count_.load(ktl::memory_order_relaxed) < should_wait_free_pages_level_) {
-      TripFreePagesLevelLocked();
-    }
-
-    if (mem_signal_ && free_count_.load(ktl::memory_order_relaxed) < mem_signal_lower_bound_) {
-      SignalFreeMemoryChangeLocked();
-    }
-  }
-
-  void IncrementFreeLoanedCountLocked(uint64_t amount) TA_REQ(loaned_list_lock_) {
-    free_loaned_count_.fetch_add(amount, ktl::memory_order_relaxed);
-  }
-  void DecrementFreeLoanedCountLocked(uint64_t amount) TA_REQ(loaned_list_lock_) {
-    DEBUG_ASSERT(free_loaned_count_.load(ktl::memory_order_relaxed) >= amount);
-    free_loaned_count_.fetch_sub(amount, ktl::memory_order_relaxed);
-  }
-
-  void IncrementLoanedCountLocked(uint64_t amount) TA_REQ(loaned_list_lock_) {
-    loaned_count_.fetch_add(amount, ktl::memory_order_relaxed);
-  }
-  void DecrementLoanedCountLocked(uint64_t amount) TA_REQ(loaned_list_lock_) {
-    DEBUG_ASSERT(loaned_count_.load(ktl::memory_order_relaxed) >= amount);
-    loaned_count_.fetch_sub(amount, ktl::memory_order_relaxed);
-  }
-
-  void IncrementLoanCancelledCountLocked(uint64_t amount) TA_REQ(loaned_list_lock_) {
-    loan_cancelled_count_.fetch_add(amount, ktl::memory_order_relaxed);
-  }
-  void DecrementLoanCancelledCountLocked(uint64_t amount) TA_REQ(loaned_list_lock_) {
-    DEBUG_ASSERT(loan_cancelled_count_.load(ktl::memory_order_relaxed) >= amount);
-    loan_cancelled_count_.fetch_sub(amount, ktl::memory_order_relaxed);
-  }
-
-  bool ShouldDelayAllocationLocked() TA_REQ(lock_);
-
-  void AllocPageHelperLocked(vm_page_t* page) TA_REQ(lock_);
-  void AllocLoanedPageHelperLocked(vm_page_t* page) TA_REQ(loaned_list_lock_);
-
-  // This method should be called when the PMM fails to allocate in a user-visible way and will
-  // (optionally) trigger an asynchronous OOM response.
-  void ReportAllocFailureLocked(AllocFailure failure) TA_REQ(lock_);
-
   fbl::Canary<fbl::magic("PNOD")> canary_;
 
   mutable DECLARE_MUTEX(PmmNode) lock_;
 
-  uint64_t arena_cumulative_size_ TA_GUARDED(lock_) = 0;
+  [[maybe_unused]] uint64_t arena_cumulative_size_ TA_GUARDED(lock_) = 0;
   // This is both an atomic and guarded by lock_ as we would like modifications to require the lock,
   // as logic in the system relies on the free_count_ not changing whilst the lock is held, but also
   // be an atomic so it can be correctly read without the lock.
-  ktl::atomic<uint64_t> free_count_ TA_GUARDED(lock_) = 0;
-  ktl::atomic<uint64_t> free_loaned_count_ TA_GUARDED(loaned_list_lock_) = 0;
-  ktl::atomic<uint64_t> loaned_count_ TA_GUARDED(loaned_list_lock_) = 0;
-  ktl::atomic<uint64_t> loan_cancelled_count_ TA_GUARDED(loaned_list_lock_) = 0;
+  [[maybe_unused]] ktl::atomic<uint64_t> free_count_ TA_GUARDED(lock_) = 0;
+  [[maybe_unused]] ktl::atomic<uint64_t> free_loaned_count_ TA_GUARDED(loaned_list_lock_) = 0;
+  [[maybe_unused]] ktl::atomic<uint64_t> loaned_count_ TA_GUARDED(loaned_list_lock_) = 0;
+  [[maybe_unused]] ktl::atomic<uint64_t> loan_cancelled_count_ TA_GUARDED(loaned_list_lock_) = 0;
 
   // Free pages where !loaned.
-  VmPageDoublyLinkedList free_list_ TA_GUARDED(lock_);
+  [[maybe_unused]] VmPageDoublyLinkedList free_list_ TA_GUARDED(lock_);
   // Free pages where loaned && !loan_cancelled.
   mutable DECLARE_MUTEX(PmmNode) loaned_list_lock_;
-  VmPageDoublyLinkedList free_loaned_list_ TA_GUARDED(loaned_list_lock_);
+  [[maybe_unused]] VmPageDoublyLinkedList free_loaned_list_ TA_GUARDED(loaned_list_lock_);
 
   // The pages comprising the memory temporarily used during phys hand-off,
   // populated on Init(). It is the responsibility of EndHandoff() to free this
   // list.
-  VmPageDoublyLinkedList phys_handoff_temporary_list_;
+  [[maybe_unused]] VmPageDoublyLinkedList phys_handoff_temporary_list_;
 
   // The pages comprising the page-aligned regions of memory that we expect to
   // turn into VMOs to hand-off to userspace - as determined by
@@ -418,10 +351,10 @@ class PmmNode {
   // It is expected that this memory will be unwired and turned into VMOs by the
   // end of the phys hand-off phase, and it is the responsibility of
   // PmmNode::EndHandoff() to ensure afterward that this list is empty.
-  VmPageDoublyLinkedList phys_handoff_vmo_list_ TA_GUARDED(lock_);
+  [[maybe_unused]] VmPageDoublyLinkedList phys_handoff_vmo_list_ TA_GUARDED(lock_);
 
   // The pages intended to be permanently reserved.
-  VmPageDoublyLinkedList permanently_reserved_list_ TA_GUARDED(lock_);
+  [[maybe_unused]] VmPageDoublyLinkedList permanently_reserved_list_ TA_GUARDED(lock_);
 
   // Controls the behavior of requests that have the PMM_ALLOC_FLAG_CAN_WAIT.
   enum class ShouldWaitState {
@@ -435,28 +368,29 @@ class PmmNode {
     // level is reset.
     UntilReset,
   };
-  ShouldWaitState should_wait_ TA_GUARDED(lock_) = ShouldWaitState::OnceLevelTripped;
+  [[maybe_unused]] ShouldWaitState should_wait_ TA_GUARDED(lock_) =
+      ShouldWaitState::OnceLevelTripped;
 
   // Below this number of free pages the PMM will transition into delaying allocations.
-  uint64_t should_wait_free_pages_level_ TA_GUARDED(lock_) = 0;
+  [[maybe_unused]] uint64_t should_wait_free_pages_level_ TA_GUARDED(lock_) = 0;
 
   // The event acts a gate keeper for waking up threads waiting for allocations one at time.
   // The event gets signalled when there MAY be pages available.
-  AutounsignalEvent may_allocate_evt_{true};
+  [[maybe_unused]] AutounsignalEvent may_allocate_evt_{true};
 
   // Indicates whether a PMM alloc call has ever failed with ZX_ERR_NO_MEMORY.  Used to trigger an
   // OOM response.  See |MemoryWatchdog::WorkerThread|.
   ktl::atomic<bool> alloc_failed_no_mem_{false};
 
   // A record of the first time an allocation failure is reported to aid in diagnostics.
-  AllocFailure first_alloc_failure_ TA_GUARDED(lock_);
+  [[maybe_unused]] AllocFailure first_alloc_failure_ TA_GUARDED(lock_);
 
   // If mem_signal_ is not null, then once the available free memory falls outside of the defined
   // lower and upper bound the signal is raised. This is a one-shot signal and is cleared after
   // firing.
-  Event* mem_signal_ TA_GUARDED(lock_) = nullptr;
-  uint64_t mem_signal_lower_bound_ TA_GUARDED(lock_) = 0;
-  uint64_t mem_signal_upper_bound_ TA_GUARDED(lock_) = 0;
+  [[maybe_unused]] Event* mem_signal_ TA_GUARDED(lock_) = nullptr;
+  [[maybe_unused]] uint64_t mem_signal_lower_bound_ TA_GUARDED(lock_) = 0;
+  [[maybe_unused]] uint64_t mem_signal_upper_bound_ TA_GUARDED(lock_) = 0;
 
   PageQueues page_queues_;
 
@@ -474,44 +408,19 @@ class PmmNode {
   // even without the lock held.
   // This is an atomic to allow for reading this outside of the lock, but modifications only happen
   // with the lock held.
-  ktl::atomic<bool> free_fill_enabled_ TA_GUARDED(lock_) TA_GUARDED(loaned_list_lock_) = false;
+  [[maybe_unused]] ktl::atomic<bool> free_fill_enabled_ TA_GUARDED(lock_)
+      TA_GUARDED(loaned_list_lock_) = false;
   // Indicates whether it is known that all pages in the free list have had a pattern filled into
   // them. This value can only transition from false->true, and never back to false again. Once this
   // value is set the action and armed state in checker_ may no longer be changed, and it becomes
   // safe to call AssertPattern even without the lock held.
-  bool all_free_pages_filled_ TA_GUARDED(loaned_list_lock_) TA_GUARDED(lock_) = false;
+  [[maybe_unused]] bool all_free_pages_filled_ TA_GUARDED(loaned_list_lock_)
+      TA_GUARDED(lock_) = false;
   PmmChecker checker_;
-
-  // This method is racy as it allows us to read free_fill_enabled_ without holding the lock. If we
-  // receive a value of 'true', then as there is no mechanism to re-set it to false, we know it is
-  // still true. If we receive the value of 'false', then it could still become 'true' later.
-  // The intent of this method is to allow for filling the free pattern outside of the lock in most
-  // cases, and in the unlikely event of a race during the checker being armed, the pattern can
-  // resort to being filled inside the lock.
-  bool IsFreeFillEnabledRacy() const TA_NO_THREAD_SAFETY_ANALYSIS {
-    // Read with acquire semantics to ensure that any modifications to checker_ are visible before
-    // changes to free_fill_enabled_. See EnableFreePageFilling for where the release is performed.
-    return free_fill_enabled_.load(ktl::memory_order_acquire);
-  }
-  // The free_fill_enabled_ and all_free_pages_filled_ members require both locks to modify, but can
-  // be safely read with either lock held. These methods provide a convenient way to do so with
-  // either of the locks held.
-  bool FreeFillEnabledLocked() const TA_REQ(lock_) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return free_fill_enabled_;
-  }
-  bool FreeFillEnabledLoanedLocked() const TA_REQ(loaned_list_lock_) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return free_fill_enabled_;
-  }
-  bool FreePagesFilledLocked() const TA_REQ(lock_) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return all_free_pages_filled_;
-  }
-  bool FreePagesFilledLoanedLocked() const TA_REQ(loaned_list_lock_) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return all_free_pages_filled_;
-  }
 
   // The rng state for random waiting on allocations. This allows us to use rand_r, which requires
   // no further thread synchronization, unlike rand().
-  uintptr_t random_should_wait_seed_ TA_GUARDED(lock_) = 0;
+  [[maybe_unused]] uintptr_t random_should_wait_seed_ TA_GUARDED(lock_) = 0;
 
   // Arenas are allocated from the node itself to avoid any boot allocations. Walking linearly
   // through them at run time should also be fairly efficient.
@@ -603,12 +512,12 @@ class FreeLoanedPagesHolder {
   // with attempts to wait on it.
   // Although the lock cannot be annotated, this member is guarded by the relevant
   // PmmNode::loaned_list_lock_.
-  bool used_ = false;
+  [[maybe_unused]] bool used_ = false;
   // List of pages presently owned by this object. Every page in this list is defined to be in the
   // ALLOC state with |owner| set to this object.
   // Although the lock cannot be annotated, this member is guarded by the relevant
   // PmmNode::loaned_list_lock_.
-  VmPageDoublyLinkedList pages_;
+  [[maybe_unused]] VmPageDoublyLinkedList pages_;
 
   struct Waiter : fbl::SinglyLinkedListable<Waiter*> {
     Event event;
@@ -619,7 +528,7 @@ class FreeLoanedPagesHolder {
   // threads, allows the waiters to retain a reference to the FLPH object while waiting. This
   // ensures that once FinishFreeLoanedPages performs the signal on the waiters, the FLPH object can
   // be safely destroyed.
-  fbl::SinglyLinkedList<Waiter*> waiters_;
+  [[maybe_unused]] fbl::SinglyLinkedList<Waiter*> waiters_;
   friend PmmNode;
 };
 

@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -71,8 +72,8 @@ class Role {
   // Attempt to create a role with the given name and selectors.
   // `Role`s should always be created with one of these functions, and should never be directly
   // constructed.
-  static fit::result<zx_status_t, Role> Create(std::string_view name,
-                                               std::vector<fuchsia_scheduler::Parameter> selectors);
+  static fit::result<zx_status_t, Role> Create(
+      std::string_view name, std::span<const fuchsia_scheduler::Parameter> selectors);
   // TODO(https://fxbug.dev/321037780): Remove ignore_selectors once the MediaProfileProvider (and
   // associated hacks in ProfileProvider) have been deprecated.
   static fit::result<zx_status_t, Role> Create(std::string_view name_with_selectors,
@@ -82,14 +83,14 @@ class Role {
   // deprecated, as the RoleManager has its own integration tests that do not rely on a hardcoded
   // test role.
   bool IsTestRole() const { return name_ == "fuchsia.test-role"; }
-  bool HasSelector(std::string selector) const;
-  std::string name() const { return name_; }
+  bool HasSelector(std::string_view selector) const;
+  std::string_view name() const { return name_; }
   fit::result<fit::failed, MediaRole> ToMediaRole() const;
   bool operator==(const Role& other) const;
 
  private:
   std::string name_;
-  std::map<std::string, fuchsia_scheduler::ParameterValue> selectors_;
+  std::map<std::string, fuchsia_scheduler::ParameterValue, std::less<>> selectors_;
   inline static const re2::RE2 kReRoleName{"(\\w[\\w\\-]*(?:\\.\\w[\\w\\-]*)*)"};
   inline static const re2::RE2 kReRoleParts{"(\\w[\\w\\-]*(?:\\.\\w[\\w\\-]*)*)(?::(.+))?"};
   inline static const re2::RE2 kReSelector{"(\\w[\\w\\-]+)(?:=([^,]+))?,?"};
@@ -99,23 +100,23 @@ class Role {
 struct RoleHash {
   std::size_t operator()(const Role& role) const {
     std::size_t hash = std::hash<std::string_view>{}(role.name_);
-    for (auto selector : role.selectors_) {
+    for (const auto& [key, value] : role.selectors_) {
       // Combine the key hash into the overall hash. The hash combination function is taken from
       // boost::hash_combine.
-      std::size_t key_hash = std::hash<std::string_view>{}(selector.first);
+      std::size_t key_hash = std::hash<std::string_view>{}(key);
       hash ^= key_hash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
 
       // Combine the value hash into the overall hash.
       std::size_t value_hash = 0;
-      switch (selector.second.Which()) {
+      switch (value.Which()) {
         case fuchsia_scheduler::ParameterValue::Tag::kIntValue:
-          value_hash = std::hash<long>{}(selector.second.int_value().value());
+          value_hash = std::hash<long>{}(value.int_value().value());
           break;
         case fuchsia_scheduler::ParameterValue::Tag::kFloatValue:
-          value_hash = std::hash<double>{}(selector.second.float_value().value());
+          value_hash = std::hash<double>{}(value.float_value().value());
           break;
         case fuchsia_scheduler::ParameterValue::Tag::kStringValue:
-          value_hash = std::hash<std::string_view>{}(selector.second.string_value().value());
+          value_hash = std::hash<std::string_view>{}(value.string_value().value());
           break;
         default:
           // We should never hit this case.

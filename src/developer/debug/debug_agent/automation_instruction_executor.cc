@@ -10,7 +10,7 @@ std::vector<debug_ipc::MemoryBlock> AutomationInstructionExecutor::ExecuteInstru
     const std::vector<debug_ipc::AutomationInstruction>& instructions, const GeneralRegisters& regs,
     const ProcessHandle& handle) {
   std::vector<debug_ipc::MemoryBlock> out_block_vect;
-  for (auto instr : instructions) {
+  for (const auto& instr : instructions) {
     if (EvalConditionVect(instr.conditions(), regs, handle)) {
       switch (instr.kind()) {
         case debug_ipc::AutomationInstructionKind::kNop:

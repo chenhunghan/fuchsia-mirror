@@ -6,7 +6,7 @@
 
 use fuchsia_rcu::RcuReadScope;
 use once_cell::sync::OnceCell;
-use rand::Rng;
+use rand::RngExt as _;
 use starnix_core::fs::tmpfs::{TmpFs, TmpFsDirectory};
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::security::{self, PermissionFlags};
@@ -15,11 +15,11 @@ use starnix_core::vfs::fs_args::MountParams;
 use starnix_core::vfs::rw_queue::{RwQueueReadGuard, RwQueueWriteGuard};
 use starnix_core::vfs::{
     AppendLockWriteGuard, CacheMode, CheckAccessReason, DirEntry, DirEntryHandle,
-    DirectoryEntryType, DirentSink, FallocMode, FileHandle, FileObject, FileOps, FileSystem,
-    FileSystemHandle, FileSystemOps, FileSystemOptions, FsLockDepType, FsNode, FsNodeFlags,
-    FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, MountInfo, OutputBuffer,
-    RenameContext, RenameFlags, SeekTarget, SymlinkTarget, UnlinkKind, ValueOrSize, VecInputBuffer,
-    VecOutputBuffer, XattrOp, default_seek, emit_dotdot, fileops_impl_directory,
+    DirectoryEntryType, DirectoryMode, DirentSink, FallocMode, FileHandle, FileObject, FileOps,
+    FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsLockDepType, FsNode,
+    FsNodeFlags, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, MountInfo,
+    OutputBuffer, RenameContext, RenameFlags, SeekTarget, SymlinkTarget, UnlinkKind, ValueOrSize,
+    VecInputBuffer, VecOutputBuffer, XattrOp, default_seek, emit_dotdot, fileops_impl_directory,
     fileops_impl_noop_sync, fileops_impl_seekable,
 };
 use starnix_logging::{log_error, log_warn, track_stub};
@@ -435,7 +435,7 @@ impl OverlayNode {
                         dir.mount(),
                         name.as_ref(),
                         UnlinkKind::NonDirectory,
-                        false,
+                        DirectoryMode::AllowAny,
                     )?;
                 }
             }
@@ -743,7 +743,13 @@ impl FsNodeOps for OverlayNodeOps {
                 } else {
                     UnlinkKind::NonDirectory
                 };
-                upper.entry().unlink(current_task, upper.mount(), name, kind, false)?;
+                upper.entry().unlink(
+                    current_task,
+                    upper.mount(),
+                    name,
+                    kind,
+                    DirectoryMode::AllowAny,
+                )?;
             }
 
             Ok(())
@@ -1266,7 +1272,7 @@ impl OverlayStack {
                         self.work.mount(),
                         temp_name.as_ref(),
                         UnlinkKind::NonDirectory,
-                        false,
+                        DirectoryMode::AllowAny,
                     )
                     .unwrap_or_else(|e| {
                         log_error!("Failed to cleanup work dir after an error: {}", e)
@@ -1350,6 +1356,10 @@ impl FileSystemOps for OverlayFs {
     }
 
     fn unmount(&self) {}
+
+    fn sub_filesystems(&self) -> Vec<Arc<FileSystem>> {
+        vec![self.stack.lower_fs.clone(), self.stack.upper_fs.clone()]
+    }
 }
 
 /// Helper used to resolve directories passed in mount options. The directory is resolved in the

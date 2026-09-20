@@ -3293,6 +3293,33 @@ TEST_P(SdmmcBlockDeviceTest, NodeToken) {
   ASSERT_EQ(info1.koid, info2.koid);
 }
 
+TEST_P(SdmmcBlockDeviceTest, InlineCryptoDunOutOfRange) {
+  ASSERT_OK(StartDriverForMmc());
+
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(FakeSdmmcDevice::kBlockSize, 0, &vmo));
+
+  driver_test_.runtime().PerformBlockingWork([&] {
+    auto client = GetRemoteBlockDeviceForBlockServer("user");
+    ASSERT_OK(client);
+
+    storage::Vmoid owned_vmoid;
+    EXPECT_OK(client->BlockAttachVmo(vmo, &owned_vmoid));
+    vmoid_t vmoid = owned_vmoid.TakeId();
+
+    BlockFifoRequest req = {
+        .command = {.opcode = BLOCK_OPCODE_READ, .flags = BLOCK_IO_FLAG_INLINE_ENCRYPTION_ENABLED},
+        .vmoid = vmoid,
+        .length = 1,
+        .vmo_offset = 0,
+        .dev_offset = 0,
+        .dun = uint64_t{1} << 32,
+        .slot = 1,
+    };
+    EXPECT_EQ(client->FifoTransaction(&req, 1), ZX_ERR_OUT_OF_RANGE);
+  });
+}
+
 INSTANTIATE_TEST_SUITE_P(SdmmcProtocolUsingFidlTest, SdmmcBlockDeviceTest, zxtest::Bool());
 
 }  // namespace sdmmc

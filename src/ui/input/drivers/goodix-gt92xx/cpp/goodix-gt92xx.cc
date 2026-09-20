@@ -422,10 +422,7 @@ zx_status_t Gt92xxDevice::ShutDown() {
 
 void Gt92xxDevice::GetInputReportsReader(GetInputReportsReaderRequestView request,
                                          GetInputReportsReaderCompleter::Sync& completer) {
-  auto status = readers_.CreateReader(dispatcher_, std::move(request->reader));
-  if (status != ZX_OK) {
-    zxlogf(ERROR, "Failed to create a reader %d", status);
-  }
+  ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
 }
 
 void Gt92xxDevice::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,

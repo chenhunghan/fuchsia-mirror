@@ -137,6 +137,13 @@ bool verify_continuous_attribution_bytes(VmObject& vmo, uint64_t expected_bytes)
 VmObject::AttributionCounts make_private_attribution_counts(uint64_t uncompressed,
                                                             uint64_t compressed);
 
+// Changes |vmo|'s high priority count by |delta|, taking care of the prepare and locking steps
+// required by PriorityChanger.
+//
+// |delta| must be non-zero. The count may never go negative, so callers must only subtract what
+// they have already added, and must remove any additions before |vmo| is destroyed.
+void change_vmo_high_priority_count(VmObjectPaged& vmo, int64_t delta);
+
 // Use the function name as the test name
 #define VM_UNITTEST(fname) UNITTEST(#fname, fname)
 

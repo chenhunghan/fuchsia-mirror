@@ -11,7 +11,6 @@ use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 use fidl_fuchsia_net_settings as fnet_settings;
 use futures::TryStreamExt as _;
 use log::warn;
-use netstack3_core::data_structures::rcu::{self, SynchronizedWriterRcu};
 use netstack3_core::tcp::TcpSettings;
 use netstack3_core::types::{BufferSizeSettings, PositiveIsize};
 use netstack3_core::{MapDerefExt as _, SettingsContext};
@@ -20,6 +19,7 @@ use once_cell::sync::Lazy;
 use crate::bindings::interface_config::{
     DeviceNeighborConfig, FidlInterfaceConfig, InterfaceConfig, InterfaceConfigDefaults,
 };
+use crate::bindings::util::rcu::{self, SynchronizedWriterRcu};
 use crate::bindings::util::{self, ErrorLogExt, IllegalZeroValueError, IntoFidl, ResultExt as _};
 use crate::bindings::{BindingsCtx, Ctx};
 

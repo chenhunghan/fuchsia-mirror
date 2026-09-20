@@ -77,6 +77,10 @@ pub struct Opt {
     /// whether to emit Fuchsia SDK metadata atoms
     #[argh(switch)]
     output_fuchsia_sdk_metadata: bool,
+
+    /// minimum age (in days) of published packages to resolve
+    #[argh(option)]
+    min_publish_age: Option<u32>,
 }
 
 type TargetName = String;
@@ -216,6 +220,10 @@ pub struct PackageCfg {
     /// feature is deliberately limited to just a single definition and a limited number
     /// of renames, as it should be used in very special cases only.
     target_renaming: Option<RuleRenaming>,
+    /// Explicitly allow a recently published crate version before cooldown expires
+    allow_recent_publish: Option<bool>,
+    /// Optional package-specific min-publish-age override in days (e.g. 0 or 3)
+    min_publish_age: Option<u32>,
 }
 
 impl PackageCfg {
@@ -230,13 +238,15 @@ impl PackageCfg {
 }
 
 /// Configs added to all GN targets in the BUILD.gn
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default, deny_unknown_fields)]
 pub struct GlobalTargetCfgs {
     remove_cfgs: Vec<String>,
     add_cfgs: Vec<String>,
     /// When true, crates must have license files.
     require_licenses: Option<bool>,
+    /// Minimum publication age (in days) for third-party crates (e.g. 14)
+    min_publish_age: Option<u32>,
 }
 
 /// Extra metadata in the Cargo.toml file that feeds into the
@@ -349,30 +359,6 @@ pub fn generate_from_manifest<W: io::Write>(mut output: &mut W, opt: &Opt) -> Re
     let mut top_level_metadata = HashSet::new();
     let mut imported_files: HashSet<String> = HashSet::new();
 
-    // generate cargo metadata
-    let mut cmd = cargo_metadata::MetadataCommand::new();
-    let parent_dir = manifest_path
-        .parent()
-        .with_context(|| format!("while parsing parent path: {}", manifest_path.display()))?;
-    let _ = cmd.current_dir(parent_dir);
-    let _ = cmd.manifest_path(manifest_path);
-    if let Some(ref cargo_path) = opt.cargo {
-        let _ = cmd.cargo_path(cargo_path);
-    }
-    if opt.all_features {
-        let _ = cmd.features(CargoOpt::AllFeatures);
-    }
-    if opt.no_default_features {
-        let _ = cmd.features(CargoOpt::NoDefaultFeatures);
-    }
-    if !opt.features.is_empty() {
-        let _ = cmd.features(CargoOpt::SomeFeatures(opt.features.clone()));
-    }
-    let _ = cmd.other_options([String::from("--frozen")]);
-    let metadata = cmd.exec().with_context(|| {
-        format!("while running cargo metadata: supplied cargo binary: {:?}", opt.cargo)
-    })?;
-
     // read out custom gn commands from the toml file
     let mut file = File::open(&manifest_path)
         .with_context(|| format!("opening {}", manifest_path.display()))?;
@@ -392,6 +378,62 @@ pub fn generate_from_manifest<W: io::Write>(mut output: &mut W, opt: &Opt) -> Re
             }
         }
     }
+
+    // generate cargo metadata
+    let mut cmd = cargo_metadata::MetadataCommand::new();
+    let parent_dir = manifest_path
+        .parent()
+        .with_context(|| format!("while parsing parent path: {}", manifest_path.display()))?;
+    let _ = cmd.current_dir(parent_dir);
+    let _ = cmd.manifest_path(manifest_path);
+    if let Some(ref cargo_path) = opt.cargo {
+        let _ = cmd.cargo_path(cargo_path);
+    }
+    if opt.all_features {
+        let _ = cmd.features(CargoOpt::AllFeatures);
+    }
+    if opt.no_default_features {
+        let _ = cmd.features(CargoOpt::NoDefaultFeatures);
+    }
+    if !opt.features.is_empty() {
+        let _ = cmd.features(CargoOpt::SomeFeatures(opt.features.clone()));
+    }
+
+    let global_min_publish_age = opt.min_publish_age.or_else(|| {
+        metadata_configs
+            .gn
+            .as_ref()
+            .and_then(|gn| gn.config.as_ref())
+            .and_then(|cfg| cfg.min_publish_age)
+    });
+
+    if let Some(min_age_days) = global_min_publish_age
+        && min_age_days > 0
+    {
+        let cargo_bin = opt.cargo.as_deref().unwrap_or_else(|| std::path::Path::new("cargo"));
+        let mut check_cmd = std::process::Command::new(cargo_bin);
+        check_cmd
+            .arg("update")
+            .arg("--dry-run")
+            .arg("--manifest-path")
+            .arg(manifest_path)
+            .arg("-Zmin-publish-age")
+            .arg(format!("--config=registry.global-min-publish-age=\"{} days\"", min_age_days));
+        let output = check_cmd
+            .output()
+            .with_context(|| "running cargo update --dry-run for min-publish-age verification")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Minimum publish age policy violation:\n{}", stderr.trim());
+        }
+    }
+
+    let other_options = vec![String::from("--frozen")];
+    let _ = cmd.other_options(other_options);
+
+    let metadata = cmd.exec().with_context(|| {
+        format!("while running cargo metadata: supplied cargo binary: {:?}", opt.cargo)
+    })?;
 
     gn::write_header(&mut output, manifest_path).context("writing header")?;
 
@@ -626,7 +668,9 @@ pub fn generate_from_manifest<W: io::Write>(mut output: &mut W, opt: &Opt) -> Re
                                 && pkg_cfg.group_visibility.is_none()
                                 && pkg_cfg.groups.is_none()
                                 && pkg_cfg.testonly.is_none()
-                                && pkg_cfg.target_renaming.is_none(),
+                                && pkg_cfg.target_renaming.is_none()
+                                && pkg_cfg.allow_recent_publish.is_none()
+                                && pkg_cfg.min_publish_age.is_none(),
                             "No other field can be set, including platform sub-configs, if an existing GN target is specified"
                         );
                         assert!(
@@ -1054,5 +1098,40 @@ mod tests {
         assert_eq!(cfg.remove_features, Some(vec!["std".to_string()]));
         assert_eq!(cfg.rustflags, Some(vec!["--cfg=foo".to_string()]));
         assert_eq!(cfg.remove_rustflags, Some(vec!["--cfg=bar".to_string()]));
+    }
+
+    #[test]
+    fn deserialize_global_target_cfgs_with_min_publish_age() {
+        let toml_str = r#"
+            min_publish_age = 14
+            require_licenses = true
+        "#;
+
+        let cfg: GlobalTargetCfgs = toml::from_str(toml_str).expect("deserialize GlobalTargetCfgs");
+        assert_eq!(cfg.min_publish_age, Some(14));
+        assert_eq!(cfg.require_licenses, Some(true));
+        assert!(cfg.remove_cfgs.is_empty());
+        assert!(cfg.add_cfgs.is_empty());
+    }
+
+    #[test]
+    fn deserialize_package_cfg_with_min_publish_age_override() {
+        let toml_str = r#"
+            allow_recent_publish = true
+            min_publish_age = 0
+        "#;
+
+        let cfg: PackageCfg = toml::from_str(toml_str).expect("deserialize PackageCfg");
+        assert_eq!(cfg.allow_recent_publish, Some(true));
+        assert_eq!(cfg.min_publish_age, Some(0));
+        assert!(cfg.validate().is_ok());
+
+        let toml_override = r#"
+            min_publish_age = 3
+        "#;
+        let cfg_override: PackageCfg =
+            toml::from_str(toml_override).expect("deserialize PackageCfg");
+        assert_eq!(cfg_override.min_publish_age, Some(3));
+        assert!(cfg_override.validate().is_ok());
     }
 }

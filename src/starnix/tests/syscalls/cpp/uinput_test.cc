@@ -43,29 +43,24 @@ class UinputTest : public ::testing::Test {
   fbl::unique_fd uinput_fd_;
 };
 
-std::set<std::string> lsDir(const char* dir) {
-  DIR* d = opendir(dir);
-  std::set<std::string> name_set;
-  dirent* e;
-  while ((e = readdir(d)) != nullptr) {
-    name_set.insert(e->d_name);
-  }
-  closedir(d);
-  return name_set;
-}
+const uint16_t GOOGLE_VENDOR_ID = 0x18d1;
 
-// return files in the first ls result but not in the second ls result.
-std::vector<std::string> lsDiff(std::set<std::string>& s1, std::set<std::string>& s2) {
-  std::vector<std::string> diff;
-  for (const auto& it : s1) {
-    if (s2.find(it) == s2.end()) {
-      diff.push_back(it);
+void WaitForDeviceClosed(const std::string& device_name) {
+  if (test_helper::IsStarnix()) {
+    for (int i = 0; i < 100; ++i) {
+      fbl::unique_fd fd(open(("/dev/input/" + device_name).c_str(), O_RDWR));
+      if (!fd.is_valid() && errno == ENOENT) {
+        break;
+      }
+      usleep(50000);
     }
   }
-  return diff;
-}
 
-const uint16_t GOOGLE_VENDOR_ID = 0x18d1;
+  // Check that the device file no longer exists. Open should fail.
+  fbl::unique_fd fd(open(("/dev/input/" + device_name).c_str(), O_RDWR));
+  EXPECT_FALSE(fd.is_valid());
+  EXPECT_EQ(errno, ENOENT);
+}
 
 TEST_F(UinputTest, UiGetVersion) {
   // Pass null to UI_GET_VERSION expect EFAULT.
@@ -181,13 +176,13 @@ TEST_F(UinputTest, UiDevCreateTouchscreenWithSize) {
   res = ioctl(uinput_fd_.get(), UI_DEV_SETUP, &usetup);
   ASSERT_EQ(res, 0);
 
-  auto ls_before = lsDir("/dev/input");
+  // /dev/input may not exist before the first device is created.
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
 
   res = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
   EXPECT_EQ(res, 0);
 
-  auto ls_after = lsDir("/dev/input");
-  auto diff = lsDiff(ls_after, ls_before);
+  auto diff = test_helper::WaitForDevice(ls_before);
   ASSERT_EQ(diff.size(), 1u);
 
   auto new_device_name = diff[0];
@@ -214,7 +209,8 @@ TEST_F(UinputTest, UiDevCreateTouchscreenWithSize) {
 }
 
 TEST_F(UinputTest, UiDevCreateDestroyTouchscreenEvIoGid) {
-  auto ls_before = lsDir("/dev/input");
+  // /dev/input may not exist before the first device is created.
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
 
   int res = ioctl(uinput_fd_.get(), UI_SET_EVBIT, EV_ABS);
   ASSERT_EQ(res, 0);
@@ -227,8 +223,7 @@ TEST_F(UinputTest, UiDevCreateDestroyTouchscreenEvIoGid) {
   res = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
   ASSERT_EQ(res, 0);
 
-  auto ls_after = lsDir("/dev/input");
-  auto diff = lsDiff(ls_after, ls_before);
+  auto diff = test_helper::WaitForDevice(ls_before);
   ASSERT_EQ(diff.size(), 1u);
 
   auto new_device_name = diff[0];
@@ -248,14 +243,12 @@ TEST_F(UinputTest, UiDevCreateDestroyTouchscreenEvIoGid) {
   res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
   ASSERT_EQ(res, 0);
 
-  // Check that the device file no longer exits. Open should fail.
-  int fd = open(("/dev/input/" + new_device_name).c_str(), O_RDWR);
-  EXPECT_EQ(fd, -1);
-  EXPECT_EQ(errno, ENOENT);
+  WaitForDeviceClosed(new_device_name);
 }
 
 TEST_F(UinputTest, UiDevCreateDestroyKeyboardEvIoGid) {
-  auto ls_before = lsDir("/dev/input");
+  // /dev/input may not exist before the first device is created.
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
   uinput_setup usetup{.id = {.bustype = BUS_USB, .vendor = GOOGLE_VENDOR_ID, .product = 5}};
   strcpy(usetup.name, "Example device");
   int res = ioctl(uinput_fd_.get(), UI_DEV_SETUP, &usetup);
@@ -264,8 +257,7 @@ TEST_F(UinputTest, UiDevCreateDestroyKeyboardEvIoGid) {
   res = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
   ASSERT_EQ(res, 0);
 
-  auto ls_after = lsDir("/dev/input");
-  auto diff = lsDiff(ls_after, ls_before);
+  auto diff = test_helper::WaitForDevice(ls_before);
   ASSERT_EQ(diff.size(), 1u);
 
   auto new_device_name = diff[0];
@@ -285,10 +277,7 @@ TEST_F(UinputTest, UiDevCreateDestroyKeyboardEvIoGid) {
   res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
   ASSERT_EQ(res, 0);
 
-  // Check that the device file no longer exits. Open should fail.
-  int fd = open(("/dev/input/" + new_device_name).c_str(), O_RDWR);
-  EXPECT_EQ(fd, -1);
-  EXPECT_EQ(errno, ENOENT);
+  WaitForDeviceClosed(new_device_name);
 }
 
 TEST_F(UinputTest, UiDevDestroy) {

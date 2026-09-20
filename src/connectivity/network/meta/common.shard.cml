@@ -301,10 +301,6 @@
             as: "fuchsia.pkg.http.GoogleClient",
         },
         {
-            protocol: [ "fuchsia.net.reachability.Monitor" ],
-            from: "#reachability",
-        },
-        {
             protocol: [
                 "fuchsia.net.dhcpv6.PrefixProvider",
                 "fuchsia.net.masquerade.Factory",

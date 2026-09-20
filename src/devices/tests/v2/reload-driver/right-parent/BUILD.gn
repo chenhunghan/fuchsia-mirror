@@ -4,9 +4,17 @@
 
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("right_parent-dml") {
+  dml = "meta/right_parent.dml"
+  driver_name = "right_parent"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/right_parent.bind"
-  deps = [ "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test" ]
+  dml_label = ":right_parent-dml"
+  deps = [
+    "//src/devices/bind/fuchsia",
+    "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test",
+  ]
   bind_output = "right_parent.bindbc"
 }
 
@@ -22,8 +30,8 @@ fuchsia_cc_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
+  dml_label = ":right_parent-dml"
   testonly = true
-  manifest = "meta/right_parent.cml"
   component_name = "right_parent"
   deps = [ ":driver" ]
   info = "meta/info.json"

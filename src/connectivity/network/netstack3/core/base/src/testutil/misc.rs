@@ -9,6 +9,9 @@
 //! Please refrain from adding types to this module, keep this only to
 //! freestanding functions. If you require a new type, create a module for it.
 
+// The crate is `no_std`, but test utilities are allowed to print to stdout.
+extern crate std;
+
 use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::sync::atomic::{self, AtomicBool};
@@ -27,7 +30,7 @@ pub fn set_logger_for_test() {
         }
 
         fn log(&self, record: &log::Record<'_>) {
-            teststd::println!("[{}] ({}) {}", record.level(), record.target(), record.args())
+            std::println!("[{}] ({}) {}", record.level(), record.target(), record.args())
         }
 
         fn flush(&self) {}

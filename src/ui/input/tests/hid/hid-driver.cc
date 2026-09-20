@@ -219,10 +219,13 @@ TEST_F(HidDriverTest, BootMouseTestInputReport) {
   ASSERT_OK(input_client.status_value());
   fidl::WireSyncClient client(std::move(input_client.value()));
 
-  auto reader_endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-  auto reader = fidl::WireSyncClient<fuchsia_input_report::InputReportsReader>(
+  auto reader_endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  auto get_reader_result = client->GetInputReportsReaderV2(
+      std::move(reader_endpoints.server),
+      static_cast<uint16_t>(fuchsia_input_report::wire::kMaxDeviceReportCount));
+  ASSERT_OK(get_reader_result.status());
+  auto reader = fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>(
       std::move(reader_endpoints.client));
-  ASSERT_OK(client->GetInputReportsReader(std::move(reader_endpoints.server)).status());
 
   // Check the Descriptor.
   {
@@ -240,13 +243,48 @@ TEST_F(HidDriverTest, BootMouseTestInputReport) {
   mouse_report.rel_y = 100;
   ASSERT_OK(hidctl_socket.write(0, &mouse_report, sizeof(mouse_report), nullptr));
 
-  // Get the mouse InputReport.
-  auto response = reader->ReadInputReports();
-  ASSERT_OK(response.status());
-  ASSERT_OK(response.status());
-  ASSERT_EQ(1, response->value()->reports.size());
-  ASSERT_EQ(50, response->value()->reports[0].mouse().movement_x());
-  ASSERT_EQ(100, response->value()->reports[0].mouse().movement_y());
+  // Get the mouse InputReport via InputReportsReaderV2 event.
+  struct MouseMovement {
+    int64_t movement_x = 0;
+    int64_t movement_y = 0;
+  };
+  std::vector<MouseMovement> received_movements;
+  uint64_t last_stamp = 0;
+
+  class EventHandler
+      : public fidl::WireSyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+   public:
+    EventHandler(std::vector<MouseMovement>& movements, uint64_t& stamp)
+        : movements_(movements), stamp_(stamp) {}
+
+    void OnInputReports(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*
+                            event) override {
+      stamp_ = event->last_report_stamp;
+      for (const auto& report : event->reports) {
+        if (report.has_mouse() && report.mouse().has_movement_x() &&
+            report.mouse().has_movement_y()) {
+          movements_.push_back({
+              .movement_x = report.mouse().movement_x(),
+              .movement_y = report.mouse().movement_y(),
+          });
+        }
+      }
+    }
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+   private:
+    std::vector<MouseMovement>& movements_;
+    uint64_t& stamp_;
+  };
+
+  EventHandler handler(received_movements, last_stamp);
+  ASSERT_OK(reader.HandleOneEvent(handler).status());
+  ASSERT_OK(reader->AcknowledgeReports(last_stamp).status());
+
+  ASSERT_EQ(1, received_movements.size());
+  ASSERT_EQ(50, received_movements[0].movement_x);
+  ASSERT_EQ(100, received_movements[0].movement_y);
 }
 
 }  // namespace

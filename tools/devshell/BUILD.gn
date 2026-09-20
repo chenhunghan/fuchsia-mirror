@@ -90,6 +90,7 @@ test_scripts = [
   "tests/fx-internal/verify_default_keys_test",
   "tests/subcommands/fx_add_test_test",
   "tests/subcommands/fx_build_test",
+  "tests/subcommands/fx_clean_test",
   "tests/subcommands/fx_config_load_test",
   "tests/subcommands/fx_cp_test",
   "tests/subcommands/fx_flash_fuchsia_test",
@@ -110,12 +111,9 @@ test_scripts = [
   "tests/subcommands/fx_set_device_test",
   "tests/subcommands/fx_setup_go_test",
   "tests/subcommands/fx_ssh_test",
+  "tests/subcommands/fx_test_test",
   "tests/subcommands/fx_unset_device_test",
   "tests/subcommands/fx_use_test",
-
-  # tests that currently can't be included in automation.
-  # use 'fx self-test' to run them manually:
-  # "tests/subcommands/fx_test_test",  # disabled because it depends on dart prebuilt
 ]
 
 # Copies the files needed for the tests to the out dir
@@ -201,6 +199,7 @@ host_script_test_data("fx_bash_tests") {
         "//tools/devshell/contrib/lint",
         "//tools/devshell/contrib/lib/count-ninja-actions.py",
         "//tools/devshell/contrib/setup-go",
+        "//tools/devshell/clean",
         "//tools/devshell/cp",
         "//tools/devshell/flash",
         "//tools/devshell/flash-remote",
@@ -260,11 +259,6 @@ host_script_test_data("fx_bash_tests") {
         "//tools/devshell/tests/subcommands/data/fx_serve_update_test/testpackage.manifest",
         "//tools/devshell/tests/subcommands/data/fx_set_test/myboard.gni",
         "//tools/devshell/tests/subcommands/data/fx_set_test/myproduct.gni",
-        "//tools/devshell/tests/subcommands/data/fx_test_test/tests_hashfile/out/default/tests.json",
-        "//tools/devshell/tests/subcommands/data/fx_test_test/tests_hashfile/out/default/package-repositories.json",
-        "//tools/devshell/tests/subcommands/data/fx_test_test/tests_hashfile/out/default/amber-files/repository/targets.json",
-        "//tools/devshell/tests/subcommands/data/fx_test_test/tests_multiple_in_package.json",
-        "//tools/devshell/tests/subcommands/data/fx_test_test/tests_package_server_integration.json",
         "//tools/devshell/unset-device",
         "//tools/devshell/use",
         "//tools/devshell/vendor",

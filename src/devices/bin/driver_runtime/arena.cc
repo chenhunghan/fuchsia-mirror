@@ -68,8 +68,14 @@ bool contains_range(uintptr_t addr, size_t num_bytes, uintptr_t want_addr, size_
   if (addr > want_addr) {
     return false;
   }
-  uintptr_t range_end = addr + num_bytes;
-  uintptr_t want_end = want_addr + want_num_bytes;
+  uintptr_t range_end;
+  if (__builtin_add_overflow(addr, num_bytes, &range_end)) {
+    return false;
+  }
+  uintptr_t want_end;
+  if (__builtin_add_overflow(want_addr, want_num_bytes, &want_end)) {
+    return false;
+  }
   return want_end <= range_end;
 }
 

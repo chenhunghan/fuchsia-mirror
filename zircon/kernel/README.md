@@ -74,7 +74,7 @@
 
 - [eng.lk_debug_level_0](/zircon/kernel/image/eng.lk_debug_level_0/BUILD.gn):
   Eng-like test image to verify that debug assertions are not load-bearing. Uses
-  `vmzircon.with-tests` under `lk_debug_level_0`.
+  `vmzircon` under `lk_debug_level_0`.
 
 ## Source organization
 

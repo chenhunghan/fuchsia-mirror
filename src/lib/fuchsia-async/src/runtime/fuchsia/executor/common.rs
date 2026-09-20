@@ -115,15 +115,6 @@ pub(crate) struct Executor {
 }
 
 impl Executor {
-    pub fn new(
-        time: ExecutorTime,
-        is_local: bool,
-        num_threads: u8,
-        instrument: Option<Arc<dyn TaskInstrument>>,
-    ) -> Self {
-        Self::new_with_port(time, is_local, num_threads, zx::Port::create(), instrument)
-    }
-
     pub fn new_with_port(
         time: ExecutorTime,
         is_local: bool,

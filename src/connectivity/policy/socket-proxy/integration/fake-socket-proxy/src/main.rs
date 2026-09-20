@@ -42,35 +42,8 @@ async fn handle_provider(
         .await
 }
 
-async fn handle_fuchsia_networks(
-    rs: fnp_socketproxy::FuchsiaNetworksRequestStream,
-) -> Result<(), anyhow::Error> {
-    rs.map(|r| r.context("fidl error"))
-        .try_for_each(|req| async move {
-            match req {
-                fnp_socketproxy::FuchsiaNetworksRequest::SetDefault {
-                    network_id: _,
-                    responder,
-                } => responder.send(Ok(()))?,
-                fnp_socketproxy::FuchsiaNetworksRequest::Add { network: _, responder } => {
-                    responder.send(Ok(()))?;
-                }
-                fnp_socketproxy::FuchsiaNetworksRequest::Update { network: _, responder } => {
-                    responder.send(Ok(()))?;
-                }
-                fnp_socketproxy::FuchsiaNetworksRequest::Remove { network_id: _, responder } => {
-                    responder.send(Ok(()))?;
-                }
-            }
-
-            Ok(())
-        })
-        .await
-}
-
 enum IncomingServices {
     NetworkRegistry(fnp_socketproxy::NetworkRegistryRequestStream),
-    FuchsiaNetworks(fnp_socketproxy::FuchsiaNetworksRequestStream),
 }
 
 #[fuchsia::main]
@@ -82,10 +55,7 @@ async fn main() -> Result<(), anyhow::Error> {
         connect_to_protocol::<fnp_socketproxy::NetworkRegistryMarker>()
             .expect("can't connect to NetworkRegistry"),
     );
-    let _ = fs
-        .dir("svc")
-        .add_fidl_service(IncomingServices::NetworkRegistry)
-        .add_fidl_service(IncomingServices::FuchsiaNetworks);
+    let _ = fs.dir("svc").add_fidl_service(IncomingServices::NetworkRegistry);
 
     let _ = fs.take_and_serve_directory_handle()?;
 
@@ -95,9 +65,6 @@ async fn main() -> Result<(), anyhow::Error> {
             if let Err(e) = match request {
                 IncomingServices::NetworkRegistry(rs) => {
                     handle_provider(delegated_networks, rs).await.context("network registry")
-                }
-                IncomingServices::FuchsiaNetworks(rs) => {
-                    handle_fuchsia_networks(rs).await.context("fuchsia networks")
                 }
             } {
                 error!("{e:?}")

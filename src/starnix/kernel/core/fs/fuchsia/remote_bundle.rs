@@ -555,7 +555,7 @@ mod test {
             .expect("new_fs failed");
             let ns = Namespace::new(fs);
             let root = ns.root();
-            let mut context = LookupContext::default().with(SymlinkMode::NoFollow);
+            let mut context = LookupContext::new(SymlinkMode::NoFollow);
 
             let test_dir = root
                 .lookup_child(&current_task, &mut context, "foo".into())

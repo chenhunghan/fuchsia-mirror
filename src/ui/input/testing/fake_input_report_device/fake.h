@@ -55,11 +55,6 @@ class FakeInputDevice final : public fuchsia::input::report::InputDevice {
   void handle_unknown_method(uint64_t ordinal, bool method_has_response) override {}
 
  private:
-  friend class FakeInputReportsReader;
-
-  // This is used by the InputReportsReader to read the reports and send them to the client.
-  std::vector<fuchsia::input::report::InputReport> ReadReports();
-
   fidl::Binding<fuchsia::input::report::InputDevice> binding_;
 
   // This lock makes the class thread-safe, which is important because setting the
@@ -69,7 +64,6 @@ class FakeInputDevice final : public fuchsia::input::report::InputDevice {
   std::vector<fuchsia::input::report::InputReport> reports_ __TA_GUARDED(lock_);
   std::vector<fuchsia::input::report::FeatureReport> feature_reports_ __TA_GUARDED(lock_);
   fuchsia::input::report::DeviceDescriptorPtr descriptor_ __TA_GUARDED(lock_);
-  std::optional<FakeInputReportsReader> reader_ __TA_GUARDED(lock_);
   std::optional<FakeInputReportsReaderV2> reader_v2_ __TA_GUARDED(lock_);
 };
 

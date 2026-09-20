@@ -334,7 +334,7 @@ TransferRequestProcessor::SendRequestUpiu<ScsiCommandUpiu, ResponseUpiu>(ScsiCom
                                                                          uint64_t dma_length);
 
 zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSlot &request_slot,
-                                                     bool is_timeout) {
+                                                     zx_status_t completion_status) {
   TRACE_DURATION("ufs", "UpiuCompletion", "slot", slot_num);
 
   scsi::StatusMessage status_message;
@@ -344,10 +344,12 @@ zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSl
       slots_.GetDescriptorBuffer<ResponseUpiu>(slot_num, request_slot.response_upiu_offset));
 
   zx::result<> request_result = zx::ok();
-  if (is_timeout) {
+  if (completion_status == ZX_ERR_TIMED_OUT) {
     status_message.host_status_code = scsi::HostStatusCode::kTimeout;
     status_message.scsi_status_code = scsi::StatusCode::GOOD;
     request_result = zx::error(ZX_ERR_TIMED_OUT);
+  } else if (completion_status != ZX_OK) {
+    request_result = zx::error(completion_status);
   } else {
     request_result = CheckResponse(slot_num, response);
 
@@ -385,7 +387,7 @@ zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSl
   }
 
   uint32_t doorbell = UtrListDoorBellReg::Get().ReadFrom(&register_).door_bell();
-  if (is_timeout && (doorbell & (1u << slot_num))) {
+  if (completion_status == ZX_ERR_TIMED_OUT && (doorbell & (1u << slot_num))) {
     // Hardware still owns the slot; do not unpin PMT memory until hardware doorbell clears
     // or controller reset / task abort finishes.
     SetSlotStateLocked(slot_num, SlotState::kTimeout);
@@ -398,7 +400,9 @@ zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSl
   if (request_slot.pmt.is_valid()) {
     if (zx_status_t unpin_status = request_slot.pmt.unpin(); unpin_status != ZX_OK) {
       fdf::error("Failed to unpin IO buffer: {}", zx_status_get_string(unpin_status));
-      request_result = zx::error(unpin_status);
+      if (request_result.is_ok()) {
+        request_result = zx::error(unpin_status);
+      }
     }
   }
 
@@ -416,6 +420,7 @@ void TransferRequestProcessor::RequestCompletion(uint8_t slot_num, RequestSlot &
                                                  bool is_timeout,
                                                  fit::callback<void(zx_status_t)> &cb,
                                                  zx_status_t &status) {
+  zx_status_t completion_status = ZX_OK;
   if (is_timeout) {
     // UTRLDBR bit is still set: tell the host controller to abandon the slot
     // *before* UpiuCompletion() unpins the client VMO and completes the block
@@ -423,18 +428,21 @@ void TransferRequestProcessor::RequestCompletion(uint8_t slot_num, RequestSlot &
     // UFSHCI 3.0 5.4.4: UTRLCLR is W0C - write 0 to the slot bit to clear it.
     UtrListClearReg::Get().FromValue(~(1u << slot_num)).WriteTo(&register_);
     SetSlotStateLocked(slot_num, SlotState::kTimeout);
-  }
-
-  if (request_slot.data_vmo->is_valid() && request_slot.is_read && request_slot.dma_length > 0) {
-    // Invalidate the cache so the read data is visible to the CPU.
-    zx_status_t cache_status = request_slot.data_vmo->op_range(
-        ZX_VMO_OP_CACHE_INVALIDATE, request_slot.dma_offset, request_slot.dma_length, nullptr, 0);
-    if (cache_status != ZX_OK) {
-      fdf::error("Failed to invalidate cache for data VMO: {}", zx_status_get_string(cache_status));
+    completion_status = ZX_ERR_TIMED_OUT;
+  } else if (request_slot.data_vmo->is_valid() && request_slot.is_read &&
+             request_slot.dma_length > 0) {
+    // Clean and invalidate the cache so that the next CPU read picks up data written to main memory
+    // by the controller (discarding any speculative CPU prefetches during DMA).
+    completion_status =
+        request_slot.data_vmo->op_range(ZX_VMO_OP_CACHE_CLEAN_INVALIDATE, request_slot.dma_offset,
+                                        request_slot.dma_length, nullptr, 0);
+    if (completion_status != ZX_OK) {
+      fdf::error("Failed to invalidate cache for data VMO: {}",
+                 zx_status_get_string(completion_status));
     }
   }
   // Check request response.
-  status = UpiuCompletion(slot_num, request_slot, is_timeout);
+  status = UpiuCompletion(slot_num, request_slot, completion_status);
   if (status == ZX_ERR_UNAVAILABLE) {
     fdf::warn(
         "Unavailability reported for request, slot[{}] "

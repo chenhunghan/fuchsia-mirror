@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("nelson-brownout-protection-dml") {
+  dml = "meta/nelson-brownout-protection.dml"
+  driver_name = "nelson-brownout-protection"
+}
+
 driver_bind_rules("nelson-brownout-protection-bind") {
-  rules = "meta/nelson-brownout-protection.bind"
+  dml_label = ":nelson-brownout-protection-dml"
   tests = "meta/nelson-brownout-protection-bind-test.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -46,7 +51,7 @@ fuchsia_driver_component("nelson-brownout-protection") {
   info = "meta/nelson-brownout-protection-info.json"
   component_name = "nelson-brownout-protection"
   deps = [ ":nelson-brownout-protection-driver" ]
-  manifest = "meta/nelson-brownout-protection.cml"
+  dml_label = ":nelson-brownout-protection-dml"
 }
 
 fuchsia_driver_package("package") {

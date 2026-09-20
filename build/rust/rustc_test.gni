@@ -161,6 +161,9 @@ template("rustc_test_internal") {
       if (defined(invoker.test_environments)) {
         environments = invoker.test_environments
       }
+      if (defined(invoker.test_build_only)) {
+        build_only = invoker.test_build_only
+      }
       forward_variables_from(invoker,
                              [
                                "package_deps",
@@ -191,7 +194,9 @@ template("rustc_test_internal") {
                              "exclude_toolchain_tags",
                              "features",
                              "inputs",
+                             "lint_config",
                              "output_dir",
+                             "proc_macro_deps",
                              "public_deps",
                              "quiet_clippy",
                              "rustenv",
@@ -265,9 +270,6 @@ template("rustc_test_internal") {
     }
     if (defined(invoker.non_rust_deps)) {
       deps += invoker.non_rust_deps
-    }
-    if (defined(invoker.proc_macro_deps)) {
-      deps += invoker.proc_macro_deps
     }
 
     # test_deps specified in the parent template (if not used directly)

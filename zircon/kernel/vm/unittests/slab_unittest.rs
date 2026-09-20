@@ -10,17 +10,18 @@
 mod slab_rs {
     use crate::vm::page::VmPage;
     use crate::vm::page_slab_allocator::{
-        BaseSlabProvider, PageSlabAllocator, SlabAllocationError, SlabProvider,
+        BaseSlabProvider, IdSlabAllocator, PageSlabAllocator, SlabAllocationError, SlabProvider,
     };
     use crate::vm_unittests::test_helper::TestRand;
     use core::convert::Infallible;
+    use core::ffi::c_void;
     use core::mem::size_of;
     use core::pin::Pin;
     use core::ptr::NonNull;
     use pin_init::{PinInit, pin_data, pin_init, stack_pin_init};
-    use rand::Rng;
+    use rand::RngExt as _;
     use rand::seq::SliceRandom;
-    use unittest::{expect_eq, expect_le, unwrap_ok};
+    use unittest::{expect_eq, expect_le, expect_lt, expect_true, unwrap_ok};
 
     struct TestObject {
         _data: [u64; 32],
@@ -215,5 +216,58 @@ mod slab_rs {
         }
 
         expect_eq!(alloc.active_slabs(), 0);
+    }
+
+    /// Tests ID allocation and exhaustion in an IdSlabAllocator.
+    #[test]
+    fn slab_max_id_test() {
+        // To satisfy the requirement that the number of objects completely fill any slabs we
+        // need to cause sufficient top level slabs to be allocated and used. Every top level
+        // slab requires an allocation in the bottom level slab. To completely fill one bottom
+        // level slab then requires `page::SIZE / size_of::<NonNull<VmPage>>()` top level slabs,
+        // each requiring `page::SIZE / size_of::<TestObject>()` objects to fill.
+        //
+        // For this test we want enough objects for two bottom level slabs.
+        const NUM_OBJECTS: usize = (page::SIZE * 2 / size_of::<NonNull<VmPage>>())
+            * (page::SIZE / size_of::<TestObject>());
+        const SLABS_REQUIRED: usize = PageSlabAllocator::<
+            { size_of::<TestObject>() },
+            BaseSlabProvider,
+        >::slabs_required(NUM_OBJECTS);
+        const SLAB_ID_SLABS_REQUIRED: usize = PageSlabAllocator::<
+            { size_of::<NonNull<VmPage>>() },
+            BaseSlabProvider,
+        >::slabs_required(SLABS_REQUIRED);
+
+        stack_pin_init!(
+            let alloc = IdSlabAllocator::<
+                { size_of::<TestObject>() },
+                NUM_OBJECTS,
+                SLABS_REQUIRED,
+                SLAB_ID_SLABS_REQUIRED,
+            >::new()
+        );
+
+        // Allocate all the objects we are supposed to be able to have.
+        for _ in 0..NUM_OBJECTS {
+            let object: NonNull<c_void> = unwrap_ok!(alloc.as_mut().allocate_bytes());
+            let id = alloc.alloc_to_id(object);
+            expect_lt!(id as usize, NUM_OBJECTS);
+        }
+
+        // Attempting another allocation should fail, as we are out of IDs.
+        {
+            let object: Result<NonNull<TestObject>, _> = alloc.as_mut().allocate_object();
+            expect_true!(object.is_err());
+        }
+
+        // Free all the objects.
+        for i in 0..NUM_OBJECTS {
+            let object: NonNull<c_void> = alloc.id_to_alloc(i as u32);
+            // SAFETY: `object` was allocated by `alloc`.
+            unsafe {
+                alloc.as_mut().deallocate_object(object);
+            }
+        }
     }
 }

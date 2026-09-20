@@ -4,7 +4,6 @@
 
 //! This module contains the implementation of FxBlob (Blobfs-on-Fxfs).
 
-mod atomic_vec;
 pub mod blob;
 mod directory;
 pub mod mapping_provider;

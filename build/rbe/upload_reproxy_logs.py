@@ -15,8 +15,9 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, Sequence
+from typing import Any
 
 import pb_message_util
 import rbe_metrics_pb2
@@ -156,7 +157,7 @@ def bq_table_insert(table: str, data: str) -> int:
 
 
 def bq_upload_remote_action_logs(
-    records: Sequence[Dict[str, Any]],
+    records: Sequence[dict[str, Any]],
     bq_table: str,
     batch_size: int,
 ) -> int:
@@ -176,7 +177,7 @@ def bq_upload_remote_action_logs(
 
 
 def bq_upload_metrics(
-    metrics: Sequence[Dict[str, Any]],
+    metrics: Sequence[dict[str, Any]],
     bq_table: str,
 ) -> int:
     data = "\n".join(json.dumps(row) for row in metrics)

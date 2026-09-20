@@ -4,7 +4,7 @@
 
 #include "src/devices/pci/drivers/pci/composite.h"
 
-#include <lib/ddk/binding_driver.h>
+#include <lib/driver/legacy-bind-constants/legacy-bind-constants.h>
 
 #include <bind/fuchsia/acpi/cpp/bind.h>
 #include <bind/fuchsia/cpp/bind.h>

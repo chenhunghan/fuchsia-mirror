@@ -1690,7 +1690,7 @@ void Scheduler::UpdateEstimatedEnergyConsumption(Thread* current_thread,
   // thread. Always consume the processor idle time, even if an energy model is
   // not set, to avoid accumulating excessive idle time and triggering the
   // assert when an energy model is finally set.
-  const SchedDuration idle_processor_time_ns{IdlePowerThread::TakeProcessorIdleTime()};
+  const SchedDuration idle_processor_time_ns{TakeProcessorIdleTime()};
   DEBUG_ASSERT_MSG(
       idle_processor_time_ns <= actual_runtime_ns,
       "idle_processor_time_ns=%" PRId64 " actual_runtime_ns=%" PRId64 " current_thread=%s",
@@ -2182,7 +2182,9 @@ void Scheduler::RescheduleCommon(Thread* const current_thread, EndTraceCallback 
     // moves outside the bounds of the current power level. All of the
     // processors in the same domain must be re-evaluated to determine whether
     // an actual rate change should occur.
-    if (power_level_control_.processing_rate_should_change()) {
+    if (power_level_control_.scheduler_control_enabled() &&
+        !power_level_control_.has_pending_request() &&
+        power_level_control_.processing_rate_should_change()) {
       power_level_control_.ReevaluateCurrentPowerLevel();
     }
 
@@ -2844,7 +2846,7 @@ void Scheduler::Insert(SchedTime now, Thread* thread, Placement placement) {
 
     // Increase the processing rate when the required utilization increases
     // beyond the current rate, accounting for current limits.
-    if (power_level_control_.is_enabled() &&
+    if (power_level_control_.is_enabled() && power_level_control_.scheduler_control_enabled() &&
         power_level_control_.processing_rate_should_increase()) {
       power_level_control_.PendPowerLevelRequestForRate(
           power_level_control_.clamped_total_demand());
@@ -3808,7 +3810,8 @@ void Scheduler::PowerLevelControl::ReevaluateCurrentPowerLevel() {
                        ("preceding_processing_rate", preceding_target_processing_rate()),
                        ("processing_rate", target_processing_rate()));
 
-  if (max_clamped_demand <= preceding_target_processing_rate() ||
+  if ((has_preceding_target_power_level() &&
+       max_clamped_demand <= preceding_target_processing_rate()) ||
       max_clamped_demand > target_processing_rate()) {
     PendPowerLevelRequestForRate(max_clamped_demand);
   }

@@ -2,10 +2,10 @@
 name: wlan-e2e-test-promotion
 description: >
   Workflow to identify FYI WLAN tests with 300+ consecutive passes, calculate
-  their average runtime, and promote them to CQ by creating a CL.
+  their average runtime, and promote them by creating a CL.
 ---
 
-# Promoting FYI WLAN Tests to CQ
+# Promoting FYI WLAN Tests to Postsubmit CI
 
 This skill defines the workflow to identify WLAN tests currently in the
 `tests_for_fyi` group that are stable enough to be promoted to
@@ -34,7 +34,7 @@ python3 src/connectivity/wlan/.agents/skills/wlan-e2e-test-promotion/scripts/pro
 ```
 
 The script will:
-1. Scan the workspace to identify WLAN tests currently in `tests_for_fyi` (under `src/connectivity/wlan/tests/`).
+1. Scan the workspace to identify WLAN tests currently in `tests_for_fyi` (under `src/connectivity/wlan/tests/` and `vendor/google/tests/end_to_end/wlan/`).
 2. Query LUCI Analysis to check the stability of each test across all board variants.
 3. Output a **Stability Report** showing which tests are "Ready for Promotion" and which are "Not Ready" (with reasons, consecutive passes up to the present, and how long ago the latest failure occurred if any).
 
@@ -44,16 +44,19 @@ If a test meets the promotion criteria (stable on ALL board variants), create a 
 
 #### 1. Modify the Code
 Move the test from `tests_for_fyi` to `tests_for_postsubmit` in the appropriate GN/GNI file.
-*   **Example (wlanix/BUILD.gn)**:
+*   **Example (wlanix/test_lists.gni or BUILD.gn)**:
     *   Remove `:sched_scan_test` from `tests_for_fyi` `public_deps`.
     *   Add `:sched_scan_test` to `tests_for_postsubmit` `public_deps`.
-*   After modifying the files, run `fx format-code` to ensure correct formatting.
+*   **Example (vendor/google/tests/end_to_end/wlan/BUILD.gn)**:
+    *   Remove `:base_functional_test` from `tests_for_fyi` `public_deps`.
+    *   Add `:base_functional_test` to `tests_for_postsubmit` `public_deps`.
+*   After modifying the files, run `fx format-code` to ensure correct formatting (run from the corresponding repository root, e.g. `vendor/google` if modifying vendor files).
 
 #### 2. Commit Message Guidelines
 The commit message must be descriptive and include the empirical data gathered during your analysis (which can be found in the script's output):
 
 *   **Subject Line**: Use the imperative mood, keep it under 50 characters, and prefix with the appropriate area.
-    *   *Example*: `[wlan] Promote sched_scan_test to CQ`
+    *   *Example*: `[wlan] Promote sched_scan_test to CI`
 *   **Body**:
     *   Explain that the test has achieved 300 consecutive passes in FYI.
     *   Include the average runtime over the last 20 runs.
@@ -66,10 +69,11 @@ The commit message must be descriptive and include the empirical data gathered d
 
 **Example Commit Message:**
 ```
-[wlan] Promote sched_scan_test to CQ
+[wlan] Promote sched_scan_test to CI
 
-Promoting sched_scan_test from FYI to WLAN CQ. The test has achieved
-300 consecutive passing runs in the last 90 days across all builders.
+Promoting sched_scan_test from FYI to postsubmit CI. The test has
+achieved 300 consecutive passing runs in the last 90 days across all
+builders.
 
 Test History: https://luci-milo.appspot.com/ui/test/turquoise/host_x64%2Fobj%2Fsrc%2Fconnectivity%2Fwlan%2Ftests%2Fwlanix%2Fsched_scan_test.sh-for-testing-wlan-wlanix.sorrel
 Passing Runs: 300/300

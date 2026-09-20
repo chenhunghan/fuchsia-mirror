@@ -93,7 +93,6 @@ func GetCoverageDataFromTest(t *testing.T, outDir string, config *Config) []stri
 	})
 	arch := distro.TargetCPU()
 	device := emulator.DefaultVirtualDevice(string(arch))
-	device.Initrd = "zircon-a"
 
 	resizeImage := distro.ResizeRawImage(config.Test.BlockImage, config.Bin.Simg2imgHostTool, false)
 	if len(resizeImage) == 0 {

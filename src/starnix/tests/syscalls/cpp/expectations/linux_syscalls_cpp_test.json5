@@ -35,6 +35,7 @@
                 "PerfEventOpenTest.MmapFirstRecordPageIsValid",
                 "PerfEventOpenTest.MmapMetadataPageIsValid",
                 "PerfEventOpenTest.InvalidDataTailIgnoredByKernel",
+                "PerfEventOpenTest.ThreadSamplingResolvesLinuxPidTid",
 
                 // TODO(https://fxbug.dev/436914153): This is flakey.
                 "Pty.EchoFlags",
@@ -108,7 +109,9 @@
                 "InputTest.DevicePropertiesMatchKeyboardProperties",
                 "InputTest.DevicePropertiesMatchTouchProperties",
                 "InputTest.DeviceCanBeRegisteredWithEpoll",
-                "InputTest.DevicePropertiesMatchMouseWheelProperties",
+                "InputTest.DevicePropertiesMatchMouseProperties",
+                "InputTest.GetDeviceName",
+                "InputTest.CurrentStateQueriesSucceed",
 
                 // TODO(https://fxbug.dev/494326733)
                 "LoopTest.BlkGetSize",

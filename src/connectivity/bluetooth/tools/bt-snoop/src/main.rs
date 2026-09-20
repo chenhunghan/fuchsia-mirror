@@ -12,6 +12,7 @@ use fidl_fuchsia_bluetooth_snoop::{
     SnoopStartRequest, UnrecognizedDeviceName,
 };
 use fidl_fuchsia_feedback::CrashReporterMarker;
+use fidl_fuchsia_firmware_crash as fcrash;
 
 use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
@@ -31,7 +32,7 @@ use crate::subscription_manager::SubscriptionManager;
 
 mod bounded_queue;
 mod core_dump;
-use crate::core_dump::{CrashEventStatus, CrashState};
+use crate::core_dump::{CoreDumpCollector, CrashEventStatus, CrashState};
 mod packet_logs;
 mod snooper;
 mod subscription_manager;
@@ -113,11 +114,13 @@ async fn process_vendor_connection(
                 let _ = crash_states.remove(&device);
             }
             if let Some(params) = crash_params {
+                let last_report_local_time =
+                    crash_states.get(path).and_then(|s| s.last_report_local_time);
                 let _ = crash_states.insert(
                     path.to_string(),
                     CrashState {
                         parameters: params,
-                        last_report_local_time: None,
+                        last_report_local_time,
                         collector: None,
                         tentative_report_file_time: None,
                     },
@@ -165,8 +168,24 @@ fn handle_crash_timer_fired(
         return;
     };
 
+    spawn_reporting_task(reporting_tasks, collector);
+}
+
+fn spawn_reporting_task(
+    reporting_tasks: &mut FuturesUnordered<fasync::Task<()>>,
+    collector: CoreDumpCollector,
+) {
     // Spawn a task because file_report is a long-running operation.
     reporting_tasks.push(fasync::Task::spawn(async move {
+        match fuchsia_component::client::connect_to_protocol::<fcrash::ReporterMarker>() {
+            Ok(firmware_reporter) => {
+                collector.file_firmware_report(&firmware_reporter);
+            }
+            Err(e) => {
+                warn!("Failed to connect to fuchsia.firmware.crash.Reporter: {:?}", e);
+            }
+        }
+
         match fuchsia_component::client::connect_to_protocol::<CrashReporterMarker>() {
             Ok(crash_reporter) => {
                 collector.file_report(&crash_reporter).await;
@@ -358,6 +377,8 @@ async fn handle_client_request(
 pub(crate) enum HandlePacketOutcome {
     /// The snoop channel for the device has closed.
     ChannelClosed,
+    /// The snoop channel closed with an in-flight core dump ready to be reported.
+    DumpReady(CoreDumpCollector),
     /// The packet was processed normally.
     Processed,
     /// A crash was detected and a new crash dump collection has started.
@@ -375,7 +396,12 @@ pub(crate) fn handle_packet(
 ) -> HandlePacketOutcome {
     let Some((device, mut packet)) = packet else {
         info!("Snoop channel closed for device: {}", device_name);
-        let _ = crash_states.remove(device_name);
+        if let Some(state) = crash_states.get_mut(device_name) {
+            state.tentative_report_file_time = None;
+            if let Some(collector) = state.collector.take() {
+                return HandlePacketOutcome::DumpReady(collector);
+            }
+        }
         return HandlePacketOutcome::ChannelClosed;
     };
     trace!("Received packet from {}.", device_name);
@@ -585,6 +611,9 @@ async fn run(
                         snoopers.push(snooper.into_future());
                     }
                     HandlePacketOutcome::Processed => snoopers.push(snooper.into_future()),
+                    HandlePacketOutcome::DumpReady(collector) => {
+                        spawn_reporting_task(&mut reporting_tasks, collector);
+                    }
                     HandlePacketOutcome::ChannelClosed => {}
                 }
             },

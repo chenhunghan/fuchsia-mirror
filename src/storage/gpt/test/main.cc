@@ -2,13 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fcntl.h>
-#include <lib/device-watcher/cpp/device-watcher.h>
 #include <limits.h>
 #include <time.h>
 #include <zircon/assert.h>
 
-#include <fbl/unique_fd.h>
 #include <zxtest/zxtest.h>
 
 bool gUseRamDisk = true;
@@ -28,7 +25,7 @@ int main(int argc, char** argv) {
     // through to zxtest. Similarly, zxtest ignores options that it
     // does not recognize (or only warns about them).
   }
-  fprintf(stdout, "Starting test with %u\n", gRandSeed);
+  printf("Starting test with %u\n", gRandSeed);
   srand(gRandSeed);
 
   return RUN_ALL_TESTS(argc, argv);

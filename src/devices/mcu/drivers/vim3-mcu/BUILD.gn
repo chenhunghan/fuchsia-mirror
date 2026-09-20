@@ -18,8 +18,14 @@ declare_args() {
   vim3_mcu_fan_default_level = 1
 }
 
+fuchsia_driver_dml("vim3-mcu-dml") {
+  dml = "meta/vim3-mcu.dml"
+  driver_name = "vim3-mcu"
+}
+
 driver_bind_rules("vim3_mcu_bind") {
-  rules = "meta/vim3-mcu.bind"
+  bind_output = "vim3-mcu.bindbc"
+  dml_label = ":vim3-mcu-dml"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -58,10 +64,10 @@ fuchsia_cc_driver("vim3-mcu-driver") {
 }
 
 fuchsia_driver_component("vim3-mcu") {
+  dml_label = ":vim3-mcu-dml"
   component_name = "vim3-mcu"
   deps = [ ":vim3-mcu-driver" ]
   info = "meta/vim3-mcu-info.json"
-  manifest = "meta/vim3-mcu.cml"
 }
 
 fuchsia_driver_package("package") {

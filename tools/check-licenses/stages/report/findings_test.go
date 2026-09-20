@@ -82,3 +82,69 @@ func TestFindingsReporter(t *testing.T) {
 		t.Errorf("Expected EndLine 25, got %d", f2.EndLine)
 	}
 }
+
+func TestDeduplicateFindings(t *testing.T) {
+	f1 := Finding{
+		FilePath:  "a.cc",
+		Line:      1,
+		CheckName: "Check1",
+		Message:   "msg1",
+	}
+	f2 := Finding{
+		FilePath:  "a.cc",
+		Line:      1,
+		CheckName: "Check1",
+		Message:   "msg1",
+	}
+	f3 := Finding{
+		FilePath:     "b.cc",
+		Line:         2,
+		CheckName:    "Check2",
+		Message:      "msg2",
+		Replacements: []string{"new content"},
+	}
+	deduped := DeduplicateFindings([]Finding{f1, f2, f3})
+	if len(deduped) != 2 {
+		t.Fatalf("Expected 2 deduplicated findings, got %d", len(deduped))
+	}
+	if len(deduped[1].Replacements) != 1 || deduped[1].Replacements[0] != "new content" {
+		t.Errorf("Expected replacement preserved, got %v", deduped[1].Replacements)
+	}
+}
+
+func TestFindingsReporterWithReplacements(t *testing.T) {
+	tempDir := t.TempDir()
+	findingsFile := filepath.Join(tempDir, "findings.json")
+
+	reporter := NewFindingsReporter(tempDir, findingsFile)
+
+	errors := []pipeline.ComplianceError{
+		{
+			CheckName:    "PolicyFuchsiaCopyright",
+			FilePath:     filepath.Join(tempDir, "src/foo.cc"),
+			Issue:        "Missing copyright",
+			Replacements: []string{"// Copyright 2026...\nint x = 1;\n"},
+		},
+	}
+
+	if err := reporter.Run(context.Background(), nil, errors); err != nil {
+		t.Fatalf("FindingsReporter.Run failed: %v", err)
+	}
+
+	data, err := os.ReadFile(findingsFile)
+	if err != nil {
+		t.Fatalf("Failed to read findings file: %v", err)
+	}
+
+	var findings []Finding
+	if err := json.Unmarshal(data, &findings); err != nil {
+		t.Fatalf("Failed to parse findings JSON: %v", err)
+	}
+
+	if len(findings) != 1 {
+		t.Fatalf("Expected 1 finding, got %d", len(findings))
+	}
+	if len(findings[0].Replacements) != 1 || findings[0].Replacements[0] != "// Copyright 2026...\nint x = 1;\n" {
+		t.Errorf("Unexpected replacements: %v", findings[0].Replacements)
+	}
+}

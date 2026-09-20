@@ -1367,4 +1367,245 @@ TEST_F(UnmanagedTestFixture, FrameLengthAdjustmentNoMetadata) {
   EXPECT_OK(dut_.StopDriver().status_value());
 }
 
+TEST_F(UnmanagedTestFixture, IrisExtensionCreatedWhenInterconnectAvailable) {
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.set_serve_platform_mocks(false);
+    env.usb_phy().set_initial_connected(true);
+  });
+
+  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = false;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_OK(res);
+  ASSERT_OK(WaitForPhy());
+
+  dut_.RunInDriverContext(
+      [this](Dwc3& drv) { EXPECT_NE(this->GetPlatformExtension(drv), nullptr); });
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u);
+    EXPECT_GT(env.path().set_bandwidth_count(), 0u);
+  });
+
+  EXPECT_OK(dut_.StopDriver().status_value());
+}
+
+TEST_F(UnmanagedTestFixture, IrisExtensionSuspendAndResumeBandwidthVotes) {
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.set_serve_platform_mocks(false);
+    env.usb_phy().set_initial_connected(true);
+  });
+
+  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = false;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_OK(res);
+  ASSERT_OK(WaitForPhy());
+
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
+
+  // Suspend
+  bool completer_called = false;
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    fdf_power::SuspendCompleter completer([&]() { completer_called = true; });
+    drv.Suspend(std::move(completer));
+  });
+  EXPECT_TRUE(completer_called);
+
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+
+  // Resume
+  completer_called = false;
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    fdf_power::ResumeCompleter completer([&]() { completer_called = true; });
+    drv.Resume(std::move(completer));
+  });
+  EXPECT_TRUE(completer_called);
+
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
+
+  EXPECT_OK(dut_.StopDriver().status_value());
+}
+
+TEST_F(UnmanagedTestFixture, IrisExtensionHotplugMaintainsBandwidthAndResets) {
+  auto reset_count = std::make_shared<std::atomic<uint32_t>>(0);
+  dut_.RunInEnvironmentTypeContext([this, reset_count](Environment& env) {
+    env.set_serve_platform_mocks(false);
+    auto& dctl_reg = env.reg_region()[DCTL::Get().addr()];
+    dctl_reg.SetWriteCallback([this, reset_count](uint64_t val) {
+      if (DCTL::Get().FromValue(static_cast<uint32_t>(val)).CSFTRST() == 1) {
+        (*reset_count)++;
+      }
+      Write_DCTL(static_cast<uint32_t>(val));
+    });
+  });
+
+  zx::result start = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = false;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_OK(start);
+  ASSERT_OK(WaitForPhy());
+
+  dut_.runtime().RunUntilIdle();
+
+  // Reset count should include Init() reset and initial disconnected event reset.
+  EXPECT_EQ(2u, reset_count->load());
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+
+  // Connect: votes default HS (40 MB/s) and executes ResetHw().
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().TriggerConnection(true); });
+  dut_.runtime().RunUntilIdle();
+  EXPECT_EQ(ZX_OK, WaitForPhy());
+  EXPECT_EQ(3u, reset_count->load());
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
+
+  // Disconnect: votes 0 bps and executes ResetHw().
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { env.usb_phy().TriggerConnection(false); });
+  dut_.runtime().RunUntilIdle();
+  EXPECT_EQ(ZX_OK, WaitForPhy());
+  EXPECT_EQ(4u, reset_count->load());
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+
+  EXPECT_OK(dut_.StopDriver().status_value());
+}
+
+TEST_F(UnmanagedTestFixture, IrisExtensionSuspendAndResumeWhileDisconnected) {
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.set_serve_platform_mocks(false);
+    env.usb_phy().set_initial_connected(false);
+  });
+
+  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = false;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_OK(res);
+  ASSERT_OK(WaitForPhy());
+
+  dut_.runtime().RunUntilIdle();
+
+  // Initially disconnected, bandwidth is 0 bps.
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+
+  // Suspend while disconnected.
+  bool completer_called = false;
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    fdf_power::SuspendCompleter completer([&]() { completer_called = true; });
+    drv.Suspend(std::move(completer));
+  });
+  EXPECT_TRUE(completer_called);
+
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+
+  // Resume while disconnected: must preserve disconnected state and vote 0 bps (not kDefaultSpeed).
+  completer_called = false;
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    fdf_power::ResumeCompleter completer([&]() { completer_called = true; });
+    drv.Resume(std::move(completer));
+  });
+  EXPECT_TRUE(completer_called);
+
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+
+  // Subsequent connect should transition bandwidth to provisional High-Speed (40 MB/s).
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().TriggerConnection(true); });
+  dut_.runtime().RunUntilIdle();
+  EXPECT_EQ(ZX_OK, WaitForPhy());
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
+
+  EXPECT_OK(dut_.StopDriver().status_value());
+}
+
+TEST_F(UnmanagedTestFixture, IrisExtensionDynamicSpeedBandwidthVotes) {
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.set_serve_platform_mocks(false);
+    env.usb_phy().set_initial_connected(true);
+  });
+
+  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = false;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_OK(res);
+  ASSERT_OK(WaitForPhy());
+
+  // Default speed is High-Speed: 40 MB/s.
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
+
+  // SuperSpeed -> 400 MB/s.
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    PlatformExtension* ext = this->GetPlatformExtension(drv);
+    ASSERT_NE(ext, nullptr);
+    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kSuper));
+  });
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 400'000'000u); });
+
+  // SuperSpeed Plus (Enhanced SuperSpeed) -> 1000 MB/s.
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    PlatformExtension* ext = this->GetPlatformExtension(drv);
+    ASSERT_NE(ext, nullptr);
+    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kEnhancedSuper));
+  });
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 1'000'000'000u); });
+
+  // Full Speed -> 2 MB/s.
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    PlatformExtension* ext = this->GetPlatformExtension(drv);
+    ASSERT_NE(ext, nullptr);
+    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kFull));
+  });
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 2'000'000u); });
+
+  // Low Speed -> 2 MB/s.
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    PlatformExtension* ext = this->GetPlatformExtension(drv);
+    ASSERT_NE(ext, nullptr);
+    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kLow));
+  });
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 2'000'000u); });
+
+  // Undefined -> 0 MB/s.
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    PlatformExtension* ext = this->GetPlatformExtension(drv);
+    ASSERT_NE(ext, nullptr);
+    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined));
+  });
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+
+  EXPECT_OK(dut_.StopDriver().status_value());
+}
+
 }  // namespace dwc3

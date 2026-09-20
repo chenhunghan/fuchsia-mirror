@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("tas58xx-dml") {
+  dml = "meta/tas58xx.dml"
+  driver_name = "tas58xx"
+}
+
 driver_bind_rules("ti_tas58xx-bind") {
-  rules = "meta/tas58xx.bind"
+  dml_label = ":tas58xx-dml"
   bind_output = "tas58xx.bindbc"
   tests = "meta/tests.json"
   deps = [
@@ -49,10 +54,10 @@ fuchsia_cc_driver("tas58xx-driver") {
 }
 
 fuchsia_driver_component("tas58xx") {
+  dml_label = ":tas58xx-dml"
   component_name = "tas58xx"
   deps = [ ":tas58xx-driver" ]
   info = "meta/tas58xx-info.json"
-  manifest = "meta/tas58xx.cml"
 }
 
 fuchsia_driver_package("package") {

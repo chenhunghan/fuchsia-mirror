@@ -4,6 +4,16 @@
 
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("composite-a-dml") {
+  dml = "meta/composite-a.dml"
+  driver_name = "composite-a"
+}
+
+fuchsia_driver_dml("top-b-dml") {
+  dml = "meta/top-b.dml"
+  driver_name = "top-b"
+}
+
 driver_bind_rules("bind") {
   disable_autobind = true
   bind_output = "root.bindbc"
@@ -29,8 +39,12 @@ fuchsia_driver_component("component_root") {
 }
 
 driver_bind_rules("bind_composite_a") {
-  rules = "meta/composite-a.bind"
-  deps = [ "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test" ]
+  dml_label = ":composite-a-dml"
+  deps = [
+    "//src/devices/bind/fuchsia",
+    "//src/devices/bind/fuchsia.platform",
+    "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test",
+  ]
   bind_output = "composite-a.bindbc"
 }
 
@@ -79,8 +93,12 @@ fuchsia_driver_component("component_composite_b") {
 }
 
 driver_bind_rules("bind_top_b") {
-  rules = "meta/top-b.bind"
-  deps = [ "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test" ]
+  dml_label = ":top-b-dml"
+  deps = [
+    "//src/devices/bind/fuchsia",
+    "//src/devices/bind/fuchsia.platform",
+    "//src/devices/tests/v2/reload-driver/bindlib:fuchsia.reloaddriverbind.test",
+  ]
   bind_output = "top-b.bindbc"
 }
 

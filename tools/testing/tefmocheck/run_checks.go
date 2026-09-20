@@ -72,17 +72,53 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 			continue
 		}
 
-		// Some checks are difficult to attribute to a single test (e.g. syslogs and serial logs).
-		// However, we would still like the check's FailureReason to be associated with a top-level
-		// test's FailureReason.
-		// By emitting synthetic test case(s) for failed test(s), we can attempt to attribute
-		// potential failures to specific failure modes in our tracking systems (e.g. ResultDB),
-		// making it easier to group and route failures.
-		// There are two modes supported:
-		// 1. **Targeted:** If the check is attributed to a specific test (via TestName()), we add
-		//    the synthetic test case ONLY to that specific test. (See https://fxbug.dev/496991183)
-		// 2. **Global:** If the check is not attributed to a specific test (e.g., broad syslog or
-		//    serial log parse failures), we add it to ALL failed tests in the task. (See https://fxbug.dev/488476740)
+		// When a tefmocheck fires, make a note of it in any matching failing tests by adding it to the
+		// FailureReason.Errors list at both the top-level-test level and the test-case level.
+		// If the check is attributed to a specific test, then only that test "matches". If it's not
+		// attributed to a specific test, all failures "match".
+		// Block 1: Failure reason enrichment where ever applicable.
+		if to != nil && to.TestSummary != nil {
+			attributedTestName := check.TestName()
+			foundMatch := false
+			errMsg := check.FailureReason()
+			for i := range to.TestSummary.Tests {
+				test := &to.TestSummary.Tests[i]
+				if runtests.IsFailure(test.Status) {
+					// Global or targeted match
+					if attributedTestName == "" || test.Name == attributedTestName {
+						if attributedTestName != "" {
+							foundMatch = true
+						}
+
+						// 1. Dual-write to top-level test.FailureReason.
+						if test.FailureReason == nil {
+							test.FailureReason = &runtests.FailureReason{}
+						}
+						test.FailureReason.Errors = append(test.FailureReason.Errors, &runtests.FailureReasonError{
+							Message: errMsg,
+						})
+
+						// 2. Dual-write to all failing test cases.
+						for j := range test.Cases {
+							tc := &test.Cases[j]
+							if runtests.IsFailure(tc.Status) {
+								if tc.FailureReason == nil {
+									tc.FailureReason = &runtests.FailureReason{}
+								}
+								tc.FailureReason.Errors = append(tc.FailureReason.Errors, &runtests.FailureReasonError{
+									Message: errMsg,
+								})
+							}
+						}
+					}
+				}
+			}
+			if attributedTestName != "" && !foundMatch {
+				log.Printf("Warning: targeted check %s attributed to test %q but test not found in summary", check.Name(), attributedTestName)
+			}
+		}
+
+		// Block 2: Legacy block gated on check.EmitSyntheticTestCase()
 		if check.EmitSyntheticTestCase() && to != nil && to.TestSummary != nil {
 			attributedTestName := check.TestName()
 			foundMatch := false

@@ -67,6 +67,16 @@ from tools.integration.fint.proto import (
 JSONObject = dict[str, Any]
 JSONArray = list[Any]
 
+# Module-scope constants for file names
+BUILD_ARTIFACTS_JSON = "build_artifacts.json"
+NINJA_ERRORS_JSON = "ninja_errors.json"
+TOOL_PATHS_JSON = "tool_paths.json"
+TESTS_JSON = "tests.json"
+GENERATED_SOURCES_JSON = "generated_sources.json"
+PREBUILT_BINARY_SETS_JSON = "prebuilt_binary_sets.json"
+FORCE_NONHERMETIC_REBUILD_SENTINEL = "force_nonhermetic_rebuild"
+LAST_NINJA_BUILD_SUCCESS_STAMP = "last_ninja_build_success.stamp"
+
 
 @dataclass
 class BuildExecution:
@@ -201,19 +211,128 @@ def load_json_list(path: pathlib.Path) -> JSONArray:
 
 
 def produce_build_artifacts(
-    artifact_dir: pathlib.Path, duration_seconds: int
+    artifact_dir: pathlib.Path,
+    duration_seconds: int,
+    failure_summary: str | None = None,
 ) -> None:
     """Serializes and writes the build_artifacts.json manifest to the artifact directory."""
     artifacts = build_artifacts_pb2.BuildArtifacts()
     artifacts.ninja_duration_seconds = duration_seconds
+    if failure_summary:
+        artifacts.failure_summary = failure_summary
 
-    json_manifest_path = artifact_dir / "build_artifacts.json"
+    json_manifest_path = artifact_dir / BUILD_ARTIFACTS_JSON
     # MessageToJson formats with nice spacing/indentation
     json_data = json_format.MessageToJson(
         artifacts, always_print_fields_with_no_presence=True
     )
     json_manifest_path.write_text(json_data)
     msg(f"Successfully wrote build artifacts manifest to {json_manifest_path}")
+
+
+@dataclass(frozen=True)
+class NinjaFailure:
+    """Represents a single action failure recorded in ninja_errors.json."""
+
+    artifacts: list[str]
+    exit_code: int
+    output: str
+
+    @classmethod
+    def from_dict(cls, data: JSONObject) -> "NinjaFailure":
+        """Constructs a NinjaFailure from a JSONObject."""
+        artifacts = data.get("artifacts")
+        exit_code = data.get("exit_code")
+        output = data.get("output", "")
+
+        # Coerce/validate fields
+        if not isinstance(artifacts, list):
+            artifacts = [str(artifacts)] if artifacts is not None else []
+        try:
+            exit_code_int = int(exit_code) if exit_code is not None else -1
+        except (ValueError, TypeError):
+            exit_code_int = -1
+
+        return cls(
+            artifacts=[str(a) for a in artifacts],
+            exit_code=exit_code_int,
+            output=str(output).strip(),
+        )
+
+    @property
+    def is_eligible_for_deduplication(self) -> bool:
+        """Returns True if the failure output is eligible for deduplication (>= 5 lines)."""
+        return bool(self.output and self.output.count("\n") >= 5)
+
+    def format(self, include_output: bool = True) -> str:
+        """Formats the failure into a high-signal error block."""
+        artifacts_str = shlex.join(self.artifacts)
+        header = f"FAILED: [code={self.exit_code}] {artifacts_str}"
+        if include_output and self.output:
+            return f"{header}\n\n{self.output}"
+        return header
+
+
+def parse_ninja_failures(errors_json_path: pathlib.Path) -> str | None:
+    """Parses ninja_errors.json file to construct a precise, formatted FailureSummary.
+
+    Args:
+        errors_json_path: Path to the ninja_errors.json file.
+
+    Returns:
+        The formatted FailureSummary string, or None if malformed, empty, or missing.
+    """
+    if not errors_json_path.exists():
+        return None
+
+    try:
+        with open(errors_json_path, "r") as f:
+            data = json.load(f)
+        return format_ninja_failures(data)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return None
+
+
+def format_ninja_failures(data: JSONObject) -> str | None:
+    """Formats already loaded ninja_errors.json data into a precise FailureSummary.
+
+    Args:
+        data: The decoded JSON dictionary.
+
+    Returns:
+        The formatted FailureSummary string, or None if malformed or unsupported.
+    """
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return None
+
+    raw_failures = data.get("failures", [])
+    if not isinstance(raw_failures, list) or not raw_failures:
+        return None
+
+    failures = []
+    for raw in raw_failures:
+        if isinstance(raw, dict):
+            failures.append(NinjaFailure.from_dict(raw))
+
+    if not failures:
+        return None
+
+    msg_lines = []
+    seen_outputs = set()
+    for failure in failures:
+        # Check deduplication eligibility
+        if failure.is_eligible_for_deduplication:
+            if failure.output in seen_outputs:
+                # Still output the failure header, but omit the redundant compiler logs
+                msg_lines.append(failure.format(include_output=False))
+                msg_lines.append("")
+                continue
+            seen_outputs.add(failure.output)
+
+        msg_lines.append(failure.format(include_output=True))
+        msg_lines.append("")
+
+    return "\n".join(msg_lines).strip()
 
 
 def run_gn_check(
@@ -351,12 +470,12 @@ class BuildContext:
     @functools.cached_property
     def tool_paths(self) -> JSONArray:
         """Loads and returns the tool paths config list."""
-        return load_json_list(self.build_dir / "tool_paths.json")
+        return load_json_list(self.build_dir / TOOL_PATHS_JSON)
 
     @functools.cached_property
     def test_specs(self) -> JSONArray:
         """Loads and returns the test specs list."""
-        path = self.build_dir / "test_specs.json"
+        path = self.build_dir / TESTS_JSON
         if not path.exists():
             return []
         return load_json_list(path)
@@ -364,7 +483,7 @@ class BuildContext:
     @functools.cached_property
     def generated_sources(self) -> JSONArray:
         """Loads and returns the generated sources list."""
-        path = self.build_dir / "generated_sources.json"
+        path = self.build_dir / GENERATED_SOURCES_JSON
         if not path.exists():
             return []
         return load_json_list(path)
@@ -372,7 +491,7 @@ class BuildContext:
     @functools.cached_property
     def prebuilt_binary_sets(self) -> JSONArray:
         """Loads and returns the prebuilt binary sets list."""
-        path = self.build_dir / "prebuilt_binary_sets.json"
+        path = self.build_dir / PREBUILT_BINARY_SETS_JSON
         if not path.exists():
             return []
         return load_json_list(path)
@@ -430,7 +549,7 @@ class BuildContext:
         return sorted(list(set(self._stream_all_targets())))
 
     def _build_bazel_host_tests(self) -> None:
-        """Builds Bazel host tests if any are present in test_specs.json."""
+        """Builds Bazel host tests if any are present in tests.json."""
         bazel_labels = []
         for spec in self.test_specs:
             test_spec = spec.get("test", {})
@@ -469,8 +588,10 @@ class BuildContext:
                 "checkout_dir is required in the Context specification"
             )
 
-        rebuild_sentinel_path = self.build_dir / "force_nonhermetic_rebuild"
-        success_stamp_path = self.build_dir / "last_ninja_build_success.stamp"
+        rebuild_sentinel_path = (
+            self.build_dir / FORCE_NONHERMETIC_REBUILD_SENTINEL
+        )
+        success_stamp_path = self.build_dir / LAST_NINJA_BUILD_SUCCESS_STAMP
 
         # Pre-build: Touch rebuild sentinel if incremental
         if self.static_spec.incremental:
@@ -624,6 +745,13 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         help="Build system wrapper mode (ninja or bazel). Default is ninja.",
     )
     parser.add_argument(
+        "--ninja-error-logging-output",
+        dest="ninja_error_logging_output",
+        type=pathlib.Path,
+        default=None,
+        help="Path where Ninja should write its error logs (ninja_errors.json).",
+    )
+    parser.add_argument(
         "wrapped_cmd",
         nargs="*",
         default=None,
@@ -706,17 +834,30 @@ def main(argv: list[str]) -> int:
             args.verbose,
         )
 
-        if run.exit_code == 0:
-            # If artifact_dir is specified, serialize and write build_artifacts.json
-            if ctx.context_spec.artifact_dir:
-                ts_msg(
-                    f"Serializing build artifacts manifest to {ctx.context_spec.artifact_dir}...",
-                    args.verbose,
-                )
-                produce_build_artifacts(
-                    pathlib.Path(ctx.context_spec.artifact_dir),
-                    duration_seconds,
-                )
+        # If artifact_dir is specified, serialize and write build_artifacts.json
+        # unconditionally on both success and failure.
+        if ctx.context_spec.artifact_dir:
+            ts_msg(
+                f"Serializing build artifacts manifest to {ctx.context_spec.artifact_dir}...",
+                args.verbose,
+            )
+            failure_summary = None
+            if run.exit_code != 0:
+                if args.ninja_error_logging_output:
+                    failure_summary = parse_ninja_failures(
+                        args.ninja_error_logging_output
+                    )
+
+                if not failure_summary:
+                    failure_summary = (
+                        f"Fuchsia build failed: delegated command "
+                        f"'{shlex.join(run.command)}' exited with status {run.exit_code}"
+                    )
+            produce_build_artifacts(
+                pathlib.Path(ctx.context_spec.artifact_dir),
+                duration_seconds,
+                failure_summary=failure_summary,
+            )
 
     return run.exit_code
 

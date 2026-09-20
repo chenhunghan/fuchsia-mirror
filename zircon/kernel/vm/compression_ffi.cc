@@ -24,4 +24,22 @@ FFI_ALWAYS_INLINE fbl::RefCounted<VmCompression>* cpp_vmcompression_get_ref_coun
       static_cast<const fbl::RefCounted<VmCompression>*>(compression));
 }
 
+FFI_ALWAYS_INLINE void cpp_vmcompression_acquire_compressor(
+    ffi::Uninitialized<VmCompression::CompressorGuard>* guard, VmCompression* compression) {
+  // `Initialize` move-constructs into `guard` and destroys the temporary returned by
+  // `AcquireCompressor()`. This is safe because the move constructor transfers the lock, so the
+  // temporary's destructor does not release it.
+  guard->Initialize(compression->AcquireCompressor());
+}
+
+FFI_ALWAYS_INLINE void cpp_vmcompression_compressor_guard_destroy(
+    VmCompression::CompressorGuard* guard) {
+  ktl::destroy_at(guard);
+}
+
+FFI_ALWAYS_INLINE VmCompressor* cpp_vmcompression_compressor_guard_get(
+    VmCompression::CompressorGuard* guard) {
+  return &guard->get();
+}
+
 }  // extern "C"

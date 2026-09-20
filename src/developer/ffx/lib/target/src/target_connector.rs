@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
-use ffx_ssh::parse::HostAddr;
 use fuchsia_async::Task;
 use std::fmt::Debug;
 use std::future::Future;
@@ -67,7 +66,6 @@ pub struct FDomainConnection {
     pub(crate) input: Box<dyn AsyncWrite + Unpin + Send>,
     pub(crate) errors: Receiver<ConnectionStreamError>,
     pub(crate) main_task: Option<Task<()>>,
-    pub(crate) ssh_host_address: Option<HostAddr>,
 }
 
 impl FDomainConnection {
@@ -79,7 +77,6 @@ impl FDomainConnection {
             errors: r,
             output: Box::new(tokio::io::BufReader::new(tokio::io::empty())),
             input: Box::new(Vec::new()),
-            ssh_host_address: None,
         }
     }
 }
@@ -91,7 +88,6 @@ pub struct OvernetConnection {
     pub(crate) input: Box<dyn AsyncWrite + Unpin>,
     pub(crate) errors: Receiver<ConnectionStreamError>,
     pub(crate) main_task: Option<Task<()>>,
-    pub(crate) ssh_host_address: Option<HostAddr>,
 }
 
 impl OvernetConnection {

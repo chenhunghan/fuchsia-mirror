@@ -9,6 +9,7 @@
 #include <zircon/assert.h>
 #include <zircon/status.h>
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -99,6 +100,43 @@ void EndpointServer::Connect(async_dispatcher_t* dispatcher,
                                         std::mem_fn(&EndpointServer::OnUnbound)));
 }
 
+namespace {
+// Maximum number of completions sent in a single FIDL event to avoid exceeding channel message
+// size limits and reduce serialization latency.
+constexpr size_t kMaxBatchSize = fendpoint::kMaxCompletionsPerEvent;
+
+template <typename Target>
+void SendCompletionsBatch(const Target& target, std::vector<fendpoint::Completion> completions) {
+  if (completions.empty()) {
+    return;
+  }
+
+  // Fast path: send directly without vector chunking allocations if within limit.
+  if (completions.size() <= kMaxBatchSize) {
+    auto status = fidl::SendEvent(target)->OnCompletion(std::move(completions));
+    if (status.is_error()) {
+      fdf::error("Error sending event: {}", status.error_value().status_string());
+    }
+    return;
+  }
+
+  auto iter = completions.begin();
+  while (iter != completions.end()) {
+    size_t chunk_size =
+        std::min(static_cast<size_t>(std::distance(iter, completions.end())), kMaxBatchSize);
+    std::vector<fendpoint::Completion> chunk(std::make_move_iterator(iter),
+                                             std::make_move_iterator(iter + chunk_size));
+    iter += chunk_size;
+
+    auto status = fidl::SendEvent(target)->OnCompletion(std::move(chunk));
+    if (status.is_error()) {
+      fdf::error("Error sending event: {}", status.error_value().status_string());
+      break;
+    }
+  }
+}
+}  // namespace
+
 void EndpointServer::OnUnbound(fidl::UnbindInfo info,
                                fidl::ServerEnd<fendpoint::Endpoint> server_end) {
   std::vector<fendpoint::Completion> completions;
@@ -110,13 +148,7 @@ void EndpointServer::OnUnbound(fidl::UnbindInfo info,
     binding_ref_.reset();
   }
 
-  if (!completions.empty()) {
-    // Return all already completed events.
-    auto status = fidl::SendEvent(server_end)->OnCompletion(std::move(completions));
-    if (status.is_error()) {
-      fdf::error("Error sending event: {}", status.error_value().status_string());
-    }
-  }
+  SendCompletionsBatch(server_end, std::move(completions));
 
   // Unregister VMOs
   auto result = UnpinVmos(registered_vmos);
@@ -220,9 +252,6 @@ void EndpointServer::RequestComplete(zx_status_t status, size_t actual, RequestV
 
   auto defer_completion = *req->defer_completion();
 
-  std::vector<fendpoint::Completion> completions;
-  std::optional<fidl::ServerBindingRef<fendpoint::Endpoint>> binding;
-
   {
     std::lock_guard<std::mutex> lock(lock_);
     completions_.emplace_back(std::move(
@@ -230,15 +259,9 @@ void EndpointServer::RequestComplete(zx_status_t status, size_t actual, RequestV
     if ((defer_completion && status == ZX_OK) || !send_now || !binding_ref_) {
       return;
     }
-
-    completions.swap(completions_);
-    binding = *binding_ref_;
   }
 
-  auto fidl_status = fidl::SendEvent(*binding)->OnCompletion(std::move(completions));
-  if (fidl_status.is_error()) {
-    fdf::error("Error sending event: {}", fidl_status.error_value().status_string());
-  }
+  SendCompletions();
 }
 
 void EndpointServer::SendCompletions() {
@@ -253,10 +276,7 @@ void EndpointServer::SendCompletions() {
     binding = *binding_ref_;
   }
 
-  auto status = fidl::SendEvent(*binding)->OnCompletion(std::move(completions));
-  if (status.is_error()) {
-    fdf::error("Error sending event: {}", status.error_value().status_string());
-  }
+  SendCompletionsBatch(*binding, std::move(completions));
 }
 
 EndpointServer::~EndpointServer() {

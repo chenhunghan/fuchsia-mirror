@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("cr50-spi-driver-dml") {
+  dml = "meta/cr50-spi-driver.dml"
+  driver_name = "cr50-spi-driver"
+}
+
 driver_bind_rules("cr50-spi_bind") {
-  rules = "meta/cr50-spi.bind"
+  dml_label = ":cr50-spi-driver-dml"
+  bind_output = "cr50-spi.bindbc"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -43,7 +49,7 @@ fuchsia_cc_driver("fuchsia_driver") {
 fuchsia_driver_component("cr50-spi-driver") {
   info = "meta/cr50-spi-driver-info.json"
   deps = [ ":fuchsia_driver" ]
-  manifest = "meta/cr50-spi.cml"
+  dml_label = ":cr50-spi-driver-dml"
 }
 
 fuchsia_driver_package("cr50-spi-pkg") {

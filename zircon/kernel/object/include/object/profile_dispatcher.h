@@ -22,7 +22,7 @@ extern "C" {
 zx_status_t cpp_profile_dispatcher_create(
     const zx_profile_info_t* info, ffi::Uninitialized<KernelHandle<ProfileDispatcher>>* handle_out);
 zx_status_t cpp_profile_dispatcher_validate_and_create_profile(
-    const zx_profile_info_t* info, SchedulerState::BaseProfile* profile_out);
+    const zx_profile_info_t* info, ffi::Uninitialized<SchedulerState::BaseProfile>* profile_out);
 }
 
 zx::result<SchedulerState::BaseProfile> validate_and_create_profile(const zx_profile_info_t& info);

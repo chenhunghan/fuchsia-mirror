@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string_view>
 
@@ -955,6 +956,45 @@ std::optional<MountInfo> ReadMountInfoLine(const std::string &path) {
   }
 
   return std::nullopt;
+}
+
+fit::result<int, std::set<std::string>> ListDirectory(const char *dir) {
+  DIR *d = opendir(dir);
+  if (d == nullptr) {
+    return fit::error(errno);
+  }
+  std::set<std::string> name_set;
+  dirent *e;
+  while ((e = readdir(d)) != nullptr) {
+    if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
+      name_set.insert(e->d_name);
+    }
+  }
+  closedir(d);
+  return fit::ok(std::move(name_set));
+}
+
+constexpr char kDevInputDir[] = "/dev/input";
+
+std::vector<std::string> WaitForDevice(const std::set<std::string> &ls_before) {
+  std::vector<std::string> diff;
+  for (int i = 0; i < 100; ++i) {
+    diff.clear();
+    auto ls_after = ListDirectory(kDevInputDir);
+    if (ls_after.is_error()) {
+      if (ls_after.error_value() != ENOENT) {
+        return {};
+      }
+    } else {
+      std::set_difference(ls_after->begin(), ls_after->end(), ls_before.begin(), ls_before.end(),
+                          std::back_inserter(diff));
+      if (!diff.empty()) {
+        break;
+      }
+    }
+    usleep(50000);  // 50ms (total 5s)
+  }
+  return diff;
 }
 
 }  // namespace test_helper

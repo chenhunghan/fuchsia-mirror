@@ -24,12 +24,8 @@ function msg() {
   echo >&2 "[${script##*/}] $*"
 }
 
-readonly PREBUILT_OS="$_FUCHSIA_RBE_CACHE_VAR_host_os"
-readonly PREBUILT_ARCH="$_FUCHSIA_RBE_CACHE_VAR_host_arch"
-
 # The project_root must cover all inputs, prebuilt tools, and build outputs.
 # This should point to $FUCHSIA_DIR for the Fuchsia project.
-# ../../ because this script lives in build/rbe.
 # The value is an absolute path.
 project_root="$default_project_root"
 project_root_rel="$(relpath . "$project_root")"
@@ -37,20 +33,17 @@ project_root_rel="$(relpath . "$project_root")"
 # defaults
 readonly default_config="$script_dir"/fuchsia-reproxy.cfg
 readonly gcertauth_config="$script_dir"/fuchsia-reproxy-gcertauth.cfg
-
-readonly PREBUILT_SUBDIR="$PREBUILT_OS"-"$PREBUILT_ARCH"
-
-readonly check_loas_script="$script_dir"/check_loas_restrictions.sh
+readonly check_loas_script="$project_root"/build/auth/check_loas_restrictions.sh
 readonly build_summary_script="$script_dir"/build_summary.py
 
 # location of reclient binaries relative to output directory where build is run
-reclient_bindir="$project_root_rel"/prebuilt/third_party/reclient/"$PREBUILT_SUBDIR"
+reclient_bindir="$project_root_rel"/prebuilt/third_party/reclient/"$HOST_PLATFORM"
 
 # Configuration for RBE metrics and logs collection.
 readonly fx_build_metrics_config="$project_root_rel"/.fx/config/build-metrics
 readonly fx_build_metrics_config_old="$project_root_rel"/.fx-build-metrics-config
 
-readonly jq="$project_root/prebuilt/third_party/jq/"$PREBUILT_SUBDIR"/bin/jq"
+readonly jq="$project_root/prebuilt/third_party/jq/"$HOST_PLATFORM"/bin/jq"
 
 loas_type=auto
 use_gce_machine_credentials=false

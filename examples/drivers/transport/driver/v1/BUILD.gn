@@ -11,8 +11,18 @@ group("drivers") {
   ]
 }
 
+fuchsia_driver_dml("child_component-dml") {
+  dml = "meta/child_component.dml"
+  driver_name = "driver_transport_child"
+}
+
+fuchsia_driver_dml("parent_component-dml") {
+  dml = "meta/parent_component.dml"
+  driver_name = "driver_transport_parent"
+}
+
 driver_bind_rules("parent_bind") {
-  rules = "meta/parent-driver.bind"
+  dml_label = ":parent_component-dml"
   bind_output = "parent-driver.bindbc"
   deps = [ "//src/devices/bind/fuchsia.test" ]
 }
@@ -33,14 +43,13 @@ fuchsia_cc_driver("parent_driver") {
 }
 
 fuchsia_driver_component("parent_component") {
-  component_name = "driver_transport_parent"
   deps = [ ":parent_driver" ]
   info = "meta/component-info.json"
-  manifest = "meta/parent_component.cml"
+  dml_label = ":parent_component-dml"
 }
 
 driver_bind_rules("child_bind") {
-  rules = "meta/child-driver.bind"
+  dml_label = ":child_component-dml"
   bind_output = "child-driver.bindbc"
   deps = [ "//src/devices/bind/fuchsia" ]
 }
@@ -60,8 +69,7 @@ fuchsia_cc_driver("child_driver") {
 }
 
 fuchsia_driver_component("child_component") {
-  component_name = "driver_transport_child"
   deps = [ ":child_driver" ]
   info = "meta/component-info.json"
-  manifest = "meta/child_component.cml"
+  dml_label = ":child_component-dml"
 }

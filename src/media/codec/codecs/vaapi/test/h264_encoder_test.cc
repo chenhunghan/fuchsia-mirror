@@ -6,6 +6,7 @@
 #include <lib/fdio/directory.h>
 #include <stdio.h>
 
+#include <limits>
 #include <memory>
 #include <thread>
 
@@ -16,6 +17,9 @@
 #include "src/media/codec/codecs/vaapi/codec_adapter_vaapi_encoder.h"
 #include "src/media/codec/codecs/vaapi/codec_runner_app.h"
 #include "src/media/codec/codecs/vaapi/vaapi_utils.h"
+#include "src/media/third_party/chromium_media/geometry.h"
+#include "src/media/third_party/chromium_media/media/gpu/gpu_video_encode_accelerator_helpers.h"
+#include "src/media/third_party/chromium_media/media/parsers/h264_parser.h"
 #include "vaapi_stubs.h"
 
 namespace {
@@ -405,6 +409,121 @@ TEST(H264Encoder, Init) {
   codec_factory.Unbind();
 
   codec_thread.join();
+}
+
+TEST(H264Encoder, BitstreamBufferSizeNoOverflow) {
+  constexpr size_t kExpected8MB = 8 * 1024 * 1024;
+  constexpr size_t kExpected4MB = 4 * 1024 * 1024;
+  constexpr size_t kExpected2MB = 2 * 1024 * 1024;
+
+  // 1. 65536 * 65536 overflows a 32-bit signed int to 0. Verify that buffer
+  // sizing uses 64-bit area and selects the 8 MB max buffer size (> 1440p)
+  // rather than falling back to 2 MB (or matching the 320x180 table entry).
+  const gfx::Size large_size(65536, 65536);
+  EXPECT_EQ(kExpected8MB, media::GetEncodeBitstreamBufferSize(large_size));
+  EXPECT_EQ(kExpected8MB, media::GetEncodeBitstreamBufferSize(large_size, 20000000u, 30u));
+
+  // 2. 46341 * 46341 overflows a 32-bit signed int to a negative value
+  // (-2,147,479,015). Verify that 64-bit area prevents matching the first
+  // table entry (<= 320 * 180) and selects the 8 MB max buffer size.
+  const gfx::Size negative_overflow_size(46341, 46341);
+  EXPECT_EQ(kExpected8MB, media::GetEncodeBitstreamBufferSize(negative_overflow_size));
+  EXPECT_EQ(kExpected8MB,
+            media::GetEncodeBitstreamBufferSize(negative_overflow_size, 100000u, 30u));
+
+  // 3. Exercise the base::saturated_cast<size_t>(data.buffer_size_in_bytes * ratio)
+  // clamping path inside the table loop using a table-matching size (1080p) and
+  // an extreme bitrate/framerate ratio.
+  const gfx::Size size_1080p(1920, 1080);
+  EXPECT_EQ(kExpected2MB, media::GetEncodeBitstreamBufferSize(
+                              size_1080p, std::numeric_limits<uint32_t>::max(), 1u));
+
+  // 4. Verify exact resolution tier transitions in GetMaxEncodeBitstreamBufferSize():
+  // <= 1080p -> 2 MB, (1080p, 1440p] -> 4 MB, > 1440p -> 8 MB.
+  EXPECT_EQ(kExpected2MB, media::GetEncodeBitstreamBufferSize(gfx::Size(1920, 1080)));
+  EXPECT_EQ(kExpected4MB, media::GetEncodeBitstreamBufferSize(gfx::Size(1920, 1081)));
+  EXPECT_EQ(kExpected4MB, media::GetEncodeBitstreamBufferSize(gfx::Size(2560, 1440)));
+  EXPECT_EQ(kExpected8MB, media::GetEncodeBitstreamBufferSize(gfx::Size(2560, 1441)));
+
+  // 5. Verify that negative constructor arguments and setter inputs are clamped
+  // to 0, preserving the non-negative invariant required by Area64() (which
+  // casts directly to uint64_t without sign checks).
+  gfx::Size clamped_size(-100, -200);
+  EXPECT_EQ(0, clamped_size.width());
+  EXPECT_EQ(0, clamped_size.height());
+  EXPECT_EQ(0ULL, clamped_size.Area64());
+  EXPECT_EQ(0, clamped_size.GetCheckedArea().ValueOrDie());
+
+  clamped_size.set_width(-50);
+  clamped_size.set_height(-75);
+  EXPECT_EQ(0, clamped_size.width());
+  EXPECT_EQ(0, clamped_size.height());
+  EXPECT_EQ(0ULL, clamped_size.Area64());
+}
+
+TEST(H264Encoder, GeometrySafeMathAndToString) {
+  const gfx::Size overflowing_size(65536, 65536);
+  EXPECT_FALSE(overflowing_size.GetCheckedArea().IsValid());
+  EXPECT_EQ(4294967296ULL, overflowing_size.Area64());
+  EXPECT_EQ("65536x65536", overflowing_size.ToString());
+
+  const gfx::Size valid_size(1920, 1080);
+  EXPECT_TRUE(valid_size.GetCheckedArea().IsValid());
+  EXPECT_EQ(1920 * 1080, valid_size.GetCheckedArea().ValueOrDie());
+
+  const gfx::Point pt(10, 20);
+  EXPECT_EQ("10,20", pt.ToString());
+
+  // Verify Rect preserves x, y, width, height and returns CheckedNumeric from
+  // right() and bottom() that detects signed integer overflow via IsValid().
+  const gfx::Rect overflowing_rect(std::numeric_limits<int>::max() - 10,
+                                   std::numeric_limits<int>::max() - 20, 100, 200);
+  EXPECT_EQ(100, overflowing_rect.width());
+  EXPECT_EQ(200, overflowing_rect.height());
+  EXPECT_FALSE(overflowing_rect.right().IsValid());
+  EXPECT_FALSE(overflowing_rect.bottom().IsValid());
+  EXPECT_FALSE(overflowing_rect.IsValid());
+
+  const gfx::Rect valid_rect(10, 20, 100, 200);
+  EXPECT_TRUE(valid_rect.right().IsValid());
+  EXPECT_TRUE(valid_rect.bottom().IsValid());
+  EXPECT_TRUE(valid_rect.IsValid());
+  EXPECT_EQ(110, valid_rect.right().ValueOrDie());
+  EXPECT_EQ(220, valid_rect.bottom().ValueOrDie());
+  EXPECT_TRUE(valid_rect.Contains(50, 50));
+  EXPECT_FALSE(valid_rect.Contains(200, 200));
+  EXPECT_TRUE(valid_rect.Contains(gfx::Rect(20, 30, 50, 50)));
+  EXPECT_FALSE(valid_rect.Contains(gfx::Rect(20, 30, 100, 200)));
+}
+
+TEST(H264Encoder, H264SPSGetVisibleRectRejectsOverflowingRect) {
+  media::H264SPS sps;
+  sps.frame_mbs_only_flag = true;
+  sps.chroma_format_idc = 1;  // 4:2:0 -> crop_unit_x = 2, crop_unit_y = 2.
+  sps.chroma_array_type = 1;
+
+  // 1. Valid 1080p SPS with bottom cropping (1920x1088 cropped by 8 rows to 1920x1080).
+  sps.pic_width_in_mbs_minus1 = 119;        // 120 * 16 = 1920
+  sps.pic_height_in_map_units_minus1 = 67;  // 68 * 16 = 1088
+  sps.frame_cropping_flag = true;
+  sps.frame_crop_left_offset = 0;
+  sps.frame_crop_right_offset = 0;
+  sps.frame_crop_top_offset = 0;
+  sps.frame_crop_bottom_offset = 4;  // crop_bottom = 8
+  auto valid_visible_rect = sps.GetVisibleRect();
+  ASSERT_TRUE(valid_visible_rect.has_value());
+  EXPECT_EQ(gfx::Rect(0, 0, 1920, 1080), valid_visible_rect.value());
+
+  // 2. Cropping offsets that cause visible_rect.right() (x + width) to overflow
+  // signed 32-bit int without triggering UB during width computation:
+  // coded_width = 16 * (134217726 + 1) = 2147483632 (INT_MAX - 15).
+  // crop_left = 100, crop_right = -100 -> visible_width = 2147483632 (fits in int).
+  // However, visible_rect.right() = 100 + 2147483632 = 2147483732 > INT_MAX,
+  // which is detected by visible_rect.IsValid() and rejected cleanly.
+  sps.pic_width_in_mbs_minus1 = std::numeric_limits<int>::max() / 16 - 1;
+  sps.frame_crop_left_offset = 50;    // crop_left = 100
+  sps.frame_crop_right_offset = -50;  // crop_right = -100
+  EXPECT_FALSE(sps.GetVisibleRect().has_value());
 }
 
 }  // namespace

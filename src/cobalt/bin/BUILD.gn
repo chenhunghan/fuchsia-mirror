@@ -150,7 +150,7 @@ fuchsia_test_package("cobalt-manual-tests") {
     "app:shuffler_prod_public",
   ]
   test_specs = {
-    environments = []
+    build_only = true
     log_settings = {
       max_severity = "ERROR"
     }

@@ -8,8 +8,6 @@
 #include <optional>
 #include <span>
 #include <string_view>
-#include <type_traits>
-#include <utility>
 
 #include "init-fini.h"
 #include "internal/dynamic-tag-error.h"
@@ -127,7 +125,7 @@ class DynamicTextrelRejectObserver
 // takes an Info reference, and has the info() accessor for it.  Then it must
 // define its own `Observe` and `Finish` methods.
 
-template <class Observer, class Info, class Elf, ElfDynTag... Tags>
+template <class Observer, class Info, ElfApi Elf, ElfDynTag... Tags>
 class DynamicInfoObserver : public DynamicTagObserver<Observer, Tags...> {
  public:
   DynamicInfoObserver() = delete;
@@ -163,7 +161,7 @@ class DynamicInfoObserver : public DynamicTagObserver<Observer, Tags...> {
     template <typename T, auto Setter, ElfDynTag AddressTag, ElfDynTag SizeBytesTag,
               ElfDynTag CountTag = ElfDynTag::kNull, class DiagnosticsType, class Memory>
     constexpr bool Finish(DiagnosticsType&& diagnostics, Memory&& memory, Info& info,
-                          typename Elf::size_type count = 0) {
+                          Elf::size_type count = 0) {
       if (!address_ && !size_bytes_) {
         // No corresponding entries were found.
         return true;
@@ -202,9 +200,9 @@ class DynamicInfoObserver : public DynamicTagObserver<Observer, Tags...> {
 
     constexpr explicit operator bool() const { return address_ || size_bytes_; }
 
-    constexpr void set_address(typename Elf::size_type val) { address_ = val; }
+    constexpr void set_address(Elf::size_type val) { address_ = val; }
 
-    constexpr void set_size_bytes(typename Elf::size_type val) { size_bytes_ = val; }
+    constexpr void set_size_bytes(Elf::size_type val) { size_bytes_ = val; }
 
    private:
     std::optional<typename Elf::size_type> address_, size_bytes_;
@@ -216,11 +214,11 @@ class DynamicInfoObserver : public DynamicTagObserver<Observer, Tags...> {
 
 // This is an observer to fill in an elfldltl::RelocationInfo<Elf> object.
 // Its constructor takes (elfldltl::RelocationInfo<Elf>&, Memory&).
-template <class Elf>
+template <ElfApi Elf>
 class DynamicRelocationInfoObserver;
 
 // This is just a shorthand to avoid repeating the long list of parameters.
-template <class Elf>
+template <ElfApi Elf>
 using DynamicRelocationInfoObserverBase =
     DynamicInfoObserver<DynamicRelocationInfoObserver<Elf>, RelocationInfo<Elf>, Elf,
                         ElfDynTag::kJmpRel, ElfDynTag::kPltRel, ElfDynTag::kPltRelSz,
@@ -229,12 +227,12 @@ using DynamicRelocationInfoObserverBase =
                         ElfDynTag::kRela, ElfDynTag::kRelaCount, ElfDynTag::kRelaEnt,
                         ElfDynTag::kRelaSz>;
 
-template <class Elf>
+template <ElfApi Elf>
 class DynamicRelocationInfoObserver : public DynamicRelocationInfoObserverBase<Elf> {
  public:
   using Base = DynamicRelocationInfoObserverBase<Elf>;
   using Info = RelocationInfo<Elf>;
-  using size_type = typename Elf::size_type;
+  using size_type = Elf::size_type;
 
   using Base::Base;
 
@@ -364,34 +362,34 @@ class DynamicRelocationInfoObserver : public DynamicRelocationInfoObserverBase<E
   }
 
  private:
-  typename Base::SizedArray relr_, rel_, rela_, jmprel_;
-  typename Elf::size_type relcount_ = 0, relacount_ = 0;
+  Base::SizedArray relr_, rel_, rela_, jmprel_;
+  Elf::size_type relcount_ = 0, relacount_ = 0;
   std::optional<typename Elf::size_type> pltrel_;
 };
 
 // Deduction guide.
-template <class Elf>
+template <ElfApi Elf>
 DynamicRelocationInfoObserver(RelocationInfo<Elf>& info) -> DynamicRelocationInfoObserver<Elf>;
 
 // This is an observer to fill in an elfldltl::SymbolInfo<Elf> object.
 // Its constructor takes (elfldltl::SymbolInfo<Elf>&, Memory&).
-template <class Elf>
+template <ElfApi Elf>
 class DynamicSymbolInfoObserver;
 
 // This is just a shorthand to avoid repeating the long list of parameters.
-template <class Elf>
+template <ElfApi Elf>
 using DynamicSymbolInfoObserverBase =
     DynamicInfoObserver<DynamicSymbolInfoObserver<Elf>, SymbolInfo<Elf>, Elf, ElfDynTag::kSymTab,
                         ElfDynTag::kSymEnt, ElfDynTag::kHash, ElfDynTag::kGnuHash,
                         ElfDynTag::kStrTab, ElfDynTag::kStrSz, ElfDynTag::kSoname,
                         ElfDynTag::kFlags, ElfDynTag::kFlags1>;
 
-template <class Elf>
+template <ElfApi Elf>
 class DynamicSymbolInfoObserver : public DynamicSymbolInfoObserverBase<Elf> {
  public:
   using Base = DynamicSymbolInfoObserverBase<Elf>;
   using Info = SymbolInfo<Elf>;
-  using size_type = typename Elf::size_type;
+  using size_type = Elf::size_type;
 
   using Base::Base;
 
@@ -511,37 +509,37 @@ class DynamicSymbolInfoObserver : public DynamicSymbolInfoObserverBase<Elf> {
   }
 
  private:
-  typename Base::SizedArray strtab_;
+  Base::SizedArray strtab_;
   std::optional<typename Elf::size_type> symtab_, hash_, gnu_hash_, soname_;
 };
 
 // Deduction guide.
-template <class Elf>
+template <ElfApi Elf>
 DynamicSymbolInfoObserver(SymbolInfo<Elf>& info) -> DynamicSymbolInfoObserver<Elf>;
 
 // These observers fill the same simple result structure.
 // Their constructors take (elfldltl::InitFiniInfo<Elf>&).
-template <class Elf>
+template <ElfApi Elf>
 class DynamicInitObserver;
 
-template <class Elf>
+template <ElfApi Elf>
 class DynamicFiniObserver;
 
-template <class Elf, ElfDynTag Array, ElfDynTag ArraySz, ElfDynTag Legacy>
+template <ElfApi Elf, ElfDynTag Array, ElfDynTag ArraySz, ElfDynTag Legacy>
 class DynamicInitFiniObserver;
 
 // This is just a shorthand to avoid repeating the long list of parameters.
-template <class Elf, ElfDynTag Array, ElfDynTag ArraySz, ElfDynTag Legacy>
+template <ElfApi Elf, ElfDynTag Array, ElfDynTag ArraySz, ElfDynTag Legacy>
 using DynamicInitFiniObserverBase =
     DynamicInfoObserver<DynamicInitFiniObserver<Elf, Array, ArraySz, Legacy>, InitFiniInfo<Elf>,
                         Elf, Array, ArraySz, Legacy>;
 
-template <class Elf, ElfDynTag Array, ElfDynTag ArraySz, ElfDynTag Legacy>
+template <ElfApi Elf, ElfDynTag Array, ElfDynTag ArraySz, ElfDynTag Legacy>
 class DynamicInitFiniObserver : public DynamicInitFiniObserverBase<Elf, Array, ArraySz, Legacy> {
  public:
   using Base = DynamicInitFiniObserverBase<Elf, Array, ArraySz, Legacy>;
   using Info = InitFiniInfo<Elf>;
-  using size_type = typename Elf::size_type;
+  using size_type = Elf::size_type;
 
   using Base::Base;
 
@@ -561,7 +559,7 @@ class DynamicInitFiniObserver : public DynamicInitFiniObserverBase<Elf, Array, A
 
   template <class DiagnosticsType, class Memory>
   constexpr bool Observe(DiagnosticsType& diagnostics, Memory& memory, DynamicTagMatch<Legacy> tag,
-                         typename Elf::Addr val) {
+                         Elf::Addr val) {
     this->info().set_legacy(val);
     return true;
   }
@@ -573,24 +571,24 @@ class DynamicInitFiniObserver : public DynamicInitFiniObserverBase<Elf, Array, A
   }
 
  private:
-  typename Base::SizedArray array_;
+  Base::SizedArray array_;
 };
 
-template <class Elf>
+template <ElfApi Elf>
 using DynamicInitObserverBase =
     DynamicInitFiniObserver<Elf, ElfDynTag::kInitArray, ElfDynTag::kInitArraySz, ElfDynTag::kInit>;
 
-template <class Elf>
+template <ElfApi Elf>
 using DynamicFiniObserverBase =
     DynamicInitFiniObserver<Elf, ElfDynTag::kFiniArray, ElfDynTag::kFiniArraySz, ElfDynTag::kFini>;
 
-template <class Elf>
+template <ElfApi Elf>
 class DynamicInitObserver : public DynamicInitObserverBase<Elf> {
  public:
   using DynamicInitObserverBase<Elf>::DynamicInitObserverBase;
 };
 
-template <class Elf>
+template <ElfApi Elf>
 class DynamicFiniObserver : public DynamicFiniObserverBase<Elf> {
  public:
   using DynamicFiniObserverBase<Elf>::DynamicFiniObserverBase;
@@ -598,29 +596,29 @@ class DynamicFiniObserver : public DynamicFiniObserverBase<Elf> {
 
 // Deduction guides.
 
-template <class Elf>
+template <ElfApi Elf>
 DynamicInitObserver(InitFiniInfo<Elf>& info) -> DynamicInitObserver<Elf>;
 
-template <class Elf>
+template <ElfApi Elf>
 DynamicFiniObserver(InitFiniInfo<Elf>& info) -> DynamicFiniObserver<Elf>;
 
 // This is simpler than the Init and Fini observers because DT_PREINIT_ARRAY
 // has no corresponding legacy tag.  So instead of using the InitFiniInfo
 // object, this ctor just takes (std::span<const Addr>& preinit_array).
-template <class Elf>
+template <ElfApi Elf>
 class DynamicPreinitObserver;
 
-template <class Elf>
+template <ElfApi Elf>
 using DynamicPreinitObserverBase =
     DynamicInfoObserver<DynamicPreinitObserver<Elf>, std::span<const typename Elf::Addr>, Elf,
                         ElfDynTag::kPreinitArray, ElfDynTag::kPreinitArraySz>;
 
-template <class Elf>
+template <ElfApi Elf>
 class DynamicPreinitObserver : public DynamicPreinitObserverBase<Elf> {
  public:
   using Base = DynamicPreinitObserverBase<Elf>;
-  using Addr = typename Elf::Addr;
-  using size_type = typename Elf::size_type;
+  using Addr = Elf::Addr;
+  using size_type = Elf::size_type;
 
   using Base::Base;
 
@@ -646,7 +644,7 @@ class DynamicPreinitObserver : public DynamicPreinitObserverBase<Elf> {
   }
 
  private:
-  typename Base::SizedArray array_;
+  Base::SizedArray array_;
 };
 
 // This can be used for invoking a callback over every DT_NEEDED tag, passed
@@ -658,11 +656,11 @@ class DynamicPreinitObserver : public DynamicPreinitObserverBase<Elf> {
 // dependencies, which is likely only going to happen after getting
 // the symbol and relocation info of the current dso, so the cost of this
 // restricition isn't high.
-template <class Elf, class SymbolInfo, class Callback>
+template <ElfApi Elf, class SymbolInfo, class Callback>
 class DynamicNeededObserver
     : public DynamicTagObserver<DynamicNeededObserver<Elf, SymbolInfo, Callback>,
                                 ElfDynTag::kNeeded> {
-  using size_type = typename Elf::size_type;
+  using size_type = Elf::size_type;
 
  public:
   DynamicNeededObserver(const SymbolInfo& si, Callback callback) : si(si), callback(callback) {}
@@ -685,21 +683,20 @@ class DynamicNeededObserver
 
 // Deduction guides.
 
-template <class Elf, class AbiTraits, template <class, class> class SymbolInfo, class Callback>
+template <ElfApi Elf, class AbiTraits, template <class, class> class SymbolInfo, class Callback>
 DynamicNeededObserver(const SymbolInfo<Elf, AbiTraits>& info, Callback)
     -> DynamicNeededObserver<Elf, SymbolInfo<Elf, AbiTraits>, Callback>;
 
 // This provides a trivial observer that simply counts how many occurrences of
 // any of the given tags appear.
-template <class Elf, ElfDynTag... Tag>
+template <ElfApi Elf, ElfDynTag... Tag>
 class DynamicTagCountObserver
     : public DynamicTagObserver<DynamicTagCountObserver<Elf, Tag...>, Tag...> {
  public:
   explicit DynamicTagCountObserver(size_t& count) : count_(count) {}
 
   template <class DiagnosticsType, class Memory, ElfDynTag Match>
-  constexpr bool Observe(DiagnosticsType&, Memory&, DynamicTagMatch<Match>,
-                         typename Elf::size_type val) {
+  constexpr bool Observe(DiagnosticsType&, Memory&, DynamicTagMatch<Match>, Elf::size_type val) {
     static_assert(((Match == Tag) || ...));
     ++count_;
     return true;
@@ -717,7 +714,7 @@ class DynamicTagCountObserver
 // An observer that will match the given tag and add its value to the provided
 // container. This observer will call the `push_back` method from the
 // container.h API with `Elf::size_type` values onto the container.
-template <class Elf, ElfDynTag Tag, class Container, const std::string_view& ErrorString>
+template <ElfApi Elf, ElfDynTag Tag, class Container, const std::string_view& ErrorString>
 class DynamicValueCollectionObserver
     : public DynamicTagObserver<DynamicValueCollectionObserver<Elf, Tag, Container, ErrorString>,
                                 Tag> {
@@ -726,7 +723,7 @@ class DynamicValueCollectionObserver
 
   template <class DiagnosticsType, class Memory, ElfDynTag Match>
   constexpr bool Observe(DiagnosticsType& diag, Memory&, DynamicTagMatch<Match>,
-                         typename Elf::size_type val) {
+                         Elf::size_type val) {
     static_assert(Match == Tag);
     return values_.push_back(diag, ErrorString, val);
   }

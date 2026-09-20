@@ -188,7 +188,7 @@ void Devfs::CloseComponent() {
 }
 
 Devnode::~Devnode() {
-  for (auto [key, child] : children().unpublished) {
+  for (const auto& [key, child] : children().unpublished) {
     child.get().parent_ = nullptr;
   }
   children().unpublished.clear();

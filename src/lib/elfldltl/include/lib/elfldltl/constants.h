@@ -18,14 +18,13 @@ namespace elfldltl {
 enum class ElfClass : uint8_t {
   k32 = 1,
   k64 = 2,
-  kNative =
-      []() {
-        if constexpr (sizeof(uintptr_t) == sizeof(uint64_t)) {
-          return k64;
-        } else if constexpr (sizeof(uintptr_t) == sizeof(uint32_t)) {
-          return k32;
-        }
-      }()
+  kNative = []() {
+    if constexpr (sizeof(uintptr_t) == sizeof(uint64_t)) {
+      return k64;
+    } else if constexpr (sizeof(uintptr_t) == sizeof(uint32_t)) {
+      return k32;
+    }
+  }(),
 };
 
 // The byte order (Least Significant Byte first, aka little-endian, vs
@@ -34,14 +33,13 @@ enum class ElfClass : uint8_t {
 enum class ElfData : uint8_t {
   k2Lsb = 1,
   k2Msb = 2,
-  kNative =
-      []() {
-        if constexpr (std::endian::native == std::endian::little) {
-          return k2Lsb;
-        } else if constexpr (std::endian::native == std::endian::big) {
-          return k2Msb;
-        }
-      }()
+  kNative = []() {
+    if constexpr (std::endian::native == std::endian::little) {
+      return k2Lsb;
+    } else if constexpr (std::endian::native == std::endian::big) {
+      return k2Msb;
+    }
+  }(),
 };
 
 constexpr std::string_view ElfDataName(ElfData data, bool upper = false) {
@@ -229,21 +227,20 @@ enum class ElfMachine : uint16_t {
   kAarch64 = 183,
   kRiscv = 243,
 
-  kNative =
-      []() {
+  kNative = []() {
 #ifdef __aarch64__
-        return kAarch64;
-#elif defined(__arm__)
-        return kArm;
-#elif defined(__i386__)
-        return k386;
-#elif defined(__x86_64__)
-        return kX86_64;
-#elif defined(__riscv)
-        return kRiscv;
+    return kAarch64;
+#elifdef __arm__
+    return kArm;
+#elifdef __i386__
+    return k386;
+#elifdef __x86_64__
+    return kX86_64;
+#elifdef __riscv
+    return kRiscv;
 #endif
-        return kNone;
-      }()
+    return kNone;
+  }(),
 };
 
 // This is used by diagnostics-ostream.h and diagnostics-printf.h to handle

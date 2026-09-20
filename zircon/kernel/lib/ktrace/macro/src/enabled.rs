@@ -299,7 +299,7 @@ macro_rules! begin_scope {
             $crate::resolve_category!($category),
             $crate::resolve_string!($label),
             crate::ktrace_rs::Context::Thread,
-            &[$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
+            [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
         )
     };
 }
@@ -313,7 +313,7 @@ macro_rules! cpu_begin_scope {
             $crate::resolve_category!($category),
             $crate::resolve_string!($label),
             crate::ktrace_rs::Context::Cpu,
-            &[$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
+            [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
         )
     };
 }
@@ -331,7 +331,7 @@ macro_rules! begin_scope_cond {
                     category,
                     $crate::resolve_string!($label),
                     crate::ktrace_rs::Context::Thread,
-                    &[$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
+                    [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
                 ))
             } else {
                 None

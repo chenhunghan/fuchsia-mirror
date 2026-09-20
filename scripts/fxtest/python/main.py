@@ -11,7 +11,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field
 import enum
-import gzip
 import json
 import os
 import re
@@ -301,6 +300,13 @@ def do_process_previous(flags: args.Flags) -> int:
             if data.count > 1:
                 line += f"       mean {data.mean:.3f}s (SD {data.std:.3f})"
             print(line)
+        return 0
+    elif flags.previous is args.PrevOption.STATS_ANALYTICS:
+        env = environment.ExecutionEnvironment.initialize_from_args(
+            flags, create_log_file=False
+        )
+        stats = log.compute_stats(log.LogSource.from_env(env))
+        print(json.dumps(stats.to_analytics_dict(), separators=(",", ":")))
         return 0
     else:
         print(f"Unknown --previous option {flags.previous}")
@@ -697,7 +703,25 @@ class AsyncMain:
             if exec_env.log_to_stdout():
                 output_file = sys.stdout
             else:
-                output_file = gzip.open(exec_env.log_file, "wt")
+                output_file, actual_log_path = log.open_exclusive_log_file(
+                    exec_env.log_file
+                )
+                if actual_log_path != exec_env.log_file:
+                    recorder.emit_warning_message(
+                        f"Log file '{exec_env.log_file}' is in use by another running test process. "
+                        f"Writing this run's logs to '{actual_log_path}' instead."
+                    )
+                    exec_env.log_file = actual_log_path
+
+                if flags.save_log_path_to_file:
+                    try:
+                        with open(flags.save_log_path_to_file, "w") as pf:
+                            pf.write(os.path.abspath(actual_log_path))
+                            pf.flush()
+                    except OSError as e:
+                        recorder.emit_warning_message(
+                            f"Failed to write log path to {flags.save_log_path_to_file}: {e}"
+                        )
             self._tasks.append(
                 asyncio.create_task(log.writer(recorder, output_file))
             )

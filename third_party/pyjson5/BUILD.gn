@@ -10,7 +10,6 @@ python_library("pyjson5") {
   sources = [
     "__init__.py",
     "__main__.py",
-    "arg_parser.py",
     "host.py",
     "json5.g",
     "lib.py",

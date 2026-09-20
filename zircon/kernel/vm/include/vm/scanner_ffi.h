@@ -14,6 +14,8 @@ __BEGIN_CDECLS
 
 void cpp_scanner_push_disable_count(void);
 void cpp_scanner_pop_disable_count(void);
+bool cpp_scanner_needs_accessed_scan(zx_instant_mono_t update_time);
+void cpp_scanner_wait_for_accessed_scan(zx_instant_mono_t update_time);
 
 __END_CDECLS
 

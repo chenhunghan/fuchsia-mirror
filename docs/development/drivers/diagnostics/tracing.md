@@ -57,30 +57,6 @@ fuchsia_cc_driver("my_driver") {
 }
 ```
 
-## Boot with tracing {:#boot-with-tracing}
-
-Caution: The information in this section is only specific to the legacy
-version of the driver framework (DFv1).
-
-Fuchsia uses a kernel command-line flag to enable tracing in drivers
-during boot:
-
-```none
-driver.tracing.enable=1
-```
-
-This is the default setting in Fuchsia devices.
-
-To disable participation of drivers in Fuchsia tracing, boot the kernel with
-the following command-line flag:
-
-```none
-driver.tracing.enable=0
-```
-
-For instructions on booting a specific Fuchsia device, see documentation for
-your hardware or QEMU. Tracing doesn't require anything special during boot.
-
 ## Use tracing {:#use-tracing}
 
 Use [`ffx trace`][ffx-trace] to record a trace and view the result with the

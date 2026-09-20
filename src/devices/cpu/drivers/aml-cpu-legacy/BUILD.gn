@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-cpu-legacy-dml") {
+  dml = "meta/aml-cpu-legacy.dml"
+  driver_name = "aml-cpu-legacy"
+}
+
 driver_bind_rules("aml-cpu-legacy-bind") {
-  rules = "meta/aml-cpu-legacy.bind"
+  dml_label = ":aml-cpu-legacy-dml"
   bind_output = "aml-cpu-legacy.bindbc"
   tests = "meta/bind-tests.json"
   deps = [
@@ -53,10 +58,10 @@ fuchsia_cc_driver("aml-cpu-legacy-driver") {
 }
 
 fuchsia_driver_component("aml-cpu-legacy") {
+  dml_label = ":aml-cpu-legacy-dml"
   component_name = "aml-cpu-legacy"
   deps = [ ":aml-cpu-legacy-driver" ]
   info = "meta/aml-cpu-legacy-info.json"
-  manifest = "meta/aml-cpu-legacy.cml"
 }
 
 fuchsia_driver_package("package") {

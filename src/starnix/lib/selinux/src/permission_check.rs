@@ -4,7 +4,7 @@
 
 use crate::access_vector_cache::{AccessVectorCache, Query};
 use crate::policy::{AccessVector, KernelAccessDecision, SELINUX_AVD_FLAGS_PERMISSIVE, XpermsKind};
-use crate::security_server::SecurityServer;
+use crate::security_server::{PolicySeqNo, SecurityServer};
 use crate::{ClassPermission, FdPermission, KernelClass, KernelPermission, SecurityId};
 
 use std::num::NonZeroU32;
@@ -66,9 +66,11 @@ impl<'a> PermissionCheck<'a> {
         target_sid: SecurityId,
         permission: P,
     ) -> PermissionCheckResult {
+        let policy_seqno = self.security_server.policy_seqno();
         let result = has_permission(
             self.local_cache,
             self.access_vector_cache,
+            policy_seqno,
             source_sid,
             target_sid,
             permission.into(),
@@ -100,11 +102,13 @@ impl<'a> PermissionCheck<'a> {
         xperm: u16,
     ) -> PermissionCheckResult {
         let permission: KernelPermission = permission.into();
+        let policy_seqno = self.security_server.policy_seqno();
         let result = self.local_cache.check_xperm(
+            policy_seqno,
             xperms_kind,
             source_sid,
             target_sid,
-            permission.clone(),
+            permission,
             xperm,
             || {
                 has_extended_permission(
@@ -112,7 +116,7 @@ impl<'a> PermissionCheck<'a> {
                     xperms_kind,
                     source_sid,
                     target_sid,
-                    permission.into(),
+                    permission,
                     xperm,
                 )
             },
@@ -161,9 +165,19 @@ impl<'a> PermissionCheck<'a> {
         target_sid: SecurityId,
         target_class: KernelClass,
     ) -> KernelAccessDecision {
-        self.local_cache.lookup_access_decision(source_sid, target_sid, target_class, || {
-            self.access_vector_cache.compute_access_decision(source_sid, target_sid, target_class)
-        })
+        self.local_cache.lookup_access_decision(
+            self.security_server.policy_seqno(),
+            source_sid,
+            target_sid,
+            target_class,
+            || {
+                self.access_vector_cache.compute_access_decision(
+                    source_sid,
+                    target_sid,
+                    target_class,
+                )
+            },
+        )
     }
 }
 
@@ -171,6 +185,7 @@ impl<'a> PermissionCheck<'a> {
 fn has_permission(
     local_cache: &PerThreadCache,
     query: &impl Query,
+    policy_seqno: PolicySeqNo,
     source_sid: SecurityId,
     target_sid: SecurityId,
     permission: KernelPermission,
@@ -179,16 +194,19 @@ fn has_permission(
 
     if permission == KernelPermission::Fd(FdPermission::Use) {
         // fd use checks are cached separately.
-        return local_cache.lookup_fd_use(source_sid, target_sid, || {
+        return local_cache.lookup_fd_use(policy_seqno, source_sid, target_sid, || {
             let decision = query.compute_access_decision(source_sid, target_sid, KernelClass::Fd);
             access_decision_to_permission_check_result(permission_access_vector, decision)
         });
     }
 
-    let decision =
-        local_cache.lookup_access_decision(source_sid, target_sid, permission.class(), || {
-            query.compute_access_decision(source_sid, target_sid, permission.class())
-        });
+    let decision = local_cache.lookup_access_decision(
+        policy_seqno,
+        source_sid,
+        target_sid,
+        permission.class(),
+        || query.compute_access_decision(source_sid, target_sid, permission.class()),
+    );
     access_decision_to_permission_check_result(permission_access_vector, decision)
 }
 
@@ -396,6 +414,7 @@ mod tests {
             let result = has_permission(
                 &local_cache1,
                 &deny_all,
+                PolicySeqNo::INITIAL,
                 *A_TEST_SID,
                 *A_TEST_SID,
                 permission.into(),
@@ -416,6 +435,7 @@ mod tests {
             let result = has_permission(
                 &local_cache2,
                 &allow_all,
+                PolicySeqNo::INITIAL,
                 *A_TEST_SID,
                 *A_TEST_SID,
                 permission.into(),

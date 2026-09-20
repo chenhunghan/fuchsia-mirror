@@ -291,7 +291,7 @@ pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::
     let mut aggregates_list = Vec::<((String, String), Vec<LocalResourceEntry>)>::new();
 
     // Process offers
-    for offer in &board_dml.offers {
+    for offer in &board_dml.offer {
         let to_name = strip_hash(&offer.to);
         let _ = get_or_create_device_idx(&mut devices, &to_name, None);
 
@@ -701,7 +701,7 @@ mod tests {
                         ]
                     }
                 ],
-                "offers": [
+                "offer": [
                     {
                         "from": "parent",
                         "to": "gpio",
@@ -758,5 +758,58 @@ mod tests {
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
         assert_ne!(id1, 0);
+    }
+
+    #[test]
+    fn test_compile_board_minimal() {
+        let temp_dir = std::env::temp_dir().join("test_temp_compile_board_minimal");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "clock",
+                        "url": "fuchsia-pkg://fuchsia.com/clock#meta/clock.cm",
+                        "compatible": "test,clock"
+                    }
+                ],
+                "offer": [
+                    {
+                        "from": "parent",
+                        "to": "#clock",
+                        "service": "fuchsia.hardware.platform.device.Service"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        assert!(res.is_ok(), "compile_board failed: {:?}", res.err());
+
+        let fidl_path = temp_dir.join("board-config.fidl");
+        let bind_path = temp_dir.join("test_board-dml.bind");
+        let cml_path = temp_dir.join("test_board-dml.cml");
+
+        assert!(fidl_path.exists(), "Expected board-config.fidl to exist");
+        assert!(bind_path.exists(), "Expected test_board-dml.bind to exist");
+        assert!(cml_path.exists(), "Expected test_board-dml.cml to exist");
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

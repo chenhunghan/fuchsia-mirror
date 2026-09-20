@@ -1072,7 +1072,6 @@ pub fn default_mmap(
         memory_offset,
         length,
         prot_flags,
-        file.max_access_for_memory_mapping(),
         options,
         MappingName::File(file.to_mapping(file_write_guard)?),
     )

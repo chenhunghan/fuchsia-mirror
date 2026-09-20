@@ -9,9 +9,9 @@
 #include <fidl/fuchsia.hardware.pci/cpp/common_types.h>
 #include <fidl/fuchsia.io/cpp/wire.h>
 #include <inttypes.h>
-#include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/driver.h>
+#include <lib/driver/legacy-bind-constants/legacy-bind-constants.h>
 #include <lib/fit/defer.h>
 #include <lib/pci/constants.h>
 #include <lib/pci/hw.h>

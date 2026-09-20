@@ -41,7 +41,7 @@ impl FfxMain for ListTool {
     }
 }
 
-pub(crate) fn output_instances(
+fn output_instances(
     instances: &[Instance],
     project: &str,
     zone: &str,
@@ -73,7 +73,7 @@ pub(crate) fn output_instances(
 
             table.add_row(row!(name, zone, machine_type, internal_ip, external_ip, status));
         }
-        table.print(writer).map_err(|e| fho::Error::Unexpected(anyhow::anyhow!("{e}")))?;
+        table.print(writer).map_err(|e| user_error!("{e}"))?;
     }
     Ok(())
 }
@@ -92,7 +92,11 @@ mod tests {
             zone: Some("us-central1-a".to_string()),
             network_interfaces: vec![NetworkInterface {
                 network_ip: Some("10.0.0.2".to_string()),
-                access_configs: vec![AccessConfig { nat_ip: Some("34.0.0.1".to_string()) }],
+                access_configs: vec![AccessConfig {
+                    nat_ip: Some("34.0.0.1".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
             }],
             ..Default::default()
         }

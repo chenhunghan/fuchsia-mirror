@@ -31,13 +31,20 @@ zx_signals_t cpp_dispatcher_signals_state_locked(const Dispatcher* disp)
   return disp->GetSignalsStateLocked();
 }
 
-void* cpp_dispatcher_get_ref_counted(const Dispatcher* disp) {
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void* cpp_dispatcher_get_ref_counted(const Dispatcher* disp) {
   return disp->get_ref_counted_base();
 }
 
-zx_obj_type_t cpp_dispatcher_get_type(const Dispatcher* disp) { return disp->get_type(); }
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_obj_type_t cpp_dispatcher_get_type(const Dispatcher* disp) {
+  return disp->get_type();
+}
 
-zx_koid_t cpp_dispatcher_get_koid(const Dispatcher* disp) { return disp->get_koid(); }
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_koid_t cpp_dispatcher_get_koid(const Dispatcher* disp) {
+  return disp->get_koid();
+}
 
 void cpp_dispatcher_recycle(Dispatcher* disp) {
   fbl::internal::recycler<Dispatcher>::recycle(disp);

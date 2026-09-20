@@ -166,6 +166,23 @@ CRATE_ANNOTATIONS = {
             gen_build_script = False,
         ),
     ],
+    "rand": [
+        crate.annotation(
+            version = "0.10.2",
+            crate_features = [
+                "alloc",
+                "default",
+                "std",
+                "std_rng",
+                "sys_rng",
+                "thread_rng",
+            ],
+            deps = [
+                "//third_party/rust_crates/vendor/chacha20-0.10.2:chacha20",
+                "//third_party/rust_crates/vendor/getrandom-0.4.3:getrandom",
+            ],
+        ),
+    ],
     "thiserror": [
         crate.annotation(
             version = "2.0.20",

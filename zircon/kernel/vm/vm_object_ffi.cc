@@ -217,6 +217,8 @@ FFI_ALWAYS_INLINE uint64_t cpp_vm_object_reclamation_event_count(const VmObject*
   return vmo->ReclamationEventCount();
 }
 
+FFI_ALWAYS_INLINE void cpp_vm_object_detach_source(VmObject* vmo) { vmo->DetachSource(); }
+
 FFI_ALWAYS_INLINE void cpp_vm_object_get_attributed_memory_in_range(
     const VmObject* vmo, uint64_t offset, uint64_t len, vm::AttributionCounts* out_counts) {
   *out_counts = vmo->GetAttributedMemoryInRange(offset, len);

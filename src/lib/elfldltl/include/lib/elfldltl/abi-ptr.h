@@ -57,46 +57,43 @@ concept AbiPtrTraitsStorageType =
 
 // Any Traits type used with AbiPtr must meet the AbiTraitsApi requirements.
 template <class Traits, typename T, class Elf>
-concept AbiPtrTraitsApi = requires(  //
-    typename Elf::Addr addr, typename Traits::template StorageType<Elf, T> storage) {
-  // This must be defined to some type that admits + and - operators with
-  // integer types, and operator- with itself.  Pointer types can satisfy this
-  // even while incomplete, though they'll have to be complete by the time the
-  // AbiPtr arithmetic methods are used.
-  typename Traits::template StorageType<Elf, T>;
-  {
-    typename Traits::template StorageType<Elf, T>{}
-  } -> AbiPtrTraitsStorageType<T, typename Elf::size_type>;
+concept AbiPtrTraitsApi =
+    ElfApi<Elf> && requires(Elf::Addr addr, Traits::template StorageType<Elf, T> storage) {
+      // This must be defined to some type that admits + and - operators with
+      // integer types, and operator- with itself.  Pointer types can satisfy
+      // this even while incomplete, though they'll have to be complete by the
+      // time the AbiPtr arithmetic methods are used.
+      typename Traits::template StorageType<Elf, T>;
+      {
+        typename Traits::template StorageType<Elf, T>{}
+      } -> AbiPtrTraitsStorageType<T, typename Elf::size_type>;
 
-  // The kScale<T> template static constexpr variable must be defined to a
-  // factor by which an integer should be scaled up before adding or
-  // subtracting it to a StorageType<..., T> value, and by which the value of
-  // subtracting two such values should be scaled down.
-  //
-  // This is not imposed as a formal requirement because that requires
-  // instantiating kScale<T> as part of the instantiation of AbiPtr<T>, and
-  // that might require T to be a complete type (e.g. if sizeof(T) is used in
-  // kScale<T> as in RemoteAbiTraits).  But that would make it impossible to
-  // declare self-referential data types using AbiPtr.
-  //{
-  //  std::integral_constant<decltype(Traits::template kScale<T>),
-  //                         Traits::template kScale<T>>::value +
-  //      0
-  //} -> std::unsigned_integral;
+      // The kScale<T> template static constexpr variable must be defined to a
+      // factor by which an integer should be scaled up before adding or
+      // subtracting it to a StorageType<..., T> value, and by which the value
+      // of subtracting two such values should be scaled down.
+      //
+      // This is not imposed as a formal requirement because that requires
+      // instantiating kScale<T> as part of the instantiation of AbiPtr<T>, and
+      // that might require T to be a complete type (e.g. if sizeof(T) is used
+      // in kScale<T> as in RemoteAbiTraits).  But that would make it
+      // impossible to declare self-referential data types using AbiPtr.  {
+      // std::integral_constant<decltype(Traits::template kScale<T>),
+      // Traits::template kScale<T>>::value + 0 } -> std::unsigned_integral;
 
-  // This must be defined to accept any StorageType<...> argument and yield the
-  // address in the target address space as some unsigned integer type.
-  { Traits::GetAddress(storage) } -> std::unsigned_integral;
+      // This must be defined to accept any StorageType<...> argument and yield
+      // the address in the target address space as some unsigned integer type.
+      { Traits::GetAddress(storage) } -> std::unsigned_integral;
 
-  // This must be defined to accept any StorageType<...> argument and yield a
-  // type that admits operator<=> for comparison of two pointers it's valid to
-  // compare by C rules.
-  { Traits::ComparisonValue(storage) } -> std::totally_ordered;
+      // This must be defined to accept any StorageType<...> argument and yield
+      // a type that admits operator<=> for comparison of two pointers it's
+      // valid to compare by C rules.
+      { Traits::ComparisonValue(storage) } -> std::totally_ordered;
 
-  // This must be defined to accept Elf::Addr (or Elf::size_type, since they
-  // are mutually convertible).
-  { Traits::template FromAddress<Elf, T>(addr) } -> std::convertible_to<decltype(storage)>;
-};
+      // This must be defined to accept Elf::Addr (or Elf::size_type, since
+      // they are mutually convertible).
+      { Traits::template FromAddress<Elf, T>(addr) } -> std::convertible_to<decltype(storage)>;
+    };
 
 // If an AbiTraits class offers the Make and Get methods to convert directly to
 // a local pointer, it qualifies as a LocalAbiTraitsApi class.  In this case,
@@ -105,7 +102,7 @@ concept AbiPtrTraitsApi = requires(  //
 template <class Traits, typename T, class Elf>
 concept AbiPtrLocalTraitsApi =
     AbiPtrTraitsApi<Traits, T, Elf> &&
-    requires(T* ptr, typename Traits::template StorageType<Elf, T> storage) {
+    requires(T* ptr, Traits::template StorageType<Elf, T> storage) {
       {
         Traits::template Make<Elf, T>(ptr)
       } -> std::convertible_to<typename Traits::template StorageType<Elf, T>>;
@@ -113,20 +110,20 @@ concept AbiPtrLocalTraitsApi =
       { Traits::template Get<Elf, T>(storage) } -> std::convertible_to<T*>;
     };
 
-template <typename T, class Elf = elfldltl::Elf<>, AbiPtrTraitsApi<T, Elf> Traits = LocalAbiTraits>
+template <typename T, ElfApi Elf = elfldltl::Elf<>, AbiPtrTraitsApi<T, Elf> Traits = LocalAbiTraits>
 struct AbiPtr {
  public:
   using value_type = T;
 
   // This is the type used to represent an address in the target address space.
-  using Addr = typename Elf::Addr;
+  using Addr = Elf::Addr;
 
   // No matter how the pointer is represented, sizes of objects or arrays it
   // points to must fit into size_type.
-  using size_type = typename Elf::size_type;
+  using size_type = Elf::size_type;
 
   // The Traits type determines the underlying type stored.
-  using StorageType = typename Traits::template StorageType<Elf, T>;
+  using StorageType = Traits::template StorageType<Elf, T>;
 
   // This provides a convenient shorthand for checking if AbiPtr is just
   // interchangeable with normal pointers.
@@ -139,7 +136,7 @@ struct AbiPtr {
   // If Traits supports it, AbiPtr can be constructed from a normal pointer.
   constexpr explicit AbiPtr(value_type* ptr)
     requires kLocal
-      : storage_(Traits::template Make<value_type>(ptr)) {}
+      : storage_(Traits::template Make<Elf, value_type>(ptr)) {}
 
   constexpr AbiPtr& operator=(const AbiPtr&) = default;
 
@@ -209,7 +206,7 @@ struct AbiPtr {
   constexpr T* get() const
     requires kLocal
   {
-    return Traits::template Get<T>(storage_);
+    return Traits::template Get<Elf, T>(storage_);
   }
 
   constexpr T* operator->() const
@@ -243,7 +240,7 @@ AbiPtr(T*) -> AbiPtr<T>;
 // This is the default Traits type for AbiPtr and things that use it.
 // It meets both AbiTraitsApi and LocalAbiTraitsApi for any Elf and T.
 struct LocalAbiTraits {
-  template <class Elf, typename T>
+  template <ElfApi Elf, typename T>
   using StorageType = T*;
 
   template <typename T>
@@ -256,19 +253,19 @@ struct LocalAbiTraits {
     return ptr;
   }
 
-  template <class Elf, typename T>
+  template <ElfApi Elf, typename T>
   static StorageType<Elf, T> FromAddress(uintptr_t address) {
     return reinterpret_cast<T*>(address);
   }
 
   // LocalAbiTraitsApi methods.
 
-  template <class Elf, typename T>
+  template <ElfApi Elf, typename T>
   static constexpr StorageType<Elf, T> Make(T* ptr) {
     return ptr;
   }
 
-  template <class Elf, typename T>
+  template <ElfApi Elf, typename T>
   static constexpr T* Get(StorageType<Elf, T> ptr) {
     return ptr;
   }
@@ -284,8 +281,8 @@ static_assert(AbiPtrLocalTraitsApi<LocalAbiTraits, Elf<>::Addr, Elf<>>);
 //
 // This meets AbiTraitsApi for any Elf and T, but not LocalAbiTraitsApi.
 struct RemoteAbiTraits {
-  template <class Elf, typename T>
-  using StorageType = typename Elf::Addr;
+  template <ElfApi Elf, typename T>
+  using StorageType = Elf::Addr;
 
   template <typename T>
   static constexpr uint32_t kScale = sizeof(T);
@@ -294,8 +291,8 @@ struct RemoteAbiTraits {
 
   static constexpr auto ComparisonValue(auto ptr) { return ptr(); }
 
-  template <class Elf, typename T>
-  static constexpr StorageType<Elf, T> FromAddress(typename Elf::Addr address) {
+  template <ElfApi Elf, typename T>
+  static constexpr StorageType<Elf, T> FromAddress(Elf::Addr address) {
     return address;
   }
 };

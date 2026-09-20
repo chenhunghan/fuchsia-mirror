@@ -6,8 +6,5 @@ import("//build/fidl/fidl.gni")
 
 fidl("test.hardwarepowercontrol") {
   sources = [ "control.test.fidl" ]
-  public_deps = [
-    "//sdk/fidl/fuchsia.hardware.power.battery",
-    "//sdk/fidl/fuchsia.hardware.power.source",
-  ]
+  public_deps = [ "//sdk/fidl/fuchsia.hardware.power.battery" ]
 }

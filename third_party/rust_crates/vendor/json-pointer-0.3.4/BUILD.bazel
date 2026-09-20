@@ -70,6 +70,6 @@ rust_library(
     }),
     version = "0.3.4",
     deps = [
-        "//third_party/rust_crates/vendor/serde_json-1.0.149:serde_json",
+        "//third_party/rust_crates/vendor/serde_json-1.0.151:serde_json",
     ],
 )

@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-pwm-init-dml") {
+  dml = "meta/aml-pwm-init.dml"
+  driver_name = "aml-pwm-init"
+}
+
 driver_bind_rules("aml-pwm-init-bind") {
-  rules = "meta/aml-pwm-init.bind"
+  dml_label = ":aml-pwm-init-dml"
   bind_output = "aml-pwm-init.bindbc"
   tests = "meta/bind-tests.json"
   deps = [
@@ -43,10 +48,10 @@ fuchsia_cc_driver("aml-pwm-init-driver") {
 }
 
 fuchsia_driver_component("aml-pwm-init") {
+  dml_label = ":aml-pwm-init-dml"
   info = "meta/aml-pwm-init-info.json"
   component_name = "aml-pwm-init"
   deps = [ ":aml-pwm-init-driver" ]
-  manifest = "meta/aml-pwm-init.cml"
 }
 
 fuchsia_driver_package("package") {

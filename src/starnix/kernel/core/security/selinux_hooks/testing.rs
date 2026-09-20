@@ -5,22 +5,18 @@
 #![cfg(test)]
 use crate::security::selinux_hooks::selinuxfs::selinuxfs_policy_loaded;
 
-use crate::mm::memory::MemoryObject;
 use crate::security::SecurityServer;
 use crate::task::CurrentTask;
-use crate::task::loader::ResolvedElf;
+use crate::task::loader::ResolvedProgram;
 use crate::testing::spawn_kernel_with_selinux_and_run;
 use crate::vfs::{FileMapping, FileWriteGuardMode, FsStr, NamespaceNode, OpenAccessCheck};
 use selinux::TaskAttrs;
-use starnix_types::arch::ArchWidth;
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::open_flags::OpenFlags;
 use std::future::Future;
 use std::sync::Arc;
-
-use zx::{self as zx};
 
 // The default name used files used in testing.
 pub const TEST_FILE_NAME: &str = "file";
@@ -113,24 +109,12 @@ pub(in crate::security) fn open_test_file(
     file.to_mapping(Some(FileWriteGuardMode::ExecMapping)).unwrap()
 }
 
-/// Creates a mock [`ResolvedElf`] from an opened [`FileMapping`] for testing.
-pub(in crate::security) fn make_resolved_elf(
+/// Creates a [`ResolvedProgram`] from an opened [`FileMapping`] for testing.
+pub(in crate::security) fn make_resolved_program(
     current_task: &CurrentTask,
     file: Arc<FileMapping>,
-) -> ResolvedElf {
-    let vmo = zx::Vmo::create(4096).unwrap();
-    let memory = Arc::new(MemoryObject::from(vmo));
-    ResolvedElf {
-        file,
-        memory,
-        headers: elf_parse::Elf64Headers::new_for_test(&Default::default(), None),
-        interp: None,
-        argv: vec![],
-        environ: vec![],
-        creds: Credentials::clone(&current_task.current_creds()),
-        secure_exec: false,
-        arch_width: ArchWidth::Arch64,
-    }
+) -> ResolvedProgram {
+    ResolvedProgram::new(current_task, file, Default::default(), vec![], vec![])
 }
 
 #[cfg(test)]

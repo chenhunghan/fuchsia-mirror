@@ -10,8 +10,9 @@ import dataclasses
 import enum
 import os
 import tempfile
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import AbstractSet, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet
 
 import cl_utils
 
@@ -347,7 +348,7 @@ def rustc_dep_only_command(
     command_tokens: Iterable[str],
     emit_metadata: bool,
     depfile_name: str,
-) -> Tuple[Sequence[str], Sequence[Path]]:
+) -> tuple[Sequence[str], Sequence[Path]]:
     """Generate a command that only produces a depfile.
 
     This implementation handles response files recursively,
@@ -539,11 +540,11 @@ class RustAction(object):
         return self._want_sysroot_libgcc
 
     @property
-    def link_reproducer(self) -> Optional[Path]:
+    def link_reproducer(self) -> Path | None:
         return self._link_reproducer
 
     @property
-    def target(self) -> Optional[str]:
+    def target(self) -> str | None:
         return self._attributes.target
 
     @property
@@ -590,12 +591,12 @@ class RustAction(object):
         return cl_utils.last_value_of_dict_flag(self._C_flags, "extra-filename")
 
     @property
-    def depfile(self) -> Optional[Path]:
+    def depfile(self) -> Path | None:
         d = cl_utils.last_value_of_dict_flag(self.emit, "dep-info", "")
         return Path(d) if d else None
 
     @property
-    def rmeta(self) -> Optional[Path]:
+    def rmeta(self) -> Path | None:
         if self.emit_metadata and self.output_file:
             return Path(
                 cl_utils.last_value_of_dict_flag(
@@ -605,11 +606,11 @@ class RustAction(object):
         return None
 
     @property
-    def use_ld(self) -> Optional[Path]:
+    def use_ld(self) -> Path | None:
         return self._use_ld
 
     @property
-    def linker(self) -> Optional[Path]:
+    def linker(self) -> Path | None:
         d = cl_utils.last_value_of_dict_flag(self._C_flags, "linker")
         return Path(d) if d else None
 
@@ -626,7 +627,7 @@ class RustAction(object):
         return [Path(p) for p in self._link_arg_files]
 
     @property
-    def link_map_output(self) -> Optional[Path]:
+    def link_map_output(self) -> Path | None:
         # The linker can produce a .map output file.
         for arg in self._C_flags.get("link-args", []):
             if arg.startswith("--Map="):
@@ -647,7 +648,7 @@ class RustAction(object):
         return sysroot_rel
 
     @property
-    def explicit_rust_sysroot(self) -> Optional[Path]:
+    def explicit_rust_sysroot(self) -> Path | None:
         """The sysroot specified on the command-line, if any."""
         return self._attributes.sysroot
 
@@ -657,7 +658,7 @@ class RustAction(object):
         return self.explicit_rust_sysroot or self.default_rust_sysroot()
 
     @property
-    def c_sysroot(self) -> Optional[Path]:
+    def c_sysroot(self) -> Path | None:
         return self._c_sysroot
 
     @property
@@ -731,7 +732,7 @@ class RustAction(object):
 
     def dep_only_command_with_rspfiles(
         self, depfile_name: str
-    ) -> Tuple[Sequence[str], Sequence[Path]]:
+    ) -> tuple[Sequence[str], Sequence[Path]]:
         """Generate a command that only produces a depfile.
 
         Returns:

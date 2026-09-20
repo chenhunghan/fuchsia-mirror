@@ -392,14 +392,17 @@ mod test {
     };
     use futures::StreamExt as _;
     use pretty_assertions::assert_eq;
+    use starnix_core::mm::{MemoryAccessor as _, MemoryAccessorExt as _};
     use starnix_core::task::dynamic_thread_spawner::SpawnRequestBuilder;
     use starnix_core::task::{EventHandler, Waiter};
-    use starnix_core::testing::spawn_kernel_and_run;
+    use starnix_core::testing::{map_memory, spawn_kernel_and_run};
     use starnix_core::vfs::FileHandle;
     use starnix_core::vfs::buffers::VecOutputBuffer;
+    use starnix_syscalls::SUCCESS;
     use starnix_types::time::timeval_from_time;
     use starnix_uapi::errors::EAGAIN;
     use starnix_uapi::uapi;
+    use starnix_uapi::user_address::UserAddress;
     use starnix_uapi::vfs::FdEvents;
     use test_case::test_case;
     use test_util::assert_near;
@@ -524,6 +527,13 @@ mod test {
         current_task: &CurrentTask,
     ) -> (InputDevice, FileHandle, fuiinput::KeyboardListenerProxy) {
         let inspector = fuchsia_inspect::Inspector::default();
+        start_keyboard_input_inspect(current_task, &inspector).await
+    }
+
+    async fn start_keyboard_input_inspect(
+        current_task: &CurrentTask,
+        inspector: &fuchsia_inspect::Inspector,
+    ) -> (InputDevice, FileHandle, fuiinput::KeyboardListenerProxy) {
         let input_device = InputDevice::new_keyboard(inspector.root());
         let input_file = input_device.open_test(current_task).expect("Failed to create input file");
         let (keyboard_proxy, mut keyboard_stream) =
@@ -1647,8 +1657,9 @@ mod test {
     #[::fuchsia::test]
     async fn skips_unknown_keyboard_events() {
         spawn_kernel_and_run(async move |current_task| {
+            let inspector = fuchsia_inspect::Inspector::default();
             let (_keyboard_device, keyboard_file, keyboard_listener) =
-                start_keyboard_input(&current_task).await;
+                start_keyboard_input_inspect(&current_task, &inspector).await;
 
             let key_event = fuiinput::KeyEvent {
                 timestamp: Some(0),
@@ -1661,6 +1672,37 @@ mod test {
             std::mem::drop(keyboard_listener); // Close Zircon channel.
             let events = read_uapi_events(&keyboard_file, &current_task);
             assert_eq!(events.len(), 0);
+
+            // The unknown key is counted as received-but-ignored, and must not be
+            // counted as converted.
+            assert_data_tree!(inspector, root: {
+                keyboard_device: {
+                    active_wake_leases_count: AnyProperty,
+                    total_events_with_wake_lease_count: AnyProperty,
+                    total_fidl_events_received_count: 1u64,
+                    total_fidl_events_ignored_count: 1u64,
+                    total_fidl_events_unexpected_count: 0u64,
+                    total_fidl_events_converted_count: 0u64,
+                    total_uapi_events_generated_count: 0u64,
+                    last_generated_uapi_event_timestamp_ns: 0i64,
+                    keyboard_file_0: {
+                        fidl_events_received_count: 1u64,
+                        fidl_events_ignored_count: 1u64,
+                        fidl_events_unexpected_count: 0u64,
+                        fidl_events_converted_count: 0u64,
+                        uapi_events_generated_count: 0u64,
+                        uapi_events_read_count: 0u64,
+                        fd_read_count: AnyProperty,
+                        fd_notify_count: AnyProperty,
+                        last_generated_uapi_event_timestamp_ns: 0i64,
+                        last_read_uapi_event_timestamp_ns: AnyProperty,
+                        opened_without_nonblock: AnyProperty,
+                        open_timestamp_ns: AnyProperty,
+                        closed: AnyProperty,
+                        close_timestamp_ns: AnyProperty,
+                    }
+                }
+            });
         })
         .await;
     }
@@ -1902,13 +1944,13 @@ mod test {
     }
 
     #[::fuchsia::test]
-    async fn ignore_mouse_non_wheel_events() {
+    async fn handles_mouse_move_and_click_events() {
         spawn_kernel_and_run(async move |current_task| {
             let mouse_move_event = fuipointer::MouseEvent {
                 timestamp: Some(0),
                 pointer_sample: Some(fuipointer::MousePointerSample {
                     device_id: Some(0),
-                    position_in_viewport: Some([50.0, 50.0]),
+                    relative_motion: Some([10.0, 20.0]),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1926,7 +1968,7 @@ mod test {
             let (_mouse_device, mouse_file, mut mouse_stream) =
                 start_mouse_input(&current_task).await;
 
-            // Expect mouse relay to discard MouseEvents without vertical scroll.
+            // Expect mouse relay to handle MouseEvents with movement and buttons.
             answer_next_mouse_watch_request(&mut mouse_stream, vec![mouse_move_event]).await;
             answer_next_mouse_watch_request(&mut mouse_stream, vec![mouse_click_event]).await;
 
@@ -1935,7 +1977,16 @@ mod test {
             answer_next_mouse_watch_request(&mut mouse_stream, vec![]).await;
 
             let events = read_uapi_events(&mouse_file, &current_task);
-            assert_eq!(events.len(), 0);
+            assert!(!events.is_empty());
+            assert!(events.iter().any(|e| e.type_ == uapi::EV_REL as u16
+                && e.code == uapi::REL_X as u16
+                && e.value == 10));
+            assert!(events.iter().any(|e| e.type_ == uapi::EV_REL as u16
+                && e.code == uapi::REL_Y as u16
+                && e.value == 20));
+            assert!(events.iter().any(|e| e.type_ == uapi::EV_KEY as u16
+                && e.code == uapi::BTN_LEFT as u16
+                && e.value == 1));
         })
         .await;
     }
@@ -2532,8 +2583,8 @@ mod test {
                 ..Default::default()
             };
 
-            // Send 2 non-wheel MouseEvents to proxy that should be counted as `received` by InputFile
-            // These events have no scroll_v delta in the pointer sample so they should be ignored.
+            // Send 2 MouseEvents: one move event with no relative motion (ignored) and one click
+            // event with button 1 pressed (converted).
             answer_next_mouse_watch_request(
                 &mut mouse_source_stream,
                 vec![mouse_move_event, mouse_click_event],
@@ -2566,20 +2617,20 @@ mod test {
                     active_wake_leases_count: 0u64,
                     total_events_with_wake_lease_count: 0u64,
                     total_fidl_events_received_count: 8u64,
-                    total_fidl_events_ignored_count: 2u64,
+                    total_fidl_events_ignored_count: 1u64,
                     total_fidl_events_unexpected_count: 0u64,
-                    total_fidl_events_converted_count: 6u64,
-                    total_uapi_events_generated_count: 4u64,
+                    total_fidl_events_converted_count: 7u64,
+                    total_uapi_events_generated_count: 7u64,
                     last_generated_uapi_event_timestamp_ns: 5000i64,
                     mouse_file_0: {
                         fidl_events_received_count: 8u64,
-                        fidl_events_ignored_count: 2u64,
+                        fidl_events_ignored_count: 1u64,
                         fidl_events_unexpected_count: 0u64,
-                        fidl_events_converted_count: 6u64,
-                        uapi_events_generated_count: 4u64,
-                        uapi_events_read_count: 4u64,
-                        fd_read_count: 5u64,
-                        fd_notify_count: 2u64,
+                        fidl_events_converted_count: 7u64,
+                        uapi_events_generated_count: 7u64,
+                        uapi_events_read_count: 7u64,
+                        fd_read_count: 8u64,
+                        fd_notify_count: 3u64,
                         last_generated_uapi_event_timestamp_ns: 5000i64,
                         last_read_uapi_event_timestamp_ns: 5000i64,
                         opened_without_nonblock: AnyProperty,
@@ -2587,6 +2638,283 @@ mod test {
                         closed: AnyProperty,
                         close_timestamp_ns: AnyProperty,
                     },
+                }
+            });
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn eviocgname_zero_buffer_length_succeeds() {
+        spawn_kernel_and_run(async move |current_task| {
+            let inspector = fuchsia_inspect::Inspector::default();
+            let touch_device = InputDevice::new_touch(700, 1200, &inspector.root());
+            let file =
+                touch_device.open_test(&current_task).expect("Failed to open touch input file");
+
+            let user_addr = starnix_core::testing::map_memory(
+                &current_task,
+                starnix_uapi::user_address::UserAddress::default(),
+                4096,
+            );
+
+            // EVIOCGNAME with 0 buffer length should return SUCCESS and not panic or write memory.
+            let res = file.ioctl(&current_task, uapi::EVIOCGNAME_0, user_addr.into());
+            assert_eq!(res, Ok(starnix_syscalls::SUCCESS));
+
+            // EVIOCGNAME with non-zero buffer length should succeed and return bytes written.
+            let name_req = uapi::EVIOCGNAME_0 | (256 << 16);
+            let res = file.ioctl(&current_task, name_req, user_addr.into());
+            assert!(res.is_ok());
+            let bytes_written = res.unwrap().value() as usize;
+            assert!(bytes_written > 0);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn evdev_variable_length_ioctls_succeed() {
+        spawn_kernel_and_run(async move |current_task| {
+            let inspector = fuchsia_inspect::Inspector::default();
+            let touch_device = InputDevice::new_touch(700, 1200, &inspector.root());
+            let file =
+                touch_device.open_test(&current_task).expect("Failed to open touch input file");
+
+            let user_addr = starnix_core::testing::map_memory(
+                &current_task,
+                starnix_uapi::user_address::UserAddress::default(),
+                4096,
+            );
+
+            // Test EVIOCGRAB succeeds.
+            let res = file.ioctl(&current_task, uapi::EVIOCGRAB, 1u64.into());
+            assert_eq!(res, Ok(starnix_syscalls::SUCCESS));
+
+            // Test EVIOCGPHYS with variable length.
+            let phys_req = crate::input_file::EVIOCGPHYS_BASE | (256 << 16);
+            let res = file.ioctl(&current_task, phys_req, user_addr.into());
+            assert!(res.is_ok());
+            let bytes_written = res.unwrap().value() as usize;
+            assert!(bytes_written > 0);
+
+            // Test EVIOCGUNIQ returns ENOENT (synthetic devices have no serial/unique identifier).
+            let uniq_req = crate::input_file::EVIOCGUNIQ_BASE | (256 << 16);
+            let res = file.ioctl(&current_task, uniq_req, user_addr.into());
+            assert_eq!(res, starnix_uapi::error!(ENOENT));
+
+            // Test EVIOCGPROP with variable length.
+            let prop_req = crate::input_file::EVIOCGPROP_BASE | (64 << 16);
+            let res = file.ioctl(&current_task, prop_req, user_addr.into());
+            assert_eq!(res, Ok(starnix_syscalls::SUCCESS));
+
+            // Test EVIOCGBIT(0) with variable length.
+            let bit0_req = crate::input_file::EVIOCGBIT_0_BASE | (64 << 16);
+            let res = file.ioctl(&current_task, bit0_req, user_addr.into());
+            assert_eq!(res, Ok(starnix_syscalls::SUCCESS));
+
+            // Test EVIOCGBIT(EV_SND) succeeds and returns zeros.
+            let snd_req = crate::input_file::EVIOCGBIT_EV_SND_BASE | (64 << 16);
+            let res = file.ioctl(&current_task, snd_req, user_addr.into());
+            assert_eq!(res, Ok(starnix_syscalls::SUCCESS));
+
+            // Test invalid EVIOCGBIT(0x1f) returns EINVAL.
+            let invalid_bit_req = (uapi::_IOC_READ << uapi::_IOC_DIRSHIFT)
+                | ((b'E' as u32) << uapi::_IOC_TYPESHIFT)
+                | (64 << 16)
+                | (0x20 + 0x1f);
+            let res = file.ioctl(&current_task, invalid_bit_req, user_addr.into());
+            assert_eq!(res, starnix_uapi::error!(EINVAL));
+
+            // Test unrecognized evdev ioctl code with valid type/dir returns EINVAL via fallback.
+            let unrecognized_evdev_req = (uapi::_IOC_READ << uapi::_IOC_DIRSHIFT)
+                | ((b'E' as u32) << uapi::_IOC_TYPESHIFT)
+                | 0xFF;
+            let res = file.ioctl(&current_task, unrecognized_evdev_req, user_addr.into());
+            assert_eq!(res, starnix_uapi::error!(EINVAL));
+
+            // Test invalid direction/type returns EINVAL.
+            let invalid_dir_req = (uapi::_IOC_WRITE << uapi::_IOC_DIRSHIFT)
+                | ((b'E' as u32) << uapi::_IOC_TYPESHIFT)
+                | 0x20;
+            let res = file.ioctl(&current_task, invalid_dir_req, user_addr.into());
+            assert_eq!(res, starnix_uapi::error!(EINVAL));
+        })
+        .await;
+    }
+
+    // The evdev current-state queries report what the device is doing right now,
+    // as opposed to the EVIOCGBIT queries which report what it is capable of.
+    // Starnix tracks none of this state and reports all-zeros, but these must not
+    // fail: `xf86-input-evdev` issues all four during PreInit and treats an error
+    // as fatal, so returning EINVAL here means X11 brings up no input devices.
+    #[::fuchsia::test]
+    async fn evdev_current_state_queries_succeed() {
+        spawn_kernel_and_run(async move |current_task| {
+            let inspector = fuchsia_inspect::Inspector::default();
+            let touch_device = InputDevice::new_touch(700, 1200, &inspector.root());
+            let file =
+                touch_device.open_test(&current_task).expect("Failed to open touch input file");
+
+            let user_addr = starnix_core::testing::map_memory(
+                &current_task,
+                starnix_uapi::user_address::UserAddress::default(),
+                4096,
+            );
+
+            const BUF_LEN: usize = 96;
+            for (name, base) in [
+                ("EVIOCGKEY", crate::input_file::EVIOCGKEY_BASE),
+                ("EVIOCGLED", crate::input_file::EVIOCGLED_BASE),
+                ("EVIOCGSND", crate::input_file::EVIOCGSND_BASE),
+                ("EVIOCGSW", crate::input_file::EVIOCGSW_BASE),
+            ] {
+                // Poison the buffer first, so that observing zeros afterwards
+                // proves the ioctl wrote them rather than finding them.
+                current_task
+                    .write_memory(user_addr, &[0xAAu8; BUF_LEN])
+                    .expect("failed to poison buffer");
+
+                let req = base | ((BUF_LEN as u32) << 16);
+                let res = file.ioctl(&current_task, req, user_addr.into());
+                assert_eq!(res, Ok(starnix_syscalls::SUCCESS), "{name} should succeed");
+
+                let read_back = current_task
+                    .read_memory_to_vec(user_addr, BUF_LEN)
+                    .expect("failed to read back buffer");
+                assert_eq!(
+                    read_back,
+                    vec![0u8; BUF_LEN],
+                    "{name} should report nothing currently active"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn keyboard_input_file_ioctls() {
+        spawn_kernel_and_run(async move |current_task| {
+            let inspector = fuchsia_inspect::Inspector::default();
+            let keyboard_device = InputDevice::new_keyboard(&inspector.root());
+            let file = keyboard_device
+                .open_test(&current_task)
+                .expect("Failed to open keyboard input file");
+
+            let user_addr = map_memory(&current_task, UserAddress::default(), 4096);
+
+            // Test EVIOCGNAME
+            let name_req = crate::input_file::EVIOCGNAME_BASE | (256 << 16);
+            let res = file.ioctl(&current_task, name_req, user_addr.into());
+            assert!(res.is_ok());
+
+            // Test EVIOCGPROP - should have INPUT_PROP_DIRECT, not INPUT_PROP_POINTER
+            let prop_req = crate::input_file::EVIOCGPROP_BASE | (64 << 16);
+            let res = file.ioctl(&current_task, prop_req, user_addr.into());
+            assert_eq!(res, Ok(SUCCESS));
+            let prop_buf = current_task.read_memory_to_vec(user_addr, 8).unwrap();
+            let byte_idx = (uapi::INPUT_PROP_DIRECT / 8) as usize;
+            let bit_idx = uapi::INPUT_PROP_DIRECT % 8;
+            assert_ne!(prop_buf[byte_idx] & (1 << bit_idx), 0);
+
+            // Test EVIOCGBIT_EV_KEY - should have KEY_A, KEY_1, KEY_ENTER, KEY_POWER, etc.
+            let key_req = crate::input_file::EVIOCGBIT_EV_KEY_BASE | (64 << 16);
+            let res = file.ioctl(&current_task, key_req, user_addr.into());
+            assert_eq!(res, Ok(SUCCESS));
+            let key_buf = current_task.read_memory_to_vec(user_addr, 64).unwrap();
+
+            let check_key = |key_code: u32| {
+                let byte = (key_code / 8) as usize;
+                let bit = key_code % 8;
+                assert_ne!(
+                    key_buf[byte] & (1 << bit),
+                    0,
+                    "Keycode {} should be set in evdev bitmask",
+                    key_code
+                );
+            };
+            check_key(uapi::KEY_A);
+            check_key(uapi::KEY_Z);
+            check_key(uapi::KEY_1);
+            check_key(uapi::KEY_ENTER);
+            check_key(uapi::KEY_SPACE);
+            check_key(uapi::KEY_ESC);
+            check_key(uapi::KEY_POWER);
+            check_key(uapi::KEY_VOLUMEUP);
+            check_key(uapi::KEY_VOLUMEDOWN);
+
+            // Buttons that are not keyboard keys must NOT be advertised. `KEY_MAP` carries a
+            // block of test-only keycodes (b/311425670) covering BTN_JOYSTICK..BTN_THUMBR; if
+            // those leak into the capability bitmask, evdev clients classify this device as a
+            // gamepad as well as a keyboard.
+            let check_key_absent = |key_code: u32, name: &str| {
+                let byte = (key_code / 8) as usize;
+                let bit = key_code % 8;
+                assert_eq!(
+                    key_buf[byte] & (1 << bit),
+                    0,
+                    "{} ({}) should NOT be set in the keyboard evdev bitmask",
+                    name,
+                    key_code
+                );
+            };
+            check_key_absent(uapi::BTN_LEFT, "BTN_LEFT");
+            check_key_absent(uapi::BTN_TRIGGER, "BTN_TRIGGER");
+            check_key_absent(uapi::BTN_SOUTH, "BTN_SOUTH");
+            check_key_absent(uapi::BTN_THUMBR, "BTN_THUMBR");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn keyboard_events_update_inspect_counters() {
+        spawn_kernel_and_run(async move |current_task| {
+            let inspector = fuchsia_inspect::Inspector::default();
+            let (_keyboard_device, keyboard_file, keyboard_listener) =
+                start_keyboard_input_inspect(&current_task, &inspector).await;
+
+            let key_event = fuiinput::KeyEvent {
+                timestamp: Some(12345),
+                type_: Some(fuiinput::KeyEventType::Pressed),
+                key: Some(fidl_fuchsia_input::Key::A),
+                ..Default::default()
+            };
+
+            let _ = keyboard_listener.on_key_event(&key_event).await;
+            std::mem::drop(keyboard_listener);
+
+            // Read events to verify delivery
+            let events = read_uapi_events(&keyboard_file, &current_task);
+            assert_eq!(events.len(), 2);
+
+            // `converted` counts FIDL events, so one key event is 1 here even though it
+            // produces 2 uapi events (the key plus a SYN). Keep this distinct from
+            // `total_uapi_events_generated_count`.
+            assert_data_tree!(inspector, root: {
+                keyboard_device: {
+                    active_wake_leases_count: AnyProperty,
+                    total_events_with_wake_lease_count: AnyProperty,
+                    total_fidl_events_received_count: 1u64,
+                    total_fidl_events_ignored_count: 0u64,
+                    total_fidl_events_unexpected_count: 0u64,
+                    total_fidl_events_converted_count: 1u64,
+                    total_uapi_events_generated_count: 2u64,
+                    last_generated_uapi_event_timestamp_ns: 12345i64,
+                    keyboard_file_0: {
+                        fidl_events_received_count: 1u64,
+                        fidl_events_ignored_count: 0u64,
+                        fidl_events_unexpected_count: 0u64,
+                        fidl_events_converted_count: 1u64,
+                        uapi_events_generated_count: 2u64,
+                        uapi_events_read_count: 2u64,
+                        fd_read_count: AnyProperty,
+                        fd_notify_count: AnyProperty,
+                        last_generated_uapi_event_timestamp_ns: 12345i64,
+                        last_read_uapi_event_timestamp_ns: AnyProperty,
+                        opened_without_nonblock: AnyProperty,
+                        open_timestamp_ns: AnyProperty,
+                        closed: AnyProperty,
+                        close_timestamp_ns: AnyProperty,
+                    }
                 }
             });
         })

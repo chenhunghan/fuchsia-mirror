@@ -44,24 +44,21 @@ class UsbFastbootTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """setup_class is called once before running test cases."""
         await super().setup_class()
-        try:
-            self._usb_power_hub: usb_power_hub.UsbPowerHub | None
-            self._usb_port: int | None
-            (self._usb_power_hub, self._usb_port) = self._lookup_usb_power_hub(
-                self.dut
+        self._usb_power_hub: usb_power_hub.UsbPowerHub | None = (
+            self.dut.usb_power_hub
+        )
+        self._usb_port: int | None = self.dut.usb_power_hub_port
+        if self._usb_power_hub is None:
+            _LOGGER.info(
+                "No USB power hub configured for %s. Proceeding without one.",
+                self.dut.device_name,
             )
+        else:
             self._usb_power_hub.power_on(port=self._usb_port)
             _LOGGER.info(
                 "Successfully bound USB Power Hub fixture on port %s",
                 self._usb_port,
             )
-        except Exception as e:
-            _LOGGER.warning(
-                "Could not acquire USB Power Hub (%s). Proceeding without power hub.",
-                e,
-            )
-            self._usb_power_hub = None
-            self._usb_port = None
 
         # Pre-cache PersistentProperty values (board, product) while the device is online
         # in Fuchsia OS. Because they are lazily evaluated, if left un-evaluated and the test
@@ -132,7 +129,6 @@ class UsbFastbootTest(fuchsia_base_test.FuchsiaBaseTest):
                 self.dut.ffx.notify_intentional_disconnect()
                 self.dut.ffx.run(
                     cmd=["target", "reboot", "--bootloader"],
-                    include_target_name=True,
                     log_status_on_failure=False,
                     timeout=15,
                 )

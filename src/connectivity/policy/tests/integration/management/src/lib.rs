@@ -20,6 +20,8 @@ use fidl_fuchsia_net_dhcp as fnet_dhcp;
 use fidl_fuchsia_net_dhcpv6 as fnet_dhcpv6;
 use fidl_fuchsia_net_ext as fnet_ext;
 use fidl_fuchsia_net_ext::IntoExt as _;
+use fidl_fuchsia_net_filter as fnet_filter;
+use fidl_fuchsia_net_filter_ext as fnet_filter_ext;
 use fidl_fuchsia_net_interfaces as fnet_interfaces;
 use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 use fidl_fuchsia_net_interfaces_ext as fnet_interfaces_ext;
@@ -334,33 +336,68 @@ async fn test_filtering_udp<M: Manager, N: Netstack>(
 
     const PAYLOAD: &'static str = "Hello World";
 
-    let sender_fut = async move {
-        let r = sender_ep_sock
-            .send_to(PAYLOAD.as_bytes(), receiver_ep_addr)
-            .await
-            .expect("sendto failed");
-        assert_eq!(r, PAYLOAD.as_bytes().len());
-    };
-    let receiver_fut = async move {
-        let mut buf = [0u8; 1024];
-        let (_, from) = receiver_ep_sock.recv_from(&mut buf[..]).await.expect("recvfrom failed");
-        assert_eq!(from, sender_ep_addr);
-        Some(())
-    };
-
-    // Choose a timeout dependent on whether we are looking for a positive
-    // check (message was received) or negative check (message was dropped).
-    let timeout = if message_expected {
-        ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT
+    if message_expected {
+        let sender_fut = async {
+            let r = sender_ep_sock
+                .send_to(PAYLOAD.as_bytes(), receiver_ep_addr)
+                .await
+                .expect("sendto failed");
+            assert_eq!(r, PAYLOAD.as_bytes().len());
+        };
+        let receiver_fut = async {
+            let mut buf = [0u8; 1024];
+            let (_, from) =
+                receiver_ep_sock.recv_from(&mut buf[..]).await.expect("recvfrom failed");
+            assert_eq!(from, sender_ep_addr);
+        };
+        let ((), ()) = futures::future::join(sender_fut, receiver_fut)
+            .on_timeout(ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT.after_now(), || {
+                panic!("timed out waiting for positive message")
+            })
+            .await;
     } else {
-        ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT
-    };
+        // TODO(https://fxbug.dev/530218539): Remove this workaround once interface-type
+        // filters are installed at startup.
+        // For negative tests, netcfg installs packet filter rules
+        // asynchronously. Early packets may succeed before rules take
+        // effect, so retry until packets are consistently dropped or
+        // until timeout.
+        let deadline = ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT.after_now();
+        let mut filter_installed = false;
+        while fuchsia_async::MonotonicInstant::now() < deadline {
+            let r = sender_ep_sock
+                .send_to(PAYLOAD.as_bytes(), receiver_ep_addr)
+                .await
+                .expect("sendto failed");
+            assert_eq!(r, PAYLOAD.as_bytes().len());
 
-    let ((), message_received) = futures::future::join(sender_fut, receiver_fut)
-        .on_timeout(timeout.after_now(), || ((), None))
-        .await;
+            let mut buf = [0u8; 1024];
+            let received = receiver_ep_sock
+                .recv_from(&mut buf[..])
+                .on_timeout(Duration::from_millis(100).after_now(), || {
+                    let kind = std::io::ErrorKind::TimedOut;
+                    Err(std::io::Error::new(kind, "timed out"))
+                })
+                .await;
 
-    assert_eq!(message_received.is_some(), message_expected);
+            match received {
+                Ok((_, from)) => {
+                    assert_eq!(from, sender_ep_addr);
+                    // Packet made it through (filter rules not yet active).
+                    // Backoff and retry.
+                    let backoff = Duration::from_millis(50);
+                    fuchsia_async::Timer::new(backoff.after_now()).await;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    // Packet was dropped as expected by packet filter.
+                    filter_installed = true;
+                    break;
+                }
+                Err(e) => panic!("recvfrom unexpected error: {e:?}"),
+            }
+        }
+        assert!(filter_installed, "timed out waiting for packet filter rules to drop packets");
+    }
 
     // Wait for orderly shutdown of the test realms to complete before allowing
     // test interfaces to be cleaned up.
@@ -2494,6 +2531,77 @@ async fn test_masquerade_errors<N: Netstack, M: Manager>(
     );
 }
 
+async fn await_masquerade_removed_ns3(
+    router: &netemul::TestRealm<'_>,
+    masq_control: fnet_masquerade::ControlProxy,
+    client: &netemul::TestRealm<'_>,
+    server: &netemul::TestRealm<'_>,
+    server_ip: std::net::IpAddr,
+    client_ip: std::net::IpAddr,
+) {
+    let filter_state = router
+        .connect_to_protocol::<fnet_filter::StateMarker>()
+        .expect("connect to fuchsia.net.filter/State server");
+    let filter_stream =
+        fnet_filter_ext::event_stream_from_state(filter_state).expect("create event stream");
+    let mut filter_stream = pin!(filter_stream);
+    let mut current_resources: HashMap<_, HashMap<_, _>> =
+        fnet_filter_ext::get_existing_resources(&mut filter_stream)
+            .await
+            .expect("get existing filter resources");
+
+    // Drop the control handle, and verify that the masquerade config is removed.
+    std::mem::drop(masq_control);
+
+    let has_masquerade_rule = |resources: &HashMap<_, HashMap<_, _>>| {
+        resources.values().flat_map(|r| r.values()).any(|resource| {
+            matches!(
+                resource,
+                fnet_filter_ext::Resource::Rule(fnet_filter_ext::Rule {
+                    action: fnet_filter_ext::Action::Masquerade { .. },
+                    ..
+                })
+            )
+        })
+    };
+
+    if has_masquerade_rule(&current_resources) {
+        fnet_filter_ext::wait_for_condition(filter_stream, &mut current_resources, |resources| {
+            !has_masquerade_rule(resources)
+        })
+        .await
+        .expect("wait for masquerade rule removal");
+    }
+
+    assert_eq!(client_ip, get_src_ip(SocketAddr::from((server_ip, 8082)), client, server).await);
+}
+
+// TODO(https://fxbug.dev/555371797): Remove this helper when Netstack2 is removed.
+async fn await_masquerade_removed_ns2(
+    masq_control: fnet_masquerade::ControlProxy,
+    client: &netemul::TestRealm<'_>,
+    server: &netemul::TestRealm<'_>,
+    server_ip: std::net::IpAddr,
+    client_ip: std::net::IpAddr,
+) {
+    // Drop the control handle, and verify that the masquerade config is removed.
+    // Note that Netstack2 doesn't have a synchronization mechanism to wait for the
+    // config to be removed. Instead, repeatedly check the source IP with a
+    // timeout until we observe the client IP again.
+    std::mem::drop(masq_control);
+    const MAX_ATTEMPTS: usize = 60;
+    const WAIT: Duration = Duration::from_secs(1);
+    // Ensure each attempt gets a unique port.
+    let port = AtomicU16::new(8082);
+    fuchsia_backoff::retry_or_last_error(std::iter::repeat(WAIT).take(MAX_ATTEMPTS), || async {
+        let port = port.fetch_add(1, Ordering::Relaxed);
+        let actual_ip = get_src_ip(SocketAddr::from((server_ip, port)), client, server).await;
+        if actual_ip == client_ip { Ok(()) } else { Err(actual_ip) }
+    })
+    .await
+    .expect("IP does not match client");
+}
+
 // Verify that the masquerade configuration is associated with the lifetime of
 // the underlying FIDL connection.
 #[netstack_test]
@@ -2539,22 +2647,24 @@ async fn test_masquerade_lifetime<N: Netstack, M: Manager>(name: &str, setup: Ma
     assert!(!masq_control.set_enabled(true).await.expect("set enabled fidl").expect("set enabled"));
     assert_eq!(router_ip, get_src_ip(SocketAddr::from((server_ip, 8081)), client, server).await);
 
-    // Drop the control handle, and verify that the masquerade config is removed.
-    // Note that we don't have a synchronization mechanism to wait for the
-    // config to be removed.  Instead, repeatedly check the source IP with a
-    // timeout until we observe the client IP again.
-    std::mem::drop(masq_control);
-    const MAX_ATTEMPTS: usize = 60;
-    const WAIT: Duration = Duration::from_secs(1);
-    // Ensure each attempt gets a unique port.
-    let port = AtomicU16::new(8082);
-    fuchsia_backoff::retry_or_last_error(std::iter::repeat(WAIT).take(MAX_ATTEMPTS), || async {
-        let port = port.fetch_add(1, Ordering::Relaxed);
-        let actual_ip = get_src_ip(SocketAddr::from((server_ip, port)), &client, &server).await;
-        if actual_ip == client_ip { Ok(()) } else { Err(actual_ip) }
-    })
-    .await
-    .expect("IP does not match client")
+    match N::VERSION {
+        netstack_testing_common::realms::NetstackVersion::Netstack3
+        | netstack_testing_common::realms::NetstackVersion::ProdNetstack3 => {
+            await_masquerade_removed_ns3(
+                router,
+                masq_control,
+                client,
+                server,
+                server_ip,
+                client_ip,
+            )
+            .await;
+        }
+        netstack_testing_common::realms::NetstackVersion::Netstack2 { .. }
+        | netstack_testing_common::realms::NetstackVersion::ProdNetstack2 => {
+            await_masquerade_removed_ns2(masq_control, client, server, server_ip, client_ip).await;
+        }
+    }
 }
 
 #[netstack_test]

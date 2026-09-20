@@ -23,11 +23,11 @@ def _log(*kwargs):
 
 def _prepare_license_files(
     license_files_dir: str, spdx_doc: SpdxDocument
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Extract license texts in the spdx_doc into separate files"""
 
     # Reuse files with duplicate license texts to speed up classification
-    file_by_unique_text: Dict[str, str] = {}
+    file_by_unique_text: dict[str, str] = {}
 
     license_files_by_id = {}
 
@@ -55,7 +55,7 @@ def _invoke_identify_license(
     identify_license_path: str,
     identify_license_output_path: str,
     license_files_dir: str,
-    license_files_by_id: Dict[str, str],
+    license_files_by_id: dict[str, str],
 ) -> LicensesClassifications:
     """Invokes identify_license tool, returning an LicensesClassifications."""
 
@@ -110,6 +110,128 @@ Error=`{result.stderr}`"""
     )
 
     return classifications
+
+
+def _get_failing_license_files(
+    classification: LicensesClassifications,
+    license_files_by_id: dict[str, str],
+) -> list[str]:
+    """Returns a sorted list of unique file paths for licenses that failed verification or were unidentified."""
+    failing_files = set()
+    for license_id, lic_class in classification.classifications_by_id.items():
+        for snippet in lic_class.identifications:
+            if (
+                snippet.identified_as
+                == IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION
+                or not snippet.verified
+            ):
+                if license_id in license_files_by_id:
+                    failing_files.add(license_files_by_id[license_id])
+                break
+    return sorted(failing_files)
+
+
+def _invoke_identify_license_single_file(
+    identify_license_path: str,
+    file_path: str,
+    output_json_path: str,
+) -> list[IdentifiedSnippet]:
+    """Invokes identify_license on a single file and returns its IdentifiedSnippets."""
+    command = [
+        identify_license_path,
+        "-headers",
+        f"-json={output_json_path}",
+        "-include_text=true",
+        "-ignorable=true",
+        "-copyright=true",
+        file_path,
+    ]
+
+    env = dict(os.environ)
+    env.pop("RUNFILES_DIR", None)
+    env.pop("RUNFILES_MANIFEST_FILE", None)
+
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    snippets = []
+    if result.returncode == 0 and os.path.exists(output_json_path):
+        try:
+            with open(output_json_path, "r") as f:
+                json_output = json.load(f)
+        except Exception:
+            json_output = []
+        if isinstance(json_output, list):
+            for one_output in json_output:
+                if (
+                    os.path.normpath(one_output.get("Filepath", ""))
+                    == os.path.normpath(file_path)
+                    or len(json_output) == 1
+                ):
+                    for match_json in one_output.get("Classifications") or []:
+                        snippets.append(
+                            IdentifiedSnippet.from_identify_license_dict(
+                                dictionary=match_json,
+                                location=output_json_path,
+                            )
+                        )
+
+    if not snippets:
+        num_lines = 1
+        if os.path.exists(file_path):
+            with open(file_path, "r") as f:
+                num_lines = len(f.readlines())
+        snippets.append(
+            IdentifiedSnippet(
+                identified_as=IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
+                confidence=0.0,
+                start_line=1,
+                end_line=max(1, num_lines),
+                conditions=set(["unidentified"]),
+            )
+        )
+    return snippets
+
+
+def _retry_failing_files(
+    raw_classification: LicensesClassifications,
+    failing_files: list[str],
+    license_files_by_id: dict[str, str],
+    identify_license_path: str,
+    identify_license_output_path: str,
+    num_retries: int = 3,
+) -> LicensesClassifications:
+    """Re-runs identify_license sequentially num_retries times on each failing file and applies the majority result."""
+    license_ids_by_file = defaultdict(list)
+    for lid, fpath in license_files_by_id.items():
+        license_ids_by_file[fpath].append(lid)
+
+    replacements = []
+    for file_idx, file_path in enumerate(failing_files):
+        runs = []
+        for attempt in range(1, num_retries + 1):
+            retry_output_path = f"{identify_license_output_path}.retry_{file_idx}_{attempt}.json"
+            snippets = _invoke_identify_license_single_file(
+                identify_license_path=identify_license_path,
+                file_path=file_path,
+                output_json_path=retry_output_path,
+            )
+            runs.append(snippets)
+
+        (
+            winning_snippets,
+            vote_count,
+        ) = LicensesClassifications.select_majority_identifications(runs)
+        _log(
+            f"Retry for {file_path}: majority vote ({vote_count}/{num_retries}) selected "
+            f"{[s.identified_as for s in winning_snippets]}"
+        )
+        for lid in license_ids_by_file[file_path]:
+            replacements.append(
+                LicenseClassification(
+                    license_id=lid, identifications=winning_snippets
+                )
+            )
+
+    return raw_classification.replace_classifications(replacements)
 
 
 def _check_for_missing_identifications(
@@ -169,7 +291,7 @@ Details:
     return classifications.add_classifications(extra_classifications)
 
 
-def _load_override_rules(rule_paths: List[str]) -> ConditionOverrideRuleSet:
+def _load_override_rules(rule_paths: list[str]) -> ConditionOverrideRuleSet:
     rules = []
     for p in rule_paths:
         rule_set = ConditionOverrideRuleSet.from_json(p)
@@ -179,8 +301,8 @@ def _load_override_rules(rule_paths: List[str]) -> ConditionOverrideRuleSet:
 
 def _apply_policy_and_overrides(
     classification: LicensesClassifications,
-    policy_override_rules_file_paths: List[str],
-    allowed_conditions: List[str],
+    policy_override_rules_file_paths: list[str],
+    allowed_conditions: list[str],
 ) -> LicensesClassifications:
     if policy_override_rules_file_paths:
         override_rules = _load_override_rules(policy_override_rules_file_paths)
@@ -198,7 +320,7 @@ def _apply_policy_and_overrides(
 def _verification_error_message(
     classifications: LicensesClassifications, preamble_file_path
 ) -> str:
-    message: List[str] = [
+    message: list[str] = [
         "ERROR: Licenses verification failed. See following details."
     ]
 
@@ -346,13 +468,59 @@ allowing downstream customers to provide project specific instructions.
 
     license_files_by_id = _prepare_license_files(licenses_dir, spdx_doc)
 
-    classification = _invoke_identify_license(
+    raw_classification = _invoke_identify_license(
         identify_license_path=args.identify_license_bin,
         identify_license_output_path=args.identify_license_output,
         license_files_dir=licenses_dir,
         license_files_by_id=license_files_by_id,
     )
 
+    classification = _process_classifications(
+        raw_classification, spdx_doc, spdx_index, args
+    )
+
+    if args.fail_on_disallowed_conditions:
+        failing_files = _get_failing_license_files(
+            classification, license_files_by_id
+        )
+        if failing_files:
+            _log(
+                f"Found {len(failing_files)} failing/unidentified license files. "
+                "Re-running identify_license sequentially 3x on each failing file..."
+            )
+            raw_classification = _retry_failing_files(
+                raw_classification=raw_classification,
+                failing_files=failing_files,
+                license_files_by_id=license_files_by_id,
+                identify_license_path=args.identify_license_bin,
+                identify_license_output_path=args.identify_license_output,
+                num_retries=3,
+            )
+            classification = _process_classifications(
+                raw_classification, spdx_doc, spdx_index, args
+            )
+
+    output_json_path = args.output_file
+    _log(f"Writing classification into {output_json_path}!")
+    classification.to_json(output_json_path)
+
+    if args.fail_on_disallowed_conditions:
+        if classification.failed_verifications_count() > 0:
+            _log("ERROR: Licenses verification failed.")
+            raise RuntimeError(
+                _verification_error_message(
+                    classification,
+                    preamble_file_path=args.failure_message_preamble,
+                )
+            )
+
+
+def _process_classifications(
+    classification: LicensesClassifications,
+    spdx_doc: SpdxDocument,
+    spdx_index: SpdxIndex,
+    args: argparse.Namespace,
+) -> LicensesClassifications:
     classification = _check_for_missing_identifications(
         spdx_doc,
         spdx_index,
@@ -376,20 +544,7 @@ allowing downstream customers to provide project specific instructions.
         classification = classification.determine_is_notice_shipped(
             conditions_requiring_shipped_notice=args.conditions_requiring_shipped_notice
         )
-
-    output_json_path = args.output_file
-    _log(f"Writing classification into {output_json_path}!")
-    classification.to_json(output_json_path)
-
-    if args.fail_on_disallowed_conditions:
-        if classification.failed_verifications_count() > 0:
-            _log("ERROR: Licenses verification failed.")
-            raise RuntimeError(
-                _verification_error_message(
-                    classification,
-                    preamble_file_path=args.failure_message_preamble,
-                )
-            )
+    return classification
 
 
 if __name__ == "__main__":

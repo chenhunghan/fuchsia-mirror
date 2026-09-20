@@ -710,6 +710,18 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn root_dir_open_non_meta_file_get_attributes() {
+        let (env, root_dir) = TestEnv::new().await;
+        let proxy = fuchsia_fs::directory::open_file(&root_dir, "resource", fio::PERM_READABLE)
+            .await
+            .unwrap();
+        let expected_hash = env.root_dir.non_meta_files.get("resource").unwrap();
+        let attrs =
+            proxy.get_attributes(fio::NodeAttributesQuery::ROOT_HASH).await.unwrap().unwrap();
+        assert_eq!(attrs.1.root_hash, Some(expected_hash.as_bytes().to_vec()));
+    }
+
+    #[fuchsia::test]
     async fn root_dir_open_meta_as_file() {
         let (env, root_dir) = TestEnv::new().await;
         let proxy =

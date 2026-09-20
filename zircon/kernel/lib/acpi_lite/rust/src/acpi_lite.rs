@@ -16,7 +16,7 @@ use crate::structures::{K_BIOS_READ_ONLY_AREA_LENGTH, K_BIOS_READ_ONLY_AREA_STAR
 
 // A PhysMemReader translates physical addresses (such as those in the ACPI tables and the RSDT
 // itself) into pointers directly readable by the acpi_lite library.
-pub trait PhysMemReader {
+pub trait PhysMemReader: Sync {
     fn phys_to_slice(&self, phys: usize, length: usize) -> Result<&[u8], Status>;
 }
 

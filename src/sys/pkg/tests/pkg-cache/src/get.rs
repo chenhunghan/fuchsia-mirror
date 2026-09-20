@@ -855,3 +855,28 @@ async fn bootfs_used_to_serve_package_directories_but_not_prevent_fetching() {
 
     let () = env.stop().await;
 }
+
+#[fuchsia_async::run_singlethreaded(test)]
+async fn get_populates_blob_root_hash() {
+    let pkg = PackageBuilder::new("test-pkg")
+        .add_resource_at("bin/foo", "foo-content".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let env = TestEnv::builder().build().await;
+
+    let dir = get_and_verify_package(
+        &env.proxies.package_cache,
+        fpkg::GcProtection::OpenPackageTracking,
+        &pkg,
+    )
+    .await;
+
+    let file = fuchsia_fs::directory::open_file(&dir, "bin/foo", fio::PERM_READABLE).await.unwrap();
+    let attrs = file.get_attributes(fio::NodeAttributesQuery::ROOT_HASH).await.unwrap().unwrap();
+    let (_, content_blobs) = pkg.contents();
+    let (expected_hash, _) = content_blobs.into_iter().next().unwrap();
+    assert_eq!(attrs.1.root_hash, Some(expected_hash.as_bytes().to_vec()));
+
+    let () = env.stop().await;
+}

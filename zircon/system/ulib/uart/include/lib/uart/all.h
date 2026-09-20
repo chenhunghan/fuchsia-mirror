@@ -129,7 +129,7 @@ class Config {
     auto to_all_config =
         []<typename UartType>(
             const std::optional<uart::Config<UartType>>& config) -> std::optional<Config> {
-      printf("atemmpted match to %s", UartType::kConfigName.data());
+      printf("attempted match to %s", UartType::kConfigName.data());
       if (config) {
         printf(" OK\n");
         return {*config};

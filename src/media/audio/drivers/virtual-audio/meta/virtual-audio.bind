@@ -6,9 +6,8 @@
 
 if fuchsia.COMPATIBLE == "fuchsia,virtual-audio" {
     true;
-} else if fuchsia.BIND_PLATFORM_DEV_VID == fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC {
+} else {
+    fuchsia.BIND_PLATFORM_DEV_VID == fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC;
     fuchsia.BIND_PLATFORM_DEV_PID == fuchsia.platform.BIND_PLATFORM_DEV_PID.GENERIC;
     fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.platform.BIND_PLATFORM_DEV_DID.VIRTUAL_AUDIO;
-} else {
-    false;
 }

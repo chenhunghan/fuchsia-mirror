@@ -12,14 +12,14 @@ use std::num::NonZeroU64;
 use fidl::endpoints::Proxy as _;
 
 use net_declare::fidl_subnet;
-use netstack_testing_common::realms::{Netstack, NetstackVersion, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn interfaces_watcher_after_invalid_state_request<N: Netstack>(name: &str) {
+async fn interfaces_watcher_after_invalid_state_request(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create netstack");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create netstack");
 
     let interfaces_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
@@ -43,50 +43,41 @@ async fn interfaces_watcher_after_invalid_state_request<N: Netstack>(name: &str)
     let interfaces = fidl_fuchsia_net_interfaces_ext::existing(stream, HashMap::new())
         .await
         .expect("failed to collect interfaces");
-    let expected = match N::VERSION {
-        NetstackVersion::Netstack3
-        | NetstackVersion::Netstack2 { tracing: false, fast_udp: false } => std::iter::once((
-            1,
-            fidl_fuchsia_net_interfaces_ext::PropertiesAndState {
-                properties: fidl_fuchsia_net_interfaces_ext::Properties {
-                    id: NonZeroU64::new(1).unwrap(),
-                    name: "lo".to_owned(),
-                    port_class: fidl_fuchsia_net_interfaces_ext::PortClass::Loopback,
-                    online: true,
-                    addresses: vec![
-                        fidl_fuchsia_net_interfaces_ext::Address {
-                            addr: fidl_subnet!("127.0.0.1/8"),
-                            valid_until:
-                                fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
-                            preferred_lifetime_info:
-                                fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
-                            assignment_state:
-                                fidl_fuchsia_net_interfaces::AddressAssignmentState::Assigned,
-                        },
-                        fidl_fuchsia_net_interfaces_ext::Address {
-                            addr: fidl_subnet!("::1/128"),
-                            valid_until:
-                                fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
-                            preferred_lifetime_info:
-                                fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
-                            assignment_state:
-                                fidl_fuchsia_net_interfaces::AddressAssignmentState::Assigned,
-                        },
-                    ],
-                    has_default_ipv4_route: false,
-                    has_default_ipv6_route: false,
-                    port_identity_koid: None,
-                },
-                state: (),
+    let expected = std::iter::once((
+        1,
+        fidl_fuchsia_net_interfaces_ext::PropertiesAndState {
+            properties: fidl_fuchsia_net_interfaces_ext::Properties {
+                id: NonZeroU64::new(1).unwrap(),
+                name: "lo".to_owned(),
+                port_class: fidl_fuchsia_net_interfaces_ext::PortClass::Loopback,
+                online: true,
+                addresses: vec![
+                    fidl_fuchsia_net_interfaces_ext::Address {
+                        addr: fidl_subnet!("127.0.0.1/8"),
+                        valid_until:
+                            fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
+                        preferred_lifetime_info:
+                            fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
+                        assignment_state:
+                            fidl_fuchsia_net_interfaces::AddressAssignmentState::Assigned,
+                    },
+                    fidl_fuchsia_net_interfaces_ext::Address {
+                        addr: fidl_subnet!("::1/128"),
+                        valid_until:
+                            fidl_fuchsia_net_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
+                        preferred_lifetime_info:
+                            fidl_fuchsia_net_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
+                        assignment_state:
+                            fidl_fuchsia_net_interfaces::AddressAssignmentState::Assigned,
+                    },
+                ],
+                has_default_ipv4_route: false,
+                has_default_ipv6_route: false,
+                port_identity_koid: None,
             },
-        ))
-        .collect(),
-        v @ (NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-        | NetstackVersion::ProdNetstack2
-        | NetstackVersion::ProdNetstack3) => panic!(
-            "netstack_test should only be parameterized with Netstack2 or Netstack3: got {:?}",
-            v
-        ),
-    };
+            state: (),
+        },
+    ))
+    .collect();
     assert_eq!(interfaces, expected);
 }

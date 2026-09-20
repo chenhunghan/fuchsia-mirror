@@ -33,6 +33,7 @@ zx_status_t cpp_supply_pager_vmo_pages(VmObjectPaged* vmo, uint64_t page_offset,
 bool cpp_verify_continuous_attribution_bytes(VmObject* vmo, uint64_t expected_bytes);
 void cpp_make_private_attribution_counts(uint64_t uncompressed, uint64_t compressed,
                                          vm::AttributionCounts* out_counts);
+void cpp_change_vmo_high_priority_count(VmObjectPaged* vmo, int64_t delta);
 
 void cpp_fill_region(uintptr_t seed, void* ptr, size_t len);
 bool cpp_test_region(uintptr_t seed, void* ptr, size_t len);

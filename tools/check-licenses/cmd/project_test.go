@@ -5,7 +5,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
@@ -15,7 +17,8 @@ import (
 
 	"github.com/google/subcommands"
 
-	v2boundary "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/report"
 )
 
 const mockMITLicenseText = `Permission is hereby granted, free of charge, to any person obtaining a copy`
@@ -135,6 +138,31 @@ func TestProjectCommand_Check(t *testing.T) {
 	status = cmd.Execute(ctx, fs5)
 	if status != subcommands.ExitSuccess {
 		t.Errorf("Expected ExitSuccess for // path in fast mode, got %v", status)
+	}
+
+	// Test 6: Fast mode with a file in a skipped directory should be ignored and pass
+	skippedDir := filepath.Join(tempDir, "build", "bazel_sdk", "tests")
+	if err := os.MkdirAll(skippedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	skippedFile := filepath.Join(skippedDir, "test.txt")
+	if err := os.WriteFile(skippedFile, []byte("/* Redistribution and use in source and binary forms */"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	skipsConfig := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "skips", "default.json")
+	if err := os.MkdirAll(filepath.Dir(skipsConfig), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skipsConfig, []byte(`{"paths":["build/bazel_sdk/tests"]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs6 := flag.NewFlagSet("test", flag.ContinueOnError)
+	cmd.SetFlags(fs6)
+	fs6.Parse([]string{"--fuchsia_dir", tempDir, "check", "--fast", skippedFile})
+	status = cmd.Execute(ctx, fs6)
+	if status != subcommands.ExitSuccess {
+		t.Errorf("Expected ExitSuccess for skipped file in fast mode, got %v", status)
 	}
 }
 
@@ -405,7 +433,7 @@ func TestBelongsToProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grouper := v2boundary.NewGrouper(fuchsiaDir, v2boundary.Config{})
+	grouper := boundary.NewGrouper(fuchsiaDir, boundary.Config{})
 
 	tests := []struct {
 		name        string
@@ -735,5 +763,429 @@ int valid() { return 1; }
 	}
 	if string(readContent) != virtualContent {
 		t.Errorf("Expected virtual README to remain unchanged, got:\n%s", string(readContent))
+	}
+}
+
+func TestProjectCommand_Check_StructuredFindings(t *testing.T) {
+	tempDir := t.TempDir()
+	scaffoldV2Config(t, tempDir)
+
+	mitPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "MIT")
+	os.MkdirAll(mitPatternDir, 0755)
+	os.WriteFile(filepath.Join(mitPatternDir, "mit.txt"), []byte(mockMITLicenseText), 0644)
+
+	bsdPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "BSD")
+	os.MkdirAll(bsdPatternDir, 0755)
+	os.WriteFile(filepath.Join(bsdPatternDir, "bsd.txt"), []byte("Redistribution and use in source and binary forms"), 0644)
+
+	copyrightExtDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "copyright_extensions")
+	os.MkdirAll(copyrightExtDir, 0755)
+	os.WriteFile(filepath.Join(copyrightExtDir, "default.json"), []byte(`{"copyright_extensions": {"extensions": [".cc", ".h"]}}`), 0644)
+
+	barrierDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "barriers")
+	os.MkdirAll(barrierDir, 0755)
+	os.WriteFile(filepath.Join(barrierDir, "default.json"), []byte(`{"barriers": [{"paths": ["third_party", "vendor", "prebuilt"]}]}`), 0644)
+
+	virtualDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "readmes")
+	os.MkdirAll(virtualDir, 0755)
+	virtualContent := `Name: Fuchsia
+Security Critical: yes
+First Party: yes
+
+License File: LICENSE
+  License: BSD-2-Clause, Copyright
+`
+	os.WriteFile(filepath.Join(virtualDir, "README.fuchsia"), []byte(virtualContent), 0644)
+	os.WriteFile(filepath.Join(tempDir, "LICENSE"), []byte(mockBSDLicenseText), 0644)
+
+	srcDir := filepath.Join(tempDir, "src", "lib", "foo")
+	os.MkdirAll(srcDir, 0755)
+
+	missingCopyrightFile := filepath.Join(srcDir, "missing.cc")
+	os.WriteFile(missingCopyrightFile, []byte("int missing() { return 0; }\n"), 0644)
+
+	validHeader := `// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+int valid() { return 1; }
+`
+	validFile := filepath.Join(srcDir, "valid.cc")
+	os.WriteFile(validFile, []byte(validHeader), 0644)
+
+	// Third party project with outdated README
+	tpDir := filepath.Join(tempDir, "third_party", "tp")
+	os.MkdirAll(tpDir, 0755)
+	tpReadme := `Name: tp
+URL: https://example.com
+Version: 1.0
+Security Critical: no
+License: MIT
+License File: declared.cc
+`
+	os.WriteFile(filepath.Join(tpDir, "README.fuchsia"), []byte(tpReadme), 0644)
+	os.WriteFile(filepath.Join(tpDir, "declared.cc"), []byte("/* Permission is hereby granted, free of charge, to any person obtaining a copy */\nint d() {}\n"), 0644)
+	os.WriteFile(filepath.Join(tpDir, "undeclared.cc"), []byte("/* Redistribution and use in source and binary forms */\nint u() {}\n"), 0644)
+
+	cmd := &ProjectCommand{fuchsiaDir: tempDir}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Case 1: Missing copyright in 1st party file produces structured finding with replacement
+	findings1File := filepath.Join(tempDir, "findings1.json")
+	fs1 := flag.NewFlagSet("test1", flag.ContinueOnError)
+	cmd.SetFlags(fs1)
+	fs1.Parse([]string{"--fuchsia_dir", tempDir, "check", "--fast", "--format=json", "-findings_file", findings1File, missingCopyrightFile})
+	if status := cmd.Execute(ctx, fs1); status != subcommands.ExitFailure {
+		t.Errorf("Expected ExitFailure for missing copyright, got %v", status)
+	}
+
+	data1, err := os.ReadFile(findings1File)
+	if err != nil {
+		t.Fatalf("Failed to read findings file: %v", err)
+	}
+	var findings1 []report.Finding
+	if err := json.Unmarshal(data1, &findings1); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+	if len(findings1) != 1 {
+		t.Fatalf("Expected 1 finding, got %d", len(findings1))
+	}
+	if findings1[0].CheckName != "AllFuchsiaAuthorSourceFilesMustHaveCopyrightHeaders" {
+		t.Errorf("Expected CheckName AllFuchsiaAuthorSourceFilesMustHaveCopyrightHeaders, got %s", findings1[0].CheckName)
+	}
+	if findings1[0].FilePath != "src/lib/foo/missing.cc" {
+		t.Errorf("Expected FilePath src/lib/foo/missing.cc, got %s", findings1[0].FilePath)
+	}
+	if len(findings1[0].Replacements) != 1 {
+		t.Fatalf("Expected 1 replacement, got %d", len(findings1[0].Replacements))
+	}
+	if !strings.Contains(findings1[0].Replacements[0], "Copyright 2026 The Fuchsia Authors") {
+		t.Errorf("Expected copyright header in replacement, got:\n%s", findings1[0].Replacements[0])
+	}
+	if !strings.Contains(findings1[0].Replacements[0], "int missing() { return 0; }") {
+		t.Errorf("Expected original code in replacement, got:\n%s", findings1[0].Replacements[0])
+	}
+
+	// Case 2: Valid 1st party file produces exit 0 and empty JSON array
+	findings2File := filepath.Join(tempDir, "findings2.json")
+	fs2 := flag.NewFlagSet("test2", flag.ContinueOnError)
+	cmd.SetFlags(fs2)
+	fs2.Parse([]string{"--fuchsia_dir", tempDir, "check", "--fast", "--format=json", "-findings_file", findings2File, validFile})
+	if status := cmd.Execute(ctx, fs2); status != subcommands.ExitSuccess {
+		t.Errorf("Expected ExitSuccess for valid file, got %v", status)
+	}
+	data2, err := os.ReadFile(findings2File)
+	if err != nil {
+		t.Fatalf("Failed to read findings file: %v", err)
+	}
+	var findings2 []report.Finding
+	if err := json.Unmarshal(data2, &findings2); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+	if len(findings2) != 0 {
+		t.Errorf("Expected 0 findings for valid file, got %d", len(findings2))
+	}
+
+	// Case 3: Out of date 3rd-party project README produces ReadmeDeclarationOutOfDate with updated README replacement
+	findings3File := filepath.Join(tempDir, "findings3.json")
+	fs3 := flag.NewFlagSet("test3", flag.ContinueOnError)
+	cmd.SetFlags(fs3)
+	fs3.Parse([]string{"--fuchsia_dir", tempDir, "check", "--fast", "--format=json", "-findings_file", findings3File, tpDir})
+	if status := cmd.Execute(ctx, fs3); status != subcommands.ExitFailure {
+		t.Errorf("Expected ExitFailure for outdated README, got %v", status)
+	}
+	data3, err := os.ReadFile(findings3File)
+	if err != nil {
+		t.Fatalf("Failed to read findings file: %v", err)
+	}
+	var findings3 []report.Finding
+	if err := json.Unmarshal(data3, &findings3); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+	if len(findings3) == 0 {
+		t.Fatalf("Expected findings for outdated README, got 0")
+	}
+	var foundReadmeOutOfDate bool
+	for _, f := range findings3 {
+		if f.CheckName == "ReadmeDeclarationOutOfDate" {
+			foundReadmeOutOfDate = true
+			if f.FilePath != "third_party/tp/README.fuchsia" {
+				t.Errorf("Expected FilePath third_party/tp/README.fuchsia, got %s", f.FilePath)
+			}
+			if !strings.Contains(f.Replacements[0], "License: BSD, MIT") || !strings.Contains(f.Replacements[0], "Generated Notice File: NOTICE.fuchsia") {
+				t.Errorf("Expected updated README content in replacement, got:\n%s", f.Replacements[0])
+			}
+		}
+	}
+	if !foundReadmeOutOfDate {
+		t.Errorf("Expected ReadmeDeclarationOutOfDate finding in findings3: %+v", findings3)
+	}
+
+	var foundNoticeOutOfDate bool
+	for _, f := range findings3 {
+		if f.CheckName == "NoticeFileOutOfDate" {
+			foundNoticeOutOfDate = true
+			if f.FilePath != "third_party/tp/NOTICE.fuchsia" {
+				t.Errorf("Expected FilePath third_party/tp/NOTICE.fuchsia, got %s", f.FilePath)
+			}
+			if len(f.Replacements) != 1 || !strings.Contains(f.Replacements[0], "undeclared.cc") {
+				t.Errorf("Expected notice replacement covering undeclared.cc, got: %v", f.Replacements)
+			}
+		}
+	}
+	if !foundNoticeOutOfDate {
+		t.Errorf("Expected NoticeFileOutOfDate finding in findings3: %+v", findings3)
+	}
+
+	// Case 4: Target a single relative file path via -file-list in 3rd party project produces ReadmeDeclarationOutOfDate and NoticeFileOutOfDate
+	fileListPath := filepath.Join(tempDir, "file_list.txt")
+	os.WriteFile(fileListPath, []byte("third_party/tp/undeclared.cc\n"), 0644)
+	findings4File := filepath.Join(tempDir, "findings4.json")
+	fs4 := flag.NewFlagSet("test4", flag.ContinueOnError)
+	cmd.SetFlags(fs4)
+	fs4.Parse([]string{"--fuchsia_dir", tempDir, "check", "--fast", "--format=json", "-findings_file", findings4File, "-file-list", fileListPath})
+	if status := cmd.Execute(ctx, fs4); status != subcommands.ExitFailure {
+		t.Errorf("Expected ExitFailure for single file target in outdated 3rd-party project, got %v", status)
+	}
+	data4, err := os.ReadFile(findings4File)
+	if err != nil {
+		t.Fatalf("Failed to read findings file: %v", err)
+	}
+	var findings4 []report.Finding
+	if err := json.Unmarshal(data4, &findings4); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+	if len(findings4) == 0 {
+		t.Fatalf("Expected findings for single file target, got 0")
+	}
+	var foundReadmeInCase4, foundNoticeInCase4 bool
+	for _, f := range findings4 {
+		if f.CheckName == "ReadmeDeclarationOutOfDate" {
+			foundReadmeInCase4 = true
+		}
+		if f.CheckName == "NoticeFileOutOfDate" {
+			foundNoticeInCase4 = true
+		}
+	}
+	if !foundReadmeInCase4 {
+		t.Errorf("Expected ReadmeDeclarationOutOfDate in findings4: %+v", findings4)
+	}
+	if !foundNoticeInCase4 {
+		t.Errorf("Expected NoticeFileOutOfDate in findings4: %+v", findings4)
+	}
+
+	// Case 5: Target a file in a new third-party project without a README.fuchsia produces AllProjectsMustHaveAReadme
+	newThirdPartyDir := filepath.Join(tempDir, "third_party", "new_foo", "nested")
+	os.MkdirAll(newThirdPartyDir, 0755)
+	newThirdPartyFile := filepath.Join(newThirdPartyDir, "bar.cc")
+	os.WriteFile(newThirdPartyFile, []byte("int bar() {}\n"), 0644)
+
+	findings5File := filepath.Join(tempDir, "findings5.json")
+	fs5 := flag.NewFlagSet("test5", flag.ContinueOnError)
+	cmd.SetFlags(fs5)
+	fs5.Parse([]string{"--fuchsia_dir", tempDir, "check", "--fast", "--format=json", "-findings_file", findings5File, newThirdPartyFile})
+	if status := cmd.Execute(ctx, fs5); status != subcommands.ExitFailure {
+		t.Errorf("Expected ExitFailure for file in new 3rd-party project missing README, got %v", status)
+	}
+	data5, err := os.ReadFile(findings5File)
+	if err != nil {
+		t.Fatalf("Failed to read findings file: %v", err)
+	}
+	var findings5 []report.Finding
+	if err := json.Unmarshal(data5, &findings5); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+	var foundReadmeError, foundLicenseError bool
+	for _, f := range findings5 {
+		if f.CheckName == "AllProjectsMustHaveAReadme" {
+			foundReadmeError = true
+			if f.FilePath != "third_party/new_foo/nested/bar.cc" {
+				t.Errorf("Expected FilePath third_party/new_foo/nested/bar.cc, got %s", f.FilePath)
+			}
+			if !strings.Contains(f.Message, "Project: third_party/new_foo") {
+				t.Errorf("Expected finding message to identify Project: third_party/new_foo, got:\n%s", f.Message)
+			}
+		}
+		if f.CheckName == "AllProjectsMustHaveALicense" {
+			foundLicenseError = true
+			if f.FilePath != "third_party/new_foo/nested/bar.cc" {
+				t.Errorf("Expected FilePath third_party/new_foo/nested/bar.cc, got %s", f.FilePath)
+			}
+			if !strings.Contains(f.Message, "Project: third_party/new_foo") {
+				t.Errorf("Expected finding message to identify Project: third_party/new_foo, got:\n%s", f.Message)
+			}
+		}
+	}
+	if !foundReadmeError {
+		t.Errorf("Expected AllProjectsMustHaveAReadme in findings5: %+v", findings5)
+	}
+	if !foundLicenseError {
+		t.Errorf("Expected AllProjectsMustHaveALicense in findings5: %+v", findings5)
+	}
+}
+
+func TestProjectCommand_Check_PartialPassOutput(t *testing.T) {
+	tempDir := t.TempDir()
+	scaffoldV2Config(t, tempDir)
+
+	mitPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "MIT")
+	os.MkdirAll(mitPatternDir, 0755)
+	os.WriteFile(filepath.Join(mitPatternDir, "mit.txt"), []byte(mockMITLicenseText), 0644)
+
+	bsdPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "BSD")
+	os.MkdirAll(bsdPatternDir, 0755)
+	os.WriteFile(filepath.Join(bsdPatternDir, "bsd.txt"), []byte("Redistribution and use in source and binary forms"), 0644)
+
+	os.MkdirAll(filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs"), 0755)
+
+	// Project 1: Compliant project
+	passProjDir := filepath.Join(tempDir, "third_party", "pass_proj")
+	os.MkdirAll(passProjDir, 0755)
+	os.WriteFile(filepath.Join(passProjDir, "README.fuchsia"), []byte("Name: pass_proj\nURL: http://pass\nVersion: 1.0\nSecurity Critical: no\nLicense: MIT\nLicense File: LICENSE\n"), 0644)
+	os.WriteFile(filepath.Join(passProjDir, "LICENSE"), []byte(mockMITLicenseText), 0644)
+	passFile := filepath.Join(passProjDir, "valid.cc")
+	os.WriteFile(passFile, []byte("int valid() { return 1; }"), 0644)
+
+	// Project 2: Failing project (undeclared BSD license in source file)
+	failProjDir := filepath.Join(tempDir, "third_party", "fail_proj")
+	os.MkdirAll(failProjDir, 0755)
+	os.WriteFile(filepath.Join(failProjDir, "README.fuchsia"), []byte("Name: fail_proj\nURL: http://fail\nVersion: 1.0\nSecurity Critical: no\nLicense: MIT\nLicense File: LICENSE\n"), 0644)
+	os.WriteFile(filepath.Join(failProjDir, "LICENSE"), []byte(mockMITLicenseText), 0644)
+	failFile := filepath.Join(failProjDir, "undeclared.cc")
+	os.WriteFile(failFile, []byte("/* Redistribution and use in source and binary forms */\nint helper() {}"), 0644)
+
+	cmd := &ProjectCommand{fuchsiaDir: tempDir}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fs := flag.NewFlagSet("test_partial", flag.ContinueOnError)
+	cmd.SetFlags(fs)
+	fs.Parse([]string{"--fuchsia_dir", tempDir, "check", passFile, failFile})
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	status := cmd.Execute(ctx, fs)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if status != subcommands.ExitFailure {
+		t.Fatalf("Expected ExitFailure due to undeclared.cc, got %v", status)
+	}
+	if !strings.Contains(output, "Passed: pass_proj") {
+		t.Fatalf("Expected pass confirmation for pass_proj in output, got:\n%s", output)
+	}
+	if strings.Contains(output, "Passed: fail_proj") {
+		t.Fatalf("Did not expect pass confirmation for fail_proj in output, got:\n%s", output)
+	}
+}
+
+func TestProjectCommand_Check_FailingProjectDirectoryNoPassOutput(t *testing.T) {
+	tempDir := t.TempDir()
+	scaffoldV2Config(t, tempDir)
+
+	mitPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "MIT")
+	os.MkdirAll(mitPatternDir, 0755)
+	os.WriteFile(filepath.Join(mitPatternDir, "mit.txt"), []byte(mockMITLicenseText), 0644)
+
+	bsdPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "BSD")
+	os.MkdirAll(bsdPatternDir, 0755)
+	os.WriteFile(filepath.Join(bsdPatternDir, "bsd.txt"), []byte("Redistribution and use in source and binary forms"), 0644)
+
+	os.MkdirAll(filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs"), 0755)
+
+	// Failing project (undeclared BSD license in source file)
+	failProjDir := filepath.Join(tempDir, "third_party", "fail_proj")
+	os.MkdirAll(failProjDir, 0755)
+	os.WriteFile(filepath.Join(failProjDir, "README.fuchsia"), []byte("Name: fail_proj\nURL: http://fail\nVersion: 1.0\nSecurity Critical: no\nLicense: MIT\nLicense File: LICENSE\n"), 0644)
+	os.WriteFile(filepath.Join(failProjDir, "LICENSE"), []byte(mockMITLicenseText), 0644)
+	os.WriteFile(filepath.Join(failProjDir, "undeclared.cc"), []byte("/* Redistribution and use in source and binary forms */\nint helper() {}"), 0644)
+
+	cmd := &ProjectCommand{fuchsiaDir: tempDir}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fs := flag.NewFlagSet("test_failing_dir", flag.ContinueOnError)
+	cmd.SetFlags(fs)
+	fs.Parse([]string{"--fuchsia_dir", tempDir, "check", failProjDir})
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	status := cmd.Execute(ctx, fs)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if status != subcommands.ExitFailure {
+		t.Fatalf("Expected ExitFailure, got %v", status)
+	}
+	if strings.Contains(output, "Passed:") {
+		t.Fatalf("Expected no pass confirmation for failing project directory, got:\n%s", output)
+	}
+}
+
+func TestProjectCommand_Check_JSONFormat_Stdout(t *testing.T) {
+	tempDir := t.TempDir()
+	scaffoldV2Config(t, tempDir)
+
+	mitPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "MIT")
+	os.MkdirAll(mitPatternDir, 0755)
+	os.WriteFile(filepath.Join(mitPatternDir, "mit.txt"), []byte(mockMITLicenseText), 0644)
+
+	bsdPatternDir := filepath.Join(tempDir, "tools", "check-licenses", "assets", "patterns", "Permissive", "BSD")
+	os.MkdirAll(bsdPatternDir, 0755)
+	os.WriteFile(filepath.Join(bsdPatternDir, "bsd.txt"), []byte("Redistribution and use in source and binary forms"), 0644)
+
+	os.MkdirAll(filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs"), 0755)
+
+	tpDir := filepath.Join(tempDir, "third_party", "tp")
+	os.MkdirAll(tpDir, 0755)
+	os.WriteFile(filepath.Join(tpDir, "README.fuchsia"), []byte("Name: tp\nURL: http://tp\nVersion: 1.0\nSecurity Critical: no\nLicense: MIT\nLicense File: LICENSE\n"), 0644)
+	os.WriteFile(filepath.Join(tpDir, "LICENSE"), []byte(mockMITLicenseText), 0644)
+	os.WriteFile(filepath.Join(tpDir, "undeclared.cc"), []byte("/* Redistribution and use in source and binary forms */\nint helper() {}"), 0644)
+
+	cmd := &ProjectCommand{fuchsiaDir: tempDir}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fs := flag.NewFlagSet("test_json_stdout", flag.ContinueOnError)
+	cmd.SetFlags(fs)
+	fs.Parse([]string{"--fuchsia_dir", tempDir, "check", "--fast", "--format=json", filepath.Join(tpDir, "undeclared.cc")})
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	status := cmd.Execute(ctx, fs)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if status != subcommands.ExitFailure {
+		t.Fatalf("Expected ExitFailure, got %v", status)
+	}
+
+	var findings []report.Finding
+	if err := json.Unmarshal([]byte(output), &findings); err != nil {
+		t.Fatalf("Expected valid JSON findings on stdout, got error: %v\nOutput was:\n%s", err, output)
+	}
+	if len(findings) == 0 {
+		t.Fatalf("Expected non-empty findings on stdout, got 0")
 	}
 }

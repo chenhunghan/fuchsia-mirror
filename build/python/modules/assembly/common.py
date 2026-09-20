@@ -4,9 +4,10 @@
 """Python Types that are shared across different parts of the assembly types"""
 import os
 import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import total_ordering
-from typing import Any, Iterable, TextIO
+from typing import Any, TextIO
 
 import serialization
 

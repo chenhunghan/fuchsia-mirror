@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Context as _, Error};
+use anyhow::{Context as _, Error, format_err};
 use fuchsia_async as fasync;
 use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
 use futures::stream::TryStreamExt;
-use futures::{future, select, Future, FutureExt};
+use futures::{Future, FutureExt, future, select};
 use std::any::{Any, TypeId};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -258,5 +258,8 @@ where
     Fut: 'static + Future<Output = R>,
     R: fasync::test_support::TestResult,
 {
-    fasync::test_support::run_singlethreaded_test(test)
+    fasync::test_support::run_singlethreaded_test(
+        test,
+        fasync::test_support::TestOptions::default(),
+    )
 }

@@ -21,7 +21,7 @@ class BuildApiFilter(object):
 
     def _filter_json_scopes(
         self, input_json: T.Any, key_name: str
-    ) -> T.List[str]:
+    ) -> list[str]:
         assert isinstance(input_json, list)
         return [s for s in input_json if s[key_name] in self._ninja_all]
 
@@ -32,7 +32,7 @@ class BuildApiFilter(object):
 
     def _filter_json_scopes_with_multiple_keys(
         self, input_json: T.Any, key_names: T.Sequence[str]
-    ) -> T.List[str]:
+    ) -> list[str]:
         assert isinstance(input_json, list)
         return [
             s

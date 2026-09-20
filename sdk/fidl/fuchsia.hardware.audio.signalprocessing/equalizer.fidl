@@ -172,7 +172,7 @@ type EqualizerElementState = table {
     /// The states of the bands in this equalizer processing element.
     ///
     /// The number of elements of the `band_states` vector must be equal or smaller than the
-    /// number of elements of the `bands` returned in returned in the corresponding
+    /// number of elements of the `bands` returned in the corresponding
     /// `Equalizer`. `band_states` must have at least one element.
     /// The bands controlled by `band_states` are determined by each `band.id`.
     ///

@@ -5,13 +5,13 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
+import("//zircon/kernel/kernel_bindgen_crate.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 source_set("object") {
   public_deps = [ ":headers" ]
 
   sources = [
-    "buffer_chain.cc",
     "bus_transaction_initiator_dispatcher.cc",
     "bus_transaction_initiator_dispatcher_ffi.cc",
     "channel_dispatcher.cc",
@@ -123,14 +123,11 @@ source_set("object") {
 library_headers("headers") {
   headers = []
   public_deps = [
-    # <object/buffer_chain.h> has #include <ktl/utility.h>.
+    # <object/message_packet.h> has #include <ktl/unique_ptr.h>.
     "//zircon/kernel/lib/ktl:headers",
 
     # <object/port_dispatcher.h> has <lib/object_cache.h>
     "//zircon/kernel/lib/object_cache:headers",
-
-    # <object/buffer_chain.h> has <lib/page_cache.h>
-    "//zircon/kernel/lib/page_cache:headers",
 
     # <object/log_dispatcher.h> has #include <lib/debuglog.h>.
     "//zircon/kernel/lib/debuglog:headers",
@@ -145,8 +142,7 @@ library_headers("headers") {
     # <object/clock_dispatcher.h> includes things from kconcurrent
     "//zircon/kernel/lib/kconcurrent:headers",
 
-    # <object/buffer_chain.h> has #include <lib/page/size.h>
-    # <object/clock_dispatcher.> has #include <lib/page/size.h>
+    # <object/clock_dispatcher.h> has #include <lib/page/size.h>
     "//zircon/kernel/lib/page:headers",
 
     # <object/process_dispatcher.h> has #include <vm/vm_aspace.h>.
@@ -160,13 +156,11 @@ library_headers("headers") {
 source_set("tests") {
   testonly = true
   sources = [
-    "test/buffer_chain_tests.cc",
     "test/exceptionate_tests.cc",
     "test/handle_tests.cc",
     "test/interrupt_event_dispatcher_tests.cc",
     "test/job_dispatcher_tests.cc",
     "test/job_policy_tests.cc",
-    "test/message_packet_tests.cc",
     "test/msi_object_tests.cc",
     "test/root_job_observer_tests.cc",
     "test/shareable_process_state_tests.cc",
@@ -192,6 +186,7 @@ kernel_rust_mod("object-rs") {
   source_root = "object.rs"
   sources = [
     "bti.rs",
+    "buffer_chain.rs",
     "bus_transaction_initiator_dispatcher.rs",
     "bus_transaction_initiator_dispatcher_ffi.rs",
     "counter_dispatcher.rs",
@@ -213,9 +208,12 @@ kernel_rust_mod("object-rs") {
     "iommu_dispatcher_ffi.rs",
     "job_dispatcher.rs",
     "job_dispatcher_ffi.rs",
+    "job_policy.rs",
+    "job_policy_ffi.rs",
     "log_dispatcher.rs",
     "log_dispatcher_ffi.rs",
     "mbuf.rs",
+    "message_packet.rs",
     "msi_allocation.rs",
     "msi_dispatcher.rs",
     "msi_dispatcher_ffi.rs",
@@ -260,14 +258,17 @@ kernel_rust_mod("object-rs") {
     "//src/lib/kalloc",
     "//src/lib/kprint",
     "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/lockdep/rust:lockdep",
     "//src/lib/zr",
     "//third_party/rust_crates:paste",
     "//third_party/rust_crates:pin-init",
     "//third_party/rust_crates:zerocopy",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/init:init_rust",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page:page-rs",
+    "//zircon/kernel/lib/page_cache:page_cache-rs",
     "//zircon/kernel/lib/range_check:range_check_rs",
     "//zircon/kernel/lib/relaxed_atomic:relaxed_atomic-rs",
     "//zircon/system/ulib/fbl/rust:fbl",

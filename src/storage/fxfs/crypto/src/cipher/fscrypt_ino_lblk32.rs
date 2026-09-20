@@ -86,7 +86,7 @@ impl Cipher for FscryptInoLblk32DirCipher {
         false
     }
 
-    fn crypt_ctx(&self, _ino: u64, _attribute_id: u64, _file_offset: u64) -> Option<(u32, u8)> {
+    fn crypt_ctx(&self, _ino: u64, _attribute_id: u64, _file_offset: u64) -> Option<(u64, u8)> {
         None
     }
 }
@@ -252,11 +252,11 @@ impl Cipher for FscryptInoLblk32FileCipher {
         true
     }
 
-    fn crypt_ctx(&self, ino: u64, _attribute_id: u64, file_offset: u64) -> Option<(u32, u8)> {
+    fn crypt_ctx(&self, ino: u64, _attribute_id: u64, file_offset: u64) -> Option<(u64, u8)> {
         assert_eq!(file_offset % BLOCK_SIZE as u64, 0);
         let block_num = file_offset / BLOCK_SIZE as u64;
         let tweak = self.tweak(ino, block_num);
-        Some((tweak, self.slot))
+        Some((tweak as u64, self.slot))
     }
 }
 
@@ -275,15 +275,15 @@ impl FscryptSoftwareInoLblk32FileCipher {
         }
     }
 
-    pub fn encrypt(&self, buffer: &mut [u8], tweak: u128) -> Result<(), Error> {
+    pub fn encrypt(&self, buffer: &mut [u8], mut tweak: u128) -> Result<(), Error> {
         fxfs_trace::duration!("encrypt", "len" => buffer.len());
         assert_eq!(buffer.len() % BLOCK_SIZE, 0);
-        let mut tweak = tweak;
 
         for block in buffer.chunks_exact_mut(BLOCK_SIZE) {
-            self.xts_key2.encrypt_block(tweak.as_mut_bytes().try_into().unwrap());
+            let mut block_tweak = tweak;
+            self.xts_key2.encrypt_block(block_tweak.as_mut_bytes().try_into().unwrap());
             self.xts_key1.encrypt_with_backend(XtsInPlaceProcessor::new(
-                Tweak(tweak),
+                Tweak(block_tweak),
                 MutPtrByteSlice::from(&mut block[..]),
             ));
             tweak += 1;
@@ -295,9 +295,10 @@ impl FscryptSoftwareInoLblk32FileCipher {
         fxfs_trace::duration!("decrypt", "len" => buffer.len());
         assert_eq!(buffer.len() % BLOCK_SIZE, 0);
         for block in buffer.chunks_exact_mut(BLOCK_SIZE) {
-            self.xts_key2.encrypt_block(tweak.as_mut_bytes().try_into().unwrap());
+            let mut block_tweak = tweak;
+            self.xts_key2.encrypt_block(block_tweak.as_mut_bytes().try_into().unwrap());
             self.xts_key1.decrypt_with_backend(XtsInPlaceProcessor::new(
-                Tweak(tweak),
+                Tweak(block_tweak),
                 MutPtrByteSlice::from(&mut block[..]),
             ));
             tweak += 1;
@@ -308,7 +309,9 @@ impl FscryptSoftwareInoLblk32FileCipher {
 
 #[cfg(test)]
 mod tests {
-    use super::{FscryptInoLblk32DirCipher, UnwrappedKey};
+    use super::{
+        BLOCK_SIZE, FscryptInoLblk32DirCipher, FscryptSoftwareInoLblk32FileCipher, UnwrappedKey,
+    };
     use crate::Cipher;
     use crate::cipher::fscrypt_test_data;
     use fscrypt::proxy_filename::ProxyFilename;
@@ -523,5 +526,57 @@ mod tests {
                 file.target
             );
         }
+    }
+
+    #[test]
+    fn test_software_file_cipher_multi_block() {
+        let key = UnwrappedKey::new((0..64).collect());
+        let cipher = FscryptSoftwareInoLblk32FileCipher::new(&key);
+        let base_tweak: u128 = 0x1234_5678;
+
+        // Create a 3-block buffer with distinct data per block.
+        let mut multi_block_buf = Vec::with_capacity(3 * BLOCK_SIZE);
+        for i in 0..3u8 {
+            multi_block_buf.extend(std::iter::repeat_n(i + 1, BLOCK_SIZE));
+        }
+        let original_plaintext = multi_block_buf.clone();
+
+        // Encrypt all 3 blocks in a single call.
+        cipher.encrypt(&mut multi_block_buf, base_tweak).expect("multi-block encrypt failed");
+
+        // Encrypting each block individually with its respective tweak (base_tweak + i) must
+        // produce identical ciphertext for every block. Note that testing encrypt followed by
+        // decrypt on the same multi-block buffer would NOT catch a bug where both encrypt and
+        // decrypt compute the wrong tweak sequence across loop iterations.
+        for i in 0..3 {
+            let mut single_block =
+                original_plaintext[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE].to_vec();
+            cipher
+                .encrypt(&mut single_block, base_tweak + i as u128)
+                .expect("single-block encrypt failed");
+            assert_eq!(
+                &multi_block_buf[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE],
+                &single_block[..],
+                "Ciphertext mismatch at block {i}"
+            );
+        }
+
+        // Verify that decrypting each block individually from the multi-block ciphertext restores
+        // the original plaintext.
+        for i in 0..3 {
+            let mut single_block = multi_block_buf[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE].to_vec();
+            cipher
+                .decrypt(&mut single_block, base_tweak + i as u128)
+                .expect("single-block decrypt failed");
+            assert_eq!(
+                &single_block[..],
+                &original_plaintext[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE],
+                "Single-block decrypt mismatch at block {i}"
+            );
+        }
+
+        // Verify multi-block decrypt restores all blocks at once.
+        cipher.decrypt(&mut multi_block_buf, base_tweak).expect("multi-block decrypt failed");
+        assert_eq!(multi_block_buf, original_plaintext);
     }
 }

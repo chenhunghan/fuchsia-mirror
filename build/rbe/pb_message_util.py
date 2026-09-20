@@ -8,13 +8,14 @@ Similar to json_format.MessageToDict, but handles maps properly.
 This works on any proto Message subtype.
 """
 
-from typing import Any, Dict, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from google.protobuf import descriptor, json_format, message, timestamp_pb2
 from google.protobuf.internal import containers as proto_containers
 
 
-def _dict_to_key_values(d: Dict[str, Any]) -> Sequence[Dict[str, Any]]:
+def _dict_to_key_values(d: dict[str, Any]) -> Sequence[dict[str, Any]]:
     return [
         {"key": k, "value": _value_to_bq_dict(v)} for k, v in sorted(d.items())
     ]
@@ -63,7 +64,7 @@ def _convert_bq_value(fd: descriptor.FieldDescriptor, value: Any) -> Any:
         return _convert_scalar_bq_value(fd, value)
 
 
-def proto_message_to_bq_dict(msg: message.Message) -> Dict[str, Any]:
+def proto_message_to_bq_dict(msg: message.Message) -> dict[str, Any]:
     """Works like json_format.MessageToDict, but handles maps properly.
 
     Builds up a dictionary recursively.

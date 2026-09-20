@@ -45,7 +45,7 @@ antlion_host_test("wlan_wmm_test") {
   # Requires a second station and custom configuration. There are no available
   # testbeds to support this toplogy. This will remain an at-desk test until an
   # infra-hosted testbed matching this topology is supported.
-  environments = []
+  build_only = true
   deps = [ "//third_party/iperf" ]
 }
 

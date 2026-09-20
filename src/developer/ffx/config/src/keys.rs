@@ -43,6 +43,12 @@ pub const VSOCK_ENABLED: &'static str = "connectivity.enable_vsock";
 /// Whether or not to enable usb connectivity.
 pub const USB_ENABLED: &'static str = "connectivity.enable_usb";
 
+/// Whether or not to enable uart connectivity.
+pub const UART_ENABLED: &'static str = "connectivity.enable_uart";
+
+/// The default baud rate for host-side UART connections.
+pub const UART_BAUD: &'static str = "connectivity.uart.baud";
+
 /// Whether or not to enable network connectivity.
 pub const NETWORK_ENABLED: &'static str = "connectivity.enable_network";
 

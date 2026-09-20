@@ -79,7 +79,15 @@ rust_lint_config(
 
 rust_lint_config(
     name = "clippy_warn_all",
-    clippy = {
+    # In Bazel, `lint_config` replaces default lint configs rather than
+    # appending as GN does.
+    #
+    # We bake `_CLIPPY_WARN_PRODUCTION` in because `clippy::all` only covers
+    # default groups (correctness, style, complexity, perf, suspicious) and
+    # omits nursery and pedantic lints enabled by our default configs (e.g.
+    # `collection_is_never_read`, `large_futures`).
+    # See https://doc.rust-lang.org/clippy/index.html
+    clippy = _CLIPPY_WARN_PRODUCTION | {
         "all": "warn",
     },
     rustc = _RUSTC_LINT_CONFIGS,

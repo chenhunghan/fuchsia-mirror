@@ -635,7 +635,7 @@ function get-device-raw {
 
   if ! is-valid-device "${device}"; then
     fx-error "Invalid device name or address: '${device}'. Some valid examples are:
-      strut-wind-ahead-turf, 192.168.3.1:8022, [fe80::7:8%eth0], [fe80::7:8%eth0]:5222, [::1]:22, serial:EM-C0B2F2D96"
+      strut-wind-ahead-turf, 192.168.3.1:8022, [fe80::7:8%eth0], [fe80::7:8%eth0]:5222, [::1]:22, serial:EM-C0B2F2D96, uart:/dev/ttyUSB0"
     exit 1
   fi
   echo "${device}"
@@ -648,7 +648,8 @@ function is-valid-device {
       && ! _looks_like_ipv6 "${device}" \
       && ! _looks_like_hostname "${device}" \
       && ! _looks_like_usb_or_vsock "${device}" \
-      && ! _looks_like_serial_or_id "${device}"; then
+      && ! _looks_like_serial_or_id "${device}" \
+      && ! _looks_like_uart "${device}"; then
     return 1
   fi
 }
@@ -720,8 +721,15 @@ function _looks_like_serial_or_id {
   [[ "$1" =~ ^(serial|id):[A-Za-z0-9_.-]+$ ]] || return 1
 }
 
+# Checks if the target string matches the UART address format: uart:<path-or-id>
+# Returns 0 if the argument matches, 1 otherwise.
+function _looks_like_uart {
+  [[ "$1" =~ ^uart:[^[:space:]]+$ ]] || return 1
+}
+
 function _looks_like_hostname {
   _looks_like_serial_or_id "$1" && return 1
+  _looks_like_uart "$1" && return 1
   [[ "$1" =~ ^([a-z0-9][.a-z0-9-]*)?(:[0-9]{1,5})?$ ]] || return 1
 }
 
@@ -1205,6 +1213,9 @@ function fx-run-build-command {
     "--resultstore=${RESULTSTORE_ENABLED}"
     "--profile=${BUILD_PROFILE_ENABLED}"
     "--tui=${TUI_ENABLED:-0}"
+
+    # MAX_BUILD_CONCURRENCY comes from fx.config, written by `gn gen`.
+    "--max-concurrency=${MAX_BUILD_CONCURRENCY:-0}"
   )
   if [[ "${print_full_cmd}" == "true" ]]; then
     args+=("--verbose")

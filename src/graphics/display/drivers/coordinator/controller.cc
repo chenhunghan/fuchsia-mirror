@@ -53,6 +53,8 @@
 #include "src/graphics/display/lib/api-types/cpp/display-id.h"
 #include "src/graphics/display/lib/api-types/cpp/driver-buffer-collection-id.h"
 #include "src/graphics/display/lib/api-types/cpp/driver-capture-image-id.h"
+#include "src/graphics/display/lib/api-types/cpp/mode-and-id.h"
+#include "src/graphics/display/lib/api-types/cpp/mode-id.h"
 #include "src/graphics/display/lib/api-types/cpp/pixel-format.h"
 
 namespace fidl_display = fuchsia_hardware_display;
@@ -207,9 +209,13 @@ void Controller::ProcessDisplayVsync(display::DisplayId display_id,
                 TA_UINT32(vsync_edge_flag = !vsync_edge_flag));
   TRACE_DURATION("gfx", "Display::Controller::OnDisplayVsync", "display_id", display_id.value());
 
-  vsync_monitor_.OnVsync(timestamp_mono, timestamp_approximate_boot, driver_config_stamp);
-
   auto displays_it = displays_.find(display_id);
+  const std::optional<zx::duration> expected_vsync_interval =
+      displays_it.IsValid() ? displays_it->GetCommittedModeVsyncInterval() : std::nullopt;
+
+  vsync_monitor_.OnVsync(display_id, timestamp_mono, timestamp_approximate_boot,
+                         driver_config_stamp, expected_vsync_interval);
+
   if (!displays_it.IsValid()) {
     fdf::error("Dropping VSync for unknown display ID: {}", display_id.value());
     return;
@@ -346,6 +352,7 @@ void Controller::SubmitConfig(DisplayConfig& display_config,
       display_info.pending_layer_change_driver_config_stamp = driver_config_stamp;
     }
     display_info.layer_count = display_config.committed_config().layer_count;
+    display_info.committed_mode_id = display_config.committed_config().mode_id;
 
     if (display_info.layer_count == 0) {
       // TODO(https://fxbug.dev/336394440): Make this a fatal error.

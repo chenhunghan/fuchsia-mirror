@@ -6,8 +6,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <lib/fit/defer.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -103,6 +106,33 @@ bool SetupConsole() {
   return true;
 }
 
+bool SetupLoopback() {
+  fbl::unique_fd fd(socket(AF_INET, SOCK_DGRAM, 0));
+  if (!fd.is_valid()) {
+    perror("socket(AF_INET, SOCK_DGRAM) failed");
+    return false;
+  }
+  ifreq ifr = {};
+  strncpy(ifr.ifr_name, "lo", IFNAMSIZ);
+  auto* addr = reinterpret_cast<sockaddr_in*>(&ifr.ifr_addr);
+  addr->sin_family = AF_INET;
+  addr->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (ioctl(fd.get(), SIOCSIFADDR, &ifr) < 0) {
+    perror("ioctl(SIOCSIFADDR) failed");
+    return false;
+  }
+  if (ioctl(fd.get(), SIOCGIFFLAGS, &ifr) < 0) {
+    perror("ioctl(SIOCGIFFLAGS) failed");
+    return false;
+  }
+  ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+  if (ioctl(fd.get(), SIOCSIFFLAGS, &ifr) < 0) {
+    perror("ioctl(SIOCSIFFLAGS) failed");
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -116,6 +146,11 @@ int main(int argc, char** argv) {
 
   if (!SetupConsole()) {
     perror("Failed to setup console");
+    return 1;
+  }
+
+  if (!SetupLoopback()) {
+    perror("Failed to setup loopback interface");
     return 1;
   }
 

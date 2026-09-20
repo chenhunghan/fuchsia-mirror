@@ -56,8 +56,8 @@ template("_cuckoo_product_bundle") {
     ]
     test_specs = {
       if (defined(invoker.disabled) && invoker.disabled) {
-        # A disabled test is marked by an empty environments list.
-        environments = []
+        # A disabled test is still built.
+        build_only = true
       } else {
         forward_variables_from(invoker, [ "environments" ])
       }

@@ -10,9 +10,9 @@ using fuchsia;
 
 primary parent "pci" {
   fuchsia.Service == "fuchsia.hardware.pci.Service";
-  fuchsia.BIND_PCI_INTERFACE == 1;
-  fuchsia.BIND_PCI_DID == fuchsia.pci.BIND_PCI_DID.RTL8111;
   fuchsia.BIND_PCI_VID == fuchsia.pci.BIND_PCI_VID.REALTEK;
+  fuchsia.BIND_PCI_DID == fuchsia.pci.BIND_PCI_DID.RTL8111;
+  fuchsia.BIND_PCI_INTERFACE == 1;
 }
 
 optional parent "acpi" {

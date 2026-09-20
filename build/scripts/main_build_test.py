@@ -6,6 +6,7 @@
 import argparse
 import builtins
 import contextlib
+import getpass
 import io
 import json
 import os
@@ -17,8 +18,9 @@ import sys
 import tempfile
 import time
 import unittest
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any
 from unittest import mock
 
 import main_build
@@ -80,6 +82,7 @@ class MainBuildTestBase(unittest.TestCase):
             "verbose": False,
             "dry_run": False,
             "status": True,
+            "auth_mode": "auto",
         }
         config_vals.update(config_kwargs)
         config = main_build.FuchsiaBuildConfig(**config_vals)
@@ -113,7 +116,7 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
         self.assertEqual(context.rbe_config_json, build_dir / "rbe_config.json")
         self.assertEqual(
             context.check_loas_script,
-            source_dir / "build/rbe/check_loas_restrictions.sh",
+            source_dir / "build/auth/check_loas_restrictions.sh",
         )
         self.assertEqual(
             context.top_build_wrapper,
@@ -145,7 +148,7 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
             "needs_auth",
             new_callable=mock.PropertyMock,
             return_value=True,
-        ):
+        ), mock.patch.object(main_build, "has_loas", return_value=True):
             with mock.patch.object(
                 main_build, "is_executable", return_value=True
             ):
@@ -162,6 +165,59 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
                         env=context.env,
                     )
 
+    def test_loas_type_unrestricted_when_cred_helper_accessible(self) -> None:
+        context = self.create_context()
+        context.env = {"FOO": "BAR"}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch.object(main_build, "has_loas", return_value=True):
+
+            def mock_is_executable(path: pathlib.Path) -> bool:
+                # Both the check_loas_script and BAZEL_CRED_HELPER are accessible
+                return True
+
+            with mock.patch.object(
+                main_build, "is_executable", side_effect=mock_is_executable
+            ):
+                with mock.patch.object(
+                    subprocess,
+                    "check_output",
+                    return_value="unrestricted\n",
+                ):
+                    self.assertEqual(context.loas_type, "unrestricted")
+
+    def test_loas_type_downgraded_when_cred_helper_inaccessible(self) -> None:
+        context = self.create_context()
+        context.env = {"FOO": "BAR"}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch.object(main_build, "has_loas", return_value=True):
+
+            def mock_is_executable(path: pathlib.Path) -> bool:
+                # The check_loas_script is executable, but BAZEL_CRED_HELPER is not
+                return str(path) != str(main_build.BAZEL_CRED_HELPER)
+
+            with mock.patch.object(
+                main_build, "is_executable", side_effect=mock_is_executable
+            ):
+                with mock.patch.object(
+                    subprocess,
+                    "check_output",
+                    return_value="unrestricted\n",
+                ):
+                    with mock.patch.object(main_build, "msg") as mock_msg:
+                        self.assertEqual(context.loas_type, "restricted")
+                        mock_msg.assert_any_call(
+                            f"WARNING: Bazel credential helper on SrcFS is not accessible: {main_build.BAZEL_CRED_HELPER}",
+                            file=mock.ANY,
+                        )
+
     def test_rbe_settings_missing_throws(self) -> None:
         context = self.create_context(rbe=None)
         self.mock_read_json.side_effect = main_build.BuildConfigurationError(
@@ -170,6 +226,21 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
         with self.assertRaises(main_build.BuildConfigurationError) as cm:
             _ = context.rbe_enabled
         self.assertEqual(str(cm.exception), "missing file")
+
+    def test_concurrency_capped(self) -> None:
+        context = self.create_context(rbe=True, max_concurrency=64)
+        with mock.patch.object(main_build, "get_cpu_count", return_value=96):
+            self.assertEqual(context.concurrency, 64)
+
+    def test_concurrency_cap_does_not_raise_concurrency(self) -> None:
+        context = self.create_context(rbe=True, max_concurrency=64)
+        with mock.patch.object(main_build, "get_cpu_count", return_value=4):
+            self.assertEqual(context.concurrency, 40)
+
+    def test_concurrency_uncapped(self) -> None:
+        context = self.create_context(rbe=True)
+        with mock.patch.object(main_build, "get_cpu_count", return_value=96):
+            self.assertEqual(context.concurrency, 960)
 
     def test_parse_properties(self) -> None:
         test_cases = [
@@ -267,6 +338,283 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
         expected = main_build._SCRIPT.resolve().parent.parent.parent
         self.assertEqual(resolved, expected)
 
+    def test_authenticated_user_from_env(self) -> None:
+        """Verifies that authenticated_user resolves from USER in env."""
+        context = self.create_context()
+        context.env = {"USER": "custom-user"}
+        self.assertEqual(context.authenticated_user, "custom-user")
+
+    def test_authenticated_user_from_getpass(self) -> None:
+        """Verifies that authenticated_user falls back to getpass.getuser() when USER is absent."""
+        context = self.create_context()
+        context.env = {}
+        with mock.patch.object(getpass, "getuser", return_value="login-user"):
+            self.assertEqual(context.authenticated_user, "login-user")
+
+    def test_authenticated_user_missing_raises_error(self) -> None:
+        """Verifies that authenticated_user raises BuildConfigurationError when USER cannot be resolved and loas_type is not skip."""
+        context = self.create_context()
+        context.env = {}
+        with mock.patch.object(getpass, "getuser", side_effect=Exception()):
+            with mock.patch.object(
+                main_build.FuchsiaBuildContext,
+                "loas_type",
+                new_callable=mock.PropertyMock,
+                return_value="restricted",
+            ):
+                with self.assertRaises(main_build.BuildConfigurationError):
+                    _ = context.authenticated_user
+
+    def test_authenticated_user_missing_defaults_to_builder(self) -> None:
+        """Verifies that authenticated_user defaults to 'builder' when USER cannot be resolved and loas_type is skip."""
+        context = self.create_context()
+        context.env = {}
+        with mock.patch.object(getpass, "getuser", side_effect=Exception()):
+            with mock.patch.object(
+                main_build.FuchsiaBuildContext,
+                "loas_type",
+                new_callable=mock.PropertyMock,
+                return_value="skip",
+            ):
+                self.assertEqual(context.authenticated_user, "builder")
+
+    @mock.patch.object(
+        pathlib.Path, "home", return_value=pathlib.Path("/mock/home")
+    )
+    def test_auth_env_needs_auth_false(self, mock_home: mock.Mock) -> None:
+        """Verifies that auth_env only contains USER when needs_auth is False."""
+        context = self.create_context(resultstore="none")
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=False,
+        ):
+            self.assertEqual(context.auth_env, {"USER": "fake-user"})
+
+    @mock.patch.object(
+        pathlib.Path, "home", return_value=pathlib.Path("/mock/home")
+    )
+    def test_auth_env_machine_auth_omits_google_application_credentials(
+        self, mock_home: mock.Mock
+    ) -> None:
+        """Verifies auth_env omits GOOGLE_APPLICATION_CREDENTIALS fallback under machine auth mode."""
+        context = self.create_context(auth_mode="machine", resultstore="all")
+        context.env = {}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch.object(getpass, "getuser", side_effect=Exception()):
+            env = context.auth_env
+            self.assertEqual(env["FX_BUILD_LOAS_TYPE"], "skip")
+            self.assertEqual(env["USER"], "builder")
+            self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", env)
+
+    def test_auth_env_gce_metadata_host_propagation(self) -> None:
+        """Verifies that GCE_METADATA_HOST is translated into G_CLOUD_METADATA_HOST and GCLOUD_METADATA_HOST."""
+        context = self.create_context(resultstore="all")
+        host_addr = "127.0.0.1:8080"
+        context.env = {"GCE_METADATA_HOST": host_addr}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ):
+            env = context.auth_env
+            self.assertEqual(env["GCE_METADATA_HOST"], host_addr)
+            self.assertEqual(env["G_CLOUD_METADATA_HOST"], host_addr)
+            self.assertEqual(env["GCLOUD_METADATA_HOST"], host_addr)
+
+    def test_get_build_env_proxy_socket_propagation(self) -> None:
+        """Verifies that remote_proxy_socket and resultstore_proxy_socket propagate correct environment variables."""
+        rbe_socket = pathlib.Path("/tmp/rbe.sock")
+        bes_socket = pathlib.Path("/tmp/bes.sock")
+        context = self.create_context(
+            remote_proxy_socket=rbe_socket,
+            resultstore_proxy_socket=bes_socket,
+        )
+        invocation = main_build.BuildInvocation(context)
+        with self.mock_invocation_context():
+            env = invocation.get_build_env()
+            self.assertEqual(env["RBE_service"], f"unix://{rbe_socket}")
+            self.assertEqual(env["RS_cas_service"], f"unix://{rbe_socket}")
+            self.assertEqual(env["RS_rs_service"], f"unix://{bes_socket}")
+            self.assertEqual(
+                env["FX_INTERNAL_BAZEL_RBE_SOCKET_PATH"], str(rbe_socket)
+            )
+            self.assertEqual(
+                env["FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH"],
+                str(bes_socket),
+            )
+
+    @mock.patch.object(
+        pathlib.Path, "home", return_value=pathlib.Path("/mock/home")
+    )
+    def test_auth_env_has_loas_true(self, mock_home: mock.Mock) -> None:
+        """Verifies auth_env when needs_auth is True and has_loas() is True."""
+        context = self.create_context(resultstore="all")
+        context.env = {"USER": "custom-user"}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch.object(
+            main_build, "has_loas", return_value=True
+        ), mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "loas_type",
+            new_callable=mock.PropertyMock,
+            return_value="restricted",
+        ):
+            env = context.auth_env
+            self.assertEqual(env["FX_BUILD_LOAS_TYPE"], "restricted")
+            self.assertEqual(env["USER"], "custom-user")
+            self.assertEqual(
+                env["GOOGLE_APPLICATION_CREDENTIALS"],
+                "/mock/home/.config/gcloud/application_default_credentials.json",
+            )
+
+    @mock.patch.object(
+        pathlib.Path, "home", return_value=pathlib.Path("/mock/home")
+    )
+    def test_auth_env_has_loas_false_defaults_to_builder(
+        self, mock_home: mock.Mock
+    ) -> None:
+        """Verifies auth_env defaults USER to builder when has_loas() is False and USER is absent."""
+        context = self.create_context(resultstore="all")
+        context.env = {}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch.object(
+            main_build, "has_loas", return_value=False
+        ), mock.patch.object(
+            getpass, "getuser", side_effect=Exception()
+        ):
+            env = context.auth_env
+            self.assertEqual(env["FX_BUILD_LOAS_TYPE"], "skip")
+            self.assertEqual(env["USER"], "builder")
+            self.assertEqual(
+                env["GOOGLE_APPLICATION_CREDENTIALS"],
+                "/mock/home/.config/gcloud/application_default_credentials.json",
+            )
+
+    @mock.patch.object(
+        pathlib.Path, "home", return_value=pathlib.Path("/mock/home")
+    )
+    def test_auth_env_has_loas_false_forwards_user(
+        self, mock_home: mock.Mock
+    ) -> None:
+        """Verifies auth_env forwards USER when has_loas() is False and USER is explicitly set."""
+        context = self.create_context(resultstore="all")
+        context.env = {"USER": "custom-bot"}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch.object(
+            main_build, "has_loas", return_value=False
+        ), mock.patch.object(
+            getpass, "getuser", side_effect=Exception()
+        ):
+            env = context.auth_env
+            self.assertEqual(env["FX_BUILD_LOAS_TYPE"], "skip")
+            self.assertEqual(env["USER"], "custom-bot")
+            self.assertEqual(
+                env["GOOGLE_APPLICATION_CREDENTIALS"],
+                "/mock/home/.config/gcloud/application_default_credentials.json",
+            )
+
+    def test_auth_env_home_raises_runtime_error(self) -> None:
+        """Verifies that auth_env handles Path.home() raising RuntimeError safely by omitting credentials."""
+        context = self.create_context(resultstore="all")
+        context.env = {}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch.object(
+            main_build, "has_loas", return_value=False
+        ), mock.patch.object(
+            getpass, "getuser", side_effect=Exception()
+        ), mock.patch.object(
+            pathlib.Path, "home", side_effect=RuntimeError("Cannot find home")
+        ):
+            env = context.auth_env
+            self.assertEqual(env["FX_BUILD_LOAS_TYPE"], "skip")
+            self.assertEqual(env["USER"], "builder")
+            self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", env)
+
+    def test_resolved_auth_mode_explicit_none(self) -> None:
+        """Verifies that auth_mode 'none' always resolves to 'none'."""
+        context = self.create_context(auth_mode="none")
+        self.assertEqual(context.resolved_auth_mode, "none")
+
+    def test_resolved_auth_mode_needs_auth_false(self) -> None:
+        """Verifies that if needs_auth is False, resolved_auth_mode is always 'none'."""
+        context = self.create_context(auth_mode="machine", resultstore="none")
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=False,
+        ):
+            self.assertEqual(context.resolved_auth_mode, "none")
+
+    def test_resolved_auth_mode_explicit_machine(self) -> None:
+        """Verifies that explicit 'machine' auth_mode resolves to 'machine'."""
+        context = self.create_context(auth_mode="machine", resultstore="all")
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ):
+            self.assertEqual(context.resolved_auth_mode, "machine")
+
+    def test_resolved_auth_mode_explicit_user(self) -> None:
+        """Verifies that explicit 'user' auth_mode resolves to 'user'."""
+        context = self.create_context(auth_mode="user", resultstore="all")
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ):
+            self.assertEqual(context.resolved_auth_mode, "user")
+
+    def test_resolved_auth_mode_auto_on_bot(self) -> None:
+        """Verifies that 'auto' auth_mode on a bot (with BUILDBUCKET_ID) resolves to 'machine'."""
+        context = self.create_context(auth_mode="auto", resultstore="all")
+        context.env = {"BUILDBUCKET_ID": "123"}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ):
+            self.assertEqual(context.resolved_auth_mode, "machine")
+
+    def test_resolved_auth_mode_auto_on_workstation(self) -> None:
+        """Verifies that 'auto' auth_mode on a workstation (no bot hints) resolves to 'user'."""
+        context = self.create_context(auth_mode="auto", resultstore="all")
+        context.env = {}
+        with mock.patch.object(
+            main_build.FuchsiaBuildContext,
+            "needs_auth",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ):
+            self.assertEqual(context.resolved_auth_mode, "user")
+
 
 class BuildInvocationTest(MainBuildTestBase):
     def test_init_caching(self) -> None:
@@ -318,6 +666,123 @@ class BuildInvocationTest(MainBuildTestBase):
             self.assertEqual(env["BUILDBUCKET_ID"], "8670925737098591985")
             self.assertEqual(env["BUILDBUCKET_BUILDER"], "fuchsia-builder")
             self.assertEqual(env["SWARMING_TASK_ID"], "616a9bc24f0")
+
+    def test_get_build_env_forward_rs_variables(self) -> None:
+        context = self.create_context(
+            resultstore_instance="projects/fuchsia-infra/instances/default_instance",
+            cas_instance="projects/fuchsia-infra/instances/default_instance",
+            rbe_instance="projects/fuchsia-infra/instances/default_instance",
+        )
+        context.env = {"USER": "fuchsia-user"}
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            env = invocation.get_build_env()
+            self.assertEqual(
+                env["RS_rs_instance"],
+                "projects/fuchsia-infra/instances/default_instance",
+            )
+            self.assertEqual(
+                env["RS_cas_instance"],
+                "projects/fuchsia-infra/instances/default_instance",
+            )
+            self.assertEqual(
+                env["RBE_instance"],
+                "projects/fuchsia-infra/instances/default_instance",
+            )
+
+    def test_get_build_env_no_forward_when_matching_disk_defaults(self) -> None:
+        context = self.create_context(
+            resultstore_instance="projects/rbe-fuchsia-prod/instances/default",
+            cas_instance="projects/rbe-fuchsia-prod/instances/default",
+            rbe_instance="projects/rbe-fuchsia-prod/instances/default",
+        )
+        context.env = {"USER": "fuchsia-user"}
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            env = invocation.get_build_env()
+            self.assertNotIn("RS_rs_instance", env)
+            self.assertNotIn("RS_cas_instance", env)
+            self.assertNotIn("RBE_instance", env)
+
+    def test_build_service_env_empty_defaults(self) -> None:
+        context = self.create_context()
+        self.assertEqual(context.build_service_env, {})
+
+    def test_build_service_env_custom_overrides(self) -> None:
+        context = self.create_context(
+            resultstore_instance="projects/custom-rs/instances/default",
+            cas_instance="projects/custom-cas/instances/default",
+            rbe_instance="projects/custom-rbe/instances/default",
+            remote_proxy_socket="/tmp/rbe.sock",
+            resultstore_proxy_socket="/tmp/rs.sock",
+        )
+        env = context.build_service_env
+        self.assertEqual(
+            env["RS_rs_instance"], "projects/custom-rs/instances/default"
+        )
+        self.assertEqual(
+            env["RS_cas_instance"], "projects/custom-cas/instances/default"
+        )
+        self.assertEqual(
+            env["RBE_instance"], "projects/custom-rbe/instances/default"
+        )
+        self.assertEqual(env["RBE_service"], "unix:///tmp/rbe.sock")
+        self.assertEqual(env["RS_cas_service"], "unix:///tmp/rbe.sock")
+        self.assertEqual(env["RS_rs_service"], "unix:///tmp/rs.sock")
+
+    def test_parse_cfg_text(self) -> None:
+        cfg_text = (
+            "\n"
+            "        # Comment line\n"
+            "        key1 = value1\n"
+            "        key2=value2\n"
+            "        # Another comment\n"
+            "        key3 =  value3" + "  \n"
+        )
+        parsed = main_build._parse_cfg_text(cfg_text)
+        self.assertEqual(
+            parsed, {"key1": "value1", "key2": "value2", "key3": "value3"}
+        )
+
+    def test_parse_cfg_file_missing_returns_empty(self) -> None:
+        non_existent = pathlib.Path("/nonexistent/file.cfg")
+        self.assertEqual(main_build._parse_cfg_file(non_existent), {})
+
+    def test_get_build_env_no_forward_rs_variables_from_env(self) -> None:
+        context = self.create_context()
+        context.env = {
+            "USER": "fuchsia-user",
+            "RS_rs_instance": "projects/fuchsia-infra/instances/default_instance",
+            "RS_cas_instance": "projects/fuchsia-infra/instances/default_instance",
+        }
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            env = invocation.get_build_env()
+            self.assertNotIn("RS_rs_instance", env)
+            self.assertNotIn("RS_cas_instance", env)
+
+    def test_get_build_env_homeless_fallback(self) -> None:
+        context = self.create_context()
+        context.env = {"USER": "fuchsia-user"}
+        with self.mock_invocation_context() as (mock_mkdir, mock_write):
+            invocation = main_build.BuildInvocation(context)
+            env = invocation.get_build_env()
+            self.assertEqual(env["HOME"], str(invocation.temp_home))
+            mock_mkdir.assert_any_call(invocation.temp_home)
+
+    def test_get_build_env_home_preserved_without_creating_temp_home(
+        self,
+    ) -> None:
+        context = self.create_context()
+        context.env = {"USER": "fuchsia-user", "HOME": "/my/custom/home"}
+        with self.mock_invocation_context() as (mock_mkdir, mock_write):
+            invocation = main_build.BuildInvocation(context)
+            env = invocation.get_build_env()
+            self.assertEqual(env["HOME"], "/my/custom/home")
+            expected_temp_home = invocation.log_dir / ".home"
+            # Verify that the expected temporary home was never created on disk
+            for call in mock_mkdir.call_args_list:
+                self.assertNotEqual(call[0][0], expected_temp_home)
 
     def test_get_build_env_no_status(self) -> None:
         context = self.create_context(status=False)
@@ -420,15 +885,23 @@ class BuildInvocationTest(MainBuildTestBase):
                 new_callable=mock.PropertyMock,
                 return_value=True,
             ):
-                with mock.patch.object(os, "getlogin", side_effect=OSError()):
-                    with self.assertRaises(
-                        main_build.BuildConfigurationError
-                    ) as cm:
-                        invocation.get_build_env()
-                    self.assertIn(
-                        "USER environment variable is not set",
-                        str(cm.exception),
-                    )
+                with mock.patch.object(
+                    main_build.FuchsiaBuildContext,
+                    "loas_type",
+                    new_callable=mock.PropertyMock,
+                    return_value="gcert",
+                ):
+                    with mock.patch.object(
+                        getpass, "getuser", side_effect=Exception()
+                    ):
+                        with self.assertRaises(
+                            main_build.BuildConfigurationError
+                        ) as cm:
+                            invocation.get_build_env()
+                        self.assertIn(
+                            "USER environment variable is not set",
+                            str(cm.exception),
+                        )
 
 
 class BuildCommandExecutionTest(unittest.TestCase):
@@ -445,12 +918,13 @@ class BuildCommandExecutionTest(unittest.TestCase):
             tui=False,
             verbose=False,
             dry_run=False,
+            auth_mode="auto",
         )
         context = main_build.FuchsiaBuildContext(
             source_dir=pathlib.Path("/tmp/fuchsia"),
             out_dir=pathlib.Path("/tmp/out"),
             build_dir=pathlib.Path("/tmp/out/default"),
-            env={},
+            env={"USER": "fake-user"},
             config=config,
         )
         with mock.patch.object(
@@ -504,12 +978,13 @@ class BuildCommandExecutionTest(unittest.TestCase):
             tui=False,
             verbose=False,
             dry_run=True,
+            auth_mode="auto",
         )
         context = main_build.FuchsiaBuildContext(
             source_dir=pathlib.Path("/tmp/fuchsia"),
             out_dir=pathlib.Path("/tmp/out"),
             build_dir=pathlib.Path("/tmp/out/default"),
-            env={},
+            env={"USER": "fake-user"},
             config=config,
         )
         with mock.patch.object(
@@ -617,6 +1092,32 @@ class FindFuchsiaDirTest(unittest.TestCase):
                 main_build.find_fuchsia_dir(pathlib.Path("/tmp/only/two"))
 
 
+class GcpInstanceNameTest(unittest.TestCase):
+    def test_valid_instance_name(self) -> None:
+        self.assertEqual(
+            main_build.gcp_instance_name(
+                "projects/my-project/instances/default"
+            ),
+            "projects/my-project/instances/default",
+        )
+
+    def test_invalid_instance_name_raises(self) -> None:
+        for invalid in (
+            "",
+            "projects",
+            "projects/my-project",
+            "projects/my-project/instances",
+            "projects/my-project/instances/",
+            "my-project/instances/default",
+            "projects/instances/default",
+            "projects/my-project/default",
+            "projects/my-project/instances/default/",
+            "projects/my-project/instances/default/extra",
+        ):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                main_build.gcp_instance_name(invalid)
+
+
 class StrToBoolTest(unittest.TestCase):
     def test_str_to_bool(self) -> None:
         self.assertTrue(main_build.str_to_bool("true"))
@@ -647,17 +1148,17 @@ class CheckRbeEnvVarsTest(unittest.TestCase):
         self.assertIn("RBE_BAR, RBE_FOO", output)
 
 
-class ChooseConcurrencyTest(unittest.TestCase):
+class RbeCpuConcurrencyTest(unittest.TestCase):
     def test_local(self) -> None:
         with mock.patch.object(main_build, "get_cpu_count", return_value=8):
             self.assertEqual(
-                main_build.choose_concurrency(rbe_enabled=False), 8
+                main_build.rbe_cpu_concurrency(rbe_enabled=False), 8
             )
 
     def test_rbe(self) -> None:
         with mock.patch.object(main_build, "get_cpu_count", return_value=8):
             self.assertEqual(
-                main_build.choose_concurrency(rbe_enabled=True), 80
+                main_build.rbe_cpu_concurrency(rbe_enabled=True), 80
             )
 
 
@@ -822,6 +1323,26 @@ class PrepareFunctionsTest(MainBuildTestBase):
         with self.assertRaises(main_build.BuildConfigurationError) as cm:
             main_build.new_ninja_build_command_execution(context, ["-j"])
         self.assertEqual(str(cm.exception), "-j requires an argument")
+
+    def test_ninja_concurrency_cap(self) -> None:
+        context = self.create_context(rbe=True, max_concurrency=64)
+        with mock.patch.object(main_build, "get_cpu_count", return_value=96):
+            with self.mock_invocation_context():
+                exec_info = main_build.new_ninja_build_command_execution(
+                    context, ["default"]
+                )
+                j_idx = exec_info.full_command.index("-j")
+                self.assertEqual(exec_info.full_command[j_idx + 1], "64")
+
+    def test_ninja_explicit_j_overrides_cap(self) -> None:
+        context = self.create_context(rbe=True, max_concurrency=64)
+        with mock.patch.object(main_build, "get_cpu_count", return_value=96):
+            with self.mock_invocation_context():
+                exec_info = main_build.new_ninja_build_command_execution(
+                    context, ["-j", "128", "default"]
+                )
+                j_idx = exec_info.full_command.index("-j")
+                self.assertEqual(exec_info.full_command[j_idx + 1], "128")
 
 
 class CheckShellCommandTest(unittest.TestCase):
@@ -995,7 +1516,7 @@ class BuildCommandSignalTest(MainBuildTestBase):
         mock_instance.run.assert_called_once()
 
 
-class ContextPropertiesAndLoggingTest(unittest.TestCase):
+class ContextPropertiesAndLoggingTest(MainBuildTestBase):
     def test_context_properties(self) -> None:
         # Create context without fint-params
         config = main_build.FuchsiaBuildConfig(
@@ -1005,12 +1526,13 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             tui=False,
             verbose=False,
             dry_run=False,
+            auth_mode="auto",
         )
         context = main_build.FuchsiaBuildContext(
             source_dir=pathlib.Path("/tmp/fuchsia"),
             out_dir=pathlib.Path("/tmp/out"),
             build_dir=pathlib.Path("/tmp/out/default"),
-            env={},
+            env={"USER": "fake-user"},
             config=config,
         )
 
@@ -1069,6 +1591,7 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             tui=False,
             verbose=True,
             dry_run=False,
+            auth_mode="auto",
         )
         context = main_build.FuchsiaBuildContext(
             source_dir=pathlib.Path("/tmp/fuchsia"),
@@ -1165,6 +1688,7 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
                 tui=True,
                 verbose=False,
                 dry_run=False,
+                auth_mode="auto",
                 fint_params_path=None,
                 fint_context_path=context_proto,
                 output_metadata_json=output_json_path,
@@ -1174,7 +1698,7 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
                 source_dir=pathlib.Path("/tmp"),
                 out_dir=out_dir,
                 build_dir=build_dir,
-                env={},
+                env={"USER": "fake-user"},
                 config=config,
             )
 
@@ -1246,6 +1770,7 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             tui=True,
             verbose=False,
             dry_run=False,
+            auth_mode="auto",
             fint_params_path=pathlib.Path("/tmp/static.proto"),
             fint_context_path=pathlib.Path("/tmp/context.proto"),
             output_metadata_json=None,
@@ -1254,7 +1779,7 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             source_dir=pathlib.Path("/tmp/fuchsia"),
             out_dir=pathlib.Path("/tmp/fuchsia/out/default"),
             build_dir=pathlib.Path("/tmp/fuchsia/out/default"),
-            env={},
+            env={"USER": "fake-user"},
             config=config,
         )
         self.assertEqual(
@@ -1286,6 +1811,7 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             tui=True,
             verbose=False,
             dry_run=False,
+            auth_mode="auto",
             fint_params_path=pathlib.Path("/tmp/static.proto"),
             fint_context_path=pathlib.Path("/tmp/context.proto"),
             output_metadata_json=None,
@@ -1294,7 +1820,7 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             source_dir=pathlib.Path("/tmp/fuchsia"),
             out_dir=pathlib.Path("/tmp/fuchsia/out/default"),
             build_dir=pathlib.Path("/tmp/fuchsia/out/default"),
-            env={},
+            env={"USER": "fake-user"},
             config=config,
         )
         self.assertIsNone(context.fint_artifact_dir)
@@ -1311,25 +1837,19 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             main_build.mkdir(build_dir)
             main_build.mkdir(out_dir)
 
-            config = main_build.FuchsiaBuildConfig(
+            context = self.create_context(
+                env={"USER": "fake-user"},
                 rbe=False,
                 resultstore="none",
                 profile=True,
                 tui=False,
                 verbose=False,
                 dry_run=False,
-                fint_params_path=None,
-                fint_context_path=None,
                 output_metadata_json=output_json_path,
             )
-
-            context = main_build.FuchsiaBuildContext(
-                source_dir=pathlib.Path("/tmp"),
-                out_dir=out_dir,
-                build_dir=build_dir,
-                env={"USER": "fake-user"},
-                config=config,
-            )
+            # Force the context out_dir and build_dir paths to use the temp directory
+            context.out_dir = out_dir
+            context.build_dir = build_dir
 
             invocation = main_build.BuildInvocation(context)
             with mock.patch.object(
@@ -1358,25 +1878,19 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             build_profile_dir = log_dir / "build_profile"
             main_build.mkdir(build_profile_dir)
 
-            config = main_build.FuchsiaBuildConfig(
+            context = self.create_context(
+                env={"USER": "fake-user"},
                 rbe=False,
                 resultstore="none",
                 profile=True,
                 tui=False,
                 verbose=False,
                 dry_run=False,
-                fint_params_path=None,
-                fint_context_path=None,
                 output_metadata_json=output_json_path,
             )
-
-            context = main_build.FuchsiaBuildContext(
-                source_dir=pathlib.Path("/tmp"),
-                out_dir=out_dir,
-                build_dir=build_dir,
-                env={"USER": "fake-user"},
-                config=config,
-            )
+            # Force the context out_dir and build_dir paths to use the temp directory
+            context.out_dir = out_dir
+            context.build_dir = build_dir
 
             invocation = main_build.BuildInvocation(context)
             with mock.patch.object(
@@ -1405,25 +1919,19 @@ class ContextPropertiesAndLoggingTest(unittest.TestCase):
             build_profile_dir = log_dir / "build_profile"
             main_build.mkdir(build_profile_dir)
 
-            config = main_build.FuchsiaBuildConfig(
+            context = self.create_context(
+                env={"USER": "fake-user"},
                 rbe=False,
                 resultstore="none",
                 profile=True,
                 tui=False,
                 verbose=False,
                 dry_run=False,
-                fint_params_path=None,
-                fint_context_path=None,
                 output_metadata_json=output_json_path,
             )
-
-            context = main_build.FuchsiaBuildContext(
-                source_dir=pathlib.Path("/tmp"),
-                out_dir=out_dir,
-                build_dir=build_dir,
-                env={"USER": "fake-user"},
-                config=config,
-            )
+            # Force the context out_dir and build_dir paths to use the temp directory
+            context.out_dir = out_dir
+            context.build_dir = build_dir
 
             invocation = main_build.BuildInvocation(context)
             with mock.patch.object(

@@ -143,6 +143,14 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
             inner.remove(key);
         }
     }
+
+    fn clear(&self) {
+        self.inner.lock().clear();
+    }
+
+    fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +347,24 @@ mod tests {
             };
         }
 
+        assert_matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::Placeholder(_));
+    }
+
+    #[fuchsia::test]
+    async fn test_clear() {
+        let cache = TreeCache::new();
+        let key = ObjectKey::object(1);
+        let now = Timestamp::now();
+        let value = ObjectValue::file(1, 0, now, now, now, now, None, None);
+
+        if let ObjectCacheResult::Placeholder(placeholder) = cache.lookup_or_reserve(&key) {
+            placeholder.complete(Some(&value));
+        } else {
+            panic!("Expected cache miss with placeholder returned.");
+        }
+
+        assert_matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::Value(_));
+        cache.clear();
         assert_matches!(cache.lookup_or_reserve(&key), ObjectCacheResult::Placeholder(_));
     }
 }

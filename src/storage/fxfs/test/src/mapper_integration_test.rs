@@ -240,14 +240,14 @@ async fn test_mapper_no_verification_on_gpt_partition() -> Result<(), Error> {
             .context("Failed to create BlobWriter")?;
         blob_writer.write(&blob.delivery_data).await.context("Failed to write blob data")?;
 
-        log::info!("Opening blob {idx} in mapping session...");
-        let (uncompressed_size, key) = mapping_session_proxy
-            .open(blob.hash.as_bytes())
+        let key = (idx + 1) as u64;
+        log::info!("Opening blob {idx} (key {key}) in mapping session...");
+        let uncompressed_size = mapping_session_proxy
+            .open(key, blob.hash.as_bytes())
             .await
             .context("FIDL error on MappingSession.Open")?
             .map_err(zx::Status::err_from_raw)
             .context("Failed to open blob in mapping session")?;
-        let key = key as u64;
 
         assert_eq!(uncompressed_size, blob.data.len() as u64);
 
@@ -272,7 +272,7 @@ async fn test_mapper_no_verification_on_gpt_partition() -> Result<(), Error> {
 
         vmo_provider.unregister_vmo(key);
         mapping_session_proxy
-            .close(key as u32)
+            .close(key)
             .await
             .context("FIDL error on MappingSession.Close")?
             .map_err(zx::Status::err_from_raw)
@@ -390,8 +390,9 @@ async fn test_mapper_with_verification_corrupted_block_on_gpt_partition() -> Res
         .context("FIDL error on temp open_session")?
         .map_err(zx::Status::err_from_raw)
         .context("Failed to open temp mapping session")?;
-    let (_uncompressed_size, temp_key) = temp_session
-        .open(target_blob.hash.as_bytes())
+    let temp_key = 1u64;
+    let _uncompressed_size = temp_session
+        .open(temp_key, target_blob.hash.as_bytes())
         .await
         .context("FIDL error on temp_session.Open")?
         .map_err(zx::Status::err_from_raw)
@@ -405,11 +406,11 @@ async fn test_mapper_with_verification_corrupted_block_on_gpt_partition() -> Res
     let msg = receiver.peek().context("Failed to peek temp mapping message")?;
     let cmd = mapping::MappingCommand::try_from(*msg)
         .map_err(|e| anyhow!("Invalid mapping command: {e:?}"))?;
-    let (offset, blob_count) = match cmd {
-        mapping::MappingCommand::Mappings { offset, blob_count, .. } => (offset, blob_count),
+    let (offset, extent_count) = match cmd {
+        mapping::MappingCommand::Mappings { offset, extent_count, .. } => (offset, extent_count),
         other => bail!("Expected Mappings command, got {other:?}"),
     };
-    ensure!(blob_count > 0, "Expected at least one extent for test blob");
+    ensure!(extent_count > 0, "Expected at least one extent for test blob");
     let payload_slice = msg.payload_slice(offset, 8);
     let mut packed_bytes = [0u8; 8];
     payload_slice.copy_to_slice(&mut packed_bytes);
@@ -418,7 +419,7 @@ async fn test_mapper_with_verification_corrupted_block_on_gpt_partition() -> Res
     drop(msg);
     drop(receiver);
     temp_session
-        .close(temp_key as u32)
+        .close(temp_key)
         .await
         .context("FIDL error on temp_session.Close")?
         .map_err(zx::Status::err_from_raw)

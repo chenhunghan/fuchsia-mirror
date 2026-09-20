@@ -95,6 +95,7 @@ template("host_test") {
 
     forward_variables_from(invoker,
                            [
+                             "build_only",
                              "environments",
                              "metadata",
                              "name",

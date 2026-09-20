@@ -19,8 +19,8 @@ use crate::vm::arch_vm_aspace::{
 };
 use crate::vm::vm_aspace::VmAspace;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use debug::{ltrace_entry, ltrace_exit, ltracef, ltracef_level};
+use lazy_init::LazyInit;
 use page;
 use regio::{MmioBank, MmioPtr, Offset, RwSafe};
 #[cfg(ktest)]
@@ -30,9 +30,8 @@ use zx_status::Status;
 
 const LOCAL_TRACE: u32 = 0;
 
-static PLIC_BASE: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
-static PLIC_SIZE: AtomicU32 = AtomicU32::new(0);
-static PLIC_MAX_INT: AtomicU32 = AtomicU32::new(0);
+static PLIC_BANK: LazyInit<MmioBank<u32, RwSafe>> = LazyInit::uninit();
+static PLIC_MAX_INT: LazyInit<u32> = LazyInit::uninit();
 
 // HACK: Temporary workaround for the SiFive HiFive Unleashed which has a
 // different calculation formulas than QEMU-virt:
@@ -46,16 +45,6 @@ fn plic_hart_idx(hart: u32) -> u32 {
     } else {
         (2 * hart) + 1
     }
-}
-
-fn plic_bank() -> MmioBank<u32, RwSafe> {
-    let base = PLIC_BASE.load(Ordering::Relaxed);
-    assert!(!base.is_null(), "PLIC base pointer is null");
-    let size = PLIC_SIZE.load(Ordering::Relaxed) as usize;
-    // SAFETY: PLIC_BASE is mapped and initialized in plic_init_post_vm.
-    // Memory mapping remains valid for the duration of the kernel's lifetime.
-    let ptr = unsafe { MmioPtr::<u32, RwSafe>::new(base) };
-    MmioBank::new(ptr, size)
 }
 
 fn plic_priority_offset(irq: u32) -> Offset<u32, RwSafe> {
@@ -79,7 +68,7 @@ fn plic_claim_complete_offset(hart: u32) -> Offset<u32, RwSafe> {
 }
 
 extern "C" fn plic_is_valid_interrupt(vector: InterruptVector, _flags: u32) -> bool {
-    vector.0 < PLIC_MAX_INT.load(Ordering::Relaxed)
+    vector.0 < *PLIC_MAX_INT
 }
 
 extern "C" fn plic_get_base_vector() -> InterruptVector {
@@ -87,24 +76,22 @@ extern "C" fn plic_get_base_vector() -> InterruptVector {
 }
 
 extern "C" fn plic_get_max_vector() -> InterruptVector {
-    InterruptVector(PLIC_MAX_INT.load(Ordering::Relaxed))
+    InterruptVector(*PLIC_MAX_INT)
 }
 
 extern "C" fn plic_init_percpu_early() {}
 
 fn plic_enable_vector(vector: u32, hart_id: u32) {
-    let bank = plic_bank();
     let offset = plic_enable_offset(vector, hart_id);
     // SAFETY: offset is within bounds of the mapped PLIC MMIO bank.
-    let reg = unsafe { bank.at(offset) };
+    let reg = unsafe { PLIC_BANK.at(offset) };
     reg.modify(|val| *val |= 1 << (vector % 32));
 }
 
 fn plic_disable_vector(vector: u32, hart_id: u32) {
-    let bank = plic_bank();
     let offset = plic_enable_offset(vector, hart_id);
     // SAFETY: offset is within bounds of the mapped PLIC MMIO bank.
-    let reg = unsafe { bank.at(offset) };
+    let reg = unsafe { PLIC_BANK.at(offset) };
     reg.modify(|val| *val &= !(1 << (vector % 32)));
 }
 
@@ -114,7 +101,7 @@ fn plic_disable_vector(vector: u32, hart_id: u32) {
 // sync.  Per-hart routing would change both of these and that function together.
 extern "C" fn plic_mask_interrupt(vector: InterruptVector) -> Result<(), Status> {
     ltracef!("vector {}\n", vector.0);
-    if vector.0 >= PLIC_MAX_INT.load(Ordering::Relaxed) {
+    if vector.0 >= *PLIC_MAX_INT {
         return Err(Status::INVALID_ARGS);
     }
     plic_disable_vector(vector.0, boot_hart_id());
@@ -123,7 +110,7 @@ extern "C" fn plic_mask_interrupt(vector: InterruptVector) -> Result<(), Status>
 
 extern "C" fn plic_unmask_interrupt(vector: InterruptVector) -> Result<(), Status> {
     ltracef!("vector {}\n", vector.0);
-    if vector.0 >= PLIC_MAX_INT.load(Ordering::Relaxed) {
+    if vector.0 >= *PLIC_MAX_INT {
         return Err(Status::INVALID_ARGS);
     }
     plic_enable_vector(vector.0, boot_hart_id());
@@ -131,7 +118,7 @@ extern "C" fn plic_unmask_interrupt(vector: InterruptVector) -> Result<(), Statu
 }
 
 extern "C" fn plic_deactivate_interrupt(vector: InterruptVector) -> Result<(), Status> {
-    if vector.0 >= PLIC_MAX_INT.load(Ordering::Relaxed) {
+    if vector.0 >= *PLIC_MAX_INT {
         return Err(Status::INVALID_ARGS);
     }
     // TODO-rvbringup: investigate what this would do
@@ -144,7 +131,7 @@ extern "C" fn plic_configure_interrupt(
     pol: InterruptPolarity,
 ) -> Result<(), Status> {
     ltracef!("vector {}, trigger mode {:?}, polarity {:?}\n", vector.0, tm, pol);
-    if vector.0 >= PLIC_MAX_INT.load(Ordering::Relaxed) {
+    if vector.0 >= *PLIC_MAX_INT {
         return Err(Status::INVALID_ARGS);
     }
     if pol != InterruptPolarity::High {
@@ -159,7 +146,7 @@ extern "C" fn plic_get_interrupt_config(
     pol: *mut InterruptPolarity,
 ) -> Result<(), Status> {
     ltracef!("vector {}\n", vector.0);
-    if vector.0 >= PLIC_MAX_INT.load(Ordering::Relaxed) {
+    if vector.0 >= *PLIC_MAX_INT {
         return Err(Status::INVALID_ARGS);
     }
     // SAFETY: Writing configuration constants back to pointers provided by C++ caller.
@@ -190,10 +177,9 @@ extern "C" fn plic_handle_irq(_frame: *mut Iframe) {
     let boot_hart_id = boot_hart_id();
     assert_eq!(curr_hart_id, boot_hart_id, "PLIC interrupt handled on non-boot hart");
 
-    let bank = plic_bank();
     let claim_offset = plic_claim_complete_offset(curr_hart_id);
     // SAFETY: claim_offset is within bounds of the mapped PLIC region.
-    let claim_reg = unsafe { bank.at(claim_offset) };
+    let claim_reg = unsafe { PLIC_BANK.at(claim_offset) };
     let vector = claim_reg.read();
     ltracef_level!(2, "vector {}\n", vector);
 
@@ -221,7 +207,7 @@ extern "C" fn plic_send_ipi(_target: cpu_mask_t, _ipi: MpIpi) -> Result<(), Stat
 extern "C" fn plic_init_percpu() {
     let curr_hart = curr_hart_id();
     ltracef!("hart {}\n", curr_hart);
-    let max_int = PLIC_MAX_INT.load(Ordering::Relaxed);
+    let max_int = *PLIC_MAX_INT;
     // mask all irqs on this cpu
     for i in 1..max_int {
         plic_disable_vector(i, curr_hart);
@@ -346,23 +332,26 @@ pub unsafe extern "C" fn plic_init_post_vm(config: &DcfgRiscvPlicDriver) {
     }
 
     let num_irqs = config.num_irqs;
-    PLIC_MAX_INT.store(num_irqs, Ordering::Relaxed);
-    PLIC_SIZE.store(config.size_bytes, Ordering::Relaxed);
-    PLIC_BASE.store(plic_base_void as *mut u32, Ordering::Relaxed);
+    let size = config.size_bytes as usize;
+    // SAFETY: Called once during boot, serialized with respect to any other access.
+    unsafe {
+        PLIC_MAX_INT.init(num_irqs);
+        let ptr = MmioPtr::<u32, RwSafe>::new(plic_base_void.cast::<u32>());
+        PLIC_BANK.init(MmioBank::new(ptr, size));
+    }
 
     let boot_hart = boot_hart_id();
-    let bank = plic_bank();
 
     // mask all irqs and set their priority to 1
     for i in 1..num_irqs {
         plic_disable_vector(i, boot_hart);
         // SAFETY: plic_priority_offset is within bounds of the mapped PLIC MMIO bank.
-        let priority_reg = unsafe { bank.at(plic_priority_offset(i)) };
+        let priority_reg = unsafe { PLIC_BANK.at(plic_priority_offset(i)) };
         priority_reg.write(1);
     }
 
     // set global priority threshold to 0
-    let threshold_reg = unsafe { bank.at(plic_threshold_offset(boot_hart)) };
+    let threshold_reg = unsafe { PLIC_BANK.at(plic_threshold_offset(boot_hart)) };
     threshold_reg.write(0);
 
     // SAFETY: Registering the ops.
@@ -388,5 +377,83 @@ pub unsafe extern "C" fn plic_init_late(config: &DcfgRiscvPlicDriver) {
             config.size_bytes as usize,
             zx_types::ZX_RSRC_KIND_MMIO,
         );
+    }
+}
+
+/// RISC-V PLIC driver kernel tests.
+#[cfg(ktest)]
+#[unittest::suite(name = "plic")]
+mod tests {
+    use unittest::{assert_eq, assert_err, assert_false, assert_ok, assert_true};
+
+    /// Test HART ID to PLIC context indexing mapping.
+    #[test]
+    fn test_plic_hart_to_context_index_mapping() {
+        assert_eq!(plic_hart_idx(0), 1);
+        assert_eq!(plic_hart_idx(1), 3);
+        assert_eq!(plic_hart_idx(4), 9);
+    }
+
+    /// Test vector bounds enforcement against PLIC_MAX_INT.
+    #[test]
+    fn test_plic_vector_bounds_enforcement() {
+        let max = *PLIC_MAX_INT;
+        if max > 0 {
+            assert_true!(plic_is_valid_interrupt(InterruptVector(max - 1), 0));
+            assert_false!(plic_is_valid_interrupt(InterruptVector(max), 0));
+            assert_err!(plic_mask_interrupt(InterruptVector(max)), Status::INVALID_ARGS);
+        }
+    }
+
+    /// Test configuration polarity rejection contract.
+    #[test]
+    fn test_plic_configure_rejects_invalid_polarity() {
+        let max = *PLIC_MAX_INT;
+        if max > 1 {
+            assert_ok!(plic_configure_interrupt(
+                InterruptVector(1),
+                InterruptTriggerMode::Edge,
+                InterruptPolarity::High
+            ));
+            assert_err!(
+                plic_configure_interrupt(
+                    InterruptVector(1),
+                    InterruptTriggerMode::Edge,
+                    InterruptPolarity::Low
+                ),
+                Status::NOT_SUPPORTED
+            );
+        }
+    }
+
+    /// Test PLIC offset calculations and regio MmioBank operations.
+    #[test]
+    fn test_plic_regio_offsets_and_bank() {
+        use super::*;
+
+        // Verify offset calculations.
+        assert_eq!(plic_priority_offset(1).value, 8);
+        assert_eq!(plic_enable_offset(0, 0).value, 0x2000 + 0x80);
+        assert_eq!(plic_threshold_offset(0).value, 0x200000 + 0x1000);
+        assert_eq!(plic_claim_complete_offset(0).value, 0x200004 + 0x1000);
+
+        // Test MmioBank operations using a placeholder buffer.
+        let mut buffer = [0u32; 1024];
+        let ptr = unsafe { MmioPtr::<u32, RwSafe>::new(buffer.as_mut_ptr()) };
+        let bank = MmioBank::new(ptr, core::mem::size_of_val(&buffer));
+
+        let offset = Offset::<u32, RwSafe>::new(16);
+        let reg = unsafe { bank.at(offset) };
+
+        reg.write(0x1234_5678);
+        assert_eq!(reg.read(), 0x1234_5678);
+
+        reg.modify(|val| *val |= 1);
+        assert_eq!(reg.read(), 0x1234_5679);
+
+        // Test accessing bank using PLIC priority offset.
+        let priority_reg = unsafe { bank.at(plic_priority_offset(1)) };
+        priority_reg.write(5);
+        assert_eq!(priority_reg.read(), 5);
     }
 }

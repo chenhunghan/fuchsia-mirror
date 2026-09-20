@@ -126,6 +126,252 @@ class TestClassificationTypes(unittest.TestCase):
         self.assertTrue(sm.matches("barr"))
         self.assertTrue(sm.matches("barbarr"))
 
+    def test_select_majority_identifications_clear_majority(self):
+        mit_snippet = IdentifiedSnippet(
+            identified_as="MIT",
+            confidence=1.0,
+            start_line=1,
+            end_line=20,
+            conditions={"notice"},
+        )
+        unid_snippet = IdentifiedSnippet(
+            identified_as=IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
+            confidence=0.0,
+            start_line=1,
+            end_line=20,
+            conditions={"unidentified"},
+        )
+
+        # 2 MIT runs vs 1 UNIDENTIFIED run -> MIT wins with count 2
+        runs = [[unid_snippet], [mit_snippet], [mit_snippet]]
+        (
+            winning_snippets,
+            count,
+        ) = LicensesClassifications.select_majority_identifications(runs)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(winning_snippets), 1)
+        self.assertEqual(winning_snippets[0].identified_as, "MIT")
+
+    def test_select_majority_identifications_unidentified_majority(self):
+        mit_snippet = IdentifiedSnippet(
+            identified_as="MIT",
+            confidence=1.0,
+            start_line=1,
+            end_line=20,
+            conditions={"notice"},
+        )
+        unid_snippet = IdentifiedSnippet(
+            identified_as=IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
+            confidence=0.0,
+            start_line=1,
+            end_line=20,
+            conditions={"unidentified"},
+        )
+
+        # 2 UNIDENTIFIED runs vs 1 MIT run -> UNIDENTIFIED wins with count 2
+        runs = [[unid_snippet], [mit_snippet], [unid_snippet]]
+        (
+            winning_snippets,
+            count,
+        ) = LicensesClassifications.select_majority_identifications(runs)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(winning_snippets), 1)
+        self.assertEqual(
+            winning_snippets[0].identified_as,
+            IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
+        )
+
+    def test_select_majority_identifications_tie_breaks_toward_identified(self):
+        unid_snippet = IdentifiedSnippet(
+            identified_as=IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
+            confidence=0.0,
+            start_line=1,
+            end_line=20,
+            conditions={"unidentified"},
+        )
+        bsd_snippet = IdentifiedSnippet(
+            identified_as="BSD-3-Clause",
+            confidence=0.85,
+            start_line=1,
+            end_line=20,
+            conditions={"notice"},
+        )
+        mit_snippet = IdentifiedSnippet(
+            identified_as="MIT",
+            confidence=1.0,
+            start_line=1,
+            end_line=20,
+            conditions={"notice"},
+        )
+
+        # 1-1-1 tie: prefers non-[UNIDENTIFIED] with highest confidence (MIT)
+        runs = [[unid_snippet], [bsd_snippet], [mit_snippet]]
+        (
+            winning_snippets,
+            count,
+        ) = LicensesClassifications.select_majority_identifications(runs)
+        self.assertEqual(count, 1)
+        self.assertEqual(winning_snippets[0].identified_as, "MIT")
+
+    def test_replace_classifications(self):
+        c1 = LicenseClassification(
+            license_id="lic1",
+            identifications=[
+                IdentifiedSnippet(
+                    identified_as=IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
+                    confidence=0.0,
+                    start_line=1,
+                    end_line=10,
+                    conditions={"unidentified"},
+                )
+            ],
+        )
+        c2 = LicenseClassification(
+            license_id="lic2",
+            identifications=[
+                IdentifiedSnippet(
+                    identified_as="Apache-2.0",
+                    confidence=1.0,
+                    start_line=1,
+                    end_line=50,
+                    conditions={"notice"},
+                )
+            ],
+        )
+        classifications = LicensesClassifications(
+            classifications_by_id={"lic1": c1, "lic2": c2}
+        )
+
+        replacement = LicenseClassification(
+            license_id="lic1",
+            identifications=[
+                IdentifiedSnippet(
+                    identified_as="MIT",
+                    confidence=1.0,
+                    start_line=1,
+                    end_line=10,
+                    conditions={"notice"},
+                )
+            ],
+        )
+        updated = classifications.replace_classifications([replacement])
+        self.assertEqual(
+            updated.classifications_by_id["lic1"]
+            .identifications[0]
+            .identified_as,
+            "MIT",
+        )
+        self.assertEqual(
+            updated.classifications_by_id["lic2"]
+            .identifications[0]
+            .identified_as,
+            "Apache-2.0",
+        )
+
+    def test_retry_failing_files_sequential_majority(self):
+        import os
+        import stat
+        import sys
+        import tempfile
+
+        from fuchsia.tools.licenses.generate_licenses_classification import (
+            _get_failing_license_files,
+            _retry_failing_files,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lic_file = os.path.join(tmpdir, "LicenseRef-Flaky.txt")
+            with open(lic_file, "w") as f:
+                f.write("MIT License text\nLine 2\n")
+
+            # Create a mock identify_license script that fails (empty classifications)
+            # on call #1 (attempt 1), and succeeds (MIT) on calls #2 and #3.
+            counter_file = os.path.join(tmpdir, "counter.txt")
+            mock_bin = os.path.join(tmpdir, "mock_identify_license.py")
+            with open(mock_bin, "w") as f:
+                f.write(
+                    f"""#!{sys.executable}
+import json
+import os
+import sys
+
+counter_path = {repr(counter_file)}
+count = 0
+if os.path.exists(counter_path):
+    with open(counter_path, "r") as cf:
+        count = int(cf.read().strip())
+count += 1
+with open(counter_path, "w") as cf:
+    cf.write(str(count))
+
+output_path = None
+target_file = sys.argv[-1]
+for arg in sys.argv[1:]:
+    if arg.startswith("-json="):
+        output_path = arg.split("=", 1)[1]
+
+if count == 1:
+    # Simulate flake (empty classifications)
+    data = [{{"Filepath": target_file, "Classifications": []}}]
+else:
+    # Simulate successful classification
+    data = [{{
+        "Filepath": target_file,
+        "Classifications": [{{
+            "Name": "MIT",
+            "Confidence": 1.0,
+            "StartLine": 1,
+            "EndLine": 2,
+            "Condition": "notice"
+        }}]
+    }}]
+
+with open(output_path, "w") as out:
+    json.dump(data, out)
+"""
+                )
+            os.chmod(mock_bin, stat.S_IRWXU)
+
+            unid_snippet = IdentifiedSnippet(
+                identified_as=IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION,
+                confidence=0.0,
+                start_line=1,
+                end_line=2,
+                conditions={"unidentified"},
+                verified=False,
+            )
+            initial_classification = LicensesClassifications(
+                classifications_by_id={
+                    "LicenseRef-Flaky": LicenseClassification(
+                        license_id="LicenseRef-Flaky",
+                        identifications=[unid_snippet],
+                    )
+                }
+            )
+            license_files_by_id = {"LicenseRef-Flaky": lic_file}
+
+            failing = _get_failing_license_files(
+                initial_classification, license_files_by_id
+            )
+            self.assertEqual(failing, [lic_file])
+
+            base_output = os.path.join(tmpdir, "output.json")
+            retried = _retry_failing_files(
+                raw_classification=initial_classification,
+                failing_files=failing,
+                license_files_by_id=license_files_by_id,
+                identify_license_path=mock_bin,
+                identify_license_output_path=base_output,
+                num_retries=3,
+            )
+
+            snippets = retried.classifications_by_id[
+                "LicenseRef-Flaky"
+            ].identifications
+            self.assertEqual(len(snippets), 1)
+            self.assertEqual(snippets[0].identified_as, "MIT")
+            self.assertEqual(snippets[0].conditions, {"notice"})
+
 
 if __name__ == "__main__":
     unittest.main()

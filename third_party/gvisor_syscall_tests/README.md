@@ -6,16 +6,13 @@ The gVisor syscall suite contains a large number of tests that validate
 POSIX behaviors on loopback sockets. The Netstack team relies heavily
 on this suite to prevent regressions and iterate on new functionality.
 
-Test suites are available for three versions of the Netstack:
-
-* [Netstack2](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/network/netstack/README.md)
-* [Netstack2 with Fast UDP enabled](https://fuchsia.dev/fuchsia-src/contribute/governance/rfcs/0109_socket_datagram_socket)
-* [Netstack3](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/network/netstack3/README.md)
+The test suite is run against
+[Netstack3](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/network/netstack3/README.md).
 
 ## Running the tests
 
 1. `fx set core.x64 --with //third_party/gvisor_syscall_tests:tests`
-1. `fx test netstack{3,2-with-fast-udp,2-with-sync-udp}-syscall-tests`
+1. `fx test netstack-syscall-tests`
 
 ## Updating the tests
 

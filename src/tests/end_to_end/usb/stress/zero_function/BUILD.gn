@@ -16,7 +16,15 @@ if (is_host) {
       "//src/tests/end_to_end/usb/lib/zero_function",
     ]
     package_deps = [ "//src/devices/usb/drivers/usb-zero-function:package" ]
-    environments = [ iris_env ]
+
+    # `setup_class` registers the usb-zero-function driver ephemerally via
+    # `ffx driver register`, so the subtool has to ship with the test.
+    test_data_deps =
+        [ "//src/developer/ffx/tools/driver:ffx_driver_tool_test_data" ]
+
+    # This test drives the DUT's USB peripheral from the host, so it can only
+    # run on Iris devices hosted by a Fuchsia cell.
+    environments = [ iris_cell_env ]
     params = {
       stress_duration_sec = 120
     }

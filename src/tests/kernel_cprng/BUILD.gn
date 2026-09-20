@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//boards/default_for_emulator.gni")
+import("//build/assembly/test_product_bundle.gni")
 import("//build/go/go_library.gni")
 import("//build/go/go_test.gni")
 import("//build/testing/boot_tests/zbi_test.gni")
@@ -44,6 +46,15 @@ zbi_test("cprng-draw-zbi") {
 }
 
 if (is_linux) {
+  _pb_label = ":test_product_bundle($default_toolchain)"
+  _pb_out_dir = get_label_info(_pb_label, "target_out_dir")
+  _pb_path = "${_pb_out_dir}/test_product_bundle"
+
+  host_test_data("test_product_bundle_data") {
+    sources = [ _pb_path ]
+    deps = [ _pb_label ]
+  }
+
   go_library("lib") {
     testonly = true
 
@@ -69,5 +80,14 @@ if (is_linux) {
                   root_build_dir),
     ]
     non_go_deps = [ ":cprng_draw_pb" ]
+  }
+}
+
+if (current_toolchain == default_toolchain) {
+  test_product_bundle("test_product_bundle") {
+    board_config = default_board_for_emulator
+    platform = {
+      build_type = "eng"
+    }
   }
 }

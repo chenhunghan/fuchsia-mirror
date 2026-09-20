@@ -291,8 +291,11 @@ void UITestRealm::ConfigureAccessibility() {
   RouteServices({fuchsia::logger::LogSink::Name_},
                 /* source = */ ParentRef(),
                 /* targets = */ {ChildRef{kA11yManagerName}});
+  // TODO(https://fxbug.dev/559810783): Drop Flatland once production a11y_manager
+  // is migrated to FlatlandFactory.
   RouteServices(
-      {fuchsia::ui::composition::Flatland::Name_, fuchsia::ui::observation::scope::Registry::Name_,
+      {fuchsia::ui::composition::Flatland::Name_, fuchsia::ui::composition::FlatlandFactory::Name_,
+       fuchsia::ui::observation::scope::Registry::Name_,
        fuchsia::ui::pointer::augment::LocalHit::Name_},
       /* source = */ ChildRef{kScenicName},
       /* targets = */ {ChildRef{kA11yManagerName}});

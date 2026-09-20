@@ -20,7 +20,7 @@ struct RawIovec {
 
 /// A copy of a user-provided `zx_iovec_t` vector entry for read operations.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct UserInVector {
     pub data: UserInPtr<u8>,
     pub len: usize,
@@ -28,7 +28,7 @@ pub struct UserInVector {
 
 /// A copy of a user-provided `zx_iovec_t` vector entry for write operations.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct UserOutVector {
     pub data: UserOutPtr<u8>,
     pub len: usize,
@@ -36,7 +36,7 @@ pub struct UserOutVector {
 
 /// A copy of a user-provided `zx_iovec_t` vector entry for read-write operations.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct UserInOutVector {
     pub data: UserInOutPtr<u8>,
     pub len: usize,

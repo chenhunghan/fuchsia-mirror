@@ -749,16 +749,6 @@ async fn tcp_communicate_with_remote_with_zone<
 #[netstack_test]
 #[variant(N, Netstack)]
 async fn tcp_connect_to_remote_with_zone<N: Netstack>(name: &str) {
-    match N::VERSION {
-        NetstackVersion::Netstack2 { tracing: _, fast_udp: _ } | NetstackVersion::ProdNetstack2 => {
-            ()
-        }
-        NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => {
-            // TODO(https://fxbug.dev/42051508): Re-enable this once Netstack3
-            // supports fallible device access.
-            return;
-        }
-    }
     const PORT: u16 = 80;
 
     tcp_communicate_with_remote_with_zone::<N, _>(name, |realm, interface, peer_ip| {

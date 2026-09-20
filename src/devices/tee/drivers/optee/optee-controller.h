@@ -102,7 +102,11 @@ class OpteeControllerBase {
 
  private:
   fbl::Mutex wq_lock_;
-  std::map<uint64_t, WaitCtx> wait_queue_;
+  struct WaitQueueEntry {
+    std::list<std::shared_ptr<WaitCtx>> waiters;
+    bool has_pending_signal = false;
+  };
+  std::map<uint64_t, WaitQueueEntry> wait_queue_;
 
   fbl::Mutex cq_lock_;
   std::list<WaitCtx> command_queue_;

@@ -2261,6 +2261,8 @@ multiconst!(u32, [
     ZX_POL_AMBIENT_MARK_VMO_EXEC = 15;
     ZX_POL_NEW_IOB               = 16;
     ZX_POL_NEW_SAMPLER           = 17;
+    #[cfg(feature = "kernel")]
+    ZX_POL_MAX                   = 18;
 
     // policy actions
     ZX_POL_ACTION_ALLOW           = 0;
@@ -2268,6 +2270,12 @@ multiconst!(u32, [
     ZX_POL_ACTION_ALLOW_EXCEPTION = 2;
     ZX_POL_ACTION_DENY_EXCEPTION  = 3;
     ZX_POL_ACTION_KILL            = 4;
+    #[cfg(feature = "kernel")]
+    ZX_POL_ACTION_MAX             = 5;
+
+    // policy override
+    ZX_POL_OVERRIDE_ALLOW = 0;
+    ZX_POL_OVERRIDE_DENY  = 1;
 
     // timer slack default modes
     ZX_TIMER_SLACK_CENTER = 0;

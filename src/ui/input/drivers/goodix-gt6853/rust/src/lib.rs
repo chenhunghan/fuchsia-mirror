@@ -23,7 +23,7 @@ use fdf_component::{Driver, DriverContext, DriverError, Node, NodeBuilder, drive
 use fidl_fuchsia_driver_framework::NodeControllerMarker;
 use fidl_next_fuchsia_hardware_gpio as fidl_gpio;
 use fidl_next_fuchsia_hardware_i2c as fidl_i2c;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct GoodixGt6853Driver {
     #[expect(unused)]
@@ -148,7 +148,11 @@ impl Driver for GoodixGt6853Driver {
         let parent_node = context.take_node()?;
         let child_node = parent_node.add_child(node_args).await?;
 
-        let controller = Controller::new(i2c, gpio_int).await?;
+        let mut controller = Controller::new(i2c, gpio_int).await?;
+        let fidl_input_device_clone = fidl_input_device.clone();
+        controller.set_touch_report_handler(Arc::new(move |contacts, event_time| {
+            fidl_input_device_clone.handle_touch_report(contacts, event_time);
+        }));
         let controller_task = fuchsia_async::Task::spawn(controller.run());
 
         log::info!("goodix_gt6853 driver initialized successfully");

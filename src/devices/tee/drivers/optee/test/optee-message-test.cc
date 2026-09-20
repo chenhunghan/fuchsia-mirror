@@ -22,6 +22,7 @@ class MockMessage : public Message {
   using Message::CalculateSize;
   using Message::CreateOutputParameterSet;
   using Message::Message;
+  using Message::params;
 
   static fpromise::result<MockMessage, zx_status_t> TryCreate(
       SharedMemoryManager::DriverMemoryPool* message_pool,
@@ -149,6 +150,26 @@ TEST_F(MessageTest, ParameterSetInvertabilityTest) {
     ASSERT_EQ(value_in.a(), value_out.a());
     ASSERT_EQ(value_in.b(), value_out.b());
     ASSERT_EQ(value_in.c(), value_out.c());
+  }
+}
+
+TEST_F(MessageTest, NoneParameterZeroesPayload) {
+  fidl::Arena allocator;
+  fidl::VectorView<fuchsia_tee::wire::Parameter> parameters(allocator, 1);
+  parameters[0] = fuchsia_tee::wire::Parameter::WithNone({});
+
+  auto result = MockMessage::TryCreate(dpool_.get(), cpool_.get(), 0, std::move(parameters));
+  ASSERT_TRUE(result.is_ok());
+
+  auto message = result.take_value();
+  auto optee_params = message.params();
+  ASSERT_EQ(optee_params.size(), 1);
+
+  ASSERT_EQ(optee_params[0].attribute, MessageParam::kAttributeTypeNone);
+
+  const uint8_t* payload_bytes = reinterpret_cast<const uint8_t*>(&optee_params[0].payload);
+  for (size_t i = 0; i < sizeof(optee_params[0].payload); ++i) {
+    EXPECT_EQ(payload_bytes[i], 0);
   }
 }
 

@@ -21,6 +21,10 @@ FFI_ALWAYS_INLINE vm_page_t* cpp_paddr_to_vm_page(zx_paddr_t paddr) {
 
 FFI_ALWAYS_INLINE PageQueues* cpp_pmm_page_queues() { return pmm_page_queues(); }
 
+FFI_ALWAYS_INLINE VmCompression* cpp_pmm_get_page_compression(void) {
+  return Pmm::Node().GetPageCompression();
+}
+
 FFI_ALWAYS_INLINE zx_status_t cpp_pmm_alloc_page(uint32_t flags, vm_page_t** out_page,
                                                  zx_paddr_t* out_paddr) {
   vm_page_t* page = nullptr;

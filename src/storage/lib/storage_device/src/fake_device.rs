@@ -9,7 +9,6 @@ use anyhow::{Error, ensure};
 use async_trait::async_trait;
 use block_protocol::{ReadOptions, WriteFlags, WriteOptions};
 use fuchsia_sync::Mutex;
-use rand::Rng;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -79,19 +78,25 @@ impl FakeDevice {
         mut reader: impl std::io::Read,
         block_size: u32,
     ) -> Result<Self, std::io::Error> {
-        let allocator =
-            BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
         let mut data = Vec::new();
         reader.read_to_end(&mut data)?;
-        Ok(Self {
+        Ok(Self::from_vec(data, block_size))
+    }
+
+    /// Creates a fake block device from a `Vec`. The size of the device is determined by the size
+    /// of the `Vec`.
+    pub fn from_vec(data: Vec<u8>, block_size: u32) -> Self {
+        let allocator =
+            BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
+        Self {
             allocator,
-            inner: Mutex::new(Inner { data: data, blocks_written_since_last_barrier: Vec::new() }),
+            inner: Mutex::new(Inner { data, blocks_written_since_last_barrier: Vec::new() }),
             closed: AtomicBool::new(false),
             operation_closure: Box::new(|_| Ok(())),
             read_only: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
             observer: None,
-        })
+        }
     }
 }
 
@@ -220,6 +225,7 @@ impl Device for FakeDevice {
 
     fn discard_random_since_last_flush(&self) -> Result<(), Error> {
         let bs = self.allocator.block_size();
+        use rand::RngExt as _;
         let mut rng = rand::rng();
         let mut guard = self.inner.lock();
         let Inner { data, blocks_written_since_last_barrier, .. } = &mut *guard;

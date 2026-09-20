@@ -6,17 +6,18 @@ import("//build/python/python_mobly_test.gni")
 import("//build/testing/environments.gni")
 
 if (is_host) {
-  python_mobly_test("usb_test") {
-    main_source = "usb_test.py"
+  python_mobly_test("usb_enumeration_test") {
+    main_source = "usb_enumeration_test.py"
     libraries = [
       "//src/testing/end_to_end/honeydew",
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
     ]
-    environments = [ sorrel_env ]
-    params = {
-      use_adb_usb = true
-      use_adb_shared_server = false
-    }
+    test_data_deps =
+        [ "//src/developer/ffx/tools/driver:ffx_driver_tool_test_data" ]
+    environments = [
+      sorrel_env,
+      iris_env,
+    ]
   }
 
   python_mobly_test("usb_fastboot_e2e_test") {
@@ -44,8 +45,8 @@ group("zero_function_test") {
 group("tests") {
   testonly = true
   public_deps = [
+    ":usb_enumeration_test($host_toolchain)",
     ":usb_fastboot_e2e_test($host_toolchain)",
-    ":usb_test($host_toolchain)",
     "zero_function:tests($host_toolchain)",
   ]
 }

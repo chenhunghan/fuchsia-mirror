@@ -104,8 +104,17 @@ std::optional<gfx::Rect> H264SPS::GetVisibleRect() const {
   if (!coded_size)
     return std::nullopt;
 
-  if (!frame_cropping_flag)
-    return gfx::Rect(coded_size.value());
+  if (!frame_cropping_flag) {
+    gfx::Rect rect(coded_size.value());
+    if (!rect.IsValid()) {
+      // The caller (H264Decoder::ProcessPPSAndSPS) validates that
+      // gfx::Rect(new_pic_size).IsValid() prior to calling GetVisibleRect() and
+      // checks new_visible_rect.IsValid() on the result, so returning nullopt
+      // here cleanly rejects an invalid rect.
+      return std::nullopt;
+    }
+    return rect;
+  }
 
   int crop_unit_x;
   int crop_unit_y;
@@ -147,9 +156,17 @@ std::optional<gfx::Rect> H264SPS::GetVisibleRect() const {
     return std::nullopt;
   }
 
-  return gfx::Rect(crop_left, crop_top,
-                   coded_size->width() - crop_left - crop_right,
-                   coded_size->height() - crop_top - crop_bottom);
+  gfx::Rect visible_rect(crop_left, crop_top,
+                         coded_size->width() - crop_left - crop_right,
+                         coded_size->height() - crop_top - crop_bottom);
+  if (!visible_rect.IsValid()) {
+    FX_LOGS(DEBUG) << "Visible rect is invalid.";
+    // The caller (H264Decoder::ProcessPPSAndSPS) handles nullopt via
+    // value_or(gfx::Rect(new_pic_size)), safely falling back to the full coded
+    // picture rect (which is already verified to be valid).
+    return std::nullopt;
+  }
+  return visible_rect;
 }
 
 // Based on T-REC-H.264 E.2.1, "VUI parameters semantics",

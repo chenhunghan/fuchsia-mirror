@@ -8,10 +8,7 @@ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load(
     "@fuchsia_rules_common//debug_symbols:debug_symbols.bzl",
     "find_and_process_unstripped_binaries",
-)
-load(
-    "@fuchsia_rules_common//debug_symbols:providers.bzl",
-    "FuchsiaDebugSymbolInfo",
+    "merge_debug_symbol_infos",
 )
 load(
     "@fuchsia_rules_common//packages:package.bzl",
@@ -24,7 +21,14 @@ load(
 )
 
 def _build_fuchsia_package_impl(ctx):
-    fuchsia_debug_symbol_info = FuchsiaDebugSymbolInfo(build_id_dirs_mapping = {})
+    fuchsia_debug_symbol_info = merge_debug_symbol_infos(
+        ctx.attr.subpackages,
+        ctx.attr.test_components,
+        ctx.attr.components,
+        ctx.attr.resources,
+        ctx.attr.processed_binaries,
+        ctx.attr.tools,
+    )
 
     return common_build_fuchsia_package_impl(
         ctx,

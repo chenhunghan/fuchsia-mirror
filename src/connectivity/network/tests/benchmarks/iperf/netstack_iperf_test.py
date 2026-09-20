@@ -341,8 +341,6 @@ class NetstackIperfTest(fuchsia_base_test.FuchsiaBaseTest):
             "--flows",
             f"{flows}",
         ]
-        if self._netstack3:
-            test_component_args.append("--netstack3")
         self.dut.ffx.run_test_component(
             "fuchsia-pkg://fuchsia.com/iperf-benchmark#meta/iperf-benchmark-component.cm",
             ffx_test_args=[

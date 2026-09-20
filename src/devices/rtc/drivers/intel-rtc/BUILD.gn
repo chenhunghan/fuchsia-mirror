@@ -12,8 +12,14 @@ import(
 
 assert(target_cpu == "x64")
 
+fuchsia_driver_dml("intel-rtc-dml") {
+  dml = "meta/intel-rtc.dml"
+  driver_name = "intel-rtc"
+}
+
 driver_bind_rules("intel_rtc_bind") {
-  rules = "meta/intel-rtc.bind"
+  bind_output = "intel-rtc.bindbc"
+  dml_label = ":intel-rtc-dml"
   tests = "meta/bind-tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -44,10 +50,10 @@ fuchsia_cc_driver("intel-rtc-driver") {
 }
 
 fuchsia_driver_component("intel-rtc") {
+  dml_label = ":intel-rtc-dml"
   info = "meta/intel-rtc-info.json"
   component_name = "intel-rtc"
   deps = [ ":intel-rtc-driver" ]
-  manifest = "meta/intel-rtc.cml"
 }
 
 fuchsia_driver_package("package") {

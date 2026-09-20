@@ -6,9 +6,18 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("usb-virtual-bus-dml") {
+  dml = "meta/usb-virtual-bus.dml"
+  driver_name = "usb-virtual-bus"
+}
+
 driver_bind_rules("usb-virtual-bus-bind") {
-  rules = "meta/usb-virtual-bus.bind"
-  deps = [ "//src/devices/bind/fuchsia.test.platform" ]
+  bind_output = "usb-virtual-bus.bindbc"
+  dml_label = ":usb-virtual-bus-dml"
+  deps = [
+    "//src/devices/bind/fuchsia.test",
+    "//src/devices/bind/fuchsia.test.platform",
+  ]
 }
 
 source_set("common") {
@@ -51,10 +60,13 @@ fuchsia_cc_driver("usb-virtual-bus-driver") {
 }
 
 fuchsia_driver_component("usb-virtual-bus") {
+  dml_label = ":usb-virtual-bus-dml"
   info = "meta/usb-virtual-bus-info.json"
   component_name = "usb-virtual-bus"
-  deps = [ ":usb-virtual-bus-driver" ]
-  manifest = "meta/usb-virtual-bus.cml"
+  deps = [
+    ":usb-virtual-bus-bind",
+    ":usb-virtual-bus-driver",
+  ]
 }
 
 group("tests") {

@@ -12,13 +12,11 @@ import filecmp
 import itertools
 import json
 import pathlib
+from collections.abc import Callable, Mapping, Sequence
 from typing import (
     Any,
-    Callable,
     Literal,
-    Mapping,
     Optional,
-    Sequence,
     TypedDict,
     TypeVar,
     get_args,
@@ -569,8 +567,8 @@ K = TypeVar("K")
 
 
 def _merge_unique_variants(
-    vs1: Optional[Sequence[T]],
-    vs2: Optional[Sequence[T]],
+    vs1: Sequence[T] | None,
+    vs2: Sequence[T] | None,
     dedup_key: Callable[[T], K],
 ) -> list[T]:
     """Merge vs1 and vs2, and assert that all values are all unique when
@@ -587,7 +585,7 @@ def _merge_unique_variants(
 
 
 def _merge_disjoint_dicts(
-    a: Optional[dict[str, Any]], b: Optional[dict[str, Any]]
+    a: dict[str, Any] | None, b: dict[str, Any] | None
 ) -> dict[str, Any]:
     """Merge two dicts, asserting that they have no overlapping keys. If either
     dict is None, it is treated as if it was empty."""

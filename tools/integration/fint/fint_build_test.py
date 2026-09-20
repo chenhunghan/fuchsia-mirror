@@ -74,12 +74,151 @@ class BuildArtifactsTest(unittest.TestCase):
         """Verifies that produce_build_artifacts successfully writes build_artifacts.json."""
         with tempfile.TemporaryDirectory() as artifact_dir:
             fint_build.produce_build_artifacts(pathlib.Path(artifact_dir), 42)
-            manifest_path = pathlib.Path(artifact_dir) / "build_artifacts.json"
+            manifest_path = (
+                pathlib.Path(artifact_dir) / fint_build.BUILD_ARTIFACTS_JSON
+            )
             self.assertTrue(manifest_path.exists())
 
             # Load and verify content
             manifest_content = json.loads(manifest_path.read_text())
             self.assertEqual(manifest_content.get("ninjaDurationSeconds"), 42)
+
+    def test_produce_build_artifacts_with_failure(self) -> None:
+        """Verifies that produce_build_artifacts successfully writes build_artifacts.json with a failure_summary."""
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            fint_build.produce_build_artifacts(
+                pathlib.Path(artifact_dir), 42, failure_summary="test failure"
+            )
+            manifest_path = (
+                pathlib.Path(artifact_dir) / fint_build.BUILD_ARTIFACTS_JSON
+            )
+            self.assertTrue(manifest_path.exists())
+
+            # Load and verify content
+            manifest_content = json.loads(manifest_path.read_text())
+            self.assertEqual(manifest_content.get("ninjaDurationSeconds"), 42)
+            self.assertEqual(
+                manifest_content.get("failureSummary"), "test failure"
+            )
+
+
+class ParseNinjaFailuresTest(unittest.TestCase):
+    """Tests the parse_ninja_failures, format_ninja_failures, and NinjaFailure classes."""
+
+    def test_ninja_failure_dataclass(self) -> None:
+        """Verifies individual NinjaFailure methods and properties behave correctly."""
+        # Test creation from valid dict
+        failure = fint_build.NinjaFailure.from_dict(
+            {
+                "artifacts": ["out/default/foo.o"],
+                "exit_code": 1,
+                "output": "some error\n",
+            }
+        )
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.artifacts, ["out/default/foo.o"])
+        self.assertEqual(failure.exit_code, 1)
+        self.assertEqual(failure.output, "some error")
+        self.assertFalse(failure.is_eligible_for_deduplication)
+        self.assertEqual(
+            failure.format(), "FAILED: [code=1] out/default/foo.o\n\nsome error"
+        )
+        self.assertEqual(
+            failure.format(include_output=False),
+            "FAILED: [code=1] out/default/foo.o",
+        )
+
+        # Test line-count based eligibility
+        long_failure = fint_build.NinjaFailure.from_dict(
+            {
+                "artifacts": ["bin/bar"],
+                "exit_code": 2,
+                "output": "1\n2\n3\n4\n5\n6",
+            }
+        )
+        self.assertTrue(long_failure.is_eligible_for_deduplication)
+
+    def test_format_valid_failures(self) -> None:
+        """Verifies format_ninja_failures correctly formats valid failures."""
+        mock_data = {
+            "version": 1,
+            "failures": [
+                {
+                    "artifacts": ["bin/foo"],
+                    "exit_code": 1,
+                    "output": "compiler error",
+                }
+            ],
+        }
+        res = fint_build.format_ninja_failures(mock_data)
+        self.assertEqual(res, "FAILED: [code=1] bin/foo\n\ncompiler error")
+
+    def test_format_deduplication(self) -> None:
+        """Verifies format_ninja_failures deduplicates long compiler errors, but preserves headers."""
+        mock_data = {
+            "version": 1,
+            "failures": [
+                {
+                    "artifacts": ["bin/foo"],
+                    "exit_code": 1,
+                    "output": "line1\nline2\nline3\nline4\nline5\nline6",
+                },
+                {
+                    "artifacts": ["bin/bar"],
+                    "exit_code": 1,
+                    "output": "line1\nline2\nline3\nline4\nline5\nline6",
+                },
+            ],
+        }
+        res = fint_build.format_ninja_failures(mock_data)
+        expected = (
+            "FAILED: [code=1] bin/foo\n\n"
+            "line1\nline2\nline3\nline4\nline5\nline6\n\n"
+            "FAILED: [code=1] bin/bar"
+        )
+        self.assertEqual(res, expected)
+
+    def test_format_invalid_version_or_malformed(self) -> None:
+        """Verifies format_ninja_failures returns None for malformed JSON or unsupported versions."""
+        # Invalid version
+        self.assertIsNone(
+            fint_build.format_ninja_failures({"version": 2, "failures": []})
+        )
+        # Missing failures
+        self.assertIsNone(fint_build.format_ninja_failures({"version": 1}))
+
+    def test_parse_file_handling(self) -> None:
+        """Verifies parse_ninja_failures correctly loads files and delegates."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            errors_json_path = (
+                pathlib.Path(tmp_dir) / fint_build.NINJA_ERRORS_JSON
+            )
+
+            # Malformed JSON
+            errors_json_path.write_text("{invalid")
+            self.assertIsNone(fint_build.parse_ninja_failures(errors_json_path))
+
+            # Non-existent file
+            self.assertIsNone(
+                fint_build.parse_ninja_failures(
+                    pathlib.Path("/non/existent/file")
+                )
+            )
+
+            # Valid file
+            mock_data = {
+                "version": 1,
+                "failures": [
+                    {
+                        "artifacts": ["bin/foo"],
+                        "exit_code": 1,
+                        "output": "error",
+                    }
+                ],
+            }
+            errors_json_path.write_text(json.dumps(mock_data))
+            res = fint_build.parse_ninja_failures(errors_json_path)
+            self.assertEqual(res, "FAILED: [code=1] bin/foo\n\nerror")
 
 
 class RunGnCheckTest(unittest.TestCase):
@@ -261,7 +400,7 @@ class NinjaBuildWrapTest(unittest.TestCase):
                 checkout_dir="fake_checkout", build_dir=tmp_dir
             )
 
-            test_specs_path = os.path.join(tmp_dir, "test_specs.json")
+            test_specs_path = os.path.join(tmp_dir, fint_build.TESTS_JSON)
             test_specs_data = [
                 {"test": {"os": "fuchsia", "path": "fuchsia_test"}},
                 {"test": {"os": "linux", "path": "host_test_1"}},
@@ -284,7 +423,9 @@ class NinjaBuildWrapTest(unittest.TestCase):
                 checkout_dir="fake_checkout", build_dir=tmp_dir
             )
 
-            stamp_path = os.path.join(tmp_dir, "last_ninja_build_success.stamp")
+            stamp_path = os.path.join(
+                tmp_dir, fint_build.LAST_NINJA_BUILD_SUCCESS_STAMP
+            )
             with open(stamp_path, "w") as f:
                 f.write("old-content")
 
@@ -295,7 +436,9 @@ class NinjaBuildWrapTest(unittest.TestCase):
                 self.assertFalse(os.path.exists(stamp_path))
 
                 # Rebuild sentinel should be touched on incremental builds
-                sentinel = os.path.join(tmp_dir, "force_nonhermetic_rebuild")
+                sentinel = os.path.join(
+                    tmp_dir, fint_build.FORCE_NONHERMETIC_REBUILD_SENTINEL
+                )
                 self.assertTrue(os.path.exists(sentinel))
 
                 run.exit_code = 0
@@ -323,7 +466,7 @@ class NinjaBuildWrapTest(unittest.TestCase):
                 with open(bazel_launcher_path, "w") as f:
                     pass
 
-                # Write actual test_specs.json
+                # Write actual tests.json
                 test_specs_data = [
                     {
                         "test": {
@@ -344,7 +487,9 @@ class NinjaBuildWrapTest(unittest.TestCase):
                         }
                     },
                 ]
-                with open(os.path.join(build_dir, "test_specs.json"), "w") as f:
+                with open(
+                    os.path.join(build_dir, fint_build.TESTS_JSON), "w"
+                ) as f:
                     json.dump(test_specs_data, f)
 
                 static_spec = static_pb2.Static()
@@ -417,7 +562,7 @@ class MainExecutionTest(unittest.TestCase):
 
                 # Verify build_artifacts.json was written to the artifact directory
                 manifest_path = os.path.join(
-                    artifact_dir, "build_artifacts.json"
+                    artifact_dir, fint_build.BUILD_ARTIFACTS_JSON
                 )
                 self.assertTrue(os.path.exists(manifest_path))
 
@@ -425,6 +570,88 @@ class MainExecutionTest(unittest.TestCase):
                 with open(manifest_path, "r") as f:
                     manifest_content = json.loads(f.read())
                 self.assertIn("ninjaDurationSeconds", manifest_content)
+
+            finally:
+                os.unlink(static_path)
+                os.unlink(context_path)
+
+    @mock.patch.object(subprocess, "run")
+    @mock.patch.object(signal_utils, "SignalManagedProcess")
+    def test_main_writes_build_artifacts_json_with_ninja_error_logging_output(
+        self, mock_managed: MagicMock, mock_run: MagicMock
+    ) -> None:
+        """Verifies that main writes build_artifacts.json with a parsed failure summary when ninja_error_logging_output is present."""
+        with tempfile.TemporaryDirectory() as artifact_dir, tempfile.TemporaryDirectory() as build_dir:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".textproto", delete=False
+            ) as static_file:
+                static_file.write("incremental: true")
+                static_path = static_file.name
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".textproto", delete=False
+            ) as context_file:
+                context_file.write(
+                    f'checkout_dir: "fake_checkout"\nartifact_dir: "{artifact_dir}"\nbuild_dir: "{build_dir}"'
+                )
+                context_path = context_file.name
+
+            errors_json_path = os.path.join(
+                build_dir, fint_build.NINJA_ERRORS_JSON
+            )
+            mock_errors_data = {
+                "version": 1,
+                "failures": [
+                    {
+                        "artifacts": ["out/default/foo.o"],
+                        "exit_code": 1,
+                        "output": "FAILED: foo.o\nsome compiler error output\nline 2",
+                    }
+                ],
+            }
+            with open(errors_json_path, "w") as f:
+                json.dump(mock_errors_data, f)
+
+            try:
+                # Mock failed build command execution
+                mock_managed.return_value.run.return_value = 1
+                mock_run.return_value.returncode = 0
+                mock_run.return_value.stdout = "ninja: build failed."
+
+                real_argv = [
+                    "--static",
+                    static_path,
+                    "--context",
+                    context_path,
+                    "--ninja-error-logging-output",
+                    errors_json_path,
+                    "--",
+                    "ninja",
+                    "target",
+                ]
+
+                # Run main() passing arguments directly
+                exit_code = fint_build.main(real_argv)
+                self.assertEqual(exit_code, 1)
+
+                # Verify build_artifacts.json was written to the artifact directory
+                manifest_path = os.path.join(
+                    artifact_dir, fint_build.BUILD_ARTIFACTS_JSON
+                )
+                self.assertTrue(os.path.exists(manifest_path))
+
+                # Load and verify content
+                with open(manifest_path, "r") as f:
+                    manifest_content = json.loads(f.read())
+                self.assertIn("ninjaDurationSeconds", manifest_content)
+                self.assertIn(
+                    "FAILED: [code=1] out/default/foo.o",
+                    manifest_content["failureSummary"],
+                )
+                self.assertIn(
+                    "some compiler error output",
+                    manifest_content["failureSummary"],
+                )
 
             finally:
                 os.unlink(static_path)

@@ -16,8 +16,12 @@ import (
 
 // FindProjectBasename derives the project's base name used for naming JSON config files.
 func (c *MasterConfig) FindProjectBasename(targetPath string) string {
-	cleanTargetPath := filepath.Clean(targetPath)
-	absTargetPath := filepath.Join(c.FuchsiaDir, cleanTargetPath)
+	fuchsiaDir := resolveFuchsiaDir("")
+	if c != nil {
+		fuchsiaDir = resolveFuchsiaDir(c.FuchsiaDir)
+	}
+	cleanTargetPath := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(targetPath)), "/")
+	absTargetPath := filepath.Join(fuchsiaDir, filepath.FromSlash(cleanTargetPath))
 
 	// Priority 1: Check README.fuchsia (or Cargo.toml / go.mod) for an explicit Name
 	metadataFiles := []string{"README.fuchsia", "Cargo.toml", "go.mod", "pubspec.yaml"}
@@ -36,11 +40,11 @@ func (c *MasterConfig) FindProjectBasename(targetPath string) string {
 	}
 
 	// Priority 1.5: Check Virtual Out-Of-Tree READMEs
-	if c.Boundary.OutOfTreeReadmes != nil {
+	if c != nil && c.Boundary.OutOfTreeReadmes != nil {
 		if virtualReadmePath, ok := c.Boundary.OutOfTreeReadmes[cleanTargetPath]; ok {
 			absVirtualPath := virtualReadmePath
 			if !filepath.IsAbs(absVirtualPath) {
-				absVirtualPath = filepath.Join(c.FuchsiaDir, virtualReadmePath)
+				absVirtualPath = filepath.Join(fuchsiaDir, virtualReadmePath)
 			}
 			if _, err := os.Stat(absVirtualPath); err == nil {
 				if rootReadmes, _, err := readme.ParseAnyMetadata(absVirtualPath); err == nil && len(rootReadmes) > 0 && rootReadmes[0].Name != "" {
@@ -51,27 +55,29 @@ func (c *MasterConfig) FindProjectBasename(targetPath string) string {
 	}
 
 	// Priority 2: Check Jiri Manifest mapping
-	if name := c.ManifestNameFor(cleanTargetPath); name != "" {
-		return filepath.Base(name)
+	if c != nil {
+		if name := c.ManifestNameFor(cleanTargetPath); name != "" {
+			return filepath.Base(name)
+		}
 	}
 
 	// Priority 3: Fallback for first-party or paths not in manifest
 	dir := filepath.Dir(cleanTargetPath)
-	if dir == "." || dir == "/" {
+	if dir == "." || dir == "/" || cleanTargetPath == "" {
 		return "root"
 	}
 
-	parts := strings.Split(cleanTargetPath, string(filepath.Separator))
+	parts := strings.Split(cleanTargetPath, "/")
 	if len(parts) > 0 && parts[0] != "" {
 		if parts[0] == "src" && len(parts) > 1 && parts[1] != "" {
 			return parts[1]
 		}
-		if parts[0] == "vendor" && len(parts) > 2 && parts[2] != "" {
-			return parts[2]
+		if (parts[0] == "third_party" || parts[0] == "vendor" || parts[0] == "prebuilt") && len(parts) > 1 {
+			return filepath.Base(cleanTargetPath)
 		}
-		return parts[len(parts)-1]
+		return parts[0]
 	}
-	return "project"
+	return "root"
 }
 
 // AddAllowlistEntry creates or updates an allowed_licenses JSON config entry on disk.

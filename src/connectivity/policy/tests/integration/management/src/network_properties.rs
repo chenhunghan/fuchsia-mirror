@@ -10,6 +10,7 @@ use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_net_name as fnet_name;
 use fidl_fuchsia_net_policy_properties as fnp_properties;
 use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
+use fidl_fuchsia_net_reachability as freachability;
 use fidl_fuchsia_net_root as fnet_root;
 use fidl_fuchsia_net_routes as fnet_routes;
 use fidl_fuchsia_net_routes_admin as fnet_routes_admin;
@@ -1564,6 +1565,124 @@ async fn test_network_removal_reports_network_gone<N: Netstack, M: Manager>(name
                         })
                     );
                 }
+            }
+            .boxed_local()
+        },
+    )
+    .await;
+}
+
+#[netstack_test]
+#[variant(N, Netstack)]
+#[variant(M, Manager)]
+async fn test_reachability_monitor_default_network_validation<N: Netstack, M: Manager>(name: &str) {
+    const TEST_NETWORK_ID: u32 = 123;
+    const TEST_MARK: u32 = 321;
+
+    let _if_name = with_netcfg_owned_device::<M, N, _>(
+        name,
+        ManagerConfig::EnableSocketProxy,
+        NetcfgOwnedDeviceArgs {
+            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            socket_proxy_type: SocketProxyType::Fake,
+            extra_known_service_providers: Vec::new(),
+        },
+        |_if_id, _network, _interface_state, realm, _sandbox| {
+            async move {
+                let delegated_networks = realm
+                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                        realms::constants::fake_socket_proxy::COMPONENT_NAME,
+                    )
+                    .expect("failed to connect to FakeSocketProxy NetworkRegistry");
+
+                let reachability = realm
+                    .connect_to_protocol_from_child::<freachability::MonitorMarker>(
+                        realms::constants::netcfg::COMPONENT_NAME,
+                    )
+                    .expect("failed to connect to Reachability Monitor");
+
+                // Snapshots are synthesized from the default network's connectivity state.
+                let disconnected = freachability::Snapshot {
+                    gateway_reachable: Some(false),
+                    dns_active: Some(false),
+                    internet_available: Some(false),
+                    http_active: Some(false),
+                    ..Default::default()
+                };
+                let unvalidated = freachability::Snapshot {
+                    gateway_reachable: Some(true),
+                    dns_active: Some(true),
+                    internet_available: Some(true),
+                    http_active: Some(false),
+                    ..Default::default()
+                };
+                let validated = freachability::Snapshot {
+                    gateway_reachable: Some(true),
+                    dns_active: Some(true),
+                    internet_available: Some(true),
+                    http_active: Some(true),
+                    ..Default::default()
+                };
+
+                // Initial Watch() reports no reachability, as there is no default network.
+                let initial = reachability.watch().await.expect("watch error");
+                assert_eq!(initial, disconnected);
+
+                // Add network with FullConnectivity and set as default.
+                let mut valid_network = network(TEST_NETWORK_ID, Some(TEST_MARK));
+                valid_network.connectivity =
+                    Some(fnp_socketproxy::ConnectivityState::FullConnectivity);
+                delegated_networks
+                    .add(&valid_network)
+                    .await
+                    .expect("fidl error")
+                    .expect("failed to add network");
+
+                // Start watch before marking default.
+                let mut pending_watch = reachability.watch();
+                assert_matches!(futures::poll!(&mut pending_watch), std::task::Poll::Pending);
+
+                delegated_networks
+                    .set_default(&fposix_socket::OptionalUint32::Value(TEST_NETWORK_ID))
+                    .await
+                    .expect("fidl error")
+                    .expect("failed to set default");
+
+                // Watch() unblocks and reports full reachability.
+                let validated_snapshot = pending_watch.await.expect("watch error");
+                assert_eq!(validated_snapshot, validated);
+
+                // Start next watch before updating connectivity.
+                let mut pending_unvalidated = reachability.watch();
+                assert_matches!(futures::poll!(&mut pending_unvalidated), std::task::Poll::Pending);
+
+                // Transition default network to PartialConnectivity (unvalidated)
+                let mut unvalidated_network = network(TEST_NETWORK_ID, Some(TEST_MARK));
+                unvalidated_network.connectivity =
+                    Some(fnp_socketproxy::ConnectivityState::PartialConnectivity);
+                delegated_networks
+                    .update(&unvalidated_network)
+                    .await
+                    .expect("fidl error")
+                    .expect("failed to update network");
+
+                // Watch() unblocks and reports DNS as active but HTTP as inactive.
+                let unvalidated_snapshot = pending_unvalidated.await.expect("watch error");
+                assert_eq!(unvalidated_snapshot, unvalidated);
+
+                // Start next watch before unsetting the default network.
+                let mut pending_unset = reachability.watch();
+                assert_matches!(futures::poll!(&mut pending_unset), std::task::Poll::Pending);
+
+                delegated_networks
+                    .set_default(&fposix_socket::OptionalUint32::Unset(fposix_socket::Empty))
+                    .await
+                    .expect("fidl error")
+                    .expect("failed to unset default");
+
+                // Watch() unblocks and reports no reachability once more.
+                let unset_snapshot = pending_unset.await.expect("watch error");
+                assert_eq!(unset_snapshot, disconnected);
             }
             .boxed_local()
         },

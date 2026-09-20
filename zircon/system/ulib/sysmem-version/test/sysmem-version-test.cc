@@ -15,7 +15,6 @@
 #include <type_traits>
 #include <vector>
 
-#include <fbl/array.h>
 #include <zxtest/zxtest.h>
 
 namespace v1 = fuchsia_sysmem;

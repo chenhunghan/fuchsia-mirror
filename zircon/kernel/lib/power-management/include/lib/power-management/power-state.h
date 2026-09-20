@@ -69,6 +69,12 @@ class PowerState {
   // domain.
   bool is_serving() const { return domain() && domain()->controller()->is_serving(); }
 
+  // Returns whether the kernel scheduler should send power level update requests through the
+  // control interface to handle utilization changes.
+  bool scheduler_control_enabled() const {
+    return domain() && domain()->scheduler_control_enabled();
+  }
+
   // Returns the active power level when device is not idle.
   constexpr std::optional<uint8_t> active_power_level() const { return active_power_level_; }
 
@@ -183,6 +189,17 @@ class PowerState {
       }
     }
     return ProcessingRate{0};
+  }
+
+  // Returns true if the targeted active power level has an active power level
+  // preceding it (i.e. is not the lowest active power level).
+  bool has_preceding_target_power_level() const {
+    if (domain()) {
+      if (const auto level = target_active_power_level()) {
+        return &domain()->model().levels()[*level] != &domain()->model().active_levels().front();
+      }
+    }
+    return false;
   }
 
   // Returns the current utilization of the processor.

@@ -11,8 +11,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Collection, Iterable, Sequence
+from typing import Any
 from unittest import mock
 
 import cl_utils

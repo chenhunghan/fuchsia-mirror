@@ -25,17 +25,39 @@
 
 #include "src/ui/lib/escher/third_party/granite/vk/shader_utils.h"
 
+#include <lib/syslog/cpp/macros.h>
+
 #include <vector>
 
 #include "src/ui/lib/escher/third_party/granite/vk/pipeline_layout.h"
 #include "src/ui/lib/escher/util/enum_utils.h"
 #include "src/ui/lib/escher/util/hasher.h"
 #include "src/ui/lib/escher/vk/shader_module.h"
+#include "src/ui/lib/escher/vk/vulkan_limits.h"
 
 #include <spirv_cross.hpp>
 
 namespace escher {
 namespace impl {
+namespace {
+
+// Escher's shaders are part of its trusted computing base: they are authored
+// in-tree and loaded from the component's own package, never supplied by a
+// client.  Even so, the resource layout reflected out of them is stored in
+// arrays and 32-bit masks that are statically sized by |VulkanLimits|, so a
+// shader declaring a descriptor set or binding beyond those limits would
+// silently corrupt memory.  Fail fast instead: a violation is a shader
+// authoring error, and must be caught in release builds too.
+void ValidateSetAndBinding(uint32_t set, uint32_t binding, const char* resource_kind) {
+  FX_CHECK(set < VulkanLimits::kNumDescriptorSets)
+      << "SPIR-V " << resource_kind << " is decorated with descriptor set " << set
+      << ", but Escher supports at most " << VulkanLimits::kNumDescriptorSets << " sets.";
+  FX_CHECK(binding < VulkanLimits::kNumBindings)
+      << "SPIR-V " << resource_kind << " is decorated with binding " << binding
+      << ", but Escher supports at most " << VulkanLimits::kNumBindings << " bindings per set.";
+}
+
+}  // namespace
 
 void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, ShaderStage stage,
                                                  ShaderModuleResourceLayout* layout) {
@@ -51,6 +73,7 @@ void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, Sh
   for (auto& image : resources.sampled_images) {
     uint32_t set = compiler.get_decoration(image.id, spv::DecorationDescriptorSet);
     uint32_t binding = compiler.get_decoration(image.id, spv::DecorationBinding);
+    ValidateSetAndBinding(set, binding, "sampled image");
     const spirv_cross::SPIRType& type = compiler.get_type(image.base_type_id);
     if (type.image.dim == spv::DimBuffer)
       layout->sets[set].sampled_buffer_mask |= 1u << binding;
@@ -65,6 +88,7 @@ void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, Sh
   for (auto& image : resources.subpass_inputs) {
     uint32_t set = compiler.get_decoration(image.id, spv::DecorationDescriptorSet);
     uint32_t binding = compiler.get_decoration(image.id, spv::DecorationBinding);
+    ValidateSetAndBinding(set, binding, "subpass input");
     layout->sets[set].input_attachment_mask |= 1u << binding;
     layout->sets[set].stages |= stage_flags;
 
@@ -76,6 +100,7 @@ void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, Sh
   for (auto& image : resources.storage_images) {
     uint32_t set = compiler.get_decoration(image.id, spv::DecorationDescriptorSet);
     uint32_t binding = compiler.get_decoration(image.id, spv::DecorationBinding);
+    ValidateSetAndBinding(set, binding, "storage image");
     layout->sets[set].storage_image_mask |= 1u << binding;
     layout->sets[set].stages |= stage_flags;
 
@@ -87,6 +112,7 @@ void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, Sh
   for (auto& buffer : resources.uniform_buffers) {
     uint32_t set = compiler.get_decoration(buffer.id, spv::DecorationDescriptorSet);
     uint32_t binding = compiler.get_decoration(buffer.id, spv::DecorationBinding);
+    ValidateSetAndBinding(set, binding, "uniform buffer");
     layout->sets[set].uniform_buffer_mask |= 1u << binding;
     layout->sets[set].stages |= stage_flags;
   }
@@ -94,6 +120,7 @@ void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, Sh
   for (auto& buffer : resources.storage_buffers) {
     uint32_t set = compiler.get_decoration(buffer.id, spv::DecorationDescriptorSet);
     uint32_t binding = compiler.get_decoration(buffer.id, spv::DecorationBinding);
+    ValidateSetAndBinding(set, binding, "storage buffer");
     layout->sets[set].storage_buffer_mask |= 1u << binding;
     layout->sets[set].stages |= stage_flags;
   }
@@ -103,11 +130,19 @@ void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, Sh
   if (stage == ShaderStage::kVertex) {
     for (auto& attrib : resources.stage_inputs) {
       auto location = compiler.get_decoration(attrib.id, spv::DecorationLocation);
+      FX_CHECK(location < VulkanLimits::kNumVertexAttributes)
+          << "SPIR-V vertex input is decorated with location " << location
+          << ", but Escher supports at most " << VulkanLimits::kNumVertexAttributes
+          << " vertex attributes.";
       layout->attribute_mask |= 1u << location;
     }
   } else if (stage == ShaderStage::kFragment) {
     for (auto& attrib : resources.stage_outputs) {
       auto location = compiler.get_decoration(attrib.id, spv::DecorationLocation);
+      FX_CHECK(location < VulkanLimits::kNumColorAttachments)
+          << "SPIR-V fragment output is decorated with location " << location
+          << ", but Escher supports at most " << VulkanLimits::kNumColorAttachments
+          << " color attachments.";
       layout->render_target_mask |= 1u << location;
     }
   }
@@ -125,20 +160,31 @@ void GenerateShaderModuleResourceLayoutFromSpirv(std::vector<uint32_t> spirv, Sh
     const spirv_cross::SPIRType& type =
         compiler.get_type(resources.push_constant_buffers.front().base_type_id);
 
+    FX_CHECK(!type.member_types.empty()) << "SPIR-V push constant block declares no members.";
+
     // The offset for the current push constant range should be equal to the offset of the
     // first declared member of that range.
-    layout->push_constant_offset = compiler.type_struct_member_offset(type, /*first member*/ 0);
+    const uint32_t first_offset = compiler.type_struct_member_offset(type, /*first member*/ 0);
 
     // The total size of the range can be calculated by adding together the offset + size of the
     // *last* member of the struct, and subtracting out the offset of the *first* member of the
     // struct. It would also be possible to simply loop over each of the member types and sum their
     // sizes, but the first approach gives us a constant time solution (and allows us to avoid
     // having to reason about padding).
-    uint32_t last = uint32_t(type.member_types.size() - 1);
-    uint32_t last_offset = compiler.type_struct_member_offset(type, last);
-    layout->push_constant_range =
-        last_offset + static_cast<uint32_t>(compiler.get_declared_struct_member_size(type, last)) -
-        layout->push_constant_offset;
+    //
+    // The end of the block is computed in 64 bits so that a malformed block cannot wrap around;
+    // both it and the resulting range are then validated against Escher's static limit, which
+    // sizes the push constant storage in CommandBuffer.
+    const uint32_t last = uint32_t(type.member_types.size() - 1);
+    const uint32_t last_offset = compiler.type_struct_member_offset(type, last);
+    const uint64_t end =
+        uint64_t{last_offset} + compiler.get_declared_struct_member_size(type, last);
+    FX_CHECK(first_offset <= end && end <= VulkanLimits::kPushConstantSize)
+        << "SPIR-V push constant block spans [" << first_offset << ", " << end
+        << ") bytes, but Escher supports at most " << VulkanLimits::kPushConstantSize << " bytes.";
+
+    layout->push_constant_offset = first_offset;
+    layout->push_constant_range = static_cast<uint32_t>(end - first_offset);
   }
 }
 

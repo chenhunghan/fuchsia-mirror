@@ -4,7 +4,7 @@
 library fuchsia.hardware.audio;
 
 /// For an overview of the Codec protocols see
-/// [Codec Interface](//docs/concepts/drivers/driver_architectures/audio_drivers/audio_codec.md)
+/// [Codec Interface](//docs/development/audio/drivers/codec.md)
 /// # Deprecation
 ///
 /// Not supported anymore, instead use an

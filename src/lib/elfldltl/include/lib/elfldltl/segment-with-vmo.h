@@ -13,6 +13,7 @@
 #include <type_traits>
 
 #include "diagnostics.h"
+#include "layout.h"
 #include "load.h"
 #include "mapped-vmo-file.h"
 #include "vmar-loader.h"
@@ -173,7 +174,7 @@ class SegmentWithVmo {
       using OtherCopyT = std::integral_constant<bool, !CopyT::value>;
 
       template <class SomeCopyT>
-      using SameSegment = typename Wrapper<SomeCopyT>::template WithVmo<Segment>;
+      using SameSegment = Wrapper<SomeCopyT>::template WithVmo<Segment>;
     };
 
     // Use the wrapper if need be, or the original type if not.
@@ -223,7 +224,7 @@ class SegmentWithVmo {
   };
 
   template <class Segment>
-  using Copy = typename Wrapper<std::true_type>::template Type<Segment>;
+  using Copy = Wrapper<std::true_type>::template Type<Segment>;
   using CopySegmentVmo = Wrapper<std::true_type>::SegmentVmo;
 
   template <class Segment>
@@ -284,9 +285,8 @@ class SegmentWithVmo {
   // immutable by replacing the segment .vmo() handle without ZX_RIGHT_WRITE.
   template <class Diagnostics, class LoadInfo>
   [[nodiscard]] static bool AlignSegments(Diagnostics& diag, LoadInfo& info, zx::unowned_vmo vmo,
-                                          typename LoadInfo::size_type page_size,
-                                          bool readonly = false) {
-    using DataWithZeroFillSegment = typename LoadInfo::DataWithZeroFillSegment;
+                                          LoadInfo::size_type page_size, bool readonly = false) {
+    using DataWithZeroFillSegment = LoadInfo::DataWithZeroFillSegment;
     auto align_segment = [vmo, page_size, readonly, &diag](auto& segment) {
       using Segment = std::decay_t<decltype(segment)>;
       if constexpr (std::is_same_v<Segment, DataWithZeroFillSegment>) {
@@ -340,7 +340,7 @@ class SegmentWithVmo {
   class GetMutableMemory {
    public:
     using Result = fit::result<bool, MappedVmoFile>;
-    using Segment = typename LoadInfo::Segment;
+    using Segment = LoadInfo::Segment;
 
     GetMutableMemory() = default;
 
@@ -423,13 +423,13 @@ class SegmentWithVmo {
 // separate partial specializations are required here to match all LoadInfo
 // instantiations using either SegmentWithVmo::... template.
 
-template <class Elf, template <class> class Container, PhdrLoadPolicy Policy>
+template <ElfApi Elf, template <class> class Container, PhdrLoadPolicy Policy>
 class VmarLoader::SegmentVmo<LoadInfo<Elf, Container, Policy, SegmentWithVmo::Copy>>
     : public SegmentWithVmo::CopySegmentVmo {
   using SegmentWithVmo::CopySegmentVmo::CopySegmentVmo;
 };
 
-template <class Elf, template <class> class Container, PhdrLoadPolicy Policy>
+template <ElfApi Elf, template <class> class Container, PhdrLoadPolicy Policy>
 class VmarLoader::SegmentVmo<LoadInfo<Elf, Container, Policy, SegmentWithVmo::NoCopy>>
     : public SegmentWithVmo::NoCopySegmentVmo {
   using SegmentWithVmo::NoCopySegmentVmo::NoCopySegmentVmo;

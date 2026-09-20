@@ -9,7 +9,7 @@ use fidl_fuchsia_netemul as fnetemul;
 use futures::FutureExt as _;
 use net_types::ip::Ipv4;
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, ProdNetstack2, ProdNetstack3, TestSandboxExt as _, constants,
+    KnownServiceProvider, Netstack, ProdNetstack3, TestSandboxExt as _, constants,
 };
 use netstack_testing_common::{
     get_component_stopped_event_stream, wait_for_component_stopped_with_stream,
@@ -170,10 +170,6 @@ impl TestIpExt for net_types::ip::Ipv6 {
 #[derive(argh::FromArgs)]
 /// Iperf3 loopback benchmarks.
 struct Args {
-    /// benchmark against NS3
-    #[argh(switch)]
-    netstack3: bool,
-
     /// transport layer protocol (UDP or TCP)
     #[argh(option)]
     protocol: Protocol,
@@ -189,16 +185,10 @@ struct Args {
 
 #[fuchsia::main]
 async fn main() {
-    let Args { netstack3, protocol, message_size, flows } = argh::from_env();
+    let Args { protocol, message_size, flows } = argh::from_env();
     // TODO(https://fxbug.dev/359670074): Consider adding IPv6 versions of
     // these benchmarks.
-    if netstack3 {
-        bench::<ProdNetstack3, Ipv4>("bench", protocol, message_size, flows, true /* bench */)
-            .await;
-    } else {
-        bench::<ProdNetstack2, Ipv4>("bench", protocol, message_size, flows, true /* bench */)
-            .await;
-    }
+    bench::<ProdNetstack3, Ipv4>("bench", protocol, message_size, flows, true /* bench */).await;
 }
 
 async fn bench<N: Netstack, I: TestIpExt>(
@@ -317,7 +307,7 @@ async fn bench<N: Netstack, I: TestIpExt>(
 mod test {
     use futures::StreamExt as _;
     use netstack_testing_common::get_component_moniker;
-    use netstack_testing_common::realms::Netstack;
+    use netstack_testing_common::realms::Netstack3;
     use netstack_testing_macros::netstack_test;
     use test_case::test_case;
 
@@ -340,8 +330,7 @@ mod test {
     }
 
     #[netstack_test]
-    #[variant(N, Netstack)]
-    async fn version<N: Netstack>(name: &str) {
+    async fn version(name: &str) {
         let sandbox = netemul::TestSandbox::new().expect("create sandbox");
 
         // Create an event stream watcher before starting iPerf so we're sure to observe
@@ -351,7 +340,7 @@ mod test {
 
         const IPERF_MONIKER: &str = "iperf";
         let realm = sandbox
-            .create_netstack_realm_with::<N, _, _>(
+            .create_netstack_realm_with::<Netstack3, _, _>(
                 name,
                 [
                     device_name_provider_component(),
@@ -382,13 +371,12 @@ mod test {
     }
 
     #[netstack_test]
-    #[variant(N, Netstack)]
     #[variant(I, Ip)]
     #[test_case(Protocol::Tcp; "tcp")]
     #[test_case(Protocol::Udp; "udp")]
-    async fn loopback<N: Netstack, I: TestIpExt>(name: &str, protocol: Protocol) {
+    async fn loopback<I: TestIpExt>(name: &str, protocol: Protocol) {
         let name = &format!("{name}-{protocol}");
-        bench::<N, I>(
+        bench::<Netstack3, I>(
             name, protocol, 1400,  /* message_size */
             1,     /* flows */
             false, /* bench */

@@ -94,8 +94,8 @@ enum class RemoteZygoteVmo : bool { kVmo = false, kDecodedPtr = true };
 template <class Elf = elfldltl::Elf<>>
 class RemoteZygoteDomain {
  public:
-  using ExecInfo = typename RemoteDecodedModule<Elf>::ExecInfo;
-  using size_type = typename Elf::size_type;
+  using ExecInfo = RemoteDecodedModule<Elf>::ExecInfo;
+  using size_type = Elf::size_type;
 
   // Return the absolute runtime PC of the root module's entry point.
   // For the main executable, this is the PC to pass to zx_process_start.
@@ -125,10 +125,10 @@ template <RemoteZygoteVmo Vmo = RemoteZygoteVmo::kVmo, class Elf = elfldltl::Elf
 class RemoteZygote {
  public:
   using Linker = RemoteDynamicLinker<Elf, RemoteLoadZygote::kYes>;
-  using Loader = typename Linker::Module::Loader;
-  using LoadInfo = typename Linker::Module::LoadInfo;
-  using ExecInfo = typename Linker::Module::ExecInfo;
-  using size_type = typename Elf::size_type;
+  using Loader = Linker::Module::Loader;
+  using LoadInfo = Linker::Module::LoadInfo;
+  using ExecInfo = Linker::Module::ExecInfo;
+  using size_type = Elf::size_type;
 
   // This is returned by Insert().
   using Domain = RemoteZygoteDomain<Elf>;
@@ -292,8 +292,8 @@ class RemoteZygote {
  private:
   friend RemoteZygote<RemoteZygoteVmo::kVmo, Elf>;
 
-  using LinkerModule = typename Linker::Module;
-  using DecodedPtr = typename LinkerModule::Decoded::Ptr;
+  using LinkerModule = Linker::Module;
+  using DecodedPtr = LinkerModule::Decoded::Ptr;
 
   // Each module holds a reference to a zx::vmo somehow.  Either it holds a
   // zx::vmo directly or it holds a DecodedPtr whose ->vmo() can be used.

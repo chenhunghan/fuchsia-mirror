@@ -336,7 +336,7 @@ fuchsia_unittest_package("use_h264_decoder_secure_input_output_test") {
   test_specs = {
     # Without ClearTVP, can't pass anywhere at the moment.
     # TODO(https://fxbug.dev/42119245): Re-enable.
-    environments = []
+    build_only = true
   }
 }
 
@@ -349,10 +349,9 @@ fuchsia_unittest_package("use_h264_decoder_dynamic_buffers_test") {
     "//src/media/codec/examples/use_media_decoder:use_h264_decoder_dynamic_buffers_test",
   ]
   test_specs = {
-    environments = [
-      # TODO(b/478359574): Enable on sorrel_env after prerequisites elsewhere.
-      # sorrel_env
-    ]
+    build_only = true
+    # TODO(b/478359574): Enable on sorrel_env after prerequisites elsewhere.
+    # environments = [ sorrel_env ]
   }
   test_type = "system"
 }
@@ -630,7 +629,7 @@ fuchsia_unittest_package("use_vp9_decoder_secure_input_output_test") {
   test_specs = {
     # Without ClearTVP, can't pass anywhere at the moment.
     # TODO(https://fxbug.dev/42119245): Re-enable.
-    environments = []
+    build_only = true
   }
 }
 
@@ -884,7 +883,7 @@ vp9_decoder_tiled_canary_conformance_test(
     "vp9_decoder_tiled_canary_conformance_test_buf") {
   test_rel_path = "buf/crowd_run_256X144_fr15_bd8_8buf_l1"
   test_specs = {
-    environments = []
+    build_only = true
   }
 }
 
@@ -892,7 +891,7 @@ vp9_decoder_tiled_canary_conformance_test(
     "vp9_decoder_tiled_canary_conformance_test_frm_resize") {
   test_rel_path = "frm_resize/crowd_run_384X192_fr30_bd8_frm_resize_l11"
   test_specs = {
-    environments = []
+    build_only = true
   }
 }
 
@@ -900,7 +899,7 @@ vp9_decoder_tiled_canary_conformance_test(
     "vp9_decoder_tiled_canary_conformance_test_gf_dist") {
   test_rel_path = "gf_dist/crowd_run_256X144_fr15_bd8_gf_dist_4_l1"
   test_specs = {
-    environments = []
+    build_only = true
   }
 }
 
@@ -908,7 +907,7 @@ vp9_decoder_tiled_canary_conformance_test(
     "vp9_decoder_tiled_canary_conformance_test_odd_size") {
   test_rel_path = "odd_size/crowd_run_248X144_fr15_bd8_odd_size_l1"
   test_specs = {
-    environments = []
+    build_only = true
   }
 }
 
@@ -916,7 +915,7 @@ vp9_decoder_tiled_canary_conformance_test(
     "vp9_decoder_tiled_canary_conformance_test_sub8x8") {
   test_rel_path = "sub8X8/crowd_run_256X144_fr15_bd8_sub8X8_l1"
   test_specs = {
-    environments = []
+    build_only = true
   }
 }
 

@@ -527,6 +527,7 @@ class RunnerTest(GitWorkspaceTestCase):
             stdout_stream=io.StringIO(), stderr_stream=io.StringIO()
         )
         ret = githooks.run_commit_msg_hook(
+            str(msg_file),
             repo_dir=worktree_dir,
             checker_fn=mock_checker,
             reporter=reporter,
@@ -578,19 +579,6 @@ class RunnerTest(GitWorkspaceTestCase):
             str(mock_checker.call_args[0][1][0]), str(msg_file.resolve())
         )
 
-        # Default msg_file_path when repo_dir is subdirectory
-        mock_checker.reset_mock()
-        ret = githooks.run_commit_msg_hook(
-            repo_dir=subdir,
-            checker_fn=mock_checker,
-            reporter=reporter,
-        )
-        self.assertEqual(ret, 0)
-        mock_checker.assert_called_once()
-        self.assertEqual(
-            str(mock_checker.call_args[0][1][0]), str(msg_file.resolve())
-        )
-
     def test_main_routing(self) -> None:
         with mock.patch(
             "agents.lib.githooks.runner.run_commit_msg_hook"
@@ -619,34 +607,6 @@ class RunnerTest(GitWorkspaceTestCase):
         with mock.patch("sys.stderr", new_callable=io.StringIO):
             self.assertIn(githooks.main(["unknown-cmd"]), (1, 2))
             self.assertIn(githooks.main([]), (1, 2))
-
-    def test_run_commit_msg_hook_default_file_missing(self) -> None:
-        reporter = ConsoleReporter(
-            stdout_stream=io.StringIO(), stderr_stream=io.StringIO()
-        )
-        ret = githooks.run_commit_msg_hook(
-            repo_dir=self.test_dir,
-            reporter=reporter,
-        )
-        self.assertEqual(ret, 1)
-
-    def test_run_commit_msg_hook_default_file_success(self) -> None:
-        msg_file = self.test_dir / ".git" / "COMMIT_EDITMSG"
-        msg_file.write_text("[agents] Test default commit\n", encoding="utf-8")
-
-        mock_checker = mock.MagicMock(return_value=True)
-        reporter = ConsoleReporter(
-            stdout_stream=io.StringIO(), stderr_stream=io.StringIO()
-        )
-        ret = githooks.run_commit_msg_hook(
-            repo_dir=self.test_dir,
-            checker_fn=mock_checker,
-            reporter=reporter,
-        )
-        self.assertEqual(ret, 0)
-        mock_checker.assert_called_once()
-        called_path = mock_checker.call_args[0][1][0]
-        self.assertEqual(called_path, str(msg_file.resolve()))
 
     def test_run_commit_msg_hook_passes_is_agent_to_context(self) -> None:
         msg_file = self.test_dir / "COMMIT_EDITMSG"

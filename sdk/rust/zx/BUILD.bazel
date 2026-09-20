@@ -61,6 +61,7 @@ rustc_library(
         "src/wait.rs",
     ],
     edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/rust/zx-status",

@@ -412,6 +412,27 @@ Bus::~Bus() {
     root_->DisableDownstream();
     root_->UnplugDownstream();
   }
+  // Pending async::Irq and async::Wait objects are automatically canceled
+  // by their respective destructors as shared_irqs_ is cleared.
+}
+
+void Bus::HandleDeviceLegacyIrqUntriggered(async_dispatcher_t* /*dispatcher*/,
+                                           async::Wait* /*wait*/, zx_status_t status,
+                                           const zx_packet_signal_t* /*signal*/,
+                                           pci::Device* device) {
+  if (status == ZX_ERR_CANCELED) {
+    return;
+  }
+  if (status != ZX_OK) {
+    zxlogf(ERROR, "Error waiting on legacy irq untriggered for %s: %s", device->config()->addr(),
+           zx_status_get_string(status));
+    return;
+  }
+  fbl::AutoLock dev_lock(device->dev_lock());
+  if (device->irqs().mode != fuchsia_hardware_pci::InterruptMode::kLegacy) {
+    return;
+  }
+  device->EnableLegacyIrq();
 }
 
 void Bus::HandleLegacyIrq(async_dispatcher_t* dispatcher, async::Irq* irq, zx_status_t status,
@@ -440,27 +461,38 @@ void Bus::HandleLegacyIrq(async_dispatcher_t* dispatcher, async::Irq* irq, zx_st
     return;
   }
   SharedVector& shared_vector = *result->second;
-  SharedIrqList& list = shared_vector.list;
-  for (auto* device : list) {
+  SharedDeviceList& list = shared_vector.list;
+  for (auto& entry : list) {
+    pci::Device* device = entry->device;
     fbl::AutoLock device_lock(device->dev_lock());
+    if (entry->wait.is_pending() || device->irqs().legacy_disabled) {
+      continue;
+    }
     config::Status dev_status = {.value = device->config()->Read(Config::kStatus)};
     if (dev_status.interrupt_status() || board_config_.use_intx_workaround()) {
+      // Legacy (INTx) interrupts are level-triggered: the device holds its
+      // interrupt line asserted until its driver services the device and
+      // clears the source. Mask the device's interrupt (set INT_DISABLE) so
+      // the line deasserts before we re-arm the physical interrupt below,
+      // preventing interrupt storms.
+      device->DisableLegacyIrq();
+
       // Trigger the virtual interrupt the device driver is using by proxy.
       zx_status_t signal_status = device->SignalLegacyIrq(interrupt->timestamp);
       if (signal_status != ZX_OK) {
         zxlogf(ERROR, "failed to signal vector %#x for device %s: %s", vector,
                device->config()->addr(), zx_status_get_string(signal_status));
+        // If signaling fails (e.g. the client driver closed or destroyed its virtual
+        // interrupt handle), the device intentionally remains masked to prevent
+        // physical interrupt storms.
+        continue;
       }
 
-      // Legacy (INTx) interrupts are level-triggered: the device holds its
-      // interrupt line asserted until its driver services the device and
-      // clears the source. Mask the device's interrupt (set INT_DISABLE) so
-      // the line deasserts before we re-arm the physical interrupt below.
-      // The driver re-arms it by calling AckInterrupt (-> EnableLegacyIrq)
-      // once it has serviced the device. Without this the line stays
-      // asserted, the kernel immediately re-delivers, and the handler spins
-      // in an interrupt storm until the driver wins the race to clear it.
-      device->DisableLegacyIrq();
+      zx_status_t wait_status = entry->wait.Begin(dispatcher_);
+      if (wait_status != ZX_OK) {
+        zxlogf(ERROR, "failed to begin wait on untriggered for %s: %s", device->config()->addr(),
+               zx_status_get_string(wait_status));
+      }
     }
   }
 

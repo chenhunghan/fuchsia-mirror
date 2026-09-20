@@ -5,9 +5,80 @@
 use crate::{DeliveryHandler, PageRequest};
 use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
 use fuchsia_sync::Mutex;
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 use storage_ptr_slice::MutPtrByteSlice;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+#[derive(Clone, Copy, IntoBytes, FromBytes, KnownLayout, Immutable)]
+#[repr(C, align(64))]
+struct Block([u8; 64]);
+
+impl Default for Block {
+    fn default() -> Self {
+        Self([0u8; 64])
+    }
+}
+
+/// A byte buffer aligned to 64 bytes, ensuring compatibility with cryptographic and DMA operations.
+#[derive(Clone, Default)]
+pub struct AlignedBuffer {
+    blocks: Vec<Block>,
+    len: usize,
+}
+
+impl AlignedBuffer {
+    pub fn new(len: usize) -> Self {
+        let block_count = len.div_ceil(64);
+        Self { blocks: vec![Block::default(); block_count], len }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn resize(&mut self, new_len: usize, val: u8) {
+        let block_count = new_len.div_ceil(64);
+        if block_count > self.blocks.len() {
+            self.blocks.resize(block_count, Block::default());
+        } else {
+            self.blocks.truncate(block_count);
+        }
+        if new_len > self.len {
+            self.blocks.as_mut_bytes()[self.len..new_len].fill(val);
+        }
+        self.len = new_len;
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.blocks.as_bytes()[..self.len]
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.blocks.as_mut_bytes()[..self.len]
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.as_slice().to_vec()
+    }
+}
+
+impl Deref for AlignedBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for AlignedBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
 
 #[derive(Default)]
 pub struct TestVecBufferInner {
@@ -29,7 +100,7 @@ impl TestVecBufferReceiver {
 }
 
 pub struct TestVecBuffer {
-    pub data: Vec<u8>,
+    pub data: AlignedBuffer,
     pub range: Range<u64>,
     pub committed_len: usize,
     pub offset: u64,
@@ -45,7 +116,7 @@ impl TestVecBuffer {
         let receiver = TestVecBufferReceiver(Arc::new(Mutex::new(TestVecBufferInner::default())));
         let range = offset..offset + size as u64;
         let buf = Self {
-            data: vec![0u8; size],
+            data: AlignedBuffer::new(size),
             range,
             committed_len: 0,
             offset,
@@ -58,7 +129,7 @@ impl TestVecBuffer {
         let size = (range.end - range.start) as usize;
         let receiver = TestVecBufferReceiver(Arc::new(Mutex::new(TestVecBufferInner::default())));
         let buf = Self {
-            data: vec![0u8; size],
+            data: AlignedBuffer::new(size),
             offset: range.start,
             range,
             committed_len: 0,
@@ -74,7 +145,7 @@ impl TestVecBuffer {
     pub fn new_unprepared_with_range(range: Range<u64>) -> (Self, TestVecBufferReceiver) {
         let receiver = TestVecBufferReceiver(Arc::new(Mutex::new(TestVecBufferInner::default())));
         let buf = Self {
-            data: Vec::new(),
+            data: AlignedBuffer::default(),
             range,
             committed_len: 0,
             offset: 0,
@@ -86,7 +157,7 @@ impl TestVecBuffer {
 
 impl Drop for TestVecBuffer {
     fn drop(&mut self) {
-        self.receiver.0.lock().output = std::mem::take(&mut self.data);
+        self.receiver.0.lock().output = self.data.to_vec();
     }
 }
 

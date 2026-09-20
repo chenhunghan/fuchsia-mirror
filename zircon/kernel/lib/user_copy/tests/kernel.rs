@@ -71,6 +71,18 @@ mod tests {
         assert_true!(def_sv.is_empty());
     }
 
+    /// Test UserPtr default without trait bounds on T.
+    #[test]
+    fn default_unconstrained() {
+        struct NoTraits(u8);
+        let in_ptr = UserInPtr::<NoTraits>::default();
+        assert_null!(in_ptr);
+        let out_ptr = UserOutPtr::<NoTraits>::default();
+        assert_null!(out_ptr);
+        let inout_ptr = UserInOutPtr::<NoTraits>::default();
+        assert_null!(inout_ptr);
+    }
+
     /// Test CopyOut.
     #[test]
     fn copy_out() {

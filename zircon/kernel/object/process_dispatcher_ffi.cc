@@ -14,6 +14,52 @@
 
 extern "C" {
 
+zx_status_t cpp_process_dispatcher_create(
+    JobDispatcher* job, const char* name_ptr, size_t name_len, uint32_t flags,
+    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_handle,
+    ffi::Uninitialized<zx_rights_t>* out_rights,
+    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_vmar_handle,
+    ffi::Uninitialized<zx_rights_t>* out_vmar_rights) {
+  KernelHandle<ProcessDispatcher> handle;
+  KernelHandle<VmAddressRegionDispatcher> vmar_handle;
+  zx_rights_t rights;
+  zx_rights_t vmar_rights;
+  zx_status_t status =
+      ProcessDispatcher::Create(fbl::ImportFromRawPtr(job), ktl::string_view(name_ptr, name_len),
+                                flags, &handle, &rights, &vmar_handle, &vmar_rights);
+  if (status == ZX_OK) {
+    out_handle->Initialize(ktl::move(handle));
+    out_rights->Initialize(rights);
+    out_vmar_handle->Initialize(ktl::move(vmar_handle));
+    out_vmar_rights->Initialize(vmar_rights);
+  }
+  return status;
+}
+
+zx_status_t cpp_process_dispatcher_create_shared(
+    ProcessDispatcher* shared_proc, const char* name_ptr, size_t name_len, uint32_t flags,
+    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_proc_handle,
+    ffi::Uninitialized<zx_rights_t>* out_proc_rights,
+    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_restricted_vmar_handle,
+    ffi::Uninitialized<zx_rights_t>* out_restricted_vmar_rights) {
+  ktl::string_view sp(name_ptr, name_len);
+  KernelHandle<ProcessDispatcher> proc_handle;
+  KernelHandle<VmAddressRegionDispatcher> restricted_vmar_handle;
+  zx_rights_t proc_rights;
+  zx_rights_t restricted_vmar_rights;
+  zx_status_t status = ProcessDispatcher::CreateShared(
+      fbl::ImportFromRawPtr(shared_proc), sp, flags, &proc_handle, &proc_rights,
+      &restricted_vmar_handle, &restricted_vmar_rights);
+  if (status != ZX_OK) {
+    return status;
+  }
+  out_proc_handle->Initialize(ktl::move(proc_handle));
+  out_restricted_vmar_handle->Initialize(ktl::move(restricted_vmar_handle));
+  out_proc_rights->Initialize(proc_rights);
+  out_restricted_vmar_rights->Initialize(restricted_vmar_rights);
+  return ZX_OK;
+}
+
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE ProcessDispatcher* cpp_process_dispatcher_current() {
   return ProcessDispatcher::GetCurrent();
@@ -109,7 +155,9 @@ FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_get_handle_locked(
   return process->handle_table().GetHandleLocked(*process, handle_value);
 }
 
-zx_info_process_t cpp_process_dispatcher_get_info(const ProcessDispatcher* process) {
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_info_process_t
+cpp_process_dispatcher_get_info(const ProcessDispatcher* process) {
   return process->GetInfo();
 }
 
@@ -120,51 +168,14 @@ FFI_ALWAYS_INLINE zx_status_t cpp_process_dispatcher_set_critical_to_job(Process
   return process->SetCriticalToJob(fbl::ImportFromRawPtr(job), retcode_nonzero);
 }
 
-zx_status_t cpp_process_dispatcher_create(
-    JobDispatcher* job, const char* name_ptr, size_t name_len, uint32_t flags,
-    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_proc_handle,
-    ffi::Uninitialized<zx_rights_t>* out_proc_rights,
-    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_vmar_handle,
-    ffi::Uninitialized<zx_rights_t>* out_vmar_rights) {
-  ktl::string_view sp(name_ptr, name_len);
-  KernelHandle<ProcessDispatcher> proc_handle;
-  KernelHandle<VmAddressRegionDispatcher> vmar_handle;
-  zx_rights_t proc_rights;
-  zx_rights_t vmar_rights;
-  zx_status_t status =
-      ProcessDispatcher::Create(fbl::ImportFromRawPtr(job), sp, flags, &proc_handle, &proc_rights,
-                                &vmar_handle, &vmar_rights);
-  if (status != ZX_OK) {
-    return status;
-  }
-  out_proc_handle->Initialize(ktl::move(proc_handle));
-  out_vmar_handle->Initialize(ktl::move(vmar_handle));
-  out_proc_rights->Initialize(proc_rights);
-  out_vmar_rights->Initialize(vmar_rights);
-  return ZX_OK;
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_process_futex_grow_pool(ProcessDispatcher* process) {
+  return process->futex_context().GrowFutexStatePool();
 }
 
-zx_status_t cpp_process_dispatcher_create_shared(
-    ProcessDispatcher* shared_proc, const char* name_ptr, size_t name_len, uint32_t flags,
-    ffi::Uninitialized<KernelHandle<ProcessDispatcher>>* out_proc_handle,
-    ffi::Uninitialized<zx_rights_t>* out_proc_rights,
-    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* out_restricted_vmar_handle,
-    ffi::Uninitialized<zx_rights_t>* out_restricted_vmar_rights) {
-  ktl::string_view sp(name_ptr, name_len);
-  KernelHandle<ProcessDispatcher> proc_handle;
-  KernelHandle<VmAddressRegionDispatcher> restricted_vmar_handle;
-  zx_rights_t proc_rights;
-  zx_rights_t restricted_vmar_rights;
-  zx_status_t status = ProcessDispatcher::CreateShared(
-      fbl::ImportFromRawPtr(shared_proc), sp, flags, &proc_handle, &proc_rights,
-      &restricted_vmar_handle, &restricted_vmar_rights);
-  if (status != ZX_OK) {
-    return status;
-  }
-  out_proc_handle->Initialize(ktl::move(proc_handle));
-  out_restricted_vmar_handle->Initialize(ktl::move(restricted_vmar_handle));
-  out_proc_rights->Initialize(proc_rights);
-  out_restricted_vmar_rights->Initialize(restricted_vmar_rights);
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_process_futex_shrink_pool(ProcessDispatcher* process) {
+  process->futex_context().ShrinkFutexStatePool();
   return ZX_OK;
 }
 
@@ -210,7 +221,8 @@ cpp_process_dispatcher_set_dyn_break_on_load(ProcessDispatcher* process, uintptr
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uintptr_t cpp_process_dispatcher_vdso_base_address(ProcessDispatcher* process) {
+FFI_ALWAYS_INLINE uintptr_t
+cpp_process_dispatcher_vdso_base_address(const ProcessDispatcher* process) {
   return process->vdso_base_address();
 }
 
@@ -221,5 +233,32 @@ cpp_process_dispatcher_hw_trace_context_id(const ProcessDispatcher* process) {
   return process->hw_trace_context_id();
 }
 #endif
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_process_attach_aspace_to_thread(ProcessDispatcher* process,
+                                                                  Thread* core_thread) {
+  VmAspace* aspace = process->normal_aspace();
+  aspace->AttachToThread(core_thread);
+  return ZX_OK;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_koid_t cpp_process_get_job_koid(const ProcessDispatcher* process) {
+  return process->job()->get_koid();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process,
+                                                                 ThreadDispatcher* thread,
+                                                                 bool ensure_initial_thread,
+                                                                 const UserEntryState* entry) {
+  return process->AddInitializedThread(thread, ensure_initial_thread, *entry);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_process_remove_thread(ProcessDispatcher* process,
+                                                 ThreadDispatcher* thread) {
+  process->RemoveThread(thread);
+}
 
 }  // extern "C"

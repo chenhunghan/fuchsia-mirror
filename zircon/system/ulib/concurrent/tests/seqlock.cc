@@ -14,6 +14,12 @@ namespace test {
 
 using SeqLock = concurrent::SeqLock<>;
 
+// The Rust port of this class (//zircon/system/ulib/concurrent/rust) makes the
+// same compile time assertions about the layout of a SeqLock.  Keep the two in
+// sync.
+static_assert(sizeof(SeqLock) == 4);
+static_assert(alignof(SeqLock) == 4);
+
 TEST(SeqLock, UncontestedRead) {
   SeqLock lock;
 

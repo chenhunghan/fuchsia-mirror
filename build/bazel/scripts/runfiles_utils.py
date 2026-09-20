@@ -180,7 +180,7 @@ class RunfilesManifest(object):
         """
         return self._map.get(runfile_path, "")
 
-    def find_source_path_for(self, target_path: str) -> T.Optional[str]:
+    def find_source_path_for(self, target_path: str) -> str | None:
         """Find the source path that matches a given target path in the manifest.
 
         This can be used to locate a real executable from a Bazel output_base layout.

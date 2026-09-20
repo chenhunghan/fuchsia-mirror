@@ -25,7 +25,6 @@ pub(crate) trait PackageResolver {
         &self,
         url: &AbsolutePackageUrl,
         dir: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-        scope: package_directory::ExecutionScope,
     ) -> Result<fpkg::ResolutionContext, Self::Error>;
 
     async fn resolve_with_context_and_serve(
@@ -33,7 +32,6 @@ pub(crate) trait PackageResolver {
         url: &PackageUrl,
         context: fpkg::ResolutionContext,
         dir: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-        scope: package_directory::ExecutionScope,
     ) -> Result<fpkg::ResolutionContext, Self::Error>;
 }
 
@@ -56,7 +54,6 @@ where
 pub(crate) async fn serve_request_stream(
     stream: fcomponent_resolution::ResolverRequestStream,
     package_resolver: Arc<impl PackageResolver>,
-    scope: package_directory::ExecutionScope,
     log_tag: &'static str,
 ) -> anyhow::Result<()> {
     stream
@@ -66,7 +63,7 @@ pub(crate) async fn serve_request_stream(
                 fcomponent_resolution::ResolverRequest::Resolve { component_url, responder } => {
                     responder
                         .send(
-                            resolve(&component_url, package_resolver.as_ref(), scope.clone())
+                            resolve(&component_url, package_resolver.as_ref())
                                 .await
                                 .map_err(|e| {
                                     let fidl_err = (&e).into();
@@ -89,7 +86,6 @@ pub(crate) async fn serve_request_stream(
                             &component_url,
                             context,
                             package_resolver.as_ref(),
-                            scope.clone(),
                         )
                         .await
                         .map_err(|e| {
@@ -114,7 +110,6 @@ pub(crate) async fn serve_request_stream(
 async fn resolve(
     url: &str,
     package_resolver: &impl PackageResolver,
-    scope: package_directory::ExecutionScope,
 ) -> Result<fcomponent_resolution::Component, Error> {
     let url = ComponentUrl::parse(url).map_err(Error::InvalidUrl)?;
     let (package, server_end) = fidl::endpoints::create_proxy();
@@ -125,7 +120,6 @@ async fn resolve(
                 PackageUrl::Relative(_) => Err(Error::AbsoluteUrlRequired)?,
             },
             server_end,
-            scope,
         )
         .await
         .map_err(|e| Error::PackageResolve(e.to_fidl_error(), anyhow::anyhow!(e)))?;
@@ -137,7 +131,6 @@ async fn resolve_with_context(
     url: &str,
     context: fcomponent_resolution::Context,
     package_resolver: &impl PackageResolver,
-    scope: package_directory::ExecutionScope,
 ) -> Result<fcomponent_resolution::Component, Error> {
     let url = ComponentUrl::parse(url).map_err(Error::InvalidUrl)?;
     let (package, server_end) = fidl::endpoints::create_proxy();
@@ -146,7 +139,6 @@ async fn resolve_with_context(
             url.package_url(),
             fpkg::ResolutionContext { bytes: context.bytes },
             server_end,
-            scope,
         )
         .await
         .map_err(|e| Error::PackageResolve(e.to_fidl_error(), anyhow::anyhow!(e)))?;
@@ -295,7 +287,6 @@ mod tests {
             &self,
             _: &AbsolutePackageUrl,
             _: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-            _: package_directory::ExecutionScope,
         ) -> Result<fpkg::ResolutionContext, BrokenPackageResolverError> {
             unimplemented!();
         }
@@ -305,7 +296,6 @@ mod tests {
             _: &PackageUrl,
             _: fpkg::ResolutionContext,
             _: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-            _: package_directory::ExecutionScope,
         ) -> Result<fpkg::ResolutionContext, BrokenPackageResolverError> {
             unimplemented!();
         }
@@ -314,12 +304,7 @@ mod tests {
     #[fuchsia::test]
     async fn resolve_rejects_relative_url() {
         assert_matches!(
-            resolve(
-                "relative#meta/missing",
-                &BrokenPackageResolver,
-                package_directory::ExecutionScope::new(),
-            )
-            .await,
+            resolve("relative#meta/missing", &BrokenPackageResolver,).await,
             Err(Error::AbsoluteUrlRequired)
         )
     }

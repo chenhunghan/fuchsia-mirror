@@ -4,8 +4,6 @@
 
 import("//build/components.gni")
 import("//build/test.gni")
-import(
-    "//src/lib/testing/expectation/fuchsia_test_with_expectations_package.gni")
 import("//src/lib/testing/expectation/generated_expectations_file.gni")
 import("//src/lib/testing/sharding/fuchsia_sharded_test_package.gni")
 
@@ -285,33 +283,15 @@ source_set("${loopback_isolated_test_label}_socket_tests") {
 }
 
 # Defines test targets and unittest packages based on the
-# provided suite name for all versions of the Netstack under
-# test.
+# provided suite name.
 #
 # Parameters
-#
-#   run_with_fast_udp (optional)
-#     Identifies whether or not the suite should be run against Netstack2
-#     with Fast UDP enabled.
-#     Type: bool
-#     Default: true
-#
-#   debug_netstack2 (optional)
-#     When true, use the debug NS2 component, and otherwise the regular one.
-#     Debug NS2 enables packet tracing and debug logs, which may overload some
-#     systems (https://fxbug.dev/328822330).
-#     Type: bool
-#     Default: true
 #
 #   test_srcs_target (optional)
 #     The local target containing the test source files used to run the suite.
 #     Type: string
 #     Default: When unset, the test source target constructed as
 #              ":${target_name}_socket_tests"
-#
-#   with_distinct_fast_udp_expectations (optional)
-#     If this is true, then we'll look for expectation files with _syncudp and
-#     _fastudp suffixes.
 #
 #   num_shards (optional)
 #     If set, this will override the number of shards the suite is sharded into.
@@ -324,148 +304,57 @@ template("syscall_test_suite") {
     _num_shards = invoker.num_shards
   }
 
-  ns3_label = "netstack3"
-
-  debug_netstack2 = true
-  if (defined(invoker.debug_netstack2)) {
-    debug_netstack2 = invoker.debug_netstack2
+  component = "//src/connectivity/network/netstack3:component-debug"
+  if (defined(invoker.log_less) && invoker.log_less) {
+    component = "//src/connectivity/network/netstack3:component-debug-less-logs"
   }
 
-  stacks = [
-    {
-      label = ns3_label
-      component = "//src/connectivity/network/netstack3:component-debug"
-      if (defined(invoker.log_less) && invoker.log_less) {
-        component =
-            "//src/connectivity/network/netstack3:component-debug-less-logs"
-      }
-      manifest = "meta/netstack3/${suite_label}_syscall_tests.cml"
-    },
-  ]
-  ns2_syncudp_stack = {
-    label = "netstack2_syncudp"
-    component =
-        "//src/connectivity/network/netstack:component-with-sync-udp-debug"
-    manifest = "meta/netstack2/syncudp/${suite_label}_syscall_tests.cml"
+  test_target_label = "netstack_${suite_label}_socket_tests"
+  test_srcs_target = ":${suite_label}_socket_tests"
+  if (defined(invoker.test_srcs_target)) {
+    test_srcs_target = invoker.test_srcs_target
   }
-  if (debug_netstack2) {
-    ns2_syncudp_stack.component =
-        "//src/connectivity/network/netstack:component-with-sync-udp-debug"
-  } else {
-    ns2_syncudp_stack.component =
-        "//src/connectivity/network/netstack:component-with-sync-udp"
+  test(test_target_label) {
+    deps = [
+      "${test_srcs_target}",
+      "//src/lib/fxl/test:gtest_main",
+    ]
   }
 
-  stacks += [ ns2_syncudp_stack ]
+  test_package_label = "netstack_${suite_label}_syscall"
+  component_label = "${test_package_label}_tests"
 
-  run_with_fast_udp = true
-  if (defined(invoker.run_with_fast_udp)) {
-    run_with_fast_udp = invoker.run_with_fast_udp
+  expectations_target_name = "${component_label}_expectations"
+  generated_expectations_file(expectations_target_name) {
+    includes = [ "expects/${suite_label}.json5" ]
   }
 
-  ns2_fastudp_label = "netstack2_fastudp"
+  fuchsia_sharded_test_package(test_package_label) {
+    forward_variables_from(invoker, [ "test_specs" ])
+    test_components = [
+      {
+        name = component_label
+        deps = [
+          ":${test_target_label}",
+          component,
+        ]
+        manifest = "meta/${suite_label}_syscall_tests.cml"
+        generated_expectations = ":${expectations_target_name}"
+        num_shards = _num_shards
 
-  if (run_with_fast_udp) {
-    ns2_fastudp_stack = {
-      label = ns2_fastudp_label
-      manifest = "meta/netstack2/fastudp/${suite_label}_syscall_tests.cml"
-    }
-    if (debug_netstack2) {
-      ns2_fastudp_stack.component =
-          "//src/connectivity/network/netstack:component-with-fast-udp-debug"
-    } else {
-      ns2_fastudp_stack.component =
-          "//src/connectivity/network/netstack:component-with-fast-udp"
-    }
-    stacks += [ ns2_fastudp_stack ]
-  } else {
-    not_needed([ "ns2_fastudp_label" ])
+        # Matches the first two slash delimited parts of the test name, or
+        # just the whole name if there are no slashes. For example, from
+        # "All/SocketInetLoopbackTest.TCPListenCloseDuringConnect/ListenV4MappedAny_ConnectV4Any"
+        # matches "All/SocketInetLoopbackTest.TCPListenCloseDuringConnect"
+        # and matches all of "SocketTest.UnixSocketPairProtocol".
+        shard_part_regex = "([^/]+(?:/[^/]+)?).*"
+      },
+    ]
   }
 
-  ns2_test_deps = []
-  ns3_test_deps = []
-  foreach(stack, stacks) {
-    combined_label = "${stack.label}_${suite_label}"
-
-    test_target_label = "${combined_label}_socket_tests"
-    test_srcs_target = ":${suite_label}_socket_tests"
-    if (defined(invoker.test_srcs_target)) {
-      test_srcs_target = invoker.test_srcs_target
-    }
-    test(test_target_label) {
-      deps = [
-        "${test_srcs_target}",
-        "//src/lib/fxl/test:gtest_main",
-      ]
-    }
-
-    test_package_label = "${combined_label}_syscall"
-    component_label = "${test_package_label}_tests"
-
-    with_distinct_fast_udp_expectations = false
-    if (defined(invoker.with_distinct_fast_udp_expectations)) {
-      with_distinct_fast_udp_expectations =
-          invoker.with_distinct_fast_udp_expectations
-    }
-
-    expectations_target_name = "${component_label}_expectations"
-    generated_expectations_file(expectations_target_name) {
-      includes = []
-      if (stack.label == ns3_label) {
-        includes = [ "expects/netstack3/${suite_label}.json5" ]
-      } else {
-        _netstack2_expects_dir = "expects/netstack2"
-        if (with_distinct_fast_udp_expectations) {
-          if (stack.label == ns2_fastudp_label) {
-            includes =
-                [ "$_netstack2_expects_dir/${suite_label}_fastudp.json5" ]
-          } else {
-            includes =
-                [ "$_netstack2_expects_dir/${suite_label}_syncudp.json5" ]
-          }
-        } else {
-          includes = [ "$_netstack2_expects_dir/${suite_label}.json5" ]
-        }
-      }
-    }
-
-    fuchsia_sharded_test_package(test_package_label) {
-      forward_variables_from(invoker, [ "test_specs" ])
-      test_components = [
-        {
-          name = component_label
-          deps = [
-            ":${test_target_label}",
-            stack.component,
-          ]
-          manifest = stack.manifest
-          generated_expectations = ":${expectations_target_name}"
-          num_shards = _num_shards
-
-          # Matches the first two slash delimited parts of the test name, or
-          # just the whole name if there are no slashes. For example, from
-          # "All/SocketInetLoopbackTest.TCPListenCloseDuringConnect/ListenV4MappedAny_ConnectV4Any"
-          # matches "All/SocketInetLoopbackTest.TCPListenCloseDuringConnect"
-          # and matches all of "SocketTest.UnixSocketPairProtocol".
-          shard_part_regex = "([^/]+(?:/[^/]+)?).*"
-        },
-      ]
-    }
-
-    if (stack.label == ns3_label) {
-      ns3_test_deps += [ ":${test_package_label}" ]
-    } else {
-      ns2_test_deps += [ ":${test_package_label}" ]
-    }
-  }
-
-  group("${suite_label}_ns3") {
+  group(suite_label) {
     testonly = true
-    public_deps = ns3_test_deps
-  }
-  group("${suite_label}_ns2") {
-    testonly = true
-    public_deps = ns2_test_deps
+    public_deps = [ ":${test_package_label}" ]
   }
 }
 
@@ -480,7 +369,6 @@ syscall_test_suite(loopback_test_label) {
   num_shards = 20
 
   # These tests are generating too much logging.  https://fxbug.dev/328822330
-  debug_netstack2 = false
   log_less = true
 }
 syscall_test_suite(loopback_isolated_test_label) {
@@ -492,18 +380,14 @@ syscall_test_suite(loopback_isolated_test_label) {
 syscall_test_suite(raw_packet_test_label) {
 }
 syscall_test_suite(udp_test_label) {
-  with_distinct_fast_udp_expectations = true
 }
 syscall_test_suite(udp_raw_test_label) {
 }
 syscall_test_suite(udp_unbound_test_label) {
 }
 syscall_test_suite(tcp_blocking_test_label) {
-  run_with_fast_udp = false
 }
 syscall_test_suite(tcp_test_label) {
-  run_with_fast_udp = false
-
   # The TCP suite is particularly large and needs to be sharded further
   # in order to complete within a reasonable period of time on RISC-V.
   num_shards = 10
@@ -521,21 +405,9 @@ suite_labels = [
   udp_unbound_test_label,
 ]
 
-ns3_labels = []
+all_packages = []
 foreach(label, suite_labels) {
-  ns3_labels += [ ":${label}_ns3" ]
-}
-
-all_packages = ns3_labels
-
-ns2_labels = []
-foreach(label, suite_labels) {
-  ns2_labels += [ ":${label}_ns2" ]
-}
-
-# RISC-V on Fuchsia does not support Golang.
-if (target_cpu != "riscv64") {
-  all_packages += ns2_labels
+  all_packages += [ ":${label}" ]
 }
 
 group("tests") {

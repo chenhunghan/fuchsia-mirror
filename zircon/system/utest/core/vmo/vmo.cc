@@ -55,9 +55,8 @@ TEST(VmoTestCase, Create) {
     EXPECT_OK(status, "vm_object_create");
   }
 
-  for (size_t i = 0; i < std::size(vmo); i++) {
-    status = zx_handle_close(vmo[i]);
-    EXPECT_OK(status, "handle_close");
+  for (zx_handle_t vmo_handle : vmo) {
+    EXPECT_OK(zx_handle_close(vmo_handle));
   }
 }
 
@@ -70,18 +69,18 @@ TEST(VmoTestCase, ReadWriteBadLen) {
   status = zx_vmo_create(len, 0, &vmo);
   EXPECT_OK(status, "vm_object_create");
 
-  char buf[len];
+  std::vector<char> buf(len);
   for (int i = 1; i <= 2; i++) {
-    status = zx_vmo_read(vmo, buf, 0,
+    status = zx_vmo_read(vmo, buf.data(), 0,
                          std::numeric_limits<size_t>::max() - (zx_system_get_page_size() / i));
     EXPECT_EQ(ZX_ERR_OUT_OF_RANGE, status);
-    status = zx_vmo_write(vmo, buf, 0,
+    status = zx_vmo_write(vmo, buf.data(), 0,
                           std::numeric_limits<size_t>::max() - (zx_system_get_page_size() / i));
     EXPECT_EQ(ZX_ERR_OUT_OF_RANGE, status);
   }
-  status = zx_vmo_read(vmo, buf, 0, len);
+  status = zx_vmo_read(vmo, buf.data(), 0, len);
   EXPECT_OK(status, "vmo_read");
-  status = zx_vmo_write(vmo, buf, 0, len);
+  status = zx_vmo_write(vmo, buf.data(), 0, len);
   EXPECT_OK(status, "vmo_write");
 
   // close the handle
@@ -98,8 +97,8 @@ TEST(VmoTestCase, ReadWrite) {
   status = zx_vmo_create(len, 0, &vmo);
   EXPECT_OK(status, "vm_object_create");
 
-  char buf[len];
-  status = zx_vmo_read(vmo, buf, 0, sizeof(buf));
+  std::vector<char> buf(len);
+  status = zx_vmo_read(vmo, buf.data(), 0, buf.size());
   EXPECT_OK(status, "vm_object_read");
 
   // make sure it's full of zeros
@@ -112,8 +111,8 @@ TEST(VmoTestCase, ReadWrite) {
     count++;
   }
 
-  memset(buf, 0x99, sizeof(buf));
-  status = zx_vmo_write(vmo, buf, 0, sizeof(buf));
+  memset(buf.data(), 0x99, buf.size());
+  status = zx_vmo_write(vmo, buf.data(), 0, buf.size());
   EXPECT_OK(status, "vm_object_write");
 
   // map it
@@ -124,7 +123,7 @@ TEST(VmoTestCase, ReadWrite) {
   EXPECT_NE(0u, ptr, "vm_map");
 
   // check that it matches what we last wrote into it
-  EXPECT_BYTES_EQ((uint8_t *)buf, (uint8_t *)ptr, sizeof(buf), "mapped buffer");
+  EXPECT_BYTES_EQ(buf.data(), (reinterpret_cast<const char *>(ptr)), buf.size(), "mapped buffer");
 
   status = zx_vmar_unmap(zx_vmar_root_self(), ptr, len);
   EXPECT_OK(status, "vm_unmap");
@@ -144,34 +143,34 @@ TEST(VmoTestCase, ReadWriteRange) {
   EXPECT_OK(status, "vm_object_create");
 
   // fail to read past end
-  char buf[len * 2];
-  status = zx_vmo_read(vmo, buf, 0, sizeof(buf));
+  std::vector<char> buf(len * 2);
+  status = zx_vmo_read(vmo, buf.data(), 0, buf.size());
   EXPECT_EQ(status, ZX_ERR_OUT_OF_RANGE, "vm_object_read past end");
 
   // Successfully read 0 bytes at end
-  status = zx_vmo_read(vmo, buf, len, 0);
+  status = zx_vmo_read(vmo, buf.data(), len, 0);
   EXPECT_OK(status, "vm_object_read zero at end");
 
   // Fail to read 0 bytes past end
-  status = zx_vmo_read(vmo, buf, len + 1, 0);
+  status = zx_vmo_read(vmo, buf.data(), len + 1, 0);
   EXPECT_EQ(status, ZX_ERR_OUT_OF_RANGE, "vm_object_read zero past end");
 
   // fail to write past end
-  status = zx_vmo_write(vmo, buf, 0, sizeof(buf));
+  status = zx_vmo_write(vmo, buf.data(), 0, buf.size());
   EXPECT_EQ(status, ZX_ERR_OUT_OF_RANGE, "vm_object_write past end");
 
   // Successfully write 0 bytes at end
-  status = zx_vmo_write(vmo, buf, len, 0);
+  status = zx_vmo_write(vmo, buf.data(), len, 0);
   EXPECT_OK(status, "vm_object_write zero at end");
 
   // Fail to read 0 bytes past end
-  status = zx_vmo_write(vmo, buf, len + 1, 0);
+  status = zx_vmo_write(vmo, buf.data(), len + 1, 0);
   EXPECT_EQ(status, ZX_ERR_OUT_OF_RANGE, "vm_object_write zero past end");
 
   // Test for unsigned wraparound
-  status = zx_vmo_read(vmo, buf, UINT64_MAX - (len / 2), len);
+  status = zx_vmo_read(vmo, buf.data(), UINT64_MAX - (len / 2), len);
   EXPECT_EQ(status, ZX_ERR_OUT_OF_RANGE, "vm_object_read offset + len wraparound");
-  status = zx_vmo_write(vmo, buf, UINT64_MAX - (len / 2), len);
+  status = zx_vmo_write(vmo, buf.data(), UINT64_MAX - (len / 2), len);
   EXPECT_EQ(status, ZX_ERR_OUT_OF_RANGE, "vm_object_write offset + len wraparound");
 
   // close the handle
@@ -1197,10 +1196,7 @@ TEST(VmoTestCase, StreamSize) {
 // Tests that if the stream size is increased, the range in between the old stream size & the new
 // stream size is zeroed.
 TEST(VmoTestCase, ZeroRangeOnSetStreamSize) {
-  const size_t four_pages = zx_system_get_page_size() * 4;
-
-  uint8_t data_buff[four_pages];
-  memset(data_buff, 9, sizeof(data_buff));
+  const std::span fill_data = vmo_test::TestFillPages<4, 9>();
 
   // 2 Page stream, unbounded VMO.
   const size_t create_len = zx_system_get_page_size() * 2;
@@ -1208,29 +1204,29 @@ TEST(VmoTestCase, ZeroRangeOnSetStreamSize) {
   EXPECT_OK(zx::vmo::create(create_len, ZX_VMO_UNBOUNDED, &vmo));
 
   // Write data to 4 pages of VMO.
-  EXPECT_OK(vmo.write(data_buff, 0, sizeof(data_buff)));
+  EXPECT_OK(vmo.write(fill_data.data(), 0, fill_data.size_bytes()));
 
   // Increase stream length.
-  EXPECT_OK(vmo.set_stream_size(four_pages));
+  EXPECT_OK(vmo.set_stream_size(fill_data.size_bytes()));
 
   // Range between the old stream size & the new stream size should have been zeroed.
-  const size_t zero_len = four_pages - create_len;
-  uint8_t zero_buff[zero_len];
-  memset(zero_buff, 0, sizeof(zero_buff));
-  uint8_t vmo_buff[zero_len];
-  EXPECT_OK(vmo.read(vmo_buff, create_len, zero_len));
-  EXPECT_BYTES_EQ(vmo_buff, zero_buff, sizeof(vmo_buff));
+  const std::span two_pages_zero = vmo_test::TestFillPages<2, 0>();
+  ASSERT_EQ(fill_data.size_bytes() - create_len, two_pages_zero.size_bytes());
+
+  std::vector<uint8_t> vmo_buff(two_pages_zero.size_bytes());
+  EXPECT_OK(vmo.read(vmo_buff.data(), create_len, vmo_buff.size()));
+  EXPECT_BYTES_EQ(vmo_buff.data(), two_pages_zero.data(), vmo_buff.size());
 
   // Write data to all pages of VMO.
-  EXPECT_OK(vmo.write(data_buff, 0, sizeof(data_buff)));
+  EXPECT_OK(vmo.write(fill_data.data(), 0, fill_data.size_bytes()));
 
   // Decrease stream length back to create_len.
   vmo.set_stream_size(create_len);
 
   // Range in between the new (smaller) stream len & old (larger) stream len should have been
   // zeroed.
-  EXPECT_OK(vmo.read(vmo_buff, create_len, zero_len));
-  EXPECT_BYTES_EQ(vmo_buff, zero_buff, sizeof(vmo_buff));
+  EXPECT_OK(vmo.read(vmo_buff.data(), create_len, two_pages_zero.size_bytes()));
+  EXPECT_BYTES_EQ(vmo_buff.data(), two_pages_zero.data(), two_pages_zero.size_bytes());
 
   // Nn page-aligned range.
 
@@ -1241,26 +1237,23 @@ TEST(VmoTestCase, ZeroRangeOnSetStreamSize) {
   EXPECT_OK(zx::vmo::create(create_len_non_aligned, ZX_VMO_UNBOUNDED, &vmo2));
 
   // Write data to 4 pages.
-  EXPECT_OK(vmo2.write(data_buff, 0, sizeof(data_buff)));
+  EXPECT_OK(vmo2.write(fill_data.data(), 0, fill_data.size_bytes()));
 
   // Increase stream len to 4 pages
-  EXPECT_OK(vmo2.set_stream_size(four_pages));
+  EXPECT_OK(vmo2.set_stream_size(fill_data.size_bytes()));
 
   // Range from old create len to the end of the VMO should be zeroed.
-  const size_t zero_len2 = four_pages - create_len_non_aligned;
-  uint8_t zero_buff2[zero_len2];
-  memset(zero_buff2, 0, sizeof(zero_buff2));
-
-  uint8_t vmo2_buff[zero_len2];
-  EXPECT_OK(vmo2.read(vmo2_buff, create_len_non_aligned, zero_len2));
-  EXPECT_BYTES_EQ(vmo2_buff, zero_buff2, sizeof(vmo2_buff));
+  const std::span non_aligned_zero =
+      vmo_test::TestFillPages<4, 0>().subspan(create_len_non_aligned);
+  std::vector<uint8_t> vmo2_buff(non_aligned_zero.size_bytes());
+  EXPECT_OK(vmo2.read(vmo2_buff.data(), create_len_non_aligned, non_aligned_zero.size_bytes()));
+  EXPECT_BYTES_EQ(vmo2_buff.data(), non_aligned_zero.data(), vmo2_buff.size());
 
   // Range from start of VMO to old create len should retain data.
-  uint8_t vmo2_buff2[create_len_non_aligned];
-  uint8_t vmo2_databuff[create_len_non_aligned];
-  memset(vmo2_databuff, 9, sizeof(vmo2_databuff));
-  EXPECT_OK(vmo2.read(vmo2_buff2, 0, create_len_non_aligned));
-  EXPECT_BYTES_EQ(vmo2_buff2, vmo2_databuff, sizeof(vmo2_buff2));
+  const std::span vmo2_fill = fill_data.subspan(0, create_len_non_aligned);
+  std::vector<uint8_t> vmo2_buff2(create_len_non_aligned);
+  EXPECT_OK(vmo2.read(vmo2_buff2.data(), 0, create_len_non_aligned));
+  EXPECT_BYTES_EQ(vmo2_buff2.data(), vmo2_fill.data(), vmo2_buff2.size());
 }
 
 // Tests that calling set_stream_size won't discard pinned pages.
@@ -2699,16 +2692,14 @@ TEST(VmoTestCase, Discardable) {
   EXPECT_OK(vmo.op_range(ZX_VMO_OP_LOCK, 0, kSize, &lock_state, sizeof(lock_state)));
 
   // Make sure we read zeros.
-  uint8_t buf[kSize];
-  memset(buf, 0xff, sizeof(buf));
-  EXPECT_OK(vmo.read(buf, 0, sizeof(buf)));
-  uint8_t comp[kSize];
-  memset(comp, 0, sizeof(comp));
-  EXPECT_BYTES_EQ(buf, comp, sizeof(buf));
+  std::vector<uint8_t> buf(kSize, 0xff);
+  EXPECT_OK(vmo.read(buf.data(), 0, kSize));
+  const std::span zero_fill = vmo_test::TestFillPages<3, 0>();
+  EXPECT_BYTES_EQ(buf.data(), zero_fill.data(), kSize);
 
   // Write something to verify later.
-  memset(buf, 0xbb, sizeof(buf));
-  EXPECT_OK(vmo.write(buf, 0, sizeof(buf)));
+  const std::span bb_fill = vmo_test::TestFillPages<3, 0xbb>();
+  EXPECT_OK(vmo.write(bb_fill.data(), 0, bb_fill.size_bytes()));
 
   // Try mapping for READ and WRITE. Mapping without ALLOW_FAULTS should fail.
   uintptr_t ptr;
@@ -2722,14 +2713,15 @@ TEST(VmoTestCase, Discardable) {
                         kSize, &ptr));
   EXPECT_NE(0u, ptr);
 
+  const std::span ptr_data{reinterpret_cast<uint8_t *>(ptr), kSize};
   // Verify the contents written last. Overwrite it via the mapped address.
-  EXPECT_BYTES_EQ(buf, (uint8_t *)ptr, sizeof(buf));
-  memset((uint8_t *)ptr, 0xcc, sizeof(buf));
+  EXPECT_BYTES_EQ(bb_fill.data(), ptr_data.data(), bb_fill.size_bytes());
+  memset(ptr_data.data(), 0xcc, ptr_data.size_bytes());
 
   // Verify contents again.
-  memset(comp, 0xcc, sizeof(comp));
-  EXPECT_OK(vmo.read(buf, 0, sizeof(buf)));
-  EXPECT_BYTES_EQ(buf, comp, sizeof(buf));
+  const std::span cc_fill = vmo_test::TestFillPages<3, 0xcc>();
+  EXPECT_OK(vmo.read(buf.data(), 0, buf.size()));
+  EXPECT_BYTES_EQ(buf.data(), cc_fill.data(), cc_fill.size_bytes());
 
   // Unlock and unmap.
   EXPECT_OK(vmo.op_range(ZX_VMO_OP_UNLOCK, 0, kSize, nullptr, 0));
@@ -3011,28 +3003,25 @@ TEST(VmoTestCase, VmoUnbounded) {
   ASSERT_EQ(vmo.set_size(zx_system_get_page_size()), ZX_ERR_UNAVAILABLE);
 
   // Buffer to test read/writes
-  const size_t len = zx_system_get_page_size() * 4;
-  char buf[len];
+  const std::span zero_fill = vmo_test::TestFillPages<4, 0>();
+  std::vector<char> buf(zero_fill.size_bytes());
 
   // Can read up to end of VMO.
-  EXPECT_OK(vmo.read(buf, size - len, sizeof(buf)));
+  EXPECT_OK(vmo.read(buf.data(), size - buf.size(), buf.size()));
 
   // Can't read off end of VMO (unbounded is a lie).
-  EXPECT_EQ(vmo.read(buf, size, sizeof(buf)), ZX_ERR_OUT_OF_RANGE);
-
-  // Zero buffer for writes
-  memset(buf, 0, sizeof(buf));
+  EXPECT_EQ(vmo.read(buf.data(), size, buf.size()), ZX_ERR_OUT_OF_RANGE);
 
   // Can write up to end of VMO
-  EXPECT_OK(vmo.write(buf, size - len, len));
+  EXPECT_OK(vmo.write(zero_fill.data(), size - zero_fill.size_bytes(), zero_fill.size_bytes()));
 
   // Can't write off end of VMO
-  EXPECT_EQ(vmo.write(buf, size, len), ZX_ERR_OUT_OF_RANGE);
+  EXPECT_EQ(vmo.write(zero_fill.data(), size, zero_fill.size_bytes()), ZX_ERR_OUT_OF_RANGE);
 
   // Check contents
-  char check[len];
-  EXPECT_OK(vmo.read(check, size - len, sizeof(buf)));
-  EXPECT_EQ(std::strcmp(buf, check), 0);
+  std::vector<char> check(buf.size());
+  EXPECT_OK(vmo.read(check.data(), size - check.size(), check.size()));
+  EXPECT_EQ(std::strcmp(buf.data(), check.data()), 0);
 
   // Unbounded clones are not supported, but large clones can be made.
   zx::vmo clone;
@@ -3043,8 +3032,8 @@ TEST(VmoTestCase, VmoUnbounded) {
   EXPECT_EQ(info.rights & ZX_RIGHT_RESIZE, 0);
 
   // Clone can read pages form parent
-  EXPECT_OK(clone.read(check, size - len, sizeof(buf)));
-  EXPECT_EQ(std::strcmp(buf, check), 0);
+  EXPECT_OK(clone.read(check.data(), size - buf.size(), buf.size()));
+  EXPECT_EQ(std::strcmp(buf.data(), check.data()), 0);
 
   ASSERT_OK(clone.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
   EXPECT_EQ(info.rights & ZX_RIGHT_RESIZE, 0);
@@ -3070,10 +3059,10 @@ TEST(VmoTestCase, VmoUnbounded) {
   // Unbounded VMO does not get the RESIZE right, or be able to be resized.
   ASSERT_OK(vmo.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
   EXPECT_EQ(info.rights & ZX_RIGHT_RESIZE, 0);
-  EXPECT_EQ(ZX_ERR_UNAVAILABLE, vmo.set_size(len + zx_system_get_page_size()));
+  EXPECT_EQ(ZX_ERR_UNAVAILABLE, vmo.set_size(buf.size() + zx_system_get_page_size()));
 
   // Create a clone, which should not be resizable.
-  ASSERT_OK(vmo.create_child(ZX_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, len, &clone));
+  ASSERT_OK(vmo.create_child(ZX_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, buf.size(), &clone));
 
   ASSERT_OK(clone.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
   EXPECT_EQ(info.rights & ZX_RIGHT_RESIZE, 0);
@@ -3182,11 +3171,14 @@ TEST(VmoTestCase, Prefetch) {
   }
 }
 
-#if !LIMIT_CONTIGUOUS_ALLOCATIONS
 TEST(VmoTestCase, UnmapLoanedcontiguousWhileFaulting) {
   using pager_tests::TestThread;
   using pager_tests::UserPager;
   using pager_tests::Vmo;
+
+  if constexpr (LIMIT_CONTIGUOUS_ALLOCATIONS) {
+    ZXTEST_SKIP("avoiding large contiguous allocations");
+  }
 
   zx::unowned_resource system_resource = maybe_standalone::GetSystemResource();
   if (!system_resource->is_valid()) {
@@ -3268,7 +3260,6 @@ TEST(VmoTestCase, UnmapLoanedcontiguousWhileFaulting) {
     // physical page provider.
   }
 }
-#endif
 
 // Test that we cannot circumvent the resize right by creating a resizable reference or slice VMO.
 // Regression test for https://fxbug.dev/520618980.

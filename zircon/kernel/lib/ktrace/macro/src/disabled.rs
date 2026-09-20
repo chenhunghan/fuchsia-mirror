@@ -105,7 +105,7 @@ macro_rules! cpu_begin_scope {
 #[macro_export]
 macro_rules! begin_scope_cond {
     ($cond:expr, $category:tt, $label:tt $(, $key:tt => $val:expr)* $(,)?) => {
-        None
+        Option::<()>::None
     };
 }
 

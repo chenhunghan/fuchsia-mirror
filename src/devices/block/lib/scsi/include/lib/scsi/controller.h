@@ -964,7 +964,6 @@ enum class PostProcess {
   kNeedsErrorHandling,
 };
 
-struct DeviceOp;
 struct DeviceOptions;
 
 class BlockDevice;
@@ -1045,12 +1044,6 @@ class Controller {
   virtual fdf::Logger& driver_logger() = 0;
   virtual zx::event node_token() const { return {}; }
 
-  // Size of metadata struct required for each command transaction by this controller. This metadata
-  // struct must include scsi::DeviceOp as its first (and possibly only) member.
-  // TODO(https://fxbug.dev/505774108): Remove when all clients are migrated to
-  // [`ExecuteCommandsAsync`].
-  virtual size_t BlockOpSize() { return 0; }
-
   // Synchronously execute a SCSI command on the device at target:lun.
   // |cdb| contains the SCSI CDB to execute.
   // |data| and |is_write| specify optional data-out or data-in regions.
@@ -1059,23 +1052,6 @@ class Controller {
   // Typically used for administrative commands where data resides in process memory.
   virtual zx_status_t ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
                                          iovec data) = 0;
-
-  // Asynchronously execute a SCSI command on the device at target:lun.
-  // |cdb| contains the SCSI CDB to execute.
-  // |device_op|, |block_size_bytes|, and |is_write| specify optional data-out or data-in regions.
-  // Command execution status is returned by invoking |device_op|->Complete(status).
-  // Typically used for IO commands where data may not reside in process memory.
-  // The |data| is used when there is an additional data buffer to pass. For example, an operation
-  // like TRIM(block_trim_t) does not have a data vmo, but the SCSI UNMAP command requires a data
-  // vmo to record the address and length of the block to be trimmed. In this case, the additional
-  // buffer is passed through |data| and the device driver creates and manages the data vmo.
-  // TODO(https://fxbug.dev/505774108): Remove when all clients are migrated to
-  // [`ExecuteCommandsAsync`].
-  virtual void ExecuteCommandAsync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
-                                   uint32_t block_size_bytes, DeviceOp* device_op,
-                                   iovec data = {nullptr, 0}) {
-    ZX_PANIC("ExecuteCommandAsync should not be called when UseNewInterface() is true");
-  }
 
   // Asynchronously execute a batch of SCSI commands on the device at target:lun.
   // Each request must be completed with [`ScsiRequest::Complete(status)`], whether it was
@@ -1092,13 +1068,7 @@ class Controller {
   // concurrently, so implementations must be thread-safe. `ScsiRequest::Complete` may be called
   // from any thread (synchronously during `ExecuteCommandsAsync` or asynchronously from an
   // interrupt/dispatcher thread).
-  virtual void ExecuteCommandsAsync(uint8_t target, uint16_t lun, std::span<ScsiRequest> batch) {}
-
-  // Exists to facilitate a soft migration. If true, all external requests will be sent via
-  // [`ExecuteCommandsAsync()`] rather than [`ExecuteCommandAsync`].
-  // TODO(https://fxbug.dev/505774108): Remove when all clients are migrated to
-  // [`ExecuteCommandsAsync`].
-  virtual bool UseNewInterface() const { return false; }
+  virtual void ExecuteCommandsAsync(uint8_t target, uint16_t lun, std::span<ScsiRequest> batch) = 0;
 
   // Test whether the target-lun is ready.
   zx_status_t TestUnitReady(uint8_t target, uint16_t lun);

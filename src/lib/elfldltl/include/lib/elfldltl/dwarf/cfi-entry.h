@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "../diagnostics.h"
+#include "../layout.h"
 #include "encoding.h"
 #include "section-data.h"
 
@@ -146,7 +147,7 @@ struct CfiEntry {
   // Failures will be sent to the diagnostics object with any error_args
   // appended to the basic details in the FormatError call.  The Elf template
   // parameter indicates the byte order.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   static constexpr std::optional<CfiEntry> Read(  //
       Diagnostics& diag, std::span<const std::byte> bytes, ErrorArgs&&... error_args) {
     // The error_args are passed by reference since they may be used again.
@@ -203,9 +204,9 @@ struct CfiEntry {
   }
 
   // Like Read, but with NormalizeEhFrame applied to the results.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   static constexpr std::optional<CfiEntry> ReadEhFrame(  //
-      Diagnostics& diag, std::span<const std::byte> bytes, typename Elf::size_type vaddr,
+      Diagnostics& diag, std::span<const std::byte> bytes, Elf::size_type vaddr,
       ErrorArgs&&... error_args) {
     std::optional<CfiEntry> result = Read<Elf>(diag, bytes, std::forward<ErrorArgs>(error_args)...);
     if (result) {
@@ -216,10 +217,10 @@ struct CfiEntry {
 
   // This does ReadEhFrame, but using a Memory object to read the FDE at vaddr.
   // The error_args do not need to include reporting the FDE vaddr passed here.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   static constexpr std::optional<CfiEntry> ReadEhFrameFromMemory(  //
       Diagnostics& diag, MemoryReader<typename Elf::size_type, std::byte> auto& memory,
-      typename Elf::size_type vaddr, ErrorArgs&&... error_args) {
+      Elf::size_type vaddr, ErrorArgs&&... error_args) {
     auto bytes = memory.template ReadArray<std::byte>(vaddr);
     if (!bytes) [[unlikely]] {
       diag.FormatError("invalid FDE pointer ", FileAddress{vaddr},
@@ -246,11 +247,11 @@ struct CfiEntry {
   // Read the CIE referenced by this FDE.  The Memory object is used to read
   // from virtual addresses in the same address space used in NormalizeEhFrame
   // on this object.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   constexpr std::optional<CfiEntry> ReadEhFrameCieFromMemory(  //
       Diagnostics& diag, MemoryReader<typename Elf::size_type, std::byte> auto& memory,
       ErrorArgs&&... error_args) const {
-    using size_type = typename Elf::size_type;
+    using size_type = Elf::size_type;
 
     if (IsCie()) [[unlikely]] {
       diag.FormatError("DWARF CFI FDE is actually a CIE", std::forward<ErrorArgs>(error_args)...);
@@ -279,7 +280,7 @@ struct CfiEntry {
   // that of the CIE itself if in .eh_frame format, where "PC-relative"
   // encodings might be used.  The error_args do not need to include reporting
   // the CIE vaddr passed here.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   std::optional<CfiCie> DecodeCie(Diagnostics& diag, uint64_t vaddr,
                                   ErrorArgs&&... error_args) const {
     auto truncated = [vaddr, &diag, &error_args...]() {
@@ -492,7 +493,7 @@ struct CfiEntry {
   // itself if in .eh_frame format, where "PC-relative" encodings might be
   // used. The error_args do not need to include reporting the FDE vaddr passed
   // here.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   std::optional<CfiFde> DecodeFde(Diagnostics& diag, uint64_t vaddr, const CfiCie& cie,
                                   ErrorArgs&&... error_args) const {
     auto truncated = [vaddr, &diag, &error_args...](uint8_t encoding) {

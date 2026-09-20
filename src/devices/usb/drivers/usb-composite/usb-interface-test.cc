@@ -7,6 +7,7 @@
 #include <lib/async-loop/cpp/loop.h>
 
 #include <queue>
+#include <vector>
 
 #include <zxtest/zxtest.h>
 
@@ -241,11 +242,11 @@ TEST_F(NoAssociationInterfaceTest, UsbProtocolTest) {
   std::vector<uint8_t> expected_read_buffer = {6, 5, 4};
   usb_.ExpectControlIn(ZX_OK, 10, 9, 8, 7, ZX_TIME_INFINITE, expected_read_buffer);
   size_t actual;
-  uint8_t read_buffer[expected_read_buffer.size()];
-  EXPECT_OK(usb_client_.ControlIn(10, 9, 8, 7, ZX_TIME_INFINITE, read_buffer, sizeof(read_buffer),
-                                  &actual));
-  EXPECT_EQ(actual, sizeof(read_buffer));
-  EXPECT_BYTES_EQ(read_buffer, expected_read_buffer.data(), actual);
+  std::vector<uint8_t> read_buffer(expected_read_buffer.size());
+  EXPECT_OK(usb_client_.ControlIn(10, 9, 8, 7, ZX_TIME_INFINITE, read_buffer.data(),
+                                  read_buffer.size(), &actual));
+  EXPECT_EQ(actual, read_buffer.size());
+  EXPECT_BYTES_EQ(read_buffer.data(), expected_read_buffer.data(), actual);
 
   // Made up values for testing
   usb_request_t expected_req = {
@@ -309,10 +310,10 @@ TEST_F(NoAssociationInterfaceTest, UsbProtocolTest) {
 
   std::vector<uint8_t> expected_config{0xA, 0xB, 0xC, 0xD, 0xE, 0xF};
   usb_.ExpectGetConfigurationDescriptor(ZX_OK, 4, expected_config);
-  uint8_t config[expected_config.size()];
-  EXPECT_OK(usb_client_.GetConfigurationDescriptor(4, config, sizeof(config), &actual));
+  std::vector<uint8_t> config(expected_config.size());
+  EXPECT_OK(usb_client_.GetConfigurationDescriptor(4, config.data(), config.size(), &actual));
   EXPECT_EQ(actual, expected_config.size());
-  EXPECT_BYTES_EQ(expected_config.data(), config, expected_config.size());
+  EXPECT_BYTES_EQ(expected_config.data(), config.data(), expected_config.size());
 
   usb_.ExpectCancelAll(ZX_OK, 5);
   EXPECT_OK(usb_client_.CancelAll(5));

@@ -228,7 +228,7 @@ class RemoteDecodedModule : public RemoteDecodedFile, public RemoteDecodedModule
   using typename Base::Phdr;
   using typename Base::size_type;
   using typename Base::Soname;
-  using Ehdr = typename Elf::Ehdr;
+  using Ehdr = Elf::Ehdr;
 
   // Names of each DT_NEEDED entry for the module.
   using NeededList = std::vector<Soname>;

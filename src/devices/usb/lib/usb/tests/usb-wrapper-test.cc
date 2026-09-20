@@ -5,6 +5,8 @@
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fuchsia/hardware/usb/descriptor/c/banjo.h>
 
+#include <vector>
+
 #include <usb/hid.h>
 #include <usb/usb.h>
 #include <zxtest/zxtest.h>
@@ -768,11 +770,11 @@ void VerifyInterface(const Interface& interface, const expected_interface_values
 
 TEST_F(InterfaceAssociationTest, TestUnownedInterfaceListSkipAlt) {
   auto length = usb_.GetDescriptorsLength();
-  uint8_t descriptor[length];
+  std::vector<uint8_t> descriptor(length);
   size_t actual;
-  usb_.GetDescriptors(descriptor, length, &actual);
+  usb_.GetDescriptors(descriptor.data(), length, &actual);
   EXPECT_EQ(actual, length);
-  EXPECT_BYTES_EQ(descriptor, &kTestInterfaceAssociation, length);
+  EXPECT_BYTES_EQ(descriptor.data(), &kTestInterfaceAssociation, length);
 
   const expected_interface_values_t expected[] = {
       expected_interface_values_t{
@@ -793,7 +795,7 @@ TEST_F(InterfaceAssociationTest, TestUnownedInterfaceListSkipAlt) {
           .association = nullptr,
       },
   };
-  UnownedInterfaceList ilist(descriptor, length, true);
+  UnownedInterfaceList ilist(descriptor.data(), length, true);
   uint32_t i = 0;
   for (const auto& interface : ilist) {
     VerifyInterface(interface, expected[i], true);
@@ -803,11 +805,11 @@ TEST_F(InterfaceAssociationTest, TestUnownedInterfaceListSkipAlt) {
 
 TEST_F(InterfaceAssociationTest, TestUnownedInterfaceList) {
   auto length = usb_.GetDescriptorsLength();
-  uint8_t descriptor[length];
+  std::vector<uint8_t> descriptor(length);
   size_t actual;
-  usb_.GetDescriptors(descriptor, length, &actual);
+  usb_.GetDescriptors(descriptor.data(), length, &actual);
   EXPECT_EQ(actual, length);
-  EXPECT_BYTES_EQ(descriptor, &kTestInterfaceAssociation, length);
+  EXPECT_BYTES_EQ(descriptor.data(), &kTestInterfaceAssociation, length);
 
   const expected_interface_values_t expected[] = {
       expected_interface_values_t{
@@ -840,7 +842,7 @@ TEST_F(InterfaceAssociationTest, TestUnownedInterfaceList) {
           .association = nullptr,
       },
   };
-  UnownedInterfaceList ilist(descriptor, length, false);
+  UnownedInterfaceList ilist(descriptor.data(), length, false);
   uint32_t i = 0;
   for (const auto& interface : ilist) {
     VerifyInterface(interface, expected[i], false);

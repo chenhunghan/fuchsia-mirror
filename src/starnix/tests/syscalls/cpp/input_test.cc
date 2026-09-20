@@ -223,6 +223,7 @@ TEST(InputTest, DevicePropertiesMatchKeyboardProperties) {
         << "get supported keys failed: " << strerror(errno);
     ASSERT_TRUE(get_bit(buf, BTN_MISC)) << " BTN_MISC not supported (but should be)";
     ASSERT_TRUE(get_bit(buf, KEY_POWER)) << " KEY_POWER not supported (but should be)";
+    ASSERT_TRUE(get_bit(buf, KEY_A)) << " KEY_A not supported (but should be)";
   }
 
   // Getting the supported absolute position attributes must succeed, but Keyboard should
@@ -320,7 +321,7 @@ TEST(InputTest, DevicePropertiesMatchKeyboardProperties) {
   }
 }
 
-TEST(InputTest, DevicePropertiesMatchMouseWheelProperties) {
+TEST(InputTest, DevicePropertiesMatchMouseProperties) {
   // TODO(https://fxbug.dev/317285180) don't skip on baseline
   if (getuid() != 0) {
     GTEST_SKIP() << "Can only be run as root.";
@@ -341,14 +342,21 @@ TEST(InputTest, DevicePropertiesMatchMouseWheelProperties) {
     ASSERT_EQ(0, ioctl(fd.get(), EVIOCGID, &buf)) << "get identifier failed: " << strerror(errno);
   }
 
-  // Getting the supported keys must succeed, with `BTN_MOUSE` unsupported so a cursor is not
-  // drawn on the screen.
+  // Getting the supported keys must succeed, with BTN_LEFT (BTN_MOUSE), BTN_RIGHT, BTN_MIDDLE,
+  // BTN_SIDE, and BTN_EXTRA supported. BTN_TOUCH must not be supported.
   {
     constexpr auto kBufSize = min_bytes(KEY_MAX);
     std::array<uint8_t, kBufSize> buf{};
     ASSERT_EQ(0, ioctl(fd.get(), EVIOCGBIT(EV_KEY, kBufSize), &buf))
         << "get supported keys failed: " << strerror(errno);
-    ASSERT_FALSE(get_bit(buf, BTN_MOUSE)) << " BTN_MOUSE should not be supported";
+    // BTN_LEFT and BTN_MOUSE are aliases (0x110) in Linux UAPI.
+    ASSERT_TRUE(get_bit(buf, BTN_MOUSE)) << " BTN_MOUSE should be supported";
+    ASSERT_TRUE(get_bit(buf, BTN_LEFT)) << " BTN_LEFT should be supported";
+    ASSERT_TRUE(get_bit(buf, BTN_RIGHT)) << " BTN_RIGHT should be supported";
+    ASSERT_TRUE(get_bit(buf, BTN_MIDDLE)) << " BTN_MIDDLE should be supported";
+    ASSERT_TRUE(get_bit(buf, BTN_SIDE)) << " BTN_SIDE should be supported";
+    ASSERT_TRUE(get_bit(buf, BTN_EXTRA)) << " BTN_EXTRA should be supported";
+    ASSERT_FALSE(get_bit(buf, BTN_TOUCH)) << " BTN_TOUCH should not be supported";
   }
 
   // Getting the supported absolute position attributes must succeed, but Mouse should
@@ -366,16 +374,17 @@ TEST(InputTest, DevicePropertiesMatchMouseWheelProperties) {
     ASSERT_FALSE(get_bit(buf, ABS_MT_POSITION_Y)) << " ABS_MT_POSITION_Y should not be supported";
   }
 
-  // Getting the supported relative motion attributes must succeed, with `REL_WHEEL` supported
-  // but `REL_X` and `REL_Y` unsupported so a cursor is not drawn on the screen.
+  // Getting the supported relative motion attributes must succeed, with REL_X, REL_Y,
+  // REL_WHEEL, and REL_HWHEEL supported.
   {
     constexpr auto kBufSize = min_bytes(REL_MAX);
     std::array<uint8_t, kBufSize> buf{};
     ASSERT_EQ(0, ioctl(fd.get(), EVIOCGBIT(EV_REL, kBufSize), &buf))
         << "get supported relative motion failed: " << strerror(errno);
+    ASSERT_TRUE(get_bit(buf, REL_X)) << " REL_X not supported (but should be)";
+    ASSERT_TRUE(get_bit(buf, REL_Y)) << " REL_Y not supported (but should be)";
     ASSERT_TRUE(get_bit(buf, REL_WHEEL)) << " REL_WHEEL not supported (but should be)";
-    ASSERT_FALSE(get_bit(buf, REL_X)) << " REL_X should not be supported";
-    ASSERT_FALSE(get_bit(buf, REL_Y)) << " REL_Y should not be supported";
+    ASSERT_TRUE(get_bit(buf, REL_HWHEEL)) << " REL_HWHEEL not supported (but should be)";
   }
 
   // Getting the supported switches must succeed, but the actual values don't matter.
@@ -410,15 +419,16 @@ TEST(InputTest, DevicePropertiesMatchMouseWheelProperties) {
         << "get supported miscellaneous features failed: " << strerror(errno);
   }
 
-  // Getting the input properties must succeed, with `INPUT_PROP_DIRECT` and `INPUT_PROP_POINTER`
-  // unsupported.
+  // Getting the input properties must succeed, with `INPUT_PROP_POINTER` supported and
+  // `INPUT_PROP_DIRECT` unsupported.
   {
     constexpr auto kBufSize = min_bytes(INPUT_PROP_MAX);
     std::array<uint8_t, kBufSize> buf{};
     ASSERT_EQ(0, ioctl(fd.get(), EVIOCGPROP(kBufSize), &buf))
         << "get supported input properties features failed: " << strerror(errno);
     ASSERT_FALSE(get_bit(buf, INPUT_PROP_DIRECT)) << " INPUT_PROP_DIRECT should not be supported";
-    ASSERT_FALSE(get_bit(buf, INPUT_PROP_POINTER)) << " INPUT_PROP_POINTER should not be supported";
+    ASSERT_TRUE(get_bit(buf, INPUT_PROP_POINTER))
+        << " INPUT_PROP_POINTER not supported (but should be)";
   }
 
   // Getting the ABS_MT_SLOT range must succeed, but the actual values don't matter.
@@ -468,6 +478,86 @@ TEST(InputTest, DeviceCanBeRegisteredWithEpoll) {
 
   epoll_event event_buf[1];
   ASSERT_EQ(0, epoll_wait(epoll_fd.get(), event_buf, 1, 0));
+}
+
+TEST(InputTest, GetDeviceName) {
+  // TODO(https://fxbug.dev/317285180) don't skip on baseline
+  if (getuid() != 0) {
+    GTEST_SKIP() << "Can only be run as root.";
+  }
+
+  auto fd = GetInputFile(kTouchInputMinor);
+  ASSERT_TRUE(fd.is_valid());
+
+  // Getting the device name with zero buffer length must succeed and return 0 bytes without
+  // underflowing.
+  ASSERT_EQ(0, ioctl(fd.get(), EVIOCGNAME(0), nullptr))
+      << "get name with 0 length failed: " << strerror(errno);
+
+  // Getting the device name with non-zero buffer must succeed and return the name.
+  char buf[256] = {};
+  int ret = ioctl(fd.get(), EVIOCGNAME(sizeof(buf)), buf);
+  ASSERT_GT(ret, 0) << "get name failed: " << strerror(errno);
+  EXPECT_GT(strlen(buf), 0u);
+}
+
+// The evdev current-state queries report what the device is doing right now (which keys
+// are held, which LEDs are lit, which sounds are playing, which switches are toggled), as
+// opposed to the EVIOCGBIT queries above which report what the device is capable of.
+//
+// Starnix does not track this state and reports all-zeros, but these must not fail.
+// `xf86-input-evdev` issues all four unconditionally during PreInit and treats any error
+// as fatal, so returning EINVAL here stops X11 from bringing up any input device at all.
+TEST(InputTest, CurrentStateQueriesSucceed) {
+  // TODO(https://fxbug.dev/317285180) don't skip on baseline
+  if (getuid() != 0) {
+    GTEST_SKIP() << "Can only be run as root.";
+  }
+
+  for (const uint32_t minor : {kTouchInputMinor, kKeyboardInputMinor, kMouseInputMinor}) {
+    auto fd = GetInputFile(minor);
+    ASSERT_TRUE(fd.is_valid());
+
+    {
+      std::array<uint8_t, min_bytes(KEY_MAX)> buf;
+      buf.fill(0xAA);
+      ASSERT_EQ(0, ioctl(fd.get(), EVIOCGKEY(buf.size()), buf.data()))
+          << "minor " << minor << ": get key state failed: " << strerror(errno);
+      for (size_t i = 0; i < buf.size(); i++) {
+        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no key should be reported as held";
+      }
+    }
+
+    {
+      std::array<uint8_t, min_bytes(LED_MAX)> buf;
+      buf.fill(0xAA);
+      ASSERT_EQ(0, ioctl(fd.get(), EVIOCGLED(buf.size()), buf.data()))
+          << "minor " << minor << ": get led state failed: " << strerror(errno);
+      for (size_t i = 0; i < buf.size(); i++) {
+        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no LED should be reported as lit";
+      }
+    }
+
+    {
+      std::array<uint8_t, min_bytes(SND_MAX)> buf;
+      buf.fill(0xAA);
+      ASSERT_EQ(0, ioctl(fd.get(), EVIOCGSND(buf.size()), buf.data()))
+          << "minor " << minor << ": get sound state failed: " << strerror(errno);
+      for (size_t i = 0; i < buf.size(); i++) {
+        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no sound should be reported as playing";
+      }
+    }
+
+    {
+      std::array<uint8_t, min_bytes(SW_MAX)> buf;
+      buf.fill(0xAA);
+      ASSERT_EQ(0, ioctl(fd.get(), EVIOCGSW(buf.size()), buf.data()))
+          << "minor " << minor << ": get switch state failed: " << strerror(errno);
+      for (size_t i = 0; i < buf.size(); i++) {
+        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no switch should be reported as toggled";
+      }
+    }
+  }
 }
 
 }  // namespace

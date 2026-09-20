@@ -49,12 +49,11 @@ pub struct BlockFifoRequest {
     pub vmo_offset: u64,
     pub dev_offset: u64,
     pub trace_flow_id: u64,
-    pub dun: u32,
+    pub dun: u64,
     pub slot: u8,
     pub padding: u8,
     pub compressed_prefix_bytes: u16,
     pub uncompressed_bytes: u32,
-    pub padding2: u32,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
@@ -81,15 +80,13 @@ const _: () = {
     ["Offset of field: BlockFifoRequest::dun"]
         [::std::mem::offset_of!(BlockFifoRequest, dun) - 48usize];
     ["Offset of field: BlockFifoRequest::slot"]
-        [::std::mem::offset_of!(BlockFifoRequest, slot) - 52usize];
+        [::std::mem::offset_of!(BlockFifoRequest, slot) - 56usize];
     ["Offset of field: BlockFifoRequest::padding"]
-        [::std::mem::offset_of!(BlockFifoRequest, padding) - 53usize];
+        [::std::mem::offset_of!(BlockFifoRequest, padding) - 57usize];
     ["Offset of field: BlockFifoRequest::compressed_prefix_bytes"]
-        [::std::mem::offset_of!(BlockFifoRequest, compressed_prefix_bytes) - 54usize];
+        [::std::mem::offset_of!(BlockFifoRequest, compressed_prefix_bytes) - 58usize];
     ["Offset of field: BlockFifoRequest::uncompressed_bytes"]
-        [::std::mem::offset_of!(BlockFifoRequest, uncompressed_bytes) - 56usize];
-    ["Offset of field: BlockFifoRequest::padding2"]
-        [::std::mem::offset_of!(BlockFifoRequest, padding2) - 60usize];
+        [::std::mem::offset_of!(BlockFifoRequest, uncompressed_bytes) - 60usize];
 };
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, FromBytes, Immutable, IntoBytes, KnownLayout)]

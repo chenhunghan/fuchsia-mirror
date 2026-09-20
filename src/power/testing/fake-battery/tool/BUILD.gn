@@ -12,7 +12,6 @@ rustc_binary("fake_battery_cli_bin") {
   edition = "2024"
   deps = [
     "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
-    "//sdk/fidl/fuchsia.hardware.power.source:fuchsia.hardware.power.source_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component",

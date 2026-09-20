@@ -1,6 +1,9 @@
 {
     "connectivity": {
-        "usb_socket_path": "$XDG_RUNTIME_DIR/ffx_usb.sock"
+        "usb_socket_path": "$XDG_RUNTIME_DIR/ffx_usb.sock",
+        "uart": {
+            "baud": 1000000
+        }
     },
     "ffx": {
         "subtool-search-paths": "$BUILD_DIR/host-tools",
@@ -39,8 +42,14 @@
         }
     },
     "gce": {
+        "bucket": "",
+        "default_machine_type": "n2-standard-4",
         "instance_dir": "$SHARED_DATA/gce_instances",
         "project": "",
+        "vbmeta": {
+            "key": "",
+            "metadata": ""
+        },
         "zone": ""
     },
     "proxy": {

@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("goldfish-display-dml") {
+  dml = "meta/goldfish-display.dml"
+  driver_name = "goldfish-display"
+}
+
 driver_bind_rules("goldfish-display-bind") {
-  rules = "meta/goldfish-display.bind"
+  bind_output = "goldfish-display.bindbc"
+  dml_label = ":goldfish-display-dml"
   tests = "meta/bind-tests.json"
   deps = [ "//src/devices/bind/fuchsia.goldfish.platform" ]
 }
@@ -29,10 +35,10 @@ fuchsia_cc_driver("goldfish-display-driver") {
 }
 
 fuchsia_driver_component("goldfish-display") {
+  dml_label = ":goldfish-display-dml"
   component_name = "goldfish-display"
   deps = [ ":goldfish-display-driver" ]
   info = "meta/goldfish-display-info.json"
-  manifest = "meta/goldfish-display.cml"
 }
 
 fuchsia_driver_package("goldfish_display") {

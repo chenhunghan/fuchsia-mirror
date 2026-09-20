@@ -37,7 +37,8 @@ pub trait TestResult: Sized {
     /// How to repeatedly run a test with this result in a single threaded executor.
     fn run_singlethreaded(
         test: &(dyn Sync + Fn(usize) -> Pin<Box<dyn Future<Output = Self>>>),
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self;
 
     /// Similarly, but use run_until_stalled
@@ -48,7 +49,8 @@ pub trait TestResult: Sized {
     >(
         fake_time: bool,
         test: F,
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self;
 
     /// Whether the result is successful.
@@ -61,7 +63,8 @@ pub trait MultithreadedTestResult: Sized {
     fn run<F: 'static + Sync + Fn(usize) -> Fut, Fut: 'static + Send + Future<Output = Self>>(
         test: F,
         threads: u8,
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self;
 
     /// Whether the result is successful.
@@ -71,9 +74,15 @@ pub trait MultithreadedTestResult: Sized {
 impl<E: Send + 'static + std::fmt::Debug> TestResult for Result<(), E> {
     fn run_singlethreaded(
         test: &(dyn Sync + Fn(usize) -> Pin<Box<dyn Future<Output = Self>>>),
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self {
-        cfg.run(1, |run| LocalExecutorBuilder::new().build().run_singlethreaded(test(run)))
+        cfg.run(1, |run| {
+            LocalExecutorBuilder::new()
+                .allow_interrupts(options.allow_interrupts)
+                .build()
+                .run_singlethreaded(test(run))
+        })
     }
 
     #[cfg(target_os = "fuchsia")]
@@ -83,11 +92,15 @@ impl<E: Send + 'static + std::fmt::Debug> TestResult for Result<(), E> {
     >(
         fake_time: bool,
         test: F,
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self {
         let test = apply_timeout!(cfg, |run| test(run));
         cfg.run(1, |run| {
-            let mut executor = TestExecutorBuilder::new().fake_time(fake_time).build();
+            let mut executor = TestExecutorBuilder::new()
+                .fake_time(fake_time)
+                .allow_interrupts(options.allow_interrupts)
+                .build();
             match executor.run_until_stalled(&mut std::pin::pin!(test(run))) {
                 Poll::Ready(result) => result,
                 Poll::Pending => panic!(
@@ -107,13 +120,18 @@ impl<E: 'static + Send> MultithreadedTestResult for Result<(), E> {
     fn run<F: 'static + Sync + Fn(usize) -> Fut, Fut: 'static + Send + Future<Output = Self>>(
         test: F,
         threads: u8,
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self {
         let test = apply_timeout!(cfg, |run| test(run));
         // Fuchsia's SendExecutor actually uses an extra thread, but it doesn't do anything, so we
         // don't count it.
         cfg.run(threads, |run| {
-            SendExecutorBuilder::new().num_threads(threads).build().run(test(run))
+            SendExecutorBuilder::new()
+                .num_threads(threads)
+                .allow_interrupts(options.allow_interrupts)
+                .build()
+                .run(test(run))
         })
     }
 
@@ -125,10 +143,14 @@ impl<E: 'static + Send> MultithreadedTestResult for Result<(), E> {
 impl TestResult for () {
     fn run_singlethreaded(
         test: &(dyn Sync + Fn(usize) -> Pin<Box<dyn Future<Output = Self>>>),
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self {
         let _ = cfg.run(1, |run| {
-            LocalExecutorBuilder::new().build().run_singlethreaded(test(run));
+            LocalExecutorBuilder::new()
+                .allow_interrupts(options.allow_interrupts)
+                .build()
+                .run_singlethreaded(test(run));
             Ok::<(), ()>(())
         });
     }
@@ -140,7 +162,8 @@ impl TestResult for () {
     >(
         fake_time: bool,
         test: F,
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self {
         let _ = TestResult::run_until_stalled(
             fake_time,
@@ -151,6 +174,7 @@ impl TestResult for () {
                     Ok::<(), ()>(())
                 }
             },
+            options,
             cfg,
         );
     }
@@ -164,12 +188,17 @@ impl MultithreadedTestResult for () {
     fn run<F: 'static + Sync + Fn(usize) -> Fut, Fut: 'static + Send + Future<Output = Self>>(
         test: F,
         threads: u8,
-        cfg: Config,
+        options: TestOptions,
+        cfg: EnvironmentConfig,
     ) -> Self {
         // Fuchsia's SendExecutor actually uses an extra thread, but it doesn't do anything, so we
         // don't count it.
         let _ = cfg.run(threads, |run| {
-            SendExecutorBuilder::new().num_threads(threads).build().run(test(run));
+            SendExecutorBuilder::new()
+                .num_threads(threads)
+                .allow_interrupts(options.allow_interrupts)
+                .build()
+                .run(test(run));
             Ok::<(), ()>(())
         });
     }
@@ -179,9 +208,9 @@ impl MultithreadedTestResult for () {
     }
 }
 
-/// Configuration variables for a single test run.
+/// Environment configurations for a single test run.
 #[derive(Clone)]
-pub struct Config {
+pub struct EnvironmentConfig {
     repeat_count: usize,
     max_concurrency: usize,
     max_threads: u8,
@@ -192,7 +221,7 @@ fn env_var<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).unwrap_or_default().parse().unwrap_or(default)
 }
 
-impl Config {
+impl EnvironmentConfig {
     fn get() -> Self {
         let repeat_count = std::cmp::max(1, env_var("FASYNC_TEST_REPEAT_COUNT", 1));
         let max_concurrency = env_var("FASYNC_TEST_MAX_CONCURRENCY", 0);
@@ -254,40 +283,51 @@ impl Config {
     }
 }
 
-/// Runs a test in an executor, potentially repeatedly and concurrently
-pub fn run_singlethreaded_test<F, Fut, R>(test: F) -> R
+/// Options for running an async test.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TestOptions {
+    /// True iff the executor should support binding Zircon interrupts.
+    pub allow_interrupts: bool,
+}
+
+/// Runs a test in an executor, potentially repeatedly and concurrently.
+pub fn run_singlethreaded_test<F, Fut, R>(test: F, options: TestOptions) -> R
 where
     F: 'static + Sync + Fn(usize) -> Fut,
     Fut: 'static + Future<Output = R>,
     R: TestResult,
 {
-    TestResult::run_singlethreaded(&|run| test(run).boxed_local(), Config::get())
+    TestResult::run_singlethreaded(
+        &|run| test(run).boxed_local(),
+        options,
+        EnvironmentConfig::get(),
+    )
 }
 
-/// Runs a test in an executor until it's stalled
+/// Runs a test in an executor until it's stalled.
 #[cfg(target_os = "fuchsia")]
-pub fn run_until_stalled_test<F, Fut, R>(fake_time: bool, test: F) -> R
+pub fn run_until_stalled_test<F, Fut, R>(fake_time: bool, test: F, options: TestOptions) -> R
 where
     F: 'static + Sync + Fn(usize) -> Fut,
     Fut: 'static + Future<Output = R>,
     R: TestResult,
 {
-    TestResult::run_until_stalled(fake_time, test, Config::get())
+    TestResult::run_until_stalled(fake_time, test, options, EnvironmentConfig::get())
 }
 
-/// Runs a test in an executor, potentially repeatedly and concurrently
-pub fn run_test<F, Fut, R>(test: F, threads: u8) -> R
+/// Runs a test in an executor, potentially repeatedly and concurrently.
+pub fn run_test<F, Fut, R>(test: F, threads: u8, options: TestOptions) -> R
 where
     F: 'static + Sync + Fn(usize) -> Fut,
     Fut: 'static + Send + Future<Output = R>,
     R: MultithreadedTestResult,
 {
-    MultithreadedTestResult::run(test, threads, Config::get())
+    MultithreadedTestResult::run(test, threads, options, EnvironmentConfig::get())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, MultithreadedTestResult, TestResult};
+    use super::{EnvironmentConfig, MultithreadedTestResult, TestOptions, TestResult};
     use futures::lock::Mutex;
     use futures::prelude::*;
     use std::collections::HashSet;
@@ -309,7 +349,8 @@ mod tests {
                 }
                 .boxed_local()
             },
-            Config {
+            TestOptions::default(),
+            EnvironmentConfig {
                 repeat_count: REPEAT_COUNT,
                 max_concurrency: 0,
                 max_threads: MAX_THREADS,
@@ -331,7 +372,8 @@ mod tests {
                 }
                 .boxed_local()
             },
-            Config {
+            TestOptions::default(),
+            EnvironmentConfig {
                 repeat_count: 1,
                 max_concurrency: 0,
                 max_threads: 0,
@@ -355,7 +397,8 @@ mod tests {
                     assert!(pending_runs_child.lock().await.remove(&i));
                 }
             },
-            Config {
+            TestOptions::default(),
+            EnvironmentConfig {
                 repeat_count: REPEAT_COUNT,
                 max_concurrency: 1,
                 max_threads: 1,
@@ -380,7 +423,8 @@ mod tests {
                 }
             },
             THREADS,
-            Config {
+            TestOptions::default(),
+            EnvironmentConfig {
                 repeat_count: REPEAT_COUNT,
                 max_concurrency: 0,
                 max_threads: THREADS,
@@ -401,11 +445,58 @@ mod tests {
                 futures::future::pending::<()>().await;
             },
             THREADS,
-            Config {
+            TestOptions::default(),
+            EnvironmentConfig {
                 repeat_count: 1,
                 max_concurrency: 0,
                 max_threads: 0,
                 timeout: Some(Duration::from_millis(1)),
+            },
+        );
+    }
+
+    #[test]
+    fn run_singlethreaded_with_allow_interrupts() {
+        TestResult::run_singlethreaded(
+            &move |_| async move {}.boxed_local(),
+            TestOptions { allow_interrupts: true },
+            EnvironmentConfig {
+                repeat_count: 1,
+                max_concurrency: 0,
+                max_threads: 1,
+                timeout: None,
+            },
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "fuchsia")]
+    fn run_until_stalled_with_allow_interrupts() {
+        TestResult::run_until_stalled(
+            false,
+            move |_| async move {},
+            TestOptions { allow_interrupts: true },
+            EnvironmentConfig {
+                repeat_count: 1,
+                max_concurrency: 1,
+                max_threads: 1,
+                timeout: None,
+            },
+        );
+    }
+
+    #[test]
+    fn run_with_allow_interrupts() {
+        const THREADS: u8 = 2;
+        MultithreadedTestResult::run(
+            move |_| async move {},
+            THREADS,
+            TestOptions { allow_interrupts: true },
+            EnvironmentConfig {
+                repeat_count: 1,
+                max_concurrency: 0,
+                max_threads: THREADS,
+                timeout: None,
             },
         );
     }

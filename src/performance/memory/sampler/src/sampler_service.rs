@@ -34,17 +34,38 @@ const MAX_CONCURRENT_REQUESTS: usize = 10;
 /// profiles.
 const MAX_DURATION_BETWEEN_PARTIAL_PROFILES: Duration = Duration::from_secs(12 * 60 * 60);
 
+/// Marks `builder` lossy if the client has signalled that it dropped datagrams
+/// because the shared socket's buffer was saturated. The signal latches on the
+/// socket, so polling it at profile emission time is sufficient and keeps the
+/// syscall off the per-datagram path.
+fn check_lossy_signal(socket: &Option<zx::Socket>, builder: &mut ProfileBuilder) {
+    if builder.is_lossy() {
+        return;
+    }
+    let Some(socket) = socket else {
+        return;
+    };
+    if let zx::WaitResult::Ok(signals) =
+        socket.wait_one(zx::Signals::USER_0, zx::MonotonicInstant::ZERO)
+        && signals.contains(zx::Signals::USER_0)
+    {
+        builder.set_lossy(true);
+    }
+}
+
 async fn maybe_emit_partial_profile<'a>(
     builder: &'a mut ProfileBuilder,
     tx: &'a mut mpsc::Sender<ProfileReport>,
     index: usize,
     mut time_of_last_profile: Instant,
+    shared_socket: &Option<zx::Socket>,
 ) -> Result<Option<(&'a mut ProfileBuilder, &'a mut mpsc::Sender<ProfileReport>, Instant)>, Error> {
     let now = Instant::now();
     if (now - time_of_last_profile >= MAX_DURATION_BETWEEN_PARTIAL_PROFILES)
         || (builder.get_approximate_reclaimable_stack_traces_count()
             >= RECLAIMABLE_STACK_TRACES_PROFILE_THRESHOLD)
     {
+        check_lossy_signal(shared_socket, builder);
         let profile = builder.build_partial_profile(index)?;
         let res = tx.try_send(profile);
         if let Err(ref e) = res
@@ -123,6 +144,7 @@ async fn process_sampler_requests(
     let mut time_of_last_profile = Instant::now();
     let mut request_index = 0;
     let mut is_enabled = true;
+    let mut shared_socket: Option<zx::Socket> = None;
 
     let mut event_streams: SelectAll<
         futures::stream::BoxStream<'static, Result<ClientEvent, Error>>,
@@ -145,6 +167,18 @@ async fn process_sampler_requests(
 
         match event {
             ClientEvent::SetSharedSocket(socket) => {
+                // A client is expected to install its socket exactly once, but
+                // do not depend on that: harvest any saturation signal latched
+                // on the socket being replaced, since dropping its handle here
+                // would lose the signal permanently.
+                check_lossy_signal(&shared_socket, &mut profile_builder);
+                shared_socket = match socket.duplicate_handle(zx::Rights::SAME_RIGHTS) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        log::warn!("Failed to duplicate shared socket handle: {:#}", e);
+                        None
+                    }
+                };
                 let socket_stream = fuchsia_async::Socket::from_socket(socket)
                     .into_datagram_stream()
                     .map(|res| match res {
@@ -216,6 +250,7 @@ async fn process_sampler_requests(
             tx,
             request_index,
             time_of_last_profile,
+            &shared_socket,
         )
         .await?
         {
@@ -224,6 +259,8 @@ async fn process_sampler_requests(
             is_enabled = false;
         }
     }
+
+    check_lossy_signal(&shared_socket, &mut profile_builder);
 
     profile_builder.build()
 }
@@ -289,7 +326,7 @@ mod test {
     use futures::{StreamExt, join};
     use itertools::{assert_equal, sorted};
     use prost::Message;
-    use zx::Vmo;
+    use zx::{Peered, Vmo};
 
     use crate::crash_reporter::ProfileReport;
     use crate::pprof::pproto::{Location, Mapping, Profile};
@@ -407,7 +444,7 @@ mod test {
             10,
         );
         let profile_future =
-            maybe_emit_partial_profile(&mut builder, &mut tx, TEST_INDEX, Instant::now());
+            maybe_emit_partial_profile(&mut builder, &mut tx, TEST_INDEX, Instant::now(), &None);
         let _ = request_stream; // Silence unused variable warning
         let (_, report) = join!(profile_future, rx.next());
         let report = report.unwrap();
@@ -441,6 +478,7 @@ mod test {
             &mut tx,
             TEST_INDEX,
             Instant::now() - MAX_DURATION_BETWEEN_PARTIAL_PROFILES,
+            &None,
         );
         let _ = request_stream; // Silence unused variable warning
         let (_, report) = join!(profile_future, rx.next());
@@ -681,6 +719,40 @@ mod test {
             let profile = deserialize_profile(profile, size);
             let locations = profile.location.into_iter().map(|Location { address, .. }| address);
             assert_equal(vec![1000, 1500, 3000].into_iter(), sorted(locations));
+        } else {
+            panic!("Expected complete report, got partial report instead.");
+        };
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_process_sampler_requests_shared_socket_lossy() -> Result<(), Error> {
+        let (client, request_stream) = create_proxy_and_stream::<SamplerMarker>();
+        let (mut tx, _rx) = mpsc::channel(1);
+        let profile_future = process_sampler_requests(request_stream, &mut tx);
+
+        let (client_sock, server_sock) = zx::Socket::create_datagram();
+        client.set_shared_socket(server_sock)?;
+
+        client.set_process_info(&SamplerSetProcessInfoRequest {
+            process_name: Some("socket lossy process".to_string()),
+            module_map: Some(vec![]),
+            ..Default::default()
+        })?;
+
+        // Signal USER_0 from the client socket to indicate buffer saturation
+        client_sock.signal_peer(zx::Signals::NONE, zx::Signals::USER_0)?;
+
+        drop(client_sock);
+        drop(client);
+
+        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+            assert_eq!("socket lossy process [TAINTED: BUFFER OVERFLOW]", process_name);
+            let profile = deserialize_profile(profile, size);
+            assert_eq!(1, profile.comment.len());
+            let comment = &profile.string_table[profile.comment[0] as usize];
+            assert!(comment.contains("WARNING: Socket buffer saturated"));
         } else {
             panic!("Expected complete report, got partial report instead.");
         };

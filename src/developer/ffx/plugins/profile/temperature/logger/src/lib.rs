@@ -2,12 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::Result;
 use async_trait::async_trait;
-use errors::ffx_bail;
 use fdomain_fuchsia_power_metrics::{self as fmetrics, Metric, StatisticsArgs, Temperature};
 use ffx_temperature_logger_args as args_mod;
-use ffx_writer::SimpleWriter;
+use ffx_writer::VerifiedMachineWriter;
 use fho::{FfxMain, FfxTool};
 use target_holders::moniker;
 
@@ -23,17 +21,18 @@ fho::embedded_plugin!(TemperatureLoggerTool);
 
 #[async_trait(?Send)]
 impl FfxMain for TemperatureLoggerTool {
-    type Writer = SimpleWriter;
+    type Writer = VerifiedMachineWriter<()>;
 
     type Error = ::fho::Error;
 
-    async fn main(self, _writer: Self::Writer) -> fho::Result<()> {
+    async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
         match self.cmd.subcommand {
             args_mod::SubCommand::Start(start_cmd) => {
                 start(self.temperature_logger, start_cmd).await?
             }
             args_mod::SubCommand::Stop(_) => stop(self.temperature_logger).await?,
         };
+        writer.machine(&())?;
         Ok(())
     }
 }
@@ -41,7 +40,7 @@ impl FfxMain for TemperatureLoggerTool {
 pub async fn start(
     temperature_logger: fmetrics::RecorderProxy,
     cmd: args_mod::StartCommand,
-) -> Result<()> {
+) -> fho::Result<()> {
     let statistics_args = cmd
         .statistics_interval
         .map(|i| Box::new(StatisticsArgs { statistics_interval_ms: i.as_millis() as u32 }));
@@ -59,7 +58,8 @@ pub async fn start(
                 cmd.output_samples_to_syslog,
                 cmd.output_stats_to_syslog,
             )
-            .await?
+            .await
+            .map_err(|e| fho::user_error!("Failed to call Recorder/StartLogging: {e}"))?
     } else {
         temperature_logger
             .start_logging_forever(
@@ -68,27 +68,28 @@ pub async fn start(
                 cmd.output_samples_to_syslog,
                 cmd.output_stats_to_syslog,
             )
-            .await?
+            .await
+            .map_err(|e| fho::user_error!("Failed to call Recorder/StartLoggingForever: {e}"))?
     };
 
     match result {
-        Err(fmetrics::RecorderError::InvalidSamplingInterval) => ffx_bail!(
+        Err(fmetrics::RecorderError::InvalidSamplingInterval) => fho::return_user_error!(
             "Recorder.StartLogging received an invalid sampling interval. \n\
             Please check if `sampling-interval` meets the following requirements: \n\
             1) Must be smaller than `duration` if `duration` is specified; \n\
             2) Must not be smaller than 500ms if `output_samples_to_syslog` is enabled."
         ),
-        Err(fmetrics::RecorderError::AlreadyLogging) => ffx_bail!(
+        Err(fmetrics::RecorderError::AlreadyLogging) => fho::return_user_error!(
             "Ffx temperature logging is already active. Use \"stop\" subcommand to stop the active \
             loggingg manually."
         ),
         Err(fmetrics::RecorderError::NoDrivers) => {
-            ffx_bail!("This device has no sensor for logging temperature.")
+            fho::return_user_error!("This device has no sensor for logging temperature.")
         }
-        Err(fmetrics::RecorderError::TooManyActiveClients) => ffx_bail!(
+        Err(fmetrics::RecorderError::TooManyActiveClients) => fho::return_user_error!(
             "Recorder is running too many clients. Retry after any other client is stopped."
         ),
-        Err(fmetrics::RecorderError::InvalidStatisticsInterval) => ffx_bail!(
+        Err(fmetrics::RecorderError::InvalidStatisticsInterval) => fho::return_user_error!(
             "Recorder.StartLogging received an invalid statistics interval. \n\
             Please check if `statistics-interval` meets the following requirements: \n\
             1) Must be equal to or larger than `sampling-interval`; \n\
@@ -99,9 +100,15 @@ pub async fn start(
     }
 }
 
-pub async fn stop(temperature_logger: fmetrics::RecorderProxy) -> Result<()> {
-    if !temperature_logger.stop_logging("ffx_temperature").await? {
-        ffx_bail!("Stop logging returned false; Check if logging is already inactive.");
+pub async fn stop(temperature_logger: fmetrics::RecorderProxy) -> fho::Result<()> {
+    let stopped = temperature_logger
+        .stop_logging("ffx_temperature")
+        .await
+        .map_err(|e| fho::user_error!("Failed to call Recorder/StopLogging: {e}"))?;
+    if !stopped {
+        fho::return_user_error!(
+            "Stop logging returned false; Check if logging is already inactive."
+        );
     }
     Ok(())
 }

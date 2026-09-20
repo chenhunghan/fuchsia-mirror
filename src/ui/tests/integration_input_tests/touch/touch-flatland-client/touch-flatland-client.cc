@@ -43,7 +43,19 @@ class TouchFlatlandClient final {
     touch_input_listener_ =
         fidl::Client(std::move(touch_input_listener_connect.value()), loop_->dispatcher());
 
-    flatland_connection_ = simple_present::FlatlandConnection::Create(loop, "TouchFlatlandClient");
+    auto factory_connect = component::Connect<fuchsia_ui_composition::FlatlandFactory>();
+    ZX_ASSERT_OK(factory_connect);
+    fidl::SyncClient factory(std::move(factory_connect.value()));
+    auto [flatland_client_end, flatland_server_end] =
+        fidl::CreateEndpoints<fuchsia_ui_composition::Flatland>().value();
+    auto create_res = factory->CreateFlatland({{
+        .server_end = std::move(flatland_server_end),
+        .config = {},
+    }});
+    ZX_ASSERT(create_res.is_ok());
+
+    flatland_connection_ = simple_present::FlatlandConnection::Create(
+        loop_->dispatcher(), std::move(flatland_client_end), "TouchFlatlandClient");
 
     auto presenter_connect = component::Connect<fuchsia_element::GraphicalPresenter>();
     ZX_ASSERT_OK(presenter_connect);

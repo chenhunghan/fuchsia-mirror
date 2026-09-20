@@ -5848,7 +5848,7 @@ mod tests {
         Icmpv6TimeExceededCode,
     };
     use packet_formats::tcp::{TcpParseArgs, TcpSegment, TcpSegmentBuilder};
-    use rand::Rng as _;
+    use rand::RngExt as _;
     use test_case::test_case;
     use test_util::assert_gt;
 

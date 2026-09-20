@@ -80,7 +80,6 @@ if (is_linux) {
     non_go_deps = [
       ":netsvc_user_tools",
       "image:host_test_data",
-      "//build/images/fuchsia:default_product_bundle_for_emulator.go",
     ]
   }
 }

@@ -17,8 +17,8 @@ import argparse
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
 _SCRIPT_BASENAME = os.path.basename(__file__)
 

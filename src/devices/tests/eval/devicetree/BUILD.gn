@@ -79,7 +79,7 @@ template("dt_eval_test_package") {
     ]
     subpackages = [ "//sdk/lib/driver_test_realm:package" ]
     test_specs = {
-      environments = []
+      build_only = true
     }
   }
 }

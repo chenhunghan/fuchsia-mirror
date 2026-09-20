@@ -67,7 +67,7 @@ if (is_host) {
 
       # TODO(https://fxbug.dev/42179241): LSAN says that Scrutiny has a leak, disable this test in ASAN
       if (is_asan) {
-        test_environments = []
+        test_build_only = true
       }
     }
   } else {

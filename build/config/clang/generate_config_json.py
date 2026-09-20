@@ -107,13 +107,13 @@ _ALL_TARGETS = _FUCHSIA_TARGETS + _HOST_TARGETS + ["fallback"]
 
 
 class Runtime(T.TypedDict):
-    cflags: T.List[str]
-    ldflags: T.List[str]
-    runtime: T.List[T.Dict[str, str]]
-    target: T.List[str]
+    cflags: list[str]
+    ldflags: list[str]
+    runtime: list[dict[str, str]]
+    target: list[str]
 
 
-def fix_clang_runtime_json(runtime_json: T.List[Runtime]) -> None:
+def fix_clang_runtime_json(runtime_json: list[Runtime]) -> None:
     """Fix the content of runtime.json."""
 
     # As a special case, on Fuchsia and for ASan builds, libclang_rt.asan.so depends
@@ -190,7 +190,7 @@ def get_clang_target_variants(clang_target: str) -> T.Sequence[str]:
     return ("none", "ubsan", "asan", "hwasan", "lsan", "tsan")
 
 
-def get_clang_variant_flags(variant: str) -> T.List[str]:
+def get_clang_variant_flags(variant: str) -> list[str]:
     """Return the Clang flag used to enable a given variant."""
     return {
         "asan": ["-fsanitize=address"],
@@ -207,7 +207,7 @@ def get_clang_rt_library_name(variant: str, ext: str, suffix: str = "") -> str:
     return f"libclang_rt.{runtime_name}{suffix}{ext}"
 
 
-def get_shared_static_exts(clang_target: str) -> T.Tuple[str, str]:
+def get_shared_static_exts(clang_target: str) -> tuple[str, str]:
     """Return a pair of file extensions for shared and static libraries."""
     if "-windows-" in clang_target:
         return ".dll", ".lib"
@@ -219,7 +219,7 @@ def get_shared_static_exts(clang_target: str) -> T.Tuple[str, str]:
         return ".so", ".a"
 
 
-Tree = T.Dict[str, T.Union[str, "Tree"]]
+Tree = dict[str, T.Union[str, "Tree"]]
 
 
 def store_into_dict(d: Tree, path: str, value: str) -> None:
@@ -332,7 +332,7 @@ class ClangFileNamePathResult(ClangRelativePathResult):
 class CommandInfo(object):
     """Record the state of a command in a CommandPool instance."""
 
-    cmd_args: T.List[str]
+    cmd_args: list[str]
     cmd_result: CommandResult
 
 
@@ -351,11 +351,11 @@ class CommandPool(object):
         Args:
            pool_depth: Maximum number of commands that will be run in parallel.
         """
-        self._commands: T.Dict[str, CommandInfo] = {}
+        self._commands: dict[str, CommandInfo] = {}
         self._depth = pool_depth
 
     def add_command(
-        self, dest: str, cmd_result: CommandResult, cmd_args: T.List[str]
+        self, dest: str, cmd_result: CommandResult, cmd_args: list[str]
     ) -> None:
         """Add new command to the pool.
 
@@ -371,7 +371,7 @@ class CommandPool(object):
         """
         self._commands[dest] = CommandInfo(cmd_args, cmd_result)
 
-    def run(self) -> T.Iterator[T.Tuple[str, str]]:
+    def run(self) -> T.Iterator[tuple[str, str]]:
         """Run all queued commands in parallel.
 
         Yields:
@@ -379,9 +379,9 @@ class CommandPool(object):
             passed to add_command(), and |value| is the result of
             calling the corresponding CommandResult.process() method.
         """
-        running: T.Dict[str, subprocess.Popen[str]] = {}
+        running: dict[str, subprocess.Popen[str]] = {}
 
-        def poll_run_queue() -> T.Iterator[T.Tuple[str, str]]:
+        def poll_run_queue() -> T.Iterator[tuple[str, str]]:
             completed = []
             for dest, proc in running.items():
                 returncode = proc.poll()

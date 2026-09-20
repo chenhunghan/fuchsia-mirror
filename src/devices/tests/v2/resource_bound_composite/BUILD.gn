@@ -22,8 +22,13 @@ bind_library("fuchsia.resourceboundcompositebind.test") {
   source = "resourceboundcomposite.test.bind"
 }
 
+fuchsia_driver_dml("root-dml") {
+  dml = "meta/root.dml"
+  driver_name = "root"
+}
+
 driver_bind_rules("root_bind") {
-  rules = "meta/root.bind"
+  dml_label = ":root-dml"
   deps = [ "//src/devices/bind/fuchsia.test" ]
   bind_output = "root.bindbc"
 }
@@ -44,16 +49,26 @@ fuchsia_cc_driver("root_driver") {
 }
 
 fuchsia_driver_component("root") {
+  dml_label = ":root-dml"
   testonly = true
-  manifest = "meta/root.cml"
   deps = [ ":root_driver" ]
   info = "meta/root_info.json"
 }
 
+fuchsia_driver_dml("leaf-dml") {
+  dml = "meta/leaf.dml"
+  driver_name = "leaf"
+}
+
 driver_bind_rules("leaf_bind") {
-  rules = "meta/leaf.bind"
+  dml_label = ":leaf-dml"
   bind_output = "leaf.bindbc"
-  deps = [ ":fuchsia.resourceboundcompositebind.test" ]
+  deps = [
+    ":fuchsia.resourceboundcompositebind.test",
+    "//src/devices/bind/fuchsia",
+    "//src/devices/bind/fuchsia.platform",
+    "//src/devices/bind/fuchsia.test",
+  ]
 }
 
 fuchsia_cc_driver("leaf_driver") {
@@ -70,8 +85,8 @@ fuchsia_cc_driver("leaf_driver") {
 }
 
 fuchsia_driver_component("leaf") {
+  dml_label = ":leaf-dml"
   testonly = true
-  manifest = "meta/leaf.cml"
   deps = [ ":leaf_driver" ]
   info = "meta/leaf_info.json"
 }

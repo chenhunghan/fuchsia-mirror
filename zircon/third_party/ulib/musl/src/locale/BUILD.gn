@@ -21,8 +21,6 @@ source_set("locale") {
     "setlocale.c",
     "strfmon.c",
     "uselocale.c",
-    "wcscoll.c",
-    "wcsxfrm.c",
   ]
 
   if (!use_llvm_libc_string_functions) {

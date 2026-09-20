@@ -13,7 +13,7 @@ use fidl_fuchsia_ui_composition as flatland;
 use fidl_fuchsia_ui_pointerinjector as pointerinjector;
 use fuchsia_component_test::{Capability, ChildOptions, RealmBuilder, RealmInstance, Ref, Route};
 use futures::lock::Mutex;
-use rand::SeedableRng;
+use rand::SeedableRng as _;
 use rand::rngs::SmallRng;
 use std::sync::Arc;
 use std::time::Duration;
@@ -159,7 +159,7 @@ impl FlatlandEnvironment {
         builder
             .add_route(
                 Route::new()
-                    .capability(Capability::protocol::<flatland::FlatlandMarker>())
+                    .capability(Capability::protocol::<flatland::FlatlandFactoryMarker>())
                     .capability(Capability::protocol::<flatland::FlatlandDisplayMarker>())
                     .capability(Capability::protocol::<pointerinjector::RegistryMarker>())
                     .from(&scenic)

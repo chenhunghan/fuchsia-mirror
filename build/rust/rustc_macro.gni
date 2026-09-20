@@ -99,7 +99,10 @@ import("//build/toolchain/restat.gni")
 #   See //build/tools/bazel2gn/README.md for details.
 #
 #      proc_macro_deps (optional)
-#        For proc_macro dependencies, has the same semantics as deps in GN.
+#        For proc_macro dependencies, has the same semantics as deps in GN,
+#        except that these are always built in `$host_toolchain`, since
+#        procedural macros run as compiler plugins on the build machine.
+#        Entries must not specify a toolchain.
 #
 # Example of usage:
 #
@@ -124,28 +127,23 @@ template("rustc_macro") {
   # avoid conflicts, the outputs of the original (host) artifact are built with
   # a `_proc_macro` suffix added onto the end, which is removed when they're
   # copied into the final target directory.
-  forward_variables_from(invoker, [ "visibility" ])
 
-  proc_macro_target = "${target_name}_proc_macro"
+  if (current_toolchain == host_toolchain) {
+    if (defined(invoker.original_target_name)) {
+      _original_target_name = invoker.original_target_name
+    } else {
+      _original_target_name = target_name
+    }
 
-  if (defined(invoker.original_target_name)) {
-    _original_target_name = invoker.original_target_name
-  } else {
-    _original_target_name = target_name
-  }
-  not_needed([ "_original_target_name" ])
+    assert(!(defined(invoker.output_name) && defined(invoker.name)),
+           "Only one of output_name and name may be specified.")
 
-  assert(!(defined(invoker.output_name) && defined(invoker.name)),
-         "Only one of output_name and name may be specified.")
+    # The 'is_host' var is true in situations that we don't want, such as
+    # cross-compiling for _other_ hosts.
+    #
+    # We only want this to be run in _this_ machine's host_toolchain.
 
-  # The 'is_host' var is true in situations that we don't want, such as
-  # cross-compiling for _other_ hosts.
-  #
-  # We only want this to be run in _this_ machine's host_toolchain.
-  in_host_compiler_toolchain = current_toolchain == host_toolchain
-
-  # The actual host-target build of the proc macro crate.
-  if (in_host_compiler_toolchain) {
+    # The actual host-target build of the proc macro crate.
     if (defined(invoker.crate_name)) {
       package_name = invoker.crate_name
     } else if (defined(invoker.output_name)) {
@@ -163,7 +161,7 @@ template("rustc_macro") {
       source_root = invoker.source_root
     }
 
-    rustc_artifact(proc_macro_target) {
+    rustc_artifact(target_name) {
       forward_variables_from(invoker,
                              [
                                "aliased_deps",
@@ -176,8 +174,10 @@ template("rustc_macro") {
                                "enforce_source_listing",
                                "features",
                                "inputs",
+                               "lint_config",
                                "output_dir",
                                "output_name",
+                               "proc_macro_deps",
                                "public_deps",
                                "quiet_clippy",
                                "rustdoc_args",
@@ -187,6 +187,7 @@ template("rustc_macro") {
                                "sources",
                                "testonly",
                                "validations",
+                               "visibility",
                                "zip_rustdoc_to",
                              ])
 
@@ -196,6 +197,11 @@ template("rustc_macro") {
                    "non_rust_deps",
                    "force_opt",
                  ])
+
+      if (defined(visibility)) {
+        # Make this target visible to redirection groups.
+        visibility += [ ":*" ]
+      }
 
       target_type = "rust_proc_macro"
       configs = []
@@ -212,9 +218,6 @@ template("rustc_macro") {
       if (defined(invoker.deps)) {
         deps += invoker.deps
       }
-      if (defined(invoker.proc_macro_deps)) {
-        deps += invoker.proc_macro_deps
-      }
 
       # TODO(https://fxbug.dev/42120123) remove "non_rust_deps"
       if (defined(invoker.non_rust_deps)) {
@@ -230,16 +233,12 @@ template("rustc_macro") {
         }
       }
     }
-  } else {
-    not_needed(invoker, "*")
-  }
 
-  # If "with_unit_tests" is set to true, generate an additional rust test
-  # target. Since the parent rule is used to compile macros, which only run on
-  # the host, only run the test code for the macros on the host.
-  # TODO(https://fxbug.dev/42152447): accept a string.
-  if (defined(invoker.with_unit_tests) && invoker.with_unit_tests) {
-    if (in_host_compiler_toolchain) {
+    # If "with_unit_tests" is set to true, generate an additional rust test
+    # target. Since the parent rule is used to compile macros, which only run on
+    # the host, only run the test code for the macros on the host.
+    # TODO(https://fxbug.dev/42152447): accept a string.
+    if (defined(invoker.with_unit_tests) && invoker.with_unit_tests) {
       rustc_test("${target_name}_test") {
         name = target_name
         if (defined(invoker.name)) {
@@ -254,38 +253,44 @@ template("rustc_macro") {
                                  "test_disable_rbe",
                                  "validations",
                                ])
+
+        if (defined(visibility)) {
+          # Make this target visible to redirection groups.
+          visibility += [ ":*" ]
+        }
         configs += [ "//build/config/rust:proc_macro_test" ]
         if (defined(invoker.test_disable_rbe)) {
           disable_rbe = invoker.test_disable_rbe
         }
       }
-    } else {
+    }
+  } else {
+    # If not in this machine's host_toolchain, switch to it.
+    #
+    # Note that we also want to be in the base variant so we don't instrument
+    # our macros with sanitizers. That is handled by the lower-level
+    # rust_proc_macro template in BUILDCONFIG.gn.
+    group(target_name) {
+      public_deps = [ ":${target_name}($host_toolchain)" ]
+      forward_variables_from(invoker,
+                             [
+                               "testonly",
+                               "visibility",
+                             ])
+    }
+
+    if (defined(invoker.with_unit_tests) && invoker.with_unit_tests) {
       # For convenience, create a forwarding target that points to the on-host
       # test target. This allows developers to list "${target_name}_test" in a
-      # test group instead of "${target_name}_test($host_toolchain)" to include
-      # the test target generated for this rule.
+      # test group instead of "${target_name}_test($host_toolchain)" to
+      # include the test target generated for this rule.
       group("${target_name}_test") {
         public_deps = [ ":${target_name}($host_toolchain)" ]
+        forward_variables_from(invoker, [ "visibility" ])
         testonly = true
       }
     }
-  }
 
-  # If not in this machine's host_toolchain, switch to it.
-  #
-  # Note that we also want to be in the base variant so we don't instrument our
-  # macros with sanitizers. That is handled by the lower-level rust_proc_macro
-  # template in BUILDCONFIG.gn.
-  if (!in_host_compiler_toolchain) {
-    group(target_name) {
-      public_deps = [ ":${target_name}($host_toolchain)" ]
-      forward_variables_from(invoker, [ "testonly" ])
-    }
-    not_needed([ "proc_macro_target" ])
-  } else {
-    group(target_name) {
-      public_deps = [ ":${proc_macro_target}" ]
-      forward_variables_from(invoker, [ "testonly" ])
-    }
+    not_needed(invoker, "*")
   }
 }

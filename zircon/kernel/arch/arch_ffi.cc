@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include <lib/arch/intrin.h>
 #include <platform.h>
 #include <sys/types.h>
 #include <zircon/types.h>
@@ -38,6 +39,7 @@ FFI_ALWAYS_INLINE zx_status_t capture_faults_result(UserCopyCaptureFaultsResult 
 
 extern "C" {
 
+void cpp_arch_yield();
 bool cpp_arch_blocking_disallowed();
 bool cpp_arch_ints_disabled();
 void cpp_arch_disable_ints();
@@ -63,6 +65,7 @@ void cpp_arch_set_blocking_disallowed(bool value);
 void* cpp_arch_get_curr_percpu();
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_arch_yield() { arch::Yield(); }
 FFI_ALWAYS_INLINE bool cpp_arch_blocking_disallowed() { return arch_blocking_disallowed(); }
 FFI_ALWAYS_INLINE bool cpp_arch_ints_disabled() { return arch_ints_disabled(); }
 FFI_ALWAYS_INLINE void cpp_arch_disable_ints() { arch_disable_ints(); }

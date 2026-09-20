@@ -53,15 +53,15 @@ class VmarReservation {
     }
   }
 
-  // Initialize the reservation by allocating a child VMAR in the parent covering the specified
-  // bounds. The offset is computed from the absolute bases of the parent and the requested child
-  // VMAR.
+  // Initialize the reservation by allocating a child VMAR in the parent
+  // covering the specified bounds. The offset is computed from the absolute
+  // bases of the parent and the requested child VMAR.
   zx::result<> Init(zx::unowned_vmar parent, zx_info_vmar_t parent_info,
-                    zx_info_vmar_t reserve_info) {
+                    zx_info_vmar_t reserve_info, zx_vm_option_t allocate_flags = 0) {
     uintptr_t child_addr;
     uintptr_t offset = reserve_info.base - parent_info.base;
-    zx_status_t status =
-        parent->allocate(ZX_VM_SPECIFIC, offset, reserve_info.len, &vmar_, &child_addr);
+    zx_status_t status = parent->allocate(ZX_VM_SPECIFIC | allocate_flags, offset, reserve_info.len,
+                                          &vmar_, &child_addr);
     if (status != ZX_OK) {
       return zx::error{status};
     }

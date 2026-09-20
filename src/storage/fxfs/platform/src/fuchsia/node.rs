@@ -324,6 +324,15 @@ impl NodeCache {
         upgrade_node(weak_node)
     }
 
+    /// Returns true if an entry exists in the cache for the given `object_id`.
+    ///
+    /// Note that this returns true if the node is currently open, if it is being loaded (i.e. has
+    /// a `Placeholder`), or if there is a weak entry with zero strong references because another
+    /// thread is in the middle of dropping the node and removing it from the cache.
+    pub fn contains_key(&self, object_id: u64) -> bool {
+        self.0.lock().map.contains_key(&object_id)
+    }
+
     /// Returns an iterator over all files in the cache.
     pub fn files(&self) -> FileIter<'_> {
         FileIter { cache: self, object_id: None }

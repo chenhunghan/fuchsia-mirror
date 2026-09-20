@@ -181,6 +181,7 @@ if (is_linux && !has_prebuilt_vulkan_runtime) {
       "renderer/batch_gpu_uploader_unittest.cc",
       "run_all_unittests.cc",
       "vk/descriptor_set_layout_unittest.cc",
+      "vk/shader_utils_unittest.cc",
     ]
 
     deps = [

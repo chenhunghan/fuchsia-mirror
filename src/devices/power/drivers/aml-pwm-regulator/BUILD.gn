@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-pwm-regulator-dml") {
+  dml = "meta/aml-pwm-regulator.dml"
+  driver_name = "aml-pwm-regulator"
+}
+
 driver_bind_rules("aml-pwm-regulator-bind") {
-  rules = "meta/aml-pwm-regulator.bind"
+  bind_output = "aml-pwm-regulator.bindbc"
+  dml_label = ":aml-pwm-regulator-dml"
   tests = "meta/bind-tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -42,10 +48,10 @@ fuchsia_cc_driver("aml-pwm-regulator-driver") {
 }
 
 fuchsia_driver_component("aml-pwm-regulator") {
+  dml_label = ":aml-pwm-regulator-dml"
   info = "meta/aml-pwm-regulator-info.json"
   component_name = "aml-pwm-regulator"
   deps = [ ":aml-pwm-regulator-driver" ]
-  manifest = "meta/aml-pwm-regulator.cml"
 }
 
 fuchsia_driver_package("package") {

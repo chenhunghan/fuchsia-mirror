@@ -6,6 +6,7 @@ use anyhow::Error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 pub use storage_ptr_slice::{MutPtrByteSlice, PtrByteSlice};
+pub use storage_xts::{Tweak, XtsInPlaceProcessor, XtsProcessor};
 use zx_status as zx;
 
 pub mod fscrypt_ino_lblk32;
@@ -54,6 +55,24 @@ pub trait Cipher: std::fmt::Debug + Send + Sync {
         buffer: MutPtrByteSlice<'_>,
     ) -> Result<(), Error>;
 
+    /// Decrypts data from `src` into `dst`.
+    ///
+    /// * `file_offset` is the byte offset within the file.
+    /// * `src` and `dst` must have the same length.
+    /// * `src` and `dst` must both be aligned to 64 bytes.
+    fn decrypt_to(
+        &self,
+        ino: u64,
+        attribute_id: u64,
+        device_offset: u64,
+        file_offset: u64,
+        src: PtrByteSlice<'_>,
+        mut dst: MutPtrByteSlice<'_>,
+    ) -> Result<(), Error> {
+        dst.copy_from_ptr_slice(src);
+        self.decrypt(ino, attribute_id, device_offset, file_offset, dst)
+    }
+
     /// Encrypts the filename contained in `buffer`.
     fn encrypt_filename(&self, object_id: u64, buffer: &mut Vec<u8>) -> Result<(), Error>;
 
@@ -82,7 +101,7 @@ pub trait Cipher: std::fmt::Debug + Send + Sync {
 
     /// If this cipher type supports inline encryption, returns the (dun, slot) value.
     /// Else returns None.
-    fn crypt_ctx(&self, ino: u64, attribute_id: u64, file_offset: u64) -> Option<(u32, u8)>;
+    fn crypt_ctx(&self, ino: u64, attribute_id: u64, file_offset: u64) -> Option<(u64, u8)>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,5 +214,3 @@ pub enum FindKeyResult {
     Unavailable,
     Key(Arc<dyn Cipher>),
 }
-
-pub use storage_xts::{Tweak, XtsInPlaceProcessor};

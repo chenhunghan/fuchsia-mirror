@@ -5,8 +5,7 @@
 //! Implementation of the network socket proxy.
 //!
 //! Runs proxied versions of fuchsia.posix.socket.Provider and fuchsia.posix.socket.raw.Provider.
-//! Exposes fuchsia.net.policy.socketproxy.StarnixNetworks and
-//! fuchsia.net.policy.socketproxy.FuchsiaNetworks.
+//! Exposes fuchsia.net.policy.socketproxy.StarnixNetworks.
 
 use anyhow::Context as _;
 use fidl_fuchsia_net as fnet;
@@ -26,7 +25,7 @@ mod mark_watcher;
 pub mod registry;
 mod socket_provider;
 
-pub use registry::{NetworkConversionError, NetworkExt, NetworkRegistryError};
+pub use registry::NetworkRegistryError;
 
 #[derive(Copy, Clone, Debug)]
 struct SocketMarks {
@@ -99,7 +98,6 @@ impl SocketProxy {
 }
 
 enum IncomingService {
-    FuchsiaNetworks(fnp_socketproxy::FuchsiaNetworksRequestStream),
     StarnixNetworks(fnp_socketproxy::StarnixNetworksRequestStream),
     PosixSocket(fidl_fuchsia_posix_socket::ProviderRequestStream),
     PosixSocketRaw(fidl_fuchsia_posix_socket_raw::ProviderRequestStream),
@@ -125,7 +123,6 @@ pub async fn run() -> Result<(), anyhow::Error> {
     let _: &mut ServiceFsDir<'_, _> = fs
         .dir("svc")
         .add_fidl_service(IncomingService::StarnixNetworks)
-        .add_fidl_service(IncomingService::FuchsiaNetworks)
         .add_fidl_service(IncomingService::PosixSocket)
         .add_fidl_service(IncomingService::PosixSocketRaw);
 
@@ -140,9 +137,6 @@ pub async fn run() -> Result<(), anyhow::Error> {
             match service {
                 IncomingService::StarnixNetworks(stream) => {
                     proxy.registry.run_starnix(stream).await
-                }
-                IncomingService::FuchsiaNetworks(stream) => {
-                    proxy.registry.run_fuchsia(stream).await
                 }
                 IncomingService::PosixSocket(stream) => proxy.socket_provider.run(stream).await,
                 IncomingService::PosixSocketRaw(stream) => {

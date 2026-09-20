@@ -9,10 +9,9 @@ import unittest
 from unittest import mock
 
 import fidl_fuchsia_hardware_power_battery as f_battery
-import fidl_fuchsia_hardware_power_source as f_power_source
 from fidl import GlobalHandleWaker
 from honeydew import affordances_capable, errors
-from honeydew.affordances.drivers.battery_manager import Battery
+from honeydew.affordances.drivers.battery_manager import Battery, BatteryStatus
 from honeydew.affordances.drivers.battery_manager.utils.errors import (
     BatteryRequestError,
 )
@@ -111,7 +110,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         """Test get_status raises BatteryRequestError when driver returns error."""
         mock_proxy = mock.AsyncMock()
         mock_res = mock.MagicMock()
-        mock_res.err = f_power_source.Error.INTERNAL
+        mock_res.err = 20
         mock_proxy.get_status.return_value = mock_res
 
         self.battery._proxy = mock_proxy
@@ -119,3 +118,47 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(BatteryRequestError):
             await self.battery.get_status()
+
+    async def test_configure_watch_success(self) -> None:
+        """Test configure_watch successfully returns WatchOptions."""
+        mock_proxy = mock.AsyncMock()
+        mock_fidl_effective = f_battery.WatchOptions(
+            interest=f_battery.Status(level_percent=0.0),
+        )
+        mock_res = mock.MagicMock()
+        mock_res.err = None
+        mock_res.response = mock.MagicMock()
+        mock_res.response.effective_options = mock_fidl_effective
+        mock_proxy.configure_watch.return_value = mock_res
+
+        self.battery._proxy = mock_proxy
+        self.battery._ready = True
+
+        options = await self.battery.configure_watch(
+            interest=BatteryStatus(level_percent=0.0)
+        )
+        self.assertIsNotNone(options.interest)
+        mock_proxy.configure_watch.assert_awaited_once()
+
+    async def test_watch_success(self) -> None:
+        """Test watch successfully returns BatteryStatus."""
+        mock_proxy = mock.AsyncMock()
+        mock_fidl_status = f_battery.Status(
+            charge_status=f_battery.ChargeStatus.FULL,
+            level_percent=100.0,
+            present=True,
+        )
+        mock_res = mock.MagicMock()
+        mock_res.err = None
+        mock_res.response = mock.MagicMock()
+        mock_res.response.status = mock_fidl_status
+        mock_proxy.watch.return_value = mock_res
+
+        self.battery._proxy = mock_proxy
+        self.battery._ready = True
+
+        status = await self.battery.watch()
+        self.assertEqual(status.charge_status, 4)
+        self.assertEqual(status.level_percent, 100.0)
+        self.assertTrue(status.present)
+        mock_proxy.watch.assert_awaited_once_with(lease=None)

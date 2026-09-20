@@ -21,7 +21,6 @@ source_set("counters") {
   public_deps = [ ":headers" ]
 
   if (is_kernel) {
-    sources = [ "counters.cc" ]
     deps = [
       "//zircon/kernel/lib/init",
       "//zircon/kernel/lib/special-sections",

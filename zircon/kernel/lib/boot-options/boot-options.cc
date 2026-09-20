@@ -13,6 +13,12 @@
 
 #include <algorithm>
 
+#ifdef _KERNEL
+#include <kernel/ffi.h>
+#else
+#define FFI_ALWAYS_INLINE
+#endif
+
 namespace {
 
 template <auto MemberPtr>
@@ -567,4 +573,7 @@ void BootOptions::PrintValue(const IntelHwpPolicy& value, FILE* out) {
 
 #endif  // BOOT_OPTIONS_GENERATOR || defined(__x86_64__)
 
-extern "C" const BootOptions* cpp_boot_options_get() { return BootOptions::Get(); }
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+extern "C" FFI_ALWAYS_INLINE const BootOptions* cpp_boot_options_get() {
+  return BootOptions::Get();
+}

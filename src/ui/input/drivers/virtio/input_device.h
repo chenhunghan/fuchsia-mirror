@@ -45,7 +45,7 @@ class HidDevice : public HidDeviceBase {
   void GetInputReportsReader(
       async_dispatcher_t* dispatcher,
       fidl::ServerEnd<fuchsia_input_report::InputReportsReader> reader) override {
-    readers_.CreateReader(dispatcher, std::move(reader));
+    ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
   }
 
   zx_status_t GetInputReportsReaderV2(

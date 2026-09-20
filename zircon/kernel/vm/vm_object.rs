@@ -650,6 +650,13 @@ impl VmObject {
         unsafe { bindings::cpp_vm_object_reclamation_event_count(self.as_raw()) }
     }
 
+    /// Detaches the underlying page source, if any. All future page requests will fail and any
+    /// clean pages will be released.
+    pub fn detach_source(&self) {
+        // SAFETY: `self.as_raw()` points to a live `VmObject`.
+        unsafe { bindings::cpp_vm_object_detach_source(self.as_raw()) }
+    }
+
     /// Takes pages out of this vmo and places them into the splice list.
     /// `pages` must be a valid, initialized and empty splice list. The length of the range
     /// is specified by the length of the splice list.

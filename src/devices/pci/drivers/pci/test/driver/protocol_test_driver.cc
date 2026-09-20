@@ -482,7 +482,7 @@ TEST_F(PciProtocolTests, GetAndSetInterruptMode) {
   EXPECT_EQ(modes.has_legacy, pci::kLegacyInterruptCount);
   ASSERT_EQ(modes.msi_count, pci::MsiCapability::MmcToCount(msi_ctrl.mm_capable()));
   ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kLegacy, 1));
-  ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kLegacyNoack, 1));
+  ASSERT_EQ(ZX_ERR_INVALID_ARGS, pci().SetInterruptMode(fpci::InterruptMode::kLegacyNoack, 1));
   ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kMsi, modes.msi_count));
   // Setting the same mode twice should work if no IRQs have been allocated off of this one.
   ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kMsi, modes.msi_count));
@@ -502,14 +502,10 @@ TEST_F(PciProtocolTests, GetInterruptModes) {
   EXPECT_EQ(modes.msix_count, kFakeQuadroMsiXIrqCnt);
 }
 
-// TODO(https://fxbug.dev/42139939): Without USERSPACE_PCI defined in proxy it presently
-// will always return the kernel implementation which avoids the channel call
-// and returns ZX_OK. This needs to be re-enabled after the migration.
-TEST_F(PciProtocolTests, DISABLED_AckingIrqModes) {
+TEST_F(PciProtocolTests, AckingIrqModes) {
   ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kLegacy, 1));
   ASSERT_OK(pci().AckInterrupt());
-  ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kLegacyNoack, 1));
-  ASSERT_STATUS(ZX_ERR_BAD_STATE, pci().AckInterrupt());
+  ASSERT_EQ(ZX_ERR_INVALID_ARGS, pci().SetInterruptMode(fpci::InterruptMode::kLegacyNoack, 1));
   ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kMsi, 1));
   ASSERT_STATUS(ZX_ERR_BAD_STATE, pci().AckInterrupt());
 
@@ -518,6 +514,14 @@ TEST_F(PciProtocolTests, DISABLED_AckingIrqModes) {
   ASSERT_STATUS(ZX_ERR_BAD_STATE, pci().AckInterrupt());
   ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kDisabled, 0));
   ASSERT_STATUS(ZX_ERR_BAD_STATE, pci().AckInterrupt());
+}
+
+TEST_F(PciProtocolTests, LegacyInterruptMapAndAck) {
+  ASSERT_OK(pci().SetInterruptMode(fpci::InterruptMode::kLegacy, 1));
+  zx::interrupt interrupt;
+  ASSERT_OK(pci().MapInterrupt(0, &interrupt));
+  EXPECT_TRUE(interrupt.is_valid());
+  ASSERT_OK(pci().AckInterrupt());
 }
 
 const size_t kWaitDeadlineSecs = 5u;

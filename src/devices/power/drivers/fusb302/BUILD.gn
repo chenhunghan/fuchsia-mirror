@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("fusb302-dml") {
+  dml = "meta/fusb302.dml"
+  driver_name = "fusb302"
+}
+
 driver_bind_rules("fusb302-bind") {
-  rules = "meta/fusb302.bind"
+  dml_label = ":fusb302-dml"
   tests = "meta/bind-tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -63,7 +68,7 @@ fuchsia_driver_component("fusb302") {
   info = "meta/fusb302-info.json"
   component_name = "fusb302"
   deps = [ ":fusb302-driver" ]
-  manifest = "meta/fusb302.cml"
+  dml_label = ":fusb302-dml"
 }
 
 fuchsia_driver_package("package") {

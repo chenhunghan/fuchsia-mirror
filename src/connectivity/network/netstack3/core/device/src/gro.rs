@@ -5,7 +5,6 @@
 //! Constructs that support Generic Receive Offload (GRO) at the device layer.
 
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 use core::num::NonZeroU16;
 
 use assert_matches::assert_matches;
@@ -54,8 +53,21 @@ impl BufferSlice<'_, '_> {
 /// A buffer that may be backed by a contiguous memory slice.
 pub trait MaybeContiguousBuffer {
     /// Obtains a slice view into the buffer, linearizing into `storage` if
-    /// necessary.
-    fn linearized<'a, 'b>(&'a mut self, storage: &'b mut Vec<u8>) -> BufferSlice<'a, 'b>;
+    /// necessary, or returning `None` if linearization was required and
+    /// `storage` was `None`.
+    fn linearized<'a, 'b>(
+        &'a mut self,
+        storage: Option<&'b mut Vec<u8>>,
+    ) -> Option<BufferSlice<'a, 'b>>;
+
+    /// Obtains a mutable slice into the buffer without linearizing. Panics if
+    /// called on a buffer that's not contiguous.
+    fn unwrap_contiguous<'a>(&'a mut self) -> &'a mut [u8] {
+        assert_matches!(
+            self.linearized(None).expect("must be `Some` if contiguous"),
+            BufferSlice::Contiguous(slice) => slice
+        )
+    }
 }
 
 /// Frame type for GRO packet parsing.
@@ -153,6 +165,23 @@ struct Ipv6FlowId {
 enum IpFlowId {
     Ipv4(Ipv4FlowId),
     Ipv6(Ipv6FlowId),
+}
+
+enum IpPacket<'a> {
+    V4(Ipv4Packet<&'a [u8]>),
+    V6(Ipv6Packet<&'a [u8]>),
+}
+
+impl<'a> From<Ipv4Packet<&'a [u8]>> for IpPacket<'a> {
+    fn from(packet: Ipv4Packet<&'a [u8]>) -> IpPacket<'a> {
+        IpPacket::V4(packet)
+    }
+}
+
+impl<'a> From<Ipv6Packet<&'a [u8]>> for IpPacket<'a> {
+    fn from(packet: Ipv6Packet<&'a [u8]>) -> IpPacket<'a> {
+        IpPacket::V6(packet)
+    }
 }
 
 trait GroIpPacket<I: IpExt> {
@@ -264,6 +293,23 @@ impl<'a> TransportPacket<'a> {
             }),
         }
     }
+
+    /// Checks if this packet must be flushed to the stack given that it was not
+    /// merged into a flow, either because it didn't match one or because it
+    /// failed the merge checks.
+    ///
+    /// If it need not be flushed, it's eligible to become a new flow.
+    fn flush_if_not_merged(&self) -> bool {
+        match self {
+            Self::Tcp(_tcp) => {
+                // True if `SYN`, `FIN`, `RST`, `URG`, or `PSH` is set, or if
+                // the payload is empty.
+
+                // TODO(https://fxbug.dev/452980285): Implement.
+                false
+            }
+        }
+    }
 }
 
 /// Flow identifier for GRO matching.
@@ -306,14 +352,9 @@ fn build_csum_offload_output(
 /// Parsed packet containing all metadata needed for GRO matching and
 /// accumulation.
 struct GroPacket<'a> {
-    // TODO(https://fxbug.dev/452980285): Remove once used.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub flow_id: GroFlowId,
-    // TODO(https://fxbug.dev/452980285): Remove once used.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub offsets: HeaderOffsets,
-    // TODO(https://fxbug.dev/452980285): Remove once used.
-    #[expect(dead_code)]
+    pub ip: IpPacket<'a>,
     pub transport: TransportPacket<'a>,
 }
 
@@ -332,19 +373,25 @@ impl<'a> GroPacket<'a> {
 
         let ip_offset = total_len - view.len();
         let ip_version = ethertype.to_ip_version()?;
-        let (ip_flow_id, transport_offset, transport) = for_any_ip_version!(ip_version, I, {
+        let (ip, ip_flow_id, transport_offset, transport) = for_any_ip_version!(ip_version, I, {
             let ip = <I as IpExt>::Packet::parse(&mut view, ())
                 .ok()
                 .filter(|p| p.is_eligible_for_gro())?;
+            let flow_id = ip.flow_id();
             let proto = ip.ip_proto()?;
             let src = ip.src_ip();
             let dst = ip.dst_ip();
 
-            let transport_offset = total_len - view.len();
+            // NB: the IP parser trims any bytes past the end of the IP payload
+            // (e.g. link layer padding) off of `view`, so `total_len -
+            // view.len()` would overshoot the start of the transport header by
+            // the number of trailing bytes. Derive the offset from the IP
+            // header length instead.
+            let transport_offset = ip_offset + ip.header_len();
             let transport = TransportPacket::parse(&mut view, proto, src, dst, context)
                 .filter(|p| p.is_eligible_for_gro())?;
 
-            (ip.flow_id(), transport_offset, transport)
+            (ip.into(), flow_id, transport_offset, transport)
         });
 
         let offsets = HeaderOffsets { ip_offset, transport_offset };
@@ -354,7 +401,257 @@ impl<'a> GroPacket<'a> {
             transport: transport.flow_id(),
         };
 
-        Some(GroPacket { flow_id, offsets, transport })
+        Some(GroPacket { flow_id, offsets, ip, transport })
+    }
+
+    fn flush_if_not_merged(&self) -> bool {
+        self.transport.flush_if_not_merged()
+    }
+}
+
+enum CoalesceResult {
+    // TODO(https://fxbug.dev/452980285): Remove once used.
+    #[expect(dead_code)]
+    Flush,
+    Continue,
+}
+
+/// TCP flow matching criteria and accumulation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TcpFlow {
+    // TODO(https://fxbug.dev/452980285): Add flow state tracking.
+}
+
+impl TcpFlow {
+    fn new(_segment: &TcpSegment<&'_ [u8]>) -> Self {
+        Self {}
+    }
+
+    /// Determines whether a TCP segment already matched to this flow is
+    /// permitted to coalesce with it.
+    fn can_coalesce(&self, _current_frame_len: usize, _segment: &TcpSegment<&'_ [u8]>) -> bool {
+        // Requires that:
+        // - payload is nonempty and no larger than `gso_size`
+        // - new frame length would not exceed the maximum
+        // - flags match in all bits but `PSH` and `FIN`
+        // - ACK number, window size, and options match
+        // - sequence numbers are contiguous
+
+        // TODO(https://fxbug.dev/452980285): Implement.
+        false
+    }
+
+    /// Coalesces a TCP segment into this flow.
+    ///
+    /// Note that this operation does not modify the header of the coalesced TCP
+    /// segment. Instead it performs internal bookkeeping and performs the
+    /// modifications once in `finalize`.
+    fn coalesce(
+        &mut self,
+        _ip_flow: &IpFlowId,
+        _segment: &TcpSegment<&'_ [u8]>,
+        _coalesce_into: &mut Vec<u8>,
+    ) -> CoalesceResult {
+        // Flow matching is permitted to continue unless `SYN`, `FIN`, `RST`,
+        // `URG`, or `PSH` is set on `segment`, or its length is less than
+        // `gso_size` (all GRO'd segments must be the same length, save for the
+        // last one).
+
+        // TODO(https://fxbug.dev/452980285): Implement.
+        CoalesceResult::Continue
+    }
+
+    /// Finalizes the coalesced TCP segment by updating the header with the
+    /// correct checksum and the merged flags (which may only set `FIN` and/or
+    /// `PSH`).
+    fn finalize(&self, mut _transport_view: &mut [u8]) {
+        // TODO(https://fxbug.dev/452980285): Implement.
+    }
+}
+
+/// Transport-specific flow state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransportFlow {
+    Tcp(TcpFlow),
+}
+
+impl TransportFlow {
+    fn new(packet: &TransportPacket<'_>) -> Self {
+        match packet {
+            TransportPacket::Tcp(tcp) => Self::Tcp(TcpFlow::new(tcp)),
+        }
+    }
+
+    fn can_coalesce(&self, current_frame_len: usize, packet: &TransportPacket<'_>) -> bool {
+        match (self, packet) {
+            (Self::Tcp(flow), TransportPacket::Tcp(tcp)) => {
+                flow.can_coalesce(current_frame_len, tcp)
+            }
+        }
+    }
+
+    fn coalesce(
+        &mut self,
+        ip_flow: &IpFlowId,
+        packet: &TransportPacket<'_>,
+        coalesce_into: &mut Vec<u8>,
+    ) -> CoalesceResult {
+        match (self, packet) {
+            (Self::Tcp(flow), TransportPacket::Tcp(tcp)) => {
+                flow.coalesce(ip_flow, tcp, coalesce_into)
+            }
+        }
+    }
+
+    fn finalize(&self, transport_view: &mut [u8]) {
+        match self {
+            Self::Tcp(tcp) => tcp.finalize(transport_view),
+        }
+    }
+}
+
+/// IPv4 flow post-match fields and header finalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ipv4Flow {
+    // TODO(https://fxbug.dev/452980285): Add flow state tracking.
+}
+
+impl Ipv4Flow {
+    fn new(_packet: &Ipv4Packet<&'_ [u8]>) -> Ipv4Flow {
+        Self {}
+    }
+
+    /// Determines whether an IPv4 packet already matched to this flow is
+    /// permitted to coalesce with it.
+    fn can_coalesce(&self, _packet: &Ipv4Packet<&'_ [u8]>) -> bool {
+        // Requires that;
+        // - TTLs match
+        // - DSCP, ECN, and DF bit match
+        // - ID matches the pattern established for the flow (may be constant or
+        //   increasing by one with each packet)
+
+        // TODO(https://fxbug.dev/452980285): Implement.
+        false
+    }
+
+    /// Finalizes the coalesced IPv4 packet by updating the header with the new
+    /// length and checksum.
+    fn finalize(&self, mut _ip_view: &mut [u8]) {
+        // TODO(https://fxbug.dev/452980285): Implement.
+    }
+}
+
+/// IPv6 flow post-match fields and header finalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ipv6Flow {
+    // TODO(https://fxbug.dev/452980285): Add flow state tracking.
+}
+
+impl Ipv6Flow {
+    fn new(_packet: &Ipv6Packet<&'_ [u8]>) -> Ipv6Flow {
+        Self {}
+    }
+
+    /// Determines whether an IPv6 packet already matched to this flow is
+    /// permitted to coalesce with it.
+    fn can_coalesce(&self, _packet: &Ipv6Packet<&'_ [u8]>) -> bool {
+        // Requires that:
+        // - Hop limits match
+        // - DSCP and ECN match
+
+        // TODO(https://fxbug.dev/452980285): Implement.
+        false
+    }
+
+    /// Finalizes the coalesced IPv6 packet by updating the header with the new
+    /// payload length.
+    fn finalize(&self, mut _ip_view: &mut [u8]) {
+        // TODO(https://fxbug.dev/452980285): Implement.
+    }
+}
+
+/// IP-specific flow state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpFlow {
+    Ipv4(Ipv4Flow),
+    Ipv6(Ipv6Flow),
+}
+
+impl IpFlow {
+    fn new(ip: &IpPacket<'_>) -> Self {
+        match ip {
+            IpPacket::V4(packet) => IpFlow::Ipv4(Ipv4Flow::new(packet)),
+            IpPacket::V6(packet) => IpFlow::Ipv6(Ipv6Flow::new(packet)),
+        }
+    }
+
+    fn can_coalesce(&self, ip: &IpPacket<'_>) -> bool {
+        match (self, ip) {
+            (Self::Ipv4(flow), IpPacket::V4(packet)) => flow.can_coalesce(packet),
+            (Self::Ipv6(flow), IpPacket::V6(packet)) => flow.can_coalesce(packet),
+            (Self::Ipv4(_), IpPacket::V6(_)) | (Self::Ipv6(_), IpPacket::V4(_)) => false,
+        }
+    }
+
+    fn finalize(&self, ip_view: &mut [u8]) {
+        match self {
+            Self::Ipv4(flow) => flow.finalize(ip_view),
+            Self::Ipv6(flow) => flow.finalize(ip_view),
+        }
+    }
+}
+
+struct GroFlow<T> {
+    target: T,
+    flow_id: GroFlowId,
+    offsets: HeaderOffsets,
+    ip: IpFlow,
+    transport: TransportFlow,
+    checksum_offload: ChecksumRxOffloading,
+    num_coalesced: usize,
+}
+
+impl<T: Eq> GroFlow<T> {
+    fn new(target: T, parsed: GroPacket<'_>, checksum_offload: ChecksumRxOffloading) -> Self {
+        let GroPacket { flow_id, offsets, ip, transport } = parsed;
+        Self {
+            target,
+            flow_id,
+            offsets,
+            ip: IpFlow::new(&ip),
+            transport: TransportFlow::new(&transport),
+            checksum_offload,
+            num_coalesced: 1,
+        }
+    }
+
+    fn matches(
+        &self,
+        target: &T,
+        flow_id: &GroFlowId,
+        checksum_offload: ChecksumRxOffloading,
+    ) -> bool {
+        self.target == *target
+            && self.flow_id == *flow_id
+            && self.checksum_offload == checksum_offload
+    }
+
+    fn can_coalesce(&self, current_frame_len: usize, parsed: &GroPacket<'_>) -> bool {
+        self.ip.can_coalesce(&parsed.ip)
+            && self.transport.can_coalesce(current_frame_len, &parsed.transport)
+    }
+
+    fn coalesce(&mut self, parsed: GroPacket<'_>, coalesce_into: &mut Vec<u8>) -> CoalesceResult {
+        self.num_coalesced += 1;
+        self.transport.coalesce(&self.flow_id.ip, &parsed.transport, coalesce_into)
+    }
+
+    fn finalize(&self, view: &mut [u8]) {
+        let HeaderOffsets { ip_offset, transport_offset } = self.offsets;
+        if self.num_coalesced > 1 {
+            self.ip.finalize(&mut view[ip_offset..]);
+            self.transport.finalize(&mut view[transport_offset..]);
+        }
     }
 }
 
@@ -394,14 +691,7 @@ impl<'a, B: MaybeContiguousBuffer, O> GroOutputBuffers<'a, B, O> {
     /// Returns a mutable slice view of the frame buffer.
     pub fn slice_mut(&mut self) -> &mut [u8] {
         match self {
-            Self::Contiguous(b) => {
-                // Note: it's safe to assert here because `Self::Contiguous` is
-                // always constructed from a `BufferSlice::Contiguous`.
-                assert_matches!(
-                    b.linearized(&mut Vec::new()),
-                    BufferSlice::Contiguous(slice) => slice
-                )
-            }
+            Self::Contiguous(b) => b.unwrap_contiguous(),
             Self::Linearized { slice, .. } | Self::Coalesced { slice, .. } => slice,
         }
     }
@@ -437,6 +727,14 @@ impl<B> GroBufferStorage<B> {
         Self::default()
     }
 
+    fn clear(&mut self) {
+        self.coalescing_vec.clear();
+        self.linearization_vec.clear();
+        self.coalesced_buffers.clear();
+    }
+}
+
+impl<B: MaybeContiguousBuffer> GroBufferStorage<B> {
     /// Adapts the provided iterator of packet buffers into a GRO iterator.
     pub fn coalesce<I, T>(&mut self, iter: I) -> GroIter<'_, I, B, T>
     where
@@ -448,24 +746,79 @@ impl<B> GroBufferStorage<B> {
         GroIter::new(iter, self, false)
     }
 
-    fn clear(&mut self) {
-        self.coalescing_vec.clear();
-        self.linearization_vec.clear();
-        self.coalesced_buffers.clear();
+    fn hold(&mut self, buffer: B) {
+        self.coalesced_buffers.push(buffer);
     }
+
+    fn build_output<'a, T: Eq>(
+        &'a mut self,
+        flow: GroFlow<T>,
+    ) -> GroOutputItem<'a, B, T, alloc::vec::Drain<'a, B>> {
+        let GroBufferStorage { coalescing_vec, coalesced_buffers, .. } = self;
+
+        flow.finalize(&mut coalescing_vec[..]);
+
+        let GroFlow { target, checksum_offload, num_coalesced, .. } = flow;
+        let buffers = GroOutputBuffers::Coalesced {
+            slice: &mut coalescing_vec[..],
+            buffers: coalesced_buffers.drain(..num_coalesced),
+        };
+        GroOutputItem { target, checksum_offload, buffers }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BufferLinearization {
+    Contiguous,
+    Linearized,
+}
+
+/// The subsequent call to `GroIter::next()` must establish this as the active
+/// flow.
+///
+/// To avoid double-linearizing a fragmented buffer, `linearization` indicates
+/// whether `buffer` is contiguous or its linearization is still held in the
+/// linearization buffer.
+struct PendingFlow<B, T> {
+    buffer: B,
+    flow: GroFlow<T>,
+    linearization: BufferLinearization,
+}
+
+/// The subsequent call to `GroIter::next()` must flush this buffer.
+///
+/// To avoid double-linearizing a fragmented buffer, `linearization` indicates
+/// whether `buffer` is contiguous or its linearization is still held in the
+/// linearization buffer.
+struct PendingFlush<B, T> {
+    buffer: B,
+    target: T,
+    linearization: BufferLinearization,
+    checksum_offload: ChecksumRxOffloading,
+}
+
+enum PendingItem<B, T> {
+    NewFlow(PendingFlow<B, T>),
+    Flush(PendingFlush<B, T>),
 }
 
 /// An iterator adapter for GRO processing.
 pub struct GroIter<'a, I, B, T> {
     iter: I,
     storage: &'a mut GroBufferStorage<B>,
+    /// The active GRO flow that GRO is attempting to match.
+    active_flow: Option<GroFlow<T>>,
+    /// Item pending processing on next iteration.
+    pending_item: Option<PendingItem<B, T>>,
     enable_tcp_gro: bool,
-    _marker: PhantomData<T>,
 }
 
-impl<'a, I, B, T> GroIter<'a, I, B, T> {
+impl<'a, I, B, T> GroIter<'a, I, B, T>
+where
+    B: MaybeContiguousBuffer,
+{
     fn new(iter: I, storage: &'a mut GroBufferStorage<B>, enable_tcp_gro: bool) -> Self {
-        Self { iter, storage, enable_tcp_gro, _marker: PhantomData }
+        Self { iter, storage, active_flow: None, pending_item: None, enable_tcp_gro }
     }
 }
 
@@ -476,8 +829,6 @@ impl<'a, I, B, T> Drop for GroIter<'a, I, B, T> {
 }
 
 enum ProcessingResult<'a, B, T, O> {
-    // TODO(https://fxbug.dev/452980285): Remove once used.
-    #[expect(dead_code)]
     Continue,
     Return(GroOutputItem<'a, B, T, O>),
 }
@@ -491,13 +842,57 @@ where
     /// Advances the iterator and returns the next GRO output item.
     pub fn next<'b>(&'b mut self) -> Option<GroOutputItem<'b, B, T, alloc::vec::Drain<'b, B>>> {
         loop {
+            if let Some(i) = self.pending_item.take() {
+                match self.process_pending(i) {
+                    ProcessingResult::Continue => continue,
+                    ProcessingResult::Return(out) => return Some(out),
+                };
+            }
             if let Some(i) = self.iter.next() {
                 match self.process_input(i) {
                     ProcessingResult::Continue => continue,
                     ProcessingResult::Return(out) => return Some(out),
                 };
             }
+            if let Some(f) = self.active_flow.take() {
+                return Some(self.storage.build_output(f));
+            }
             return None;
+        }
+    }
+
+    fn process_pending<'b>(
+        &'b mut self,
+        pending: PendingItem<B, T>,
+    ) -> ProcessingResult<'b, B, T, alloc::vec::Drain<'b, B>> {
+        let Self { storage, active_flow, .. } = self;
+        match pending {
+            PendingItem::NewFlow(flow) => {
+                let PendingFlow { mut buffer, flow, linearization } = flow;
+                let slice = match linearization {
+                    BufferLinearization::Contiguous => buffer.unwrap_contiguous(),
+                    BufferLinearization::Linearized => &mut storage.linearization_vec,
+                };
+
+                storage.coalescing_vec.clear();
+                storage.coalescing_vec.extend_from_slice(slice);
+
+                storage.hold(buffer);
+                *active_flow = Some(flow);
+                ProcessingResult::Continue
+            }
+            PendingItem::Flush(pending) => {
+                let PendingFlush { buffer, target, linearization, checksum_offload } = pending;
+
+                let buffers = match linearization {
+                    BufferLinearization::Contiguous => GroOutputBuffers::Contiguous(buffer),
+                    BufferLinearization::Linearized => GroOutputBuffers::Linearized {
+                        buffer,
+                        slice: &mut storage.linearization_vec,
+                    },
+                };
+                ProcessingResult::Return(GroOutputItem { target, checksum_offload, buffers })
+            }
         }
     }
 
@@ -507,11 +902,17 @@ where
         &'b mut self,
         item: GroInputItem<B, T>,
     ) -> ProcessingResult<'b, B, T, alloc::vec::Drain<'b, B>> {
-        let Self { storage, enable_tcp_gro, .. } = self;
+        let Self { storage, active_flow, pending_item, enable_tcp_gro, .. } = self;
         let GroInputItem { mut buffer, target, checksum_offload } = item;
 
         storage.linearization_vec.clear();
-        let buffer_slice = buffer.linearized(&mut storage.linearization_vec);
+        let buffer_slice = buffer
+            .linearized(Some(&mut storage.linearization_vec))
+            .expect("must be `Some` if linearization vec is provided");
+        let linearization = match &buffer_slice {
+            BufferSlice::Contiguous(_) => BufferLinearization::Contiguous,
+            BufferSlice::Linearized(_) => BufferLinearization::Linearized,
+        };
 
         // Implemented as a macro rather than a function or closure because
         // passing `buffer` and `buffer_slice` across a call boundary causes the
@@ -549,10 +950,71 @@ where
             None => return_single_buffer!(checksum_offload),
         };
 
-        // TODO(https://fxbug.dev/452980285): Implement flow matching and
-        // coalescing.
-        let _ = parsed;
-        return_single_buffer!(checksum_offload);
+        let flush_if_not_merged = parsed.flush_if_not_merged();
+        let Some(mut active) = active_flow.take() else {
+            // There's no active flow. Establish the active flow unless the
+            // buffer needs to be flushed immediately.
+
+            if flush_if_not_merged {
+                return_single_buffer!(checksum_offload);
+            }
+
+            storage.coalescing_vec.clear();
+            storage.coalescing_vec.extend_from_slice(buffer_slice.as_slice());
+
+            let flow = GroFlow::new(target, parsed, checksum_offload);
+            storage.hold(buffer);
+            *active_flow = Some(flow);
+            return ProcessingResult::Continue;
+        };
+
+        if !active.matches(&target, &parsed.flow_id, checksum_offload) {
+            // The buffer didn't match the active flow, so it was not merged and
+            // the active flow is not flushed. Replace the active flow with a
+            // new one unless the buffer must be flushed immediately, in which
+            // case we just keep the active flow as-is.
+            //
+            // Note that while this may result in packet re-ordering across
+            // separate flows, it will still preserve ordering within any given
+            // flow. This is consistent with Linux's implementation of GRO
+            // (albeit with a single tracked flow, where Linux tracks up to 8).
+
+            if flush_if_not_merged {
+                *active_flow = Some(active);
+                return_single_buffer!(checksum_offload);
+            }
+
+            let flow = GroFlow::new(target, parsed, checksum_offload);
+            let pending = PendingItem::NewFlow(PendingFlow { buffer, flow, linearization });
+            *pending_item = Some(pending);
+            return ProcessingResult::Return(storage.build_output(active));
+        }
+
+        if active.can_coalesce(storage.coalescing_vec.len(), &parsed) {
+            let coalesce_result = active.coalesce(parsed, &mut storage.coalescing_vec);
+            storage.hold(buffer);
+
+            match coalesce_result {
+                CoalesceResult::Flush => ProcessingResult::Return(storage.build_output(active)),
+                CoalesceResult::Continue => {
+                    *active_flow = Some(active);
+                    ProcessingResult::Continue
+                }
+            }
+        } else {
+            // The buffer matched the active flow but could not be merged into
+            // it, so the active flow is flushed. The buffer is flushed as well
+            // if it must be; otherwise it becomes the new active flow.
+
+            let pending = if flush_if_not_merged {
+                PendingItem::Flush(PendingFlush { buffer, target, linearization, checksum_offload })
+            } else {
+                let flow = GroFlow::new(target, parsed, checksum_offload);
+                PendingItem::NewFlow(PendingFlow { buffer, flow, linearization })
+            };
+            *pending_item = Some(pending);
+            ProcessingResult::Return(storage.build_output(active))
+        }
     }
 }
 
@@ -593,17 +1055,21 @@ mod tests {
     }
 
     impl MaybeContiguousBuffer for TestBuffer {
-        fn linearized<'a, 'b>(&'a mut self, storage: &'b mut Vec<u8>) -> BufferSlice<'a, 'b> {
+        fn linearized<'a, 'b>(
+            &'a mut self,
+            storage: Option<&'b mut Vec<u8>>,
+        ) -> Option<BufferSlice<'a, 'b>> {
             if self.contiguous {
-                BufferSlice::Contiguous(&mut self.buf[..])
+                Some(BufferSlice::Contiguous(&mut self.buf[..]))
             } else {
+                let storage = storage?;
                 let frame_length = self.buf.len();
                 if storage.len() < frame_length {
                     storage.resize(frame_length, 0);
                 }
                 let slice = &mut storage[..frame_length];
                 slice.copy_from_slice(&self.buf);
-                BufferSlice::Linearized(slice)
+                Some(BufferSlice::Linearized(slice))
             }
         }
     }
@@ -647,17 +1113,21 @@ mod tests {
     }
 
     impl MaybeContiguousBuffer for TrackedBuffer {
-        fn linearized<'a, 'b>(&'a mut self, storage: &'b mut Vec<u8>) -> BufferSlice<'a, 'b> {
+        fn linearized<'a, 'b>(
+            &'a mut self,
+            storage: Option<&'b mut Vec<u8>>,
+        ) -> Option<BufferSlice<'a, 'b>> {
             if self.contiguous {
-                BufferSlice::Contiguous(&mut self.buf[..])
+                Some(BufferSlice::Contiguous(&mut self.buf[..]))
             } else {
+                let storage = storage?;
                 let frame_length = self.buf.len();
                 if storage.len() < frame_length {
                     storage.resize(frame_length, 0);
                 }
                 let slice = &mut storage[..frame_length];
                 slice.copy_from_slice(&self.buf);
-                BufferSlice::Linearized(slice)
+                Some(BufferSlice::Linearized(slice))
             }
         }
     }

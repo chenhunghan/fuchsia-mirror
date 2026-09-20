@@ -33,6 +33,15 @@ compiler_config("abi") {
 # hold the user-mode values while running in kernel mode.
 compiler_config("integer-register-abi") {
   cflags = [ "-msoft-float" ]
+  if (!is_gcc) {
+    cflags_c = [
+      "-Xclang",
+      "-target-feature",
+      "-Xclang",
+      "+soft-float",
+    ]
+    cflags_cc = cflags_c
+  }
   rust_target_features = [ "+soft-float" ]
   if (toolchain_environment == "kernel") {
     rust_target_edits = [
@@ -320,6 +329,7 @@ kernel_rust_mod("arch-x86-rs") {
     "//src/lib/kalloc",
     "//src/lib/kprint",
     "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/regio",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",

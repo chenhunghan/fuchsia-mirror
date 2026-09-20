@@ -60,11 +60,7 @@ fn is_user_accessible_range(va: usize, len: usize) -> bool {
         return false;
     };
 
-    if !is_user_accessible(va) || (len != 0 && !is_user_accessible(end - 1)) {
-        return false;
-    }
-
-    true
+    is_user_accessible(va) && (len == 0 || is_user_accessible(end - 1))
 }
 
 /// Copy memory from user space (`src`) to kernel space (`dst`).

@@ -530,6 +530,66 @@ TEST(Resource, MexecEmptyZbi) {
             zx_system_mexec(mexec_resource.get(), kernel_vmo.get(), bootimage_vmo.get()));
 }
 
+// Regression test for HAZARD-ZIRCON-01: Verify that failed sys_system_mexec calls
+// do not leak wired physical memory pages allocated by vmo_coalesce_pages.
+TEST(Resource, MexecMemoryLeakOnFailure) {
+  zx::unowned_resource system_resource = get_system();
+  if (!system_resource->is_valid()) {
+    ZXTEST_SKIP("System resource not available");
+  }
+
+  zx::resource mexec_resource;
+  if (zx_status_t status =
+          zx::resource::create(*system_resource, ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_MEXEC_BASE, 1,
+                               nullptr, 0, &mexec_resource);
+      status != ZX_OK) {
+    ZXTEST_SKIP("MEXEC resource not available");
+  }
+
+  zx::resource info_resource;
+  if (zx_status_t status =
+          zx::resource::create(*system_resource, ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_INFO_BASE, 1,
+                               nullptr, 0, &info_resource);
+      status != ZX_OK) {
+    ZXTEST_SKIP("INFO resource not available");
+  }
+
+  zx_info_kmem_stats_t kmem_before;
+  ASSERT_OK(zx_object_get_info(info_resource.get(), ZX_INFO_KMEM_STATS, &kmem_before,
+                               sizeof(kmem_before), nullptr, nullptr));
+
+  // Allocate a 64KB kernel VMO containing an invalid container header (no bootable kernel).
+  const size_t test_vmo_size = 64 * 1024;
+  zx::vmo kernel_vmo, bootimage_vmo;
+  ASSERT_OK(zx::vmo::create(test_vmo_size, 0, &kernel_vmo));
+  ASSERT_OK(zx::vmo::create(zx_system_get_page_size(), 0, &bootimage_vmo));
+
+  const zbi_header_t header = zbitl::ContainerHeader(0);
+  ASSERT_OK(kernel_vmo.write(&header, 0, sizeof(header)));
+
+  // Repeatedly invoke mexec expecting failure on zbitl validation.
+  // Prior to the fix, each call leaked the entire contiguous physical range (64KB per call, ~38MB
+  // total).
+  constexpr size_t kIterations = 600;
+  for (size_t i = 0; i < kIterations; ++i) {
+    EXPECT_EQ(ZX_ERR_IO_DATA_INTEGRITY,
+              zx_system_mexec(mexec_resource.get(), kernel_vmo.get(), bootimage_vmo.get()));
+  }
+
+  zx_info_kmem_stats_t kmem_after;
+  ASSERT_OK(zx_object_get_info(info_resource.get(), ZX_INFO_KMEM_STATS, &kmem_after,
+                               sizeof(kmem_after), nullptr, nullptr));
+
+  // If memory were leaked, free_bytes would decrease by at least (kIterations * test_vmo_size) =
+  // ~38MB. Allow for modest ambient allocations, but assert we did not leak ~38MB.
+  const uint64_t potential_leak_bytes = kIterations * test_vmo_size;
+  if (kmem_before.free_bytes > kmem_after.free_bytes) {
+    uint64_t bytes_lost = kmem_before.free_bytes - kmem_after.free_bytes;
+    EXPECT_LT(bytes_lost, potential_leak_bytes / 2,
+              "Wired physical memory was leaked across failed mexec calls");
+  }
+}
+
 // Regression test for https://fxbug.dev/512234306
 // NOTE: If behavior ever regresses, then we expect this
 // test to only fail (crash) on KASAN builds of the kernel.

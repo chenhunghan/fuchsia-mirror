@@ -142,7 +142,6 @@ class ScsiDriver : public fdf::DriverBase2, public scsi::Controller {
                                  iovec data) override;
   void ExecuteCommandsAsync(uint8_t target, uint16_t lun,
                             std::span<scsi::ScsiRequest> batch) override;
-  bool UseNewInterface() const override { return true; }
 
  protected:
   void set_scsi_device(std::unique_ptr<ScsiDevice> device) { scsi_device_ = std::move(device); }

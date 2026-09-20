@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <list>
 #include <memory>
+#include <optional>
 #include <span>
 
 #include <fbl/vector.h>

@@ -6,8 +6,8 @@ use fidl::endpoints::*;
 use fidl_fuchsia_media::*;
 use fidl_fuchsia_mediacodec::*;
 use fuchsia_component::client;
-use futures::future::{self, BoxFuture};
 use futures::FutureExt;
+use futures::future::{self, BoxFuture};
 use stream_processor_test::*;
 
 pub struct DecoderFactory;
@@ -18,7 +18,23 @@ impl StreamProcessorFactory for DecoderFactory {
         stream: &dyn ElementaryStream,
         format_details_version_ordinal: u64,
     ) -> BoxFuture<'_, Result<StreamProcessorProxy>> {
-        let get_decoder = || {
+        DecoderFactoryWithParams { require_sw: None }
+            .connect_to_stream_processor(stream, format_details_version_ordinal)
+    }
+}
+
+pub struct DecoderFactoryWithParams {
+    pub require_sw: Option<bool>,
+}
+
+impl StreamProcessorFactory for DecoderFactoryWithParams {
+    fn connect_to_stream_processor(
+        &self,
+        stream: &dyn ElementaryStream,
+        format_details_version_ordinal: u64,
+    ) -> BoxFuture<'_, Result<StreamProcessorProxy>> {
+        let require_sw = self.require_sw;
+        let get_decoder = move || {
             let factory = client::connect_to_protocol::<CodecFactoryMarker>()?;
             let (decoder_client_end, decoder_request) = create_endpoints();
             let decoder = decoder_client_end.into_proxy();
@@ -29,6 +45,7 @@ impl StreamProcessorFactory for DecoderFactory {
                     input_details: Some(stream.format_details(format_details_version_ordinal)),
                     promise_separate_access_units_on_input: Some(stream.is_access_units()),
                     permit_lack_of_split_header_handling: Some(true),
+                    require_sw,
                     ..Default::default()
                 },
                 decoder_request,

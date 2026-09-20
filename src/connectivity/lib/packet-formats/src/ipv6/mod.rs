@@ -602,7 +602,8 @@ impl<B: SplitByteSlice> Ipv6Packet<B> {
         Ipv6PerFragmentHeaderBuilder { prefix_builder, meta }
     }
 
-    fn header_len(&self) -> usize {
+    /// The size of the fixed header plus extension headers.
+    pub fn header_len(&self) -> usize {
         Ref::bytes(&self.fixed_hdr).len() + self.extension_hdrs.bytes().len()
     }
 

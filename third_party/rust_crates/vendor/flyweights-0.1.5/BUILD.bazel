@@ -78,7 +78,7 @@ rust_library(
     deps = [
         "//third_party/rust_crates/ask2patch/byteorder",
         "//third_party/rust_crates/vendor/ahash-0.8.12:ahash",
-        "//third_party/rust_crates/vendor/bstr-1.12.1:bstr",
+        "//third_party/rust_crates/vendor/bstr-1.13.1:bstr",
         "//third_party/rust_crates/vendor/schemars-0.8.22:schemars",
         "//third_party/rust_crates/vendor/serde-1.0.229:serde",
         "//third_party/rust_crates/vendor/static_assertions-1.1.0:static_assertions",

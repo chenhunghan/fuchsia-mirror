@@ -20,22 +20,19 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from pathlib import Path
 from typing import (
     IO,
     Any,
-    Callable,
-    Dict,
-    FrozenSet,
-    Generator,
-    Iterable,
-    Iterator,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
     TextIO,
-    Tuple,
 )
 
 _SCRIPT_BASENAME = Path(__file__).name
@@ -79,7 +76,7 @@ def timer_cm(text: str) -> Generator[Any, Any, Any]:
             tmsg(end_time, "end  : " + text + f" (elapsed: {elapsed})")
 
 
-def auto_env_prefix_command(command: List[str]) -> List[str]:
+def auto_env_prefix_command(command: list[str]) -> list[str]:
     if not command:
         return []
     if "=" in command[0]:
@@ -145,7 +142,7 @@ def copy_preserve_subpath(src: Path, dest_dir: Path) -> None:
 # TODO: move this to library for abstract data operations
 def partition_sequence(
     seq: Sequence[Any], sep: Any
-) -> Tuple[Sequence[Any], Any, Sequence[Any]]:
+) -> tuple[Sequence[Any], Any, Sequence[Any]]:
     """Similar to string.partition, but for arbitrary sequences.
 
     Args:
@@ -182,7 +179,7 @@ def split_into_subsequences(
     Returns:
       sequence of subsequences between occurrences of the separator.
     """
-    subseq: List[Any] = []
+    subseq: list[Any] = []
     for elem in seq:
         if elem == sep:
             yield subseq
@@ -196,7 +193,7 @@ def split_into_subsequences(
 # TODO: move this to library for abstract data operations
 def match_prefix_transform_suffix(
     text: str, prefix: str, transform: Callable[[str], str]
-) -> Optional[str]:
+) -> str | None:
     """If text matches prefix, transform the text after the prefix.
 
     This can be useful for transforming command flags.
@@ -267,7 +264,7 @@ def remove_c_comments(text: str) -> str:
 
 
 def expand_response_files(
-    command: Iterable[str], rspfiles: List[Path]
+    command: Iterable[str], rspfiles: list[Path]
 ) -> Iterator[str]:
     """Expand response files in a command into tokens contained therein.
 
@@ -328,7 +325,7 @@ def expand_fused_flags(
 
 
 def fuse_expanded_flags(
-    command: Iterable[str], flags: FrozenSet[str]
+    command: Iterable[str], flags: frozenset[str]
 ) -> Iterable[str]:
     """Turns flags like ('-D' 'foo') into '-Dfoo'.
 
@@ -362,7 +359,7 @@ class StringSetAdd(argparse.Action):
         self,
         option_strings: Sequence[str],
         dest: str,
-        nargs: Optional[Any] = None,
+        nargs: Any | None = None,
         **kwargs: Any,
     ) -> None:
         if nargs is not None:
@@ -374,7 +371,7 @@ class StringSetAdd(argparse.Action):
         parser: Any,
         namespace: Any,
         values: Any,
-        option_string: Optional[str] = None,
+        option_string: str | None = None,
     ) -> None:
         collection = getattr(namespace, self.dest).copy()
         collection.add(values)
@@ -388,7 +385,7 @@ class StringSetRemove(argparse.Action):
         self,
         option_strings: Sequence[str],
         dest: str,
-        nargs: Optional[Any] = None,
+        nargs: Any | None = None,
         **kwargs: Any,
     ) -> None:
         if nargs is not None:
@@ -400,7 +397,7 @@ class StringSetRemove(argparse.Action):
         parser: Any,
         namespace: Any,
         values: Any,
-        option_string: Optional[str] = None,
+        option_string: str | None = None,
     ) -> None:
         collection = getattr(namespace, self.dest).copy()
         # special case: values == "all", clear entire set
@@ -427,7 +424,7 @@ def expand_paths_from_files(files: Iterable[Path]) -> Iterable[Path]:
                         yield Path(p.replace(" ", "\\ "))  # preserve escape
 
 
-def read_config_file_lines(lines: Iterable[str]) -> Dict[str, str]:
+def read_config_file_lines(lines: Iterable[str]) -> dict[str, str]:
     """Parser for reading RBE config files.
 
     RBE config files are text files with lines of "VAR=VALUE"
@@ -452,7 +449,7 @@ def read_config_file_lines(lines: Iterable[str]) -> Dict[str, str]:
 
 
 def values_dict_to_config_value(
-    values: Dict[str, str], eq: str = "=", sep: str = ","
+    values: dict[str, str], eq: str = "=", sep: str = ","
 ) -> str:
     """Return a string representation of a dictionary for config lines.
 
@@ -473,7 +470,7 @@ def values_dict_to_config_value(
 
 
 def keyed_flags_to_values_dict(
-    flags: Iterable[str], convert_type: Optional[Callable[[str], Any]] = None
+    flags: Iterable[str], convert_type: Callable[[str], Any] | None = None
 ) -> Mapping[str, Sequence[str]]:
     """Convert a series of key[=value]s into a dictionary.
 
@@ -609,7 +606,7 @@ class FlagForwarder(object):
     def __init__(self, flag_mappings: Iterable[ForwardedFlag]):
         self._map = {m.name: m for m in flag_mappings}
 
-    def sift(self, argv: Iterable[str]) -> Tuple[Sequence[str], Sequence[str]]:
+    def sift(self, argv: Iterable[str]) -> tuple[Sequence[str], Sequence[str]]:
         """Sifts out known flags while transforming them.
 
         Args:
@@ -761,7 +758,7 @@ class BlockingFileLock(object):
 
     def __init__(self, lockfile: Path):
         self._lockfile: Path = lockfile
-        self._lockfile_fd: Optional[int] = None
+        self._lockfile_fd: int | None = None
 
     def _acquire(self) -> None:
         lockfile_fd = os.open(self._lockfile, os.O_RDWR | os.O_CREAT, 0o644)
@@ -795,10 +792,10 @@ class SubprocessResult(object):
     def __init__(
         self,
         returncode: int,
-        stdout: Optional[Sequence[str]] = None,  # lines
-        stderr: Optional[Sequence[str]] = None,  # lines
+        stdout: Sequence[str] | None = None,  # lines
+        stderr: Sequence[str] | None = None,  # lines
         # The process id may come in handy when looking for logs
-        pid: Optional[int] = None,
+        pid: int | None = None,
     ):
         self.returncode = returncode
         self.stdout = stdout or []
@@ -827,7 +824,7 @@ class SubprocessResult(object):
 
 
 async def _read_stream(
-    stream: Optional[asyncio.StreamReader], callback: Callable[[bytes], None]
+    stream: asyncio.StreamReader | None, callback: Callable[[bytes], None]
 ) -> None:
     if not stream:
         return
@@ -841,9 +838,9 @@ async def _read_stream(
 
 async def _stream_subprocess(
     cmd: Sequence[str],
-    stdin: Optional[IO[Any]] = None,
-    stdout: Optional[TextIO] = None,
-    stderr: Optional[TextIO] = None,
+    stdin: IO[Any] | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
     quiet: bool = False,
     **kwargs: Any,
 ) -> SubprocessResult:
@@ -868,10 +865,10 @@ async def _stream_subprocess(
     )
     pid = p.pid
 
-    out_text: List[str] = []
-    err_text: List[str] = []
+    out_text: list[str] = []
+    err_text: list[str] = []
 
-    def tee(line: bytes, sink: List[str], pipe: TextIO) -> None:
+    def tee(line: bytes, sink: list[str], pipe: TextIO) -> None:
         line_str = line.decode("utf-8").rstrip()
         sink.append(line_str)
         if not quiet:
@@ -896,9 +893,9 @@ async def _stream_subprocess(
 
 def subprocess_call(
     cmd: Sequence[str],
-    stdin: Optional[IO[Any]] = None,
-    stdout: Optional[TextIO] = None,
-    stderr: Optional[TextIO] = None,
+    stdin: IO[Any] | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
     quiet: bool = False,
     **kwargs: Any,
 ) -> SubprocessResult:

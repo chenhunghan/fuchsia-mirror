@@ -142,6 +142,7 @@ rustc_library("arch-rs") {
 
   sources = [
     "src/arm64/cache.rs",
+    "src/arm64/debug.rs",
     "src/arm64/feature.rs",
     "src/arm64/memory.rs",
     "src/arm64/mod.rs",

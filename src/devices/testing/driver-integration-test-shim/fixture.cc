@@ -107,7 +107,6 @@ zx_status_t IsolatedDevmgr::Create(Args* args, IsolatedDevmgr* out) {
            },
        .boot_driver_components = {{
            "zxcrypt.cm",
-           "block.core.cm",
            "ramdisk-v2.cm",
            "ramdisk.cm",
            "inspect-test.cm",

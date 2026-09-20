@@ -10,13 +10,13 @@ use crate::vfs::{
 };
 use fidl::endpoints::{DiscoverableProtocolMarker, SynchronousProxy, create_sync_proxy};
 use fidl_fuchsia_fshost::StarnixVolumeProviderMarker;
-use fidl_fuchsia_fxfs::CryptMarker;
+use fidl_fuchsia_fxfs::{CryptMarker, DebugMarker};
 use fidl_fuchsia_hardware_inlineencryption::DeviceMarker as InlineEncryptionDeviceMarker;
 use fidl_fuchsia_io as fio;
 use starnix_crypt::CryptService;
 use starnix_logging::{Level, log, log_error};
 use starnix_uapi::errors::Errno;
-use starnix_uapi::{errno, from_status_like_fdio, statfs};
+use starnix_uapi::{errno, error, from_status_like_fdio, statfs};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -83,6 +83,31 @@ impl FileSystemOps for RemoteVolume {
 
     fn crypt_service(&self) -> Option<Arc<CryptService>> {
         Some(self.crypt_service.clone())
+    }
+
+    fn drop_caches(&self, _fs: &FileSystem) -> Result<(), Errno> {
+        let (proxy, server_end) = create_sync_proxy::<DebugMarker>();
+        if let Err(e) = fdio::service_connect_at(
+            self.exposed_dir_proxy.as_channel(),
+            &format!("svc/{}", DebugMarker::PROTOCOL_NAME),
+            server_end.into(),
+        ) {
+            log_error!(e:%; "RemoteVolume.drop_caches failed to connect to fuchsia.fxfs.Debug");
+            return error!(EIO);
+        }
+
+        match proxy.clear_caches(zx::MonotonicInstant::INFINITE) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(status)) => {
+                let err = from_status_like_fdio!(zx::Status::err_from_raw(status));
+                log_error!(err:?; "RemoteVolume.drop_caches failed");
+                Err(err)
+            }
+            Err(e) => {
+                log_error!(e:%; "RemoteVolume.drop_caches failed at FIDL layer");
+                error!(EIO)
+            }
+        }
     }
 }
 

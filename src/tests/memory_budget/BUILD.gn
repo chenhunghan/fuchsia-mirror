@@ -2,9 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//boards/default_for_emulator.gni")
+import("//build/assembly/test_product_bundle.gni")
 import("//build/go/go_library.gni")
 import("//build/go/go_test.gni")
-import("//build/images/paths.gni")
+import("//build/testing/host_test_data.gni")
 
 group("tests") {
   testonly = true
@@ -33,9 +35,13 @@ if (is_linux) {
     outputs = [ "$root_out_dir/test_data/config/{{source_file_part}}" ]
   }
 
-  host_test_data("memory_budget_pb_data") {
-    sources = [ files.product_bundle_dir ]
-    deps = [ "//build/images/fuchsia:default_product_bundle_for_emulator.go" ]
+  _pb_label = ":test_product_bundle($default_toolchain)"
+  _pb_out_dir = get_label_info(_pb_label, "target_out_dir")
+  _pb_path = "${_pb_out_dir}/test_product_bundle"
+
+  host_test_data("host_test_data") {
+    sources = [ _pb_path ]
+    deps = [ _pb_label ]
   }
 
   go_library("lib") {
@@ -55,13 +61,22 @@ if (is_linux) {
     embed = [ ":lib" ]
     args = [
       "-product-bundle",
-      rebase_path(files.product_bundle_dir, root_build_dir),
+      rebase_path(_pb_path, root_build_dir),
     ]
     non_go_deps = [
       ":host_fvm",
-      ":memory_budget_pb_data",
+      ":host_test_data",
       ":vm_config",
       "//src/storage/lib/sparse/rust:simg2img_sources",
     ]
+  }
+}
+
+if (current_toolchain == default_toolchain) {
+  test_product_bundle("test_product_bundle") {
+    board_config = default_board_for_emulator
+    platform = {
+      build_type = "eng"
+    }
   }
 }

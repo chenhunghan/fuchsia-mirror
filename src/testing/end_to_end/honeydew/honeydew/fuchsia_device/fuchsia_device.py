@@ -1072,6 +1072,16 @@ class FuchsiaDevice(
         """
         self._on_device_resume_fns.append(fn)
 
+    @property
+    def usb_power_hub(self) -> usb_power_hub_interface.UsbPowerHub | None:
+        """USB power hub controlling this device, if one has been set."""
+        return self._usb_power_hub
+
+    @property
+    def usb_power_hub_port(self) -> int | None:
+        """Port on the USB power hub where this device is connected, if any."""
+        return self._usb_power_hub_port
+
     def set_usb_power_hub(
         self,
         usb_power_hub: usb_power_hub_interface.UsbPowerHub,
@@ -1100,7 +1110,8 @@ class FuchsiaDevice(
         """
         if self._usb_power_hub is None:
             raise errors.NotSupportedError(
-                "USB power hub not set. Use set_usb_power_hub to set it."
+                f"Cannot suspend '{self.device_name}': USB power hub is not configured. "
+                "Either call `set_usb_power_hub()` or ensure USB power hub details are provided in the testbed config."
             )
 
         for fn in self._on_device_suspend_fns:
@@ -1129,7 +1140,8 @@ class FuchsiaDevice(
         """
         if self._usb_power_hub is None:
             raise errors.NotSupportedError(
-                "USB power hub not set. Use set_usb_power_hub to set it."
+                f"Cannot resume '{self.device_name}': USB power hub is not configured. "
+                "Either call `set_usb_power_hub()` or ensure USB power hub details are provided in the testbed config."
             )
 
         _LOGGER.info("Connecting USB to %s...", self.device_name)

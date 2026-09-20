@@ -14,12 +14,24 @@ import (
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
 )
 
-// UpdateWithClassifiedFiles updates a slice of Readmes in-place with the given classified files.
+// UpdateWithClassifiedFiles updates a slice of Readmes in-place with the given classified files
+// and writes generated NOTICE.fuchsia files to disk.
 // It maps each classified file to the correct sub-project (based on Location) and populates the LicenseFiles arrays.
 // Files that match any NonLicenseFile entries are ignored.
 // If preserveExisting is true, existing license file entries and NOTICE.fuchsia files are preserved
 // rather than being cleared or deleted (e.g. for targeted or incremental updates).
-func UpdateWithClassifiedFiles(fuchsiaDir, absDir string, readmes []*Readme, foundLicenses []pipeline.ClassifiedFile, preserveExisting bool) {
+// Returns a map of absolute notice file paths to their generated notice content.
+func UpdateWithClassifiedFiles(fuchsiaDir, absDir string, readmes []*Readme, foundLicenses []pipeline.ClassifiedFile, preserveExisting bool) map[string]string {
+	return updateWithClassifiedFilesInternal(fuchsiaDir, absDir, readmes, foundLicenses, preserveExisting, true)
+}
+
+// UpdateWithClassifiedFilesDryRun updates a slice of Readmes in memory without modifying NOTICE.fuchsia files on disk.
+// Returns a map of absolute notice file paths to their generated notice content.
+func UpdateWithClassifiedFilesDryRun(fuchsiaDir, absDir string, readmes []*Readme, foundLicenses []pipeline.ClassifiedFile, preserveExisting bool) map[string]string {
+	return updateWithClassifiedFilesInternal(fuchsiaDir, absDir, readmes, foundLicenses, preserveExisting, false)
+}
+
+func updateWithClassifiedFilesInternal(fuchsiaDir, absDir string, readmes []*Readme, foundLicenses []pipeline.ClassifiedFile, preserveExisting, writeFiles bool) map[string]string {
 	fileToReadme := make(map[string]*Readme)
 
 	for _, cf := range foundLicenses {
@@ -165,6 +177,7 @@ func UpdateWithClassifiedFiles(fuchsiaDir, absDir string, readmes []*Readme, fou
 		}
 	}
 
+	notices := make(map[string]string)
 	for _, r := range readmes {
 		noticeDir := absDir
 		if r.FilePath != "" {
@@ -180,12 +193,16 @@ func UpdateWithClassifiedFiles(fuchsiaDir, absDir string, readmes []*Readme, fou
 
 		if len(readmeSourceFiles[r]) > 0 {
 			content := generateNoticeContent(readmeSourceFiles[r])
-			_ = os.MkdirAll(noticeDir, 0755)
-			if err := os.WriteFile(noticePath, []byte(content), 0644); err == nil {
-				r.GeneratedNoticeFiles = []string{"NOTICE.fuchsia"}
+			notices[noticePath] = content
+			r.GeneratedNoticeFiles = []string{"NOTICE.fuchsia"}
+			if writeFiles {
+				_ = os.MkdirAll(noticeDir, 0755)
+				_ = os.WriteFile(noticePath, []byte(content), 0644)
 			}
 		} else if !preserveExisting {
-			os.Remove(noticePath)
+			if writeFiles {
+				_ = os.Remove(noticePath)
+			}
 			r.GeneratedNoticeFiles = nil
 		}
 
@@ -193,6 +210,7 @@ func UpdateWithClassifiedFiles(fuchsiaDir, absDir string, readmes []*Readme, fou
 		r.LicenseFiles = deduplicateAndSort(r.LicenseFiles)
 		r.GeneratedNoticeFiles = deduplicateAndSort(r.GeneratedNoticeFiles)
 	}
+	return notices
 }
 
 type sourceMatchInfo struct {

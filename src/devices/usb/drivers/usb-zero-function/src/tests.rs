@@ -1083,7 +1083,7 @@ async fn test_source_sink_cancellation() {
     let ep_out_proxy = ep_out_client.into_proxy();
 
     let mut vmos_registered = false;
-    let _tasks = run_source_sink(
+    let (sink_task, source_task) = run_source_sink(
         ep_in_proxy,
         ep_out_proxy,
         &mut vmos_registered,
@@ -1131,6 +1131,52 @@ async fn test_source_sink_cancellation() {
         assert_eq!(state.requests.len(), QUEUE_DEPTH - 1);
     }
 
+    // Verify IO_REFUSED re-queues transfer to maintain ring depth on OUT endpoint
+    let io_refused_out_req = {
+        let mut state = state_out.lock().unwrap();
+        let req = state.requests.pop().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
+        req
+    };
+    comp_out_tx
+        .unbounded_send(vec![fusb_endpoint::Completion {
+            request: Some(io_refused_out_req),
+            status: Some(zx::sys::ZX_ERR_IO_REFUSED),
+            transfer_size: Some(0),
+            ..Default::default()
+        }])
+        .unwrap();
+
+    let event = event_out_rx.next().await;
+    assert_eq!(event, Some(MockEvent::RequestQueued));
+    {
+        let state = state_out.lock().unwrap();
+        // IO_REFUSED transfer re-queued to maintain ring depth.
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 1);
+    }
+
+    // Verify IO_NOT_PRESENT terminates pump task without re-queuing on OUT endpoint
+    let io_not_present_out_req = {
+        let mut state = state_out.lock().unwrap();
+        let req = state.requests.pop().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
+        req
+    };
+    comp_out_tx
+        .unbounded_send(vec![fusb_endpoint::Completion {
+            request: Some(io_not_present_out_req),
+            status: Some(zx::sys::ZX_ERR_IO_NOT_PRESENT),
+            transfer_size: Some(0),
+            ..Default::default()
+        }])
+        .unwrap();
+
+    sink_task.await;
+    {
+        let state = state_out.lock().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
+    }
+
     // Verify cancellation in a mixed batch on IN endpoint
     let (canceled_in_req, valid_in_req) = {
         let mut state = state_in.lock().unwrap();
@@ -1163,6 +1209,52 @@ async fn test_source_sink_cancellation() {
         let state = state_in.lock().unwrap();
         // Canceled transfer dropped; only valid transfer re-queued.
         assert_eq!(state.requests.len(), QUEUE_DEPTH - 1);
+    }
+
+    // Verify IO_REFUSED re-queues transfer to maintain ring depth on IN endpoint
+    let io_refused_in_req = {
+        let mut state = state_in.lock().unwrap();
+        let req = state.requests.pop().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
+        req
+    };
+    comp_in_tx
+        .unbounded_send(vec![fusb_endpoint::Completion {
+            request: Some(io_refused_in_req),
+            status: Some(zx::sys::ZX_ERR_IO_REFUSED),
+            transfer_size: Some(0),
+            ..Default::default()
+        }])
+        .unwrap();
+
+    let event = event_in_rx.next().await;
+    assert_eq!(event, Some(MockEvent::RequestQueued));
+    {
+        let state = state_in.lock().unwrap();
+        // IO_REFUSED transfer re-queued to maintain ring depth.
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 1);
+    }
+
+    // Verify IO_NOT_PRESENT terminates pump task without re-queuing on IN endpoint
+    let io_not_present_in_req = {
+        let mut state = state_in.lock().unwrap();
+        let req = state.requests.pop().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
+        req
+    };
+    comp_in_tx
+        .unbounded_send(vec![fusb_endpoint::Completion {
+            request: Some(io_not_present_in_req),
+            status: Some(zx::sys::ZX_ERR_IO_NOT_PRESENT),
+            transfer_size: Some(0),
+            ..Default::default()
+        }])
+        .unwrap();
+
+    source_task.await;
+    {
+        let state = state_in.lock().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
     }
 }
 
@@ -1202,7 +1294,7 @@ async fn test_loopback_cancellation() {
     let ep_out_proxy = ep_out_client.into_proxy();
 
     let mut vmos_registered = false;
-    let _tasks = run_loopback(
+    let (read_task, _write_task) = run_loopback(
         ep_in_proxy,
         ep_out_proxy,
         &mut vmos_registered,
@@ -1246,6 +1338,52 @@ async fn test_loopback_cancellation() {
         let state = state_out.lock().unwrap();
         // Canceled transfer dropped; only valid transfer re-queued.
         assert_eq!(state.requests.len(), QUEUE_DEPTH - 1);
+    }
+
+    // Verify IO_REFUSED re-queues buffer to maintain ring depth (endpoint halt / abort)
+    let io_refused_out_req = {
+        let mut state = state_out.lock().unwrap();
+        let req = state.requests.pop().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
+        req
+    };
+    comp_out_tx
+        .unbounded_send(vec![fusb_endpoint::Completion {
+            request: Some(io_refused_out_req),
+            status: Some(zx::sys::ZX_ERR_IO_REFUSED),
+            transfer_size: Some(0),
+            ..Default::default()
+        }])
+        .unwrap();
+
+    let event = event_out_rx.next().await;
+    assert_eq!(event, Some(MockEvent::RequestQueued));
+    {
+        let state = state_out.lock().unwrap();
+        // IO_REFUSED transfer re-queued to maintain ring depth.
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 1);
+    }
+
+    // Verify IO_NOT_PRESENT terminates loopback read task without re-queuing (disconnect)
+    let io_not_present_out_req = {
+        let mut state = state_out.lock().unwrap();
+        let req = state.requests.pop().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
+        req
+    };
+    comp_out_tx
+        .unbounded_send(vec![fusb_endpoint::Completion {
+            request: Some(io_not_present_out_req),
+            status: Some(zx::sys::ZX_ERR_IO_NOT_PRESENT),
+            transfer_size: Some(0),
+            ..Default::default()
+        }])
+        .unwrap();
+
+    read_task.await;
+    {
+        let state = state_out.lock().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH - 2);
     }
 }
 

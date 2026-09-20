@@ -129,10 +129,9 @@ fn convert(pilot_summary: Summary, test_config: TestConfig) -> TestResult {
         } else {
             None
         },
-        // TODO: Populate these lifecycle fields from pilot_summary once supported by test-pilot.
-        setup_succeeded: None,
-        teardown_succeeded: None,
-        exit_code: None,
+        setup_succeeded: pilot_summary.setup_succeeded,
+        teardown_succeeded: pilot_summary.teardown_succeeded,
+        exit_code: pilot_summary.exit_code,
     }
 }
 
@@ -342,6 +341,7 @@ mod tests {
                     },
                 ),
             ]),
+            ..Default::default()
         };
 
         let test_config = TestConfig { output_directory: "/path/to/output/directory".to_string() };
@@ -387,6 +387,55 @@ mod tests {
         assert_eq!(case3.display_name, "case3");
         assert_eq!(case3.status, "PASS");
         assert_eq!(case3.failure_reason, None);
+    }
+
+    #[test]
+    fn test_convert_lifecycle_fields() {
+        let pilot_summary = Summary {
+            setup_succeeded: Some(true),
+            teardown_succeeded: Some(false),
+            exit_code: Some(0),
+            ..Default::default()
+        };
+
+        let test_config = TestConfig { output_directory: "/path/to/output/directory".to_string() };
+
+        let botanist_summary = convert(pilot_summary, test_config);
+
+        assert_eq!(botanist_summary.setup_succeeded, Some(true));
+        assert_eq!(botanist_summary.teardown_succeeded, Some(false));
+        assert_eq!(botanist_summary.exit_code, Some(0));
+
+        let botanist_summary_json = serde_json::to_value(&botanist_summary).unwrap();
+        assert_eq!(botanist_summary_json.get("setup_succeeded"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            botanist_summary_json.get("teardown_succeeded"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(botanist_summary_json.get("exit_code"), Some(&serde_json::json!(0)));
+    }
+
+    #[test]
+    fn test_convert_lifecycle_fields_failure() {
+        let pilot_summary = Summary {
+            setup_succeeded: Some(false),
+            teardown_succeeded: Some(true),
+            exit_code: Some(86),
+            ..Default::default()
+        };
+
+        let test_config = TestConfig { output_directory: "/path/to/output/directory".to_string() };
+
+        let botanist_summary = convert(pilot_summary, test_config);
+
+        assert_eq!(botanist_summary.setup_succeeded, Some(false));
+        assert_eq!(botanist_summary.teardown_succeeded, Some(true));
+        assert_eq!(botanist_summary.exit_code, Some(86));
+
+        let botanist_summary_json = serde_json::to_value(&botanist_summary).unwrap();
+        assert_eq!(botanist_summary_json.get("setup_succeeded"), Some(&serde_json::json!(false)));
+        assert_eq!(botanist_summary_json.get("teardown_succeeded"), Some(&serde_json::json!(true)));
+        assert_eq!(botanist_summary_json.get("exit_code"), Some(&serde_json::json!(86)));
     }
 
     #[test]

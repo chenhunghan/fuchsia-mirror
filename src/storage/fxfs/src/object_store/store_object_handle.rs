@@ -493,7 +493,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         &self,
         buf: BufferRef<'_>,
         device_offset: u64,
-        crypt_ctx: Option<(u32, u8)>,
+        crypt_ctx: Option<(u64, u8)>,
         flags: WriteFlags,
     ) -> Result<MaybeChecksums, Error> {
         if self.trace() {
@@ -2740,7 +2740,7 @@ mod tests {
         .await
         .expect("replace_child failed");
         transaction.commit().await.unwrap();
-        store.tombstone_object(object.object_id(), Options::default()).await.unwrap();
+        store.tombstone_object(object.object_id(), Options::default(), None).await.unwrap();
 
         crate::fsck::fsck(fs.clone()).await.unwrap();
 

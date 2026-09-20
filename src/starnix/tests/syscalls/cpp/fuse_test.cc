@@ -127,7 +127,7 @@ class FuseTest : public ::testing::Test {
     base_dir_ = base_dir;
 
     std::string witness = mergedir + "/" + witness_name;
-    for (int i = 0; i < 20 && access(witness.c_str(), R_OK) != 0; ++i) {
+    for (int i = 0; i < 100 && access(witness.c_str(), R_OK) != 0; ++i) {
       usleep(100000);
     }
     if (access(witness.c_str(), R_OK) != 0) {

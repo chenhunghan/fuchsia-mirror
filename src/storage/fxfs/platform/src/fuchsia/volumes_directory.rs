@@ -16,7 +16,7 @@ use fidl_fuchsia_fs::{AdminMarker, AdminRequest, AdminRequestStream};
 use fidl_fuchsia_fs_startup::{
     CheckOptions, CreateOptions, MountOptions, VolumeRequest, VolumeRequestStream,
 };
-use fidl_fuchsia_fxfs::{FileBackedVolumeProviderMarker, ProjectIdMarker};
+use fidl_fuchsia_fxfs::{DebugMarker, FileBackedVolumeProviderMarker, ProjectIdMarker};
 use fidl_fuchsia_io as fio;
 use fs_inspect::{FsInspectTree, FsInspectVolume};
 use fuchsia_async as fasync;
@@ -406,15 +406,18 @@ impl VolumesDirectory {
         Ok(me)
     }
 
-    /// Clears the directory entry cache (dirent cache) for all mounted volumes.  This drops the
-    /// strong references to nodes held by the cache, allowing them (and their associated VMOs) to
-    /// be freed if they are not otherwise open.  Note that this does not clear other internal
-    /// caches (like LSM tree caches or CachingObjectHandle).
+    /// Clears the directory entry cache (dirent cache) and internal object store caches for all
+    /// mounted volumes and filesystem metadata stores.
     pub async fn clear_caches(&self) {
-        let volumes = self.mounted_volumes.lock().await;
-        for mounted_volume in volumes.values() {
-            mounted_volume.volume.volume().dirent_cache().clear();
+        let volumes: Vec<_> =
+            self.mounted_volumes.lock().await.values().map(|v| v.volume.volume().clone()).collect();
+        for volume in volumes {
+            volume.clear_caches();
         }
+        let fs = self.root_volume.volume_directory().store().filesystem();
+        fs.root_store().clear_caches();
+        fs.root_parent_store().clear_caches();
+        fs.allocator().tree().clear_cache();
     }
 
     /// Delete a profile for a given volume. Fails if that volume isn't mounted or if there is
@@ -753,6 +756,20 @@ impl VolumesDirectory {
                 }
             }),
         )?;
+        {
+            let vol_scope = volume.volume().scope().clone();
+            let weak_vol = Arc::downgrade(volume.volume());
+            svc_dir.add_entry(
+                DebugMarker::PROTOCOL_NAME,
+                vfs::service::host(move |requests| {
+                    let weak_vol = weak_vol.clone();
+                    let scope = vol_scope.clone();
+                    async move {
+                        let _ = FxVolume::handle_debug_requests(weak_vol, scope, requests).await;
+                    }
+                }),
+            )?;
+        }
         volume.root().clone().register_additional_volume_services(&svc_dir)?;
 
         let scope = volume.admin_scope().clone();
@@ -1166,7 +1183,7 @@ mod tests {
     use fidl::endpoints::{DiscoverableProtocolMarker, create_proxy, create_request_stream};
     use fidl_fuchsia_fs::AdminMarker;
     use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions, VolumeProxy};
-    use fidl_fuchsia_fxfs::{CryptRequest, FxfsKey, KeyPurpose, WrappedKey};
+    use fidl_fuchsia_fxfs::{CryptRequest, DebugMarker, FxfsKey, KeyPurpose, WrappedKey};
     use fidl_fuchsia_io as fio;
     use fuchsia_async as fasync;
     use fuchsia_component_client::connect_to_protocol_at_dir_svc;
@@ -1989,6 +2006,110 @@ mod tests {
         admin_proxy.shutdown().await.expect("shutdown failed");
 
         assert!(volumes_directory.mounted_volumes.lock().await.is_empty());
+    }
+
+    #[fuchsia::test]
+    async fn test_volume_debug_clear_caches() {
+        let device = DeviceHolder::new(FakeDevice::new(8192, 512));
+        let filesystem = FxFilesystem::new_empty(device).await.unwrap();
+        let blob_resupplied_count =
+            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let volumes_directory = VolumesDirectory::new(
+            root_volume(filesystem.clone()).await.unwrap(),
+            Weak::new(),
+            None,
+            blob_resupplied_count,
+            MemoryPressureConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let crypt = Arc::new(new_insecure_crypt()) as Arc<dyn Crypt>;
+        let vol = volumes_directory
+            .create_and_mount_volume("test_vol", Some(crypt), false, CreateOptions::default())
+            .await
+            .expect("create encrypted volume failed");
+
+        let (dir_proxy, dir_server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
+        volumes_directory.serve_volume(&vol, dir_server_end, false).expect("serve_volume failed");
+
+        let (root, root_server_end) = create_proxy::<fio::DirectoryMarker>();
+        vol.root().clone().serve(fio::PERM_READABLE | fio::PERM_WRITABLE, root_server_end);
+        let file = open_file_checked(
+            &root,
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_FILE,
+            &Default::default(),
+        )
+        .await;
+
+        file.write(b"Hello, world!").await.expect("write fidl failed").expect("write failed");
+        file.sync()
+            .await
+            .expect("sync fidl failed")
+            .map_err(Status::err_from_raw)
+            .expect("sync failed");
+
+        let (_, attrs) = file
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("get_attributes fidl failed")
+            .expect("get_attributes failed");
+        let file_id = attrs.id.expect("missing file id");
+
+        let store = vol.volume().store();
+        // Flush the store so that records are compacted into a PersistentLayer.
+        store.flush().await.expect("flush failed");
+
+        // Clear the tree cache so the lookup below misses TreeCache and reads from the
+        // PersistentLayer on disk, populating both the layer chunk cache and TreeCache.
+        store.tree().clear_cache();
+        let _ = store
+            .tree()
+            .find(&fxfs::object_store::ObjectKey::object(file_id))
+            .await
+            .expect("tree find failed");
+
+        let layer_object_id =
+            store.tree().immutable_layer_set().layers[0].handle().unwrap().object_id();
+
+        // Verify all caches are populated prior to ClearCaches.
+        assert!(vol.volume().dirent_cache().len() > 0);
+        assert!(store.tree().cache_len() > 0);
+        assert!(store.key_manager().get(file_id).await.unwrap().is_some());
+        assert!(
+            filesystem.root_store().key_manager().get(layer_object_id).await.unwrap().is_some()
+        );
+
+        let debug_proxy = connect_to_protocol_at_dir_svc::<DebugMarker>(&dir_proxy)
+            .expect("Unable to connect to debug service");
+
+        debug_proxy
+            .clear_caches()
+            .await
+            .expect("clear_caches fidl failed")
+            .expect("clear_caches failed");
+
+        // Verify dirent cache and TreeCache are cleared.
+        assert_eq!(vol.volume().dirent_cache().len(), 0);
+        assert_eq!(store.tree().cache_len(), 0);
+        // Verify non-permanent file key is evicted from the volume store.
+        assert!(store.key_manager().get(file_id).await.unwrap().is_none());
+
+        // Also clear caches on the top-level VolumesDirectory and verify permanent layer keys in
+        // root_store are preserved so reading from the encrypted volume continues to work.
+        volumes_directory.clear_caches().await;
+        assert!(
+            filesystem.root_store().key_manager().get(layer_object_id).await.unwrap().is_some()
+        );
+        let _ = store
+            .tree()
+            .find(&fxfs::object_store::ObjectKey::object(file_id))
+            .await
+            .expect("tree find after clear_caches failed");
     }
 
     #[fuchsia::test]

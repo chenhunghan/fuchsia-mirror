@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("tmp112-dml") {
+  dml = "meta/tmp112.dml"
+  driver_name = "tmp112"
+}
+
 driver_bind_rules("tmp112-bind") {
-  rules = "meta/tmp112.bind"
+  bind_output = "tmp112.bindbc"
+  dml_label = ":tmp112-dml"
   tests = "meta/tmp112-bind-test.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -35,10 +41,10 @@ fuchsia_cc_driver("tmp112-driver") {
 }
 
 fuchsia_driver_component("tmp112") {
+  dml_label = ":tmp112-dml"
   info = "meta/tmp112-info.json"
   component_name = "tmp112"
   deps = [ ":tmp112-driver" ]
-  manifest = "meta/tmp112.cml"
 }
 
 test("tmp112-test-bin") {

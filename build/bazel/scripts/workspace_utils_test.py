@@ -962,6 +962,7 @@ class GenerateFuchsiaPlatformSysrootRepositoryTest(unittest.TestCase):
 
         build_bazel = self._repository_dir / "BUILD.bazel"
         self.assertTrue(build_bazel.exists())
+        self.assertTrue((self._repository_dir / "LICENSE").is_symlink())
 
         self.maxDiff = None
         self.assertEqual(
@@ -971,6 +972,15 @@ class GenerateFuchsiaPlatformSysrootRepositoryTest(unittest.TestCase):
 load(
     "@fuchsia_rules_common//debug_symbols:debug_symbols.bzl",
     "fuchsia_unstripped_binary",
+)
+load("@rules_license//rules:license.bzl", "license")
+
+package(default_applicable_licenses = [":license"])
+
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:BSD-2-Clause"],
+    license_text = "LICENSE",
 )
 
 exports_files(["sysroot/empty"])
@@ -1029,6 +1039,7 @@ fuchsia_unstripped_binary(
                     path = "{self._root}/build/bazel_sdk/fuchsia_rules_common",
                 )
                 bazel_dep(name = "platforms", version = "1.1.0")
+                bazel_dep(name = "rules_license", version = "1.0.0")
                 """
             ),
         )

@@ -18,8 +18,15 @@ int run_a11y_manager(int argc, const char** argv) {
 
   auto context = sys::ComponentContext::Create();
 
+  fuchsia::ui::composition::FlatlandFactoryPtr flatland_factory =
+      context->svc()->Connect<fuchsia::ui::composition::FlatlandFactory>();
+  flatland_factory.set_error_handler([&](zx_status_t status) {
+    FX_PLOGS(ERROR, status) << "flatland_factory connection closed; exiting";
+    loop.Quit();
+  });
   auto make_flatland = [&]() {
-    fidl::InterfacePtr flatland = context->svc()->Connect<fuchsia::ui::composition::Flatland>();
+    fuchsia::ui::composition::FlatlandPtr flatland;
+    flatland_factory->CreateFlatland(flatland.NewRequest(), {}, [](auto) {});
     flatland.set_error_handler([&](zx_status_t status) {
       FX_PLOGS(ERROR, status) << "flatland connection closed; exiting";
       loop.Quit();

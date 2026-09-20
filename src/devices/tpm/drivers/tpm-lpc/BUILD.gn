@@ -20,8 +20,13 @@ group("tests") {
   deps = [ ":tpm-lpc-tests" ]
 }
 
+fuchsia_driver_dml("tpm-lpc-dml") {
+  dml = "meta/tpm-lpc.dml"
+  driver_name = "tpm-lpc"
+}
+
 driver_bind_rules("tpm-lpc_bind") {
-  rules = "meta/tpm-lpc.bind"
+  dml_label = ":tpm-lpc-dml"
   bind_output = "tpm-lpc.bindbc"
   tests = "meta/bind_tests.json"
   deps = [ "//src/devices/bind/fuchsia.acpi" ]
@@ -53,7 +58,7 @@ fuchsia_driver_component("tpm-lpc-driver") {
   component_name = "tpm-lpc"
   deps = [ ":fuchsia_driver" ]
   info = "meta/tpm-lpc-info.json"
-  manifest = "meta/tpm-lpc.cml"
+  dml_label = ":tpm-lpc-dml"
 }
 
 fuchsia_driver_package("tpm-lpc-pkg") {

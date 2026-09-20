@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <optional>
+#include <set>
 #include <string_view>
 #include <vector>
 
@@ -657,6 +658,18 @@ fit::result<int, std::vector<MountInfo>> ReadMountInfo();
 // Reads "/proc/self/mountinfo" and returns the info for the mount at `path`.
 // If no such mount is found, or the file cannot be read, the result will be an empty optional.
 std::optional<MountInfo> ReadMountInfoLine(const std::string &path);
+
+// Returns the set of file names in `dir`. `.` and `..` are not included.
+// If `dir` does not exist or cannot be opened, returns an error (e.g. ENOENT).
+fit::result<int, std::set<std::string>> ListDirectory(const char *dir);
+
+// Polls `/dev/input` for up to 5 seconds until new device entries appear that were
+// not present in `ls_before`.
+//
+// Returns a vector of newly appeared device names. If the poll times out and no
+// new devices appeared, the returned vector will be empty. Note that more than one
+// device name may be returned if multiple devices appeared.
+std::vector<std::string> WaitForDevice(const std::set<std::string> &ls_before);
 
 }  // namespace test_helper
 

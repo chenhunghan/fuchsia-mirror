@@ -8,7 +8,8 @@ import json
 import struct
 import subprocess
 import sys
-from typing import Iterable, Optional, TypeVar
+from collections.abc import Iterable
+from typing import TypeVar
 
 DEFAULT_CONFIGS = [
     "--no-environment",
@@ -201,7 +202,7 @@ def check_contents_for_subpackage_names(args: argparse.Namespace) -> None:
 
 
 def check_contents_for_bind_bytecode(
-    contents: list[str], bind: Optional[str]
+    contents: list[str], bind: str | None
 ) -> None:
     if bind:
         _assert_in(bind, contents, "Failed to find bind bytecode")

@@ -6,7 +6,6 @@
 import subprocess
 import unittest
 from pathlib import Path
-from typing import Tuple
 from unittest import mock
 
 import cl_utils
@@ -63,8 +62,8 @@ _fake_downloader = remotetool.RemoteTool(
 
 
 def _fake_download(
-    packed_args: Tuple[Path, remotetool.RemoteTool, Path]
-) -> Tuple[Path, cl_utils.SubprocessResult]:
+    packed_args: tuple[Path, remotetool.RemoteTool, Path]
+) -> tuple[Path, cl_utils.SubprocessResult]:
     # For mocking dlwrap._download_for_mp.
     # defined because multiprocessing cannot serialize mocks
     stub_path, downloader, working_dir_abs = packed_args
@@ -72,8 +71,8 @@ def _fake_download(
 
 
 def _fake_download_fail(
-    packed_args: Tuple[Path, remotetool.RemoteTool, Path]
-) -> Tuple[Path, cl_utils.SubprocessResult]:
+    packed_args: tuple[Path, remotetool.RemoteTool, Path]
+) -> tuple[Path, cl_utils.SubprocessResult]:
     # For mocking dlwrap._download_for_mp.
     # defined because multiprocessing cannot serialize mocks
     stub_path, downloader, working_dir_abs = packed_args

@@ -598,11 +598,7 @@ void Minfs::Terminate() {
   {
     std::scoped_lock load_vnode_vmo_lock(load_vnode_vmo_mutex_);
     if (load_vnode_vmo_vmoid_.IsAttached()) {
-      if (zx_status_t status = bc_->BlockDetachVmo(std::move(load_vnode_vmo_vmoid_));
-          status != ZX_OK) {
-        FX_PLOGS(ERROR, status) << "Failed to detach load_vnode_transfer_buf";
-        ZX_DEBUG_ASSERT_MSG(false, "Failed to detach load_vnode_transfer_buf");
-      }
+      bc_->BlockDetachVmo(std::move(load_vnode_vmo_vmoid_));
     }
   }
 #endif
@@ -1840,13 +1836,13 @@ zx::result<zx::vmo> Minfs::LoadVnodeVmo(VnodeIterator iterator, uint64_t block_c
     block_count -= count;
   }
 
-  // If any of the below operations fail, pages may be left behind in the transfer vmo. If a file in
-  // a later call to |LoadVnodeVmo| is sparse and has a hole where the left behind pages are, then
-  // the pages would erroneously get transferred into that file's vmo. This defer will remove all of
-  // the pages from the transfer vmo in the case of an error.
+  // If any of the below operations fail, pages may be left behind in the transfer vmo. If a file
+  // in a later call to |LoadVnodeVmo| is sparse and has a hole where the left behind pages are,
+  // then the pages would erroneously get transferred into that file's vmo. This defer will remove
+  // all of the pages from the transfer vmo in the case of an error.
   auto zero_transfer_buf = fit::defer([this, vmo_size] {
-    // The lock is still held when this callback is called but the compiler's thread-safety-analysis
-    // doesn't know that.
+    // The lock is still held when this callback is called but the compiler's
+    // thread-safety-analysis doesn't know that.
     []() __TA_ASSERT(load_vnode_vmo_mutex_) {}();
     // If zeroing out the transfer buffer fails then we can't guarantee that data from one file
     // won't end up in another which could leak information. Panicking avoids the leak.

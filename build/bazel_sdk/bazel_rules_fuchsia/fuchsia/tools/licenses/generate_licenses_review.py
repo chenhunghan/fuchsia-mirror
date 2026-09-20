@@ -10,7 +10,6 @@ import os
 import shutil
 import zipfile
 from sys import stderr
-from typing import List
 
 from fuchsia.tools.licenses.classification_types import *
 from fuchsia.tools.licenses.spdx_types import *
@@ -23,7 +22,7 @@ def _log(*kwargs):
         print(*kwargs, file=stderr)
 
 
-def _dedup(input: List[str]) -> List[str]:
+def _dedup(input: list[str]) -> list[str]:
     return sorted(list(set(input)))
 
 

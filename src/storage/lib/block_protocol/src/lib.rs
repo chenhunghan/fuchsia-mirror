@@ -36,11 +36,11 @@ pub struct ReadOptions {
 pub struct InlineCryptoOptions {
     pub is_enabled: bool,
     pub slot: u8,
-    pub dun: u32,
+    pub dun: u64,
 }
 
 impl InlineCryptoOptions {
-    pub fn enabled(slot: u8, dun: u32) -> Self {
+    pub fn enabled(slot: u8, dun: u64) -> Self {
         Self { is_enabled: true, slot, dun }
     }
 }

@@ -400,6 +400,31 @@ impl EnvironmentContext {
         }
     }
 
+    /// Returns the overridden path to the environment config file, if explicitly configured.
+    pub fn custom_env_file_path(&self) -> Option<&Path> {
+        self.env_file_path.as_deref()
+    }
+
+    /// Returns the CLI argument flags representing this environment context
+    /// (such as `--no-environment`, `--isolate-dir <path>`, `--env <path>`, `--strict`).
+    pub fn env_args(&self) -> Result<Vec<String>, ContextError> {
+        let mut args = Vec::new();
+        if self.has_no_environment() {
+            args.push("--no-environment".to_string());
+        }
+        if let Some(isolate_root) = self.env_kind().isolate_root() {
+            let root_str: &Utf8Path = isolate_root.try_into()?;
+            args.extend(["--isolate-dir".to_string(), root_str.to_string()]);
+        }
+        if let Some(env_file) = self.custom_env_file_path() {
+            let env_str: &Utf8Path = env_file.try_into()?;
+            args.extend(["--env".to_string(), env_str.to_string()]);
+        }
+        if self.is_strict() {
+            args.push("--strict".to_string());
+        }
+        Ok(args)
+    }
     /// Returns the context's project root, if it makes sense for its
     /// [`EnvironmentKind`].
     pub fn project_root(&self) -> Option<&Path> {
@@ -900,5 +925,72 @@ mod test {
             ctx.get_overridden_target_specifier().expect("target spec unset"),
             Some("foo".to_string())
         )
+    }
+
+    #[fuchsia::test]
+    fn test_env_args() {
+        // Default / empty
+        let ctx =
+            EnvironmentContext::no_context(ExecutableKind::Test, ConfigMap::new(), None, false)
+                .unwrap();
+        assert_eq!(ctx.env_args().unwrap(), Vec::<String>::new());
+
+        // No environment flag
+        let ctx =
+            EnvironmentContext::no_context(ExecutableKind::Test, ConfigMap::new(), None, true)
+                .unwrap();
+        assert_eq!(ctx.env_args().unwrap(), vec!["--no-environment".to_string()]);
+
+        // Isolated environment
+        let isolate_dir = tempdir().expect("tempdir");
+        let isolate_path = isolate_dir.path().to_owned();
+        let expected_isolate_path = std::path::absolute(&isolate_path).unwrap();
+        let expected_isolate_str = expected_isolate_path.to_str().unwrap().to_string();
+        let ctx = EnvironmentContext::isolated(
+            ExecutableKind::Test,
+            isolate_path,
+            Default::default(),
+            Default::default(),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.env_args().unwrap(),
+            vec!["--isolate-dir".to_string(), expected_isolate_str]
+        );
+
+        // Custom env file path
+        let env_path = PathBuf::from("/tmp/custom_env_file.json");
+        let ctx = EnvironmentContext::no_context(
+            ExecutableKind::Test,
+            ConfigMap::new(),
+            Some(env_path.clone()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.env_args().unwrap(),
+            vec!["--env".to_string(), "/tmp/custom_env_file.json".to_string()]
+        );
+
+        // Strict context
+        let mut config_map = ConfigMap::new();
+        config_map.insert("target".to_string(), serde_json::json!({ "default": "127.0.0.1" }));
+        config_map.insert(
+            "ssh".to_string(),
+            serde_json::json!({ "pub": "/tmp/whatever", "priv": "/tmp/whatever2" }),
+        );
+        config_map.insert("log".to_string(), serde_json::json!({ "dir": "/tmp/loggodoggo" }));
+        config_map.insert(
+            "fastboot".to_string(),
+            serde_json::json!({ "devices_file": { "path": "/tmp/fastboot_thing_I_guess" } }),
+        );
+        let ctx = EnvironmentContext::strict(ExecutableKind::Test, config_map).unwrap();
+        assert_eq!(
+            ctx.env_args().unwrap(),
+            vec!["--no-environment".to_string(), "--strict".to_string()]
+        );
     }
 }

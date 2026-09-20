@@ -412,10 +412,9 @@ impl TransferManager {
         let mut contig_regions = contig_regions.peekable();
         let first_region = contig_regions.next().unwrap();
         let crypto_params = if transfer_options.inline_crypto.is_enabled {
-            Some(CryptoParams {
-                slot: transfer_options.inline_crypto.slot,
-                dun: transfer_options.inline_crypto.dun,
-            })
+            let dun = u32::try_from(transfer_options.inline_crypto.dun)
+                .map_err(|_| zx::Status::OUT_OF_RANGE)?;
+            Some(CryptoParams { slot: transfer_options.inline_crypto.slot, dun })
         } else {
             None
         };
@@ -1415,7 +1414,35 @@ mod tests {
                 .err(),
             Some(zx::Status::INVALID_ARGS)
         );
+        unsafe {
+            Arc::try_unwrap(manager).unwrap().unpin_buffers();
+        }
+    }
 
+    #[fuchsia::test]
+    fn crypto_dun_out_of_range() {
+        let (manager, fake_bti) = setup();
+        fake_bti.set_paddrs(&[4096]);
+        let vmo = Arc::new(zx::Vmo::create(4096).unwrap());
+        let err = manager
+            .prepare_transfer(
+                0,
+                vmo.clone(),
+                0,
+                0,
+                1,
+                Direction::Read,
+                TransferOptions {
+                    queue_barrier: false,
+                    inline_crypto: block_server::InlineCryptoOptions {
+                        is_enabled: true,
+                        slot: 5,
+                        dun: 1u64 << 32,
+                    },
+                },
+            )
+            .expect_err("prepare_transfer with out-of-range DUN should fail");
+        assert_eq!(err, zx::Status::OUT_OF_RANGE);
         unsafe {
             Arc::try_unwrap(manager).unwrap().unpin_buffers();
         }

@@ -251,7 +251,7 @@ struct RelocationTraits<ElfMachine::kRiscv> {
 // for TLS.  This is only what relocation needs to handle, not the whole
 // thread-pointer ABI for the machine.  Each specialization must meet the
 // concept TlsTraitsApi<Elf> defined below.
-template <class Elf, ElfMachine Machine>
+template <ElfApi Elf, ElfMachine Machine>
 struct TlsTraitsImpl;
 
 // This defines the API for each TlsTraitsImpl<Elf, Machine> class, given Elf.
@@ -260,6 +260,8 @@ struct TlsTraitsImpl;
 // indicates the requirement for a public member `static constexpr T K = ...;`.
 template <class Traits, class Elf = Elf<>>
 concept TlsTraitsApi = requires {
+  requires ElfApi<Elf>;
+
   // This is the type of GOT entries in this ABI, usually Elf::Addr.
   typename Traits::GotAddr;
 
@@ -304,20 +306,20 @@ concept TlsTraitsApi = requires {
 };
 
 // This is a convenient way to verify a TlsTraitsApi implementation.
-template <class Elf, TlsTraitsApi<Elf> Traits>
+template <ElfApi Elf, TlsTraitsApi<Elf> Traits>
 using AsTlsTraitsApi = Traits;
 
 // All uses go through this so any TlsTraitsImpl specialization actually used
 // will be verified against the concept requirements.
-template <class Elf = Elf<>, ElfMachine Machine = ElfMachine::kNative>
+template <ElfApi Elf = Elf<>, ElfMachine Machine = ElfMachine::kNative>
 using TlsTraits = AsTlsTraitsApi<Elf, TlsTraitsImpl<Elf, Machine>>;
 
 // This is an exemplar and recommended starting point for newly-specified TLS
 // psABIs.  Specializations for real machines can use this as a base class.
-template <class Elf>
+template <ElfApi Elf>
 struct TlsTraitsImpl<Elf, ElfMachine::kNone> {
-  using GotAddr = typename Elf::Addr;
-  using size_type = typename Elf::size_type;
+  using GotAddr = Elf::Addr;
+  using size_type = Elf::size_type;
 
   static constexpr size_type kTlsLocalExecOffset = 0;
   static constexpr bool kTlsNegative = false;
@@ -326,7 +328,7 @@ struct TlsTraitsImpl<Elf, ElfMachine::kNone> {
 };
 
 // AArch64 puts TLS above TP after a two-word reserved area.
-template <class Elf>
+template <ElfApi Elf>
 struct TlsTraitsImpl<Elf, ElfMachine::kAarch64> : public TlsTraits<Elf, ElfMachine::kNone> {
   using typename TlsTraits<Elf, ElfMachine::kNone>::size_type;
 
@@ -334,11 +336,11 @@ struct TlsTraitsImpl<Elf, ElfMachine::kAarch64> : public TlsTraits<Elf, ElfMachi
 };
 
 // ARM (AArch32) is just the same.
-template <class Elf>
+template <ElfApi Elf>
 struct TlsTraitsImpl<Elf, ElfMachine::kArm> : public TlsTraits<Elf, ElfMachine::kAarch64> {};
 
 // RISC-V puts TLS above TP with no offset, as shown in the exemplar.
-template <class Elf>
+template <ElfApi Elf>
 struct TlsTraitsImpl<Elf, ElfMachine::kRiscv> : public TlsTraits<Elf, ElfMachine::kNone> {
   using typename TlsTraits<Elf, ElfMachine::kNone>::size_type;
 
@@ -346,14 +348,14 @@ struct TlsTraitsImpl<Elf, ElfMachine::kRiscv> : public TlsTraits<Elf, ElfMachine
 };
 
 // x86 puts TLS below TP and requires *$tp = $tp.
-template <class Elf>
+template <ElfApi Elf>
 struct TlsTraitsImpl<Elf, ElfMachine::k386> : public TlsTraits<Elf, ElfMachine::kNone> {
   static constexpr bool kTlsNegative = true;
   static constexpr bool kTpSelfPointer = true;
 };
 
 // x86-64 uses 64-bit GOT entries even for ILP32.
-template <class Elf>
+template <ElfApi Elf>
 struct TlsTraitsImpl<Elf, ElfMachine::kX86_64> : public TlsTraits<Elf, ElfMachine::k386> {
   using GotAddr = Elf64<Elf::kData>::Addr;
 };

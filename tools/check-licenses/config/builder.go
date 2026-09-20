@@ -45,7 +45,15 @@ func (b *Builder) Assemble() error {
 	err := b.parseConfigFile(rootConfig)
 	assetDirs := []string{
 		filepath.Join(b.Config.FuchsiaDir, "tools", "check-licenses", "assets"),
-		filepath.Join(b.Config.FuchsiaDir, "vendor", "google", "tools", "check-licenses", "assets"),
+	}
+	vendorDir := filepath.Join(b.Config.FuchsiaDir, "vendor")
+	if entries, readErr := os.ReadDir(vendorDir); readErr == nil {
+		for _, entry := range entries {
+			candidate := filepath.Join(vendorDir, entry.Name(), "tools", "check-licenses", "assets")
+			if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+				assetDirs = append(assetDirs, candidate)
+			}
+		}
 	}
 	for _, assetDir := range assetDirs {
 		filepath.WalkDir(assetDir, func(path string, d fs.DirEntry, walkErr error) error {
@@ -55,32 +63,43 @@ func (b *Builder) Assemble() error {
 			slashPath := filepath.ToSlash(path)
 			if idx := strings.Index(slashPath, "/allowed_licenses/"); idx != -1 {
 				subParts := strings.Split(slashPath[idx+len("/allowed_licenses/"):], "/")
-				if len(subParts) >= 2 {
+				if len(subParts) >= 2 && subParts[0] != "" && subParts[1] != "" {
 					if b.Config.Classify.LicenseCategories == nil {
 						b.Config.Classify.LicenseCategories = make(map[string]string)
 					}
 					b.Config.Classify.LicenseCategories[subParts[1]] = subParts[0]
 				}
 			}
+			if d.IsDir() {
+				return nil
+			}
 			if d.Name() == "README.fuchsia" {
 				rel, relErr := filepath.Rel(b.Config.FuchsiaDir, filepath.Dir(path))
 				if relErr == nil {
-					rel = filepath.ToSlash(rel)
-					logical := rel
-					logical = strings.TrimPrefix(logical, "vendor/google/tools/check-licenses/assets/readmes")
-					logical = strings.TrimPrefix(logical, "tools/check-licenses/assets/readmes")
-					logical = strings.TrimPrefix(logical, "/")
-					if logical == "" {
-						logical = "."
-					}
-					if _, exists := b.Config.Boundary.OutOfTreeReadmes[logical]; !exists {
-						b.Config.Boundary.OutOfTreeReadmes[logical] = path
+					logical := filepath.ToSlash(rel)
+					if idx := strings.Index(logical, "tools/check-licenses/assets/readmes"); idx != -1 {
+						logical = strings.TrimPrefix(logical[idx+len("tools/check-licenses/assets/readmes"):], "/")
+						if logical == "" {
+							logical = "."
+						}
+						if _, exists := b.Config.Boundary.OutOfTreeReadmes[logical]; !exists {
+							b.Config.Boundary.OutOfTreeReadmes[logical] = path
+						}
 					}
 				}
 			}
 			return nil
 		})
 	}
+
+	b.Config.Validate.VirtualReadmeDir = func(projectPath string) string {
+		root := b.Config.ReadmeRootFor(projectPath)
+		if rel, relErr := filepath.Rel(b.Config.FuchsiaDir, root); relErr == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+		return filepath.ToSlash(root)
+	}
+
 	return err
 }
 
@@ -196,7 +215,10 @@ func (b *Builder) parseConfigFile(path string) error {
 			return fmt.Errorf("validation error in %s: a 'bug' field is required to track this exception", path)
 		}
 		for _, p := range barrier.Paths {
-			b.Config.Boundary.BarrierPaths[p] = true
+			b.Config.Boundary.BarrierPaths[filepath.ToSlash(filepath.Clean(strings.TrimPrefix(p, "//")))] = true
+		}
+		for _, p := range barrier.Exceptions {
+			b.Config.Boundary.BarrierExceptions[filepath.ToSlash(filepath.Clean(strings.TrimPrefix(p, "//")))] = true
 		}
 	}
 

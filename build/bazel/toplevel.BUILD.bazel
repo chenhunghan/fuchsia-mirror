@@ -102,7 +102,6 @@ exports_files(
 
     # build/info
     [
-        "integration/.git/HEAD",
         "fuchsia_build_generated/git",
         "fuchsia_build_generated/jiri_snapshot.xml",
     ] +

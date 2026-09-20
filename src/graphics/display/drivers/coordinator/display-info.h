@@ -25,6 +25,7 @@
 #include "src/graphics/display/lib/api-types/cpp/driver-config-stamp.h"
 #include "src/graphics/display/lib/api-types/cpp/image-id.h"
 #include "src/graphics/display/lib/api-types/cpp/mode-and-id.h"
+#include "src/graphics/display/lib/api-types/cpp/mode-id.h"
 #include "src/graphics/display/lib/api-types/cpp/pixel-format.h"
 
 namespace display_coordinator {
@@ -67,7 +68,19 @@ class DisplayInfo : public IdMappable<std::unique_ptr<DisplayInfo>, display::Dis
   // Returns an empty string if the information is not available.
   std::string GetMonitorSerial() const;
 
+  // Returns the Vsync interval implied by `committed_mode_id`, or std::nullopt
+  // if no mode has been committed or the mode's refresh rate is invalid.
+  std::optional<zx::duration> GetCommittedModeVsyncInterval() const;
+
   fbl::Vector<display::ModeAndId> preferred_modes;
+
+  // The ID of the mode in the configuration most recently committed to the
+  // display engine. If valid, the ID is listed in `preferred_modes`.
+  //
+  // Initialized to `kInvalidModeId` because when the display is added (before
+  // any configuration has been committed by the coordinator), the display mode
+  // may have been configured by the bootloader or engine driver to any value.
+  display::ModeId committed_mode_id = display::kInvalidModeId;
 
   const fbl::Vector<display::PixelFormat> pixel_formats;
 

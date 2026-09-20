@@ -142,6 +142,7 @@ template("rustc_dylib") {
                              "exclude_toolchain_tags",
                              "features",
                              "inputs",
+                             "lint_config",
                              "output_dir",
                              "output_name",
                              "public_deps",

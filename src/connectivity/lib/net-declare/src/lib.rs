@@ -440,4 +440,51 @@ mod tests {
             net_prefix_length_v6!(125)
         )
     }
+
+    #[test]
+    fn test_net_addr_subnet_v4() {
+        assert_eq!(
+            net_types::ip::AddrSubnet::new(net_types::ip::Ipv4Addr::new([192, 168, 0, 1]), 24)
+                .unwrap(),
+            net_addr_subnet_v4!("192.168.0.1/24")
+        );
+    }
+
+    #[test]
+    fn test_net_addr_subnet_v6() {
+        assert_eq!(
+            net_types::ip::AddrSubnet::new(
+                net_types::ip::Ipv6Addr::new([0xfe80, 0, 0, 0, 0, 0, 0, 1]),
+                64
+            )
+            .unwrap(),
+            net_addr_subnet_v6!("fe80::1/64")
+        );
+    }
+
+    #[test]
+    fn test_net_addr_subnet() {
+        assert_eq!(
+            net_types::ip::AddrSubnetEither::<
+                net_types::SpecifiedAddr<net_types::ip::IpAddr>,
+            >::new(
+                net_types::ip::IpAddr::V4(net_types::ip::Ipv4Addr::new([192, 168, 0, 1])),
+                24
+            )
+            .unwrap(),
+            net_addr_subnet!("192.168.0.1/24")
+        );
+        assert_eq!(
+            net_types::ip::AddrSubnetEither::<
+                net_types::SpecifiedAddr<net_types::ip::IpAddr>,
+            >::new(
+                net_types::ip::IpAddr::V6(net_types::ip::Ipv6Addr::new([
+                    0xfe80, 0, 0, 0, 0, 0, 0, 1
+                ])),
+                64
+            )
+            .unwrap(),
+            net_addr_subnet!("fe80::1/64")
+        );
+    }
 }

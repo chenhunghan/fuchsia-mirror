@@ -128,7 +128,7 @@ fuchsia_test_package("storage-benchmarks") {
   # Prevent this test from being run as a target-side test, because it
   # is run by a host-side wrapper.
   test_specs = {
-    environments = []
+    build_only = true
   }
   deps = [
     "//src/storage/benchmarks/fuchsia/pkgdir-component:production-component-and-config",

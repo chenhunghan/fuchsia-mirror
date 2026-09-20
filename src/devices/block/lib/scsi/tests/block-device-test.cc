@@ -117,11 +117,6 @@ class TestController : public fdf::DriverBase2, public Controller {
     return token;
   }
 
-  size_t BlockOpSize() override {
-    // No additional metadata required for each command transaction.
-    return sizeof(DeviceOp);
-  }
-
   void ExecuteCommandsAsync(uint8_t target, uint16_t lun, std::span<ScsiRequest> batch) override {
     fbl::AutoLock lock(&lock_);
     for (auto& req : batch) {
@@ -144,31 +139,6 @@ class TestController : public fdf::DriverBase2, public Controller {
       cv_.Signal();
     }
   }
-
-  void ExecuteCommandAsync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
-                           uint32_t block_size_bytes, DeviceOp* device_op, iovec data) override {
-    // In the caller, enqueue the request for the worker thread,
-    // poke the worker thread and return. The worker thread, on
-    // waking up, will do the actual IO and call the callback.
-    auto io = std::make_unique<QueuedIo>();
-    io->target = target;
-    io->lun = lun;
-    // The cdb is allocated on the stack in the scsi::BlockDevice's BlockImplQueue.
-    // Make a copy of the CDB here so that it can be used in the worker thread.
-    memcpy(reinterpret_cast<void*>(&io->cdbptr), cdb.iov_base, cdb.iov_len);
-    io->cdb.iov_base = &io->cdbptr;
-    io->cdb.iov_len = cdb.iov_len;
-    io->is_write = is_write;
-    io->data_vmo = zx::unowned_vmo(device_op->op.rw.vmo);
-    io->vmo_offset_bytes = device_op->op.rw.offset_vmo * block_size_bytes;
-    io->transfer_bytes = device_op->op.rw.length * block_size_bytes;
-    io->device_op = device_op;
-    fbl::AutoLock lock(&lock_);
-    queued_ios_.push(std::move(io));
-    cv_.Signal();
-  }
-
-  bool UseNewInterface() const override { return true; }
 
   zx_status_t ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
                                  iovec data) override {
@@ -224,11 +194,7 @@ class TestController : public fdf::DriverBase2, public Controller {
           status = zx_vmo_read(io->data_vmo->get(), temp_buffer.get(), io->vmo_offset_bytes,
                                io->transfer_bytes);
           if (status != ZX_OK) {
-            if (io->scsi_req.has_value()) {
-              io->scsi_req->Complete(status);
-            } else {
-              io->device_op->Complete(status);
-            }
+            io->scsi_req->Complete(status);
             continue;
           }
         }
@@ -248,11 +214,7 @@ class TestController : public fdf::DriverBase2, public Controller {
                               io->transfer_bytes);
       }
 
-      if (io->scsi_req.has_value()) {
-        io->scsi_req->Complete(status);
-      } else {
-        io->device_op->Complete(status);
-      }
+      io->scsi_req->Complete(status);
     }
     return ZX_OK;
   }
@@ -270,7 +232,6 @@ class TestController : public fdf::DriverBase2, public Controller {
     zx::unowned_vmo data_vmo;
     zx_off_t vmo_offset_bytes;
     size_t transfer_bytes;
-    DeviceOp* device_op = nullptr;
     std::optional<ScsiRequest> scsi_req;
   };
 
@@ -567,83 +528,6 @@ TEST_F(BlockDeviceTest, TestCreateDestroyWithModeSense10) {
   });
   driver_test().RunInNodeContext(
       [](fdf_testing::TestNode& node) { ASSERT_EQ(size_t{1}, node.children().size()); });
-}
-
-// Test creating a block device and executing read commands.
-TEST_F(BlockDeviceTest, TestCreateReadDestroy) {
-  driver_test().RunInDriverContext([&](TestController& controller) {
-    auto result =
-        BlockDevice::Bind(&controller, kTarget, kLun, kTransferSize,
-                          DeviceOptions(/*check_unmap_support=*/true, /*use_mode_sense_6=*/true,
-                                        /*use_read_write_12=*/true));
-    ASSERT_OK(result);
-    device_ = std::move(result.value());
-  });
-  driver_test().RunInNodeContext(
-      [](fdf_testing::TestNode& node) { ASSERT_EQ(size_t{1}, node.children().size()); });
-  block_info_t info;
-  size_t op_size;
-  device_->BlockImplQuery(&info, &op_size);
-
-  // To test SCSI Read functionality, create a fake "block device" backing store in memory and
-  // service reads from it. Fill block 1 with a test pattern of 0x01.
-  std::map<uint64_t, DiskBlock> blocks;
-  DiskBlock& test_block_1 = blocks[1];
-  memset(test_block_1, 0x01, sizeof(DiskBlock));
-
-  driver_test().RunInDriverContext([&](TestController& controller) {
-    controller.ExpectCall(
-        [&blocks](uint8_t target, uint16_t lun, iovec cdb, bool is_write, iovec data) -> auto {
-          EXPECT_EQ(cdb.iov_len, size_t{16});
-          Read16CDB decoded_cdb = {};
-          memcpy(&decoded_cdb, cdb.iov_base, cdb.iov_len);
-          EXPECT_EQ(decoded_cdb.opcode, Opcode::READ_16);
-          EXPECT_FALSE(is_write);
-
-          // Support reading one block.
-          EXPECT_EQ(be32toh(decoded_cdb.transfer_length), uint32_t{1});
-          uint64_t block_to_read = be64toh(decoded_cdb.logical_block_address);
-          const DiskBlock& data_to_return = blocks.at(block_to_read);
-          memcpy(data.iov_base, data_to_return, sizeof(DiskBlock));
-
-          return ZX_OK;
-        },
-        /*times=*/1);
-  });
-
-  // Issue a read to block 1 that should work.
-  struct IoWait {
-    fbl::Mutex lock_;
-    fbl::ConditionVariable cv_;
-  };
-  IoWait iowait_;
-  auto block_op = std::make_unique<uint8_t[]>(op_size);
-  block_op_t& read = *reinterpret_cast<block_op_t*>(block_op.get());
-  block_impl_queue_callback done = [](void* ctx, zx_status_t status, block_op_t* op) {
-    IoWait* iowait_ = reinterpret_cast<struct IoWait*>(ctx);
-
-    fbl::AutoLock lock(&iowait_->lock_);
-    iowait_->cv_.Signal();
-  };
-  read.command = {.opcode = BLOCK_OPCODE_READ, .flags = 0};
-  read.rw.length = 1;      // Read one block
-  read.rw.offset_dev = 1;  // Read logical block 1
-  read.rw.offset_vmo = 0;
-  EXPECT_OK(zx_vmo_create(zx_system_get_page_size(), 0, &read.rw.vmo));
-  driver_test().RunInDriverContext([&](TestController& controller) { controller.AsyncIoInit(); });
-  {
-    fbl::AutoLock lock(&iowait_.lock_);
-    device_->BlockImplQueue(&read, done, &iowait_);  // NOTE: Assumes asynchronous controller
-    iowait_.cv_.Wait(&iowait_.lock_);
-  }
-  // Make sure the contents of the VMO we read into match the expected test pattern
-  DiskBlock check_buffer = {};
-  EXPECT_OK(zx_vmo_read(read.rw.vmo, check_buffer, 0, sizeof(DiskBlock)));
-  for (uint i = 0; i < sizeof(DiskBlock); i++) {
-    EXPECT_EQ(check_buffer[i], 0x01);
-  }
-  driver_test().RunInDriverContext(
-      [&](TestController& controller) { controller.AsyncIoRelease(); });
 }
 
 TEST_F(BlockDeviceTest, ScsiComplete) {

@@ -91,7 +91,7 @@ foreach(benchmark_name, gvisor_benchmarks) {
     # Set environments to none so infra doesn't run these benchmarks.
     # These benchmarks are run as a part of the perf test targets below.
     test_specs = {
-      environments = []
+      build_only = true
     }
   }
   all_benchmark_packages += [ ":${_package_label}" ]

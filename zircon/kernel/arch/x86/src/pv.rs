@@ -14,8 +14,10 @@ use super::platform_access::{MsrAccess, RealMsrAccess};
 use super::registers::{X86_MSR_KVM_PV_EOI_EN, X86_MSR_KVM_PV_EOI_EN_ENABLE};
 use crate::arch_rs as arch;
 use crate::vm::{page_state, physmap, pmm, vm};
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use kprint::kprintln;
+use lazy_init::LazyInit;
 use zx_status::Status;
 use zx_types::zx_status_t;
 
@@ -76,8 +78,26 @@ pub struct pv_clock_system_time {
 zr::static_assert!(core::mem::size_of::<pv_clock_system_time>() == 32);
 zr::static_assert!(core::mem::align_of::<pv_clock_system_time>() == 8);
 
-static BOOT_TIME: AtomicPtr<pv_clock_boot_time> = AtomicPtr::new(core::ptr::null_mut());
-static SYSTEM_TIME: AtomicPtr<pv_clock_system_time> = AtomicPtr::new(core::ptr::null_mut());
+#[derive(Copy, Clone, Debug)]
+#[repr(transparent)]
+struct PvClock<T>(ptr::NonNull<T>);
+
+// SAFETY: PvClock represents a pointer to a mapped, hypervisor-accessible page.
+unsafe impl<T: Send> Send for PvClock<T> {}
+unsafe impl<T: Sync> Sync for PvClock<T> {}
+
+impl<T> PvClock<T> {
+    fn new(ptr: ptr::NonNull<T>) -> Self {
+        Self(ptr)
+    }
+
+    fn as_ptr(&self) -> *mut T {
+        self.0.as_ptr()
+    }
+}
+
+static BOOT_TIME: LazyInit<PvClock<pv_clock_boot_time>> = LazyInit::uninit();
+static SYSTEM_TIME: LazyInit<PvClock<pv_clock_system_time>> = LazyInit::uninit();
 
 static PV_EOI: [PvEoi; SMP_MAX_CPUS] = [const { PvEoi::new() }; SMP_MAX_CPUS];
 
@@ -216,12 +236,6 @@ impl Drop for PvEoi {
 ///
 /// This function should only be called by CPU 0.
 pub fn pv_clock_init() -> Result<(), Status> {
-    if !BOOT_TIME.load(Ordering::Relaxed).is_null()
-        || !SYSTEM_TIME.load(Ordering::Relaxed).is_null()
-    {
-        return Err(Status::BAD_STATE);
-    }
-
     let (page, pa) = pmm::alloc_page(pmm::ALLOC_FLAG_ANY)?;
     let va = physmap::paddr_to_physmap(pa);
 
@@ -232,8 +246,12 @@ pub fn pv_clock_init() -> Result<(), Status> {
         arch::ops::zero_page(va);
     }
 
-    let boot_time_ptr = core::ptr::with_exposed_provenance_mut(va.0);
-    BOOT_TIME.store(boot_time_ptr, Ordering::Release);
+    // SAFETY: The zero address is not in the physmap.
+    let boot_time_ptr =
+        unsafe { ptr::NonNull::new_unchecked(ptr::with_exposed_provenance_mut(va.0)) };
+
+    // SAFETY: Called once during boot, serialized with respect to any other access.
+    unsafe { BOOT_TIME.init(PvClock::new(boot_time_ptr)) };
     // SAFETY: Writing pa to KVM boot time MSR informs the hypervisor of the boot time page.
     unsafe { super::x86::write_msr(KVM_BOOT_TIME, pa.0 as u64) };
 
@@ -247,8 +265,12 @@ pub fn pv_clock_init() -> Result<(), Status> {
         arch::ops::zero_page(va);
     }
 
-    let system_time_ptr = core::ptr::with_exposed_provenance_mut(va.0);
-    SYSTEM_TIME.store(system_time_ptr, Ordering::Release);
+    // SAFETY: The zero address is not in the physmap.
+    let system_time_ptr =
+        unsafe { ptr::NonNull::new_unchecked(ptr::with_exposed_provenance_mut(va.0)) };
+
+    // SAFETY: Called once during boot, serialized with respect to any other access.
+    unsafe { SYSTEM_TIME.init(PvClock::new(system_time_ptr)) };
 
     // Note: We're setting up one, system-wide PV clock rather than per-CPU system
     // clocks. This is OK because
@@ -276,13 +298,10 @@ pub extern "C" fn pv_clock_shutdown() {
 /// Checks if the para-virtualized clock is stable.
 #[unsafe(no_mangle)]
 pub extern "C" fn pv_clock_is_stable() -> bool {
-    let system_time_ptr = SYSTEM_TIME.load(Ordering::Acquire);
-    let flags = if !system_time_ptr.is_null() {
-        // SAFETY: system_time_ptr points to the valid hypervisor-mapped page.
-        unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*system_time_ptr).flags)) }
-    } else {
-        0
-    };
+    let system_time_ptr = SYSTEM_TIME.as_ptr();
+
+    // SAFETY: system_time_ptr points to the valid hypervisor-mapped page.
+    let flags = unsafe { ptr::read_volatile(ptr::addr_of!((*system_time_ptr).flags)) };
 
     let is_stable =
         (flags & KVM_SYSTEM_TIME_STABLE) != 0 || x86_feature_test(X86_FEATURE_KVM_PV_CLOCK_STABLE);
@@ -313,32 +332,32 @@ pub fn calculate_tsc_freq(tsc_mul: u32, tsc_shift: i8) -> u64 {
 pub extern "C" fn pv_clock_get_tsc_freq() -> u64 {
     kprintln!("pv_clock: Fetching TSC frequency");
 
-    let system_time_ptr = SYSTEM_TIME.load(Ordering::Acquire);
-    assert!(!system_time_ptr.is_null(), "system_time must be initialized");
+    let system_time_ptr = SYSTEM_TIME.as_ptr();
 
     // SAFETY: system_time_ptr is non-null and valid.
-    let version =
-        unsafe { &*(core::ptr::addr_of!((*system_time_ptr).version) as *const AtomicU32) };
+    let version_ptr = unsafe { ptr::addr_of!((*system_time_ptr).version) };
     // SAFETY: system_time_ptr is non-null and valid.
-    let tsc_mul_ptr = unsafe { core::ptr::addr_of!((*system_time_ptr).tsc_mul) };
+    let tsc_mul_ptr = unsafe { ptr::addr_of!((*system_time_ptr).tsc_mul) };
     // SAFETY: system_time_ptr is non-null and valid.
-    let tsc_shift_ptr = unsafe { core::ptr::addr_of!((*system_time_ptr).tsc_shift) };
+    let tsc_shift_ptr = unsafe { ptr::addr_of!((*system_time_ptr).tsc_shift) };
 
     let mut tsc_mul: u32;
     let mut tsc_shift: i8;
 
     loop {
-        let pre_version = version.load(Ordering::SeqCst);
+        // SAFETY: Reading version from volatile system_time page.
+        let pre_version = unsafe { ptr::read_volatile(version_ptr) };
         if (pre_version & 1) != 0 {
             core::hint::spin_loop();
             continue;
         }
         // SAFETY: Reading tsc_mul and tsc_shift from volatile system_time page.
         unsafe {
-            tsc_mul = core::ptr::read_volatile(tsc_mul_ptr);
-            tsc_shift = core::ptr::read_volatile(tsc_shift_ptr);
+            tsc_mul = ptr::read_volatile(tsc_mul_ptr);
+            tsc_shift = ptr::read_volatile(tsc_shift_ptr);
         }
-        let post_version = version.load(Ordering::SeqCst);
+        // SAFETY: Reading version from volatile system_time page.
+        let post_version = unsafe { ptr::read_volatile(version_ptr) };
         if pre_version == post_version {
             break;
         }

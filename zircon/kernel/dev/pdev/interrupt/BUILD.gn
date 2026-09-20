@@ -26,6 +26,7 @@ kernel_rust_mod("interrupt-rs") {
   deps = [
     "//sdk/rust/zx-status",
     "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//third_party/rust_crates:pin-init",
     "//zircon/kernel/lib/debug",
   ]

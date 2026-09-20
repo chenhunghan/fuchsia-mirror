@@ -8,6 +8,7 @@
 #include <concepts>
 
 #include "internal/abi-span.h"
+#include "layout.h"
 
 namespace elfldltl {
 
@@ -26,7 +27,7 @@ namespace elfldltl {
 // an explicit `get()` method to return it.  The iterator methods (begin, end,
 // etc.) return the std::span<T> iterator types directly.
 
-template <typename T, size_t N = std::dynamic_extent, class Elf = elfldltl::Elf<>,
+template <typename T, size_t N = std::dynamic_extent, ElfApi Elf = elfldltl::Elf<>,
           AbiPtrTraitsApi<T, Elf> Traits = LocalAbiTraits>
 class AbiSpan : public internal::AbiSpanImpl<T, N, Elf, Traits> {
  public:
@@ -79,7 +80,7 @@ AbiSpan(Args&&... args)
     -> AbiSpan<typename decltype(std::span{std::forward<Args>(args)...})::element_type,
                decltype(std::span{std::forward<Args>(args)...})::extent>;
 
-template <typename T, class Elf, class Traits>
+template <typename T, ElfApi Elf, class Traits>
 class AbiSpan<T, std::dynamic_extent, Elf, Traits>
     : public internal::AbiSpanImpl<T, std::dynamic_extent, Elf, Traits> {
  public:
@@ -134,12 +135,12 @@ class AbiSpan<T, std::dynamic_extent, Elf, Traits>
 // dereferencing is supported by the Traits type, it just provides a `get()`
 // method and implicit conversion to and from std::string_view so it can be
 // copied into a std::string_view to call the various methods.
-template <class Elf = elfldltl::Elf<>, class Traits = LocalAbiTraits>
+template <ElfApi Elf = elfldltl::Elf<>, class Traits = LocalAbiTraits>
 class AbiStringView {
  public:
   using Span = AbiSpan<const char, std::dynamic_extent, Elf, Traits>;
-  using Ptr = typename Span::Ptr;
-  using size_type = typename Span::size_type;
+  using Ptr = Span::Ptr;
+  using size_type = Span::size_type;
 
   constexpr AbiStringView() = default;
 

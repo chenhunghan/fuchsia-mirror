@@ -38,7 +38,8 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Dict, FrozenSet, Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 _SCRIPT_BASENAME = os.path.basename(__file__)
 
@@ -172,7 +173,7 @@ def env_safe_command(command: Sequence[str]) -> Sequence[str]:
 
 def record_existing_outputs(
     outputs: Iterable[str], transform: Callable[[str], str]
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Map output file paths to their backup locations, using a transform.
 
     Args:
@@ -190,8 +191,8 @@ def record_existing_outputs(
 
 
 def backup_outputs(
-    outputs: FrozenSet[str], tempfile_transform: TempFileTransform
-) -> Dict[str, str]:
+    outputs: frozenset[str], tempfile_transform: TempFileTransform
+) -> dict[str, str]:
     """Move pre-existing output files to backup locations.
 
     This is move, not copy, so this should be paired with some
@@ -220,7 +221,7 @@ def backup_outputs(
 
 
 def restore_if_unchanged(
-    files_to_restore: Dict[str, str], verbose: bool = False
+    files_to_restore: dict[str, str], verbose: bool = False
 ) -> bool:
     """If backup contents match the new output, restore the backup.
 
@@ -246,7 +247,7 @@ def restore_if_unchanged(
     return move_err
 
 
-def restore_all(outputs_to_restore: Dict[str, str]) -> bool:
+def restore_all(outputs_to_restore: dict[str, str]) -> bool:
     """Restores backups to their original location.
 
     This operation preserves modification timestamps.
@@ -274,7 +275,7 @@ class Action(object):
     """Represents a set of parameters of a single build action."""
 
     command: Sequence[str] = dataclasses.field(default_factory=list)
-    outputs: FrozenSet[str] = dataclasses.field(default_factory=set)
+    outputs: frozenset[str] = dataclasses.field(default_factory=set)
     label: str = ""
 
     def run_cached(

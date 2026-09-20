@@ -145,6 +145,12 @@ impl PmmChecker {
         // SAFETY: `self.as_raw()` and `page.as_ffi()` return valid pointers.
         unsafe { bindings::cpp_pmm_checker_assert_pattern(self.as_raw(), page.as_ffi()) }
     }
+
+    /// Prints the status of the checker to standard output.
+    pub fn print_status_stdout(&self) {
+        // SAFETY: `self.as_raw()` returns a valid `PmmChecker` pointer.
+        unsafe { bindings::cpp_pmm_checker_print_status_stdout(self.as_raw()) }
+    }
 }
 
 /// Unit tests for PmmChecker.

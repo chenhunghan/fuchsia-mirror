@@ -75,14 +75,25 @@ template("rust_syscall_test") {
     }
   }
 
+  _is_machina = defined(invoker.test_target_kernel) &&
+                invoker.test_target_kernel == "linux"
+
   # Define the test component
   starnix_linux_test_component(target_name) {
     test_label = ":${_test_binary_name}"
     test_binary = _test_binary_name
     manifest = _manifest_file
     deps = [ ":${_manifest_label}" ]
-    foreach(_resource, _resources) {
-      deps += [ "${_resource}($target_linux_toolchain)" ]
+    if (_is_machina) {
+      not_needed([ "_resources" ])
+
+      # Machina tests use the unified dependency target
+      deps += [ "//src/starnix/tests/syscalls:unified_syscall_deps" ]
+    } else {
+      # Starnix tests bundle only their granular per-test resources
+      foreach(_resource, _resources) {
+        deps += [ "${_resource}($target_linux_toolchain)" ]
+      }
     }
     uses_expectations = true
     generated_expectations = ":syscalls_rust_test_expectations"

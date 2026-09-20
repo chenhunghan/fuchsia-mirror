@@ -5,7 +5,7 @@
 #[macro_use]
 extern crate quote;
 
-use net_types::ip::{IpAddress, SubnetError};
+use net_types::ip::{AddrSubnetError, IpAddress, SubnetError};
 use proc_macro2::TokenStream;
 use std::fmt::Formatter;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -404,11 +404,12 @@ impl Generator<IpAddressWithPrefix<IpAddr>> for FidlGen {
     }
 }
 
-impl Generator<IpAddressWithPrefix<IpAddr>> for NetGen {
-    fn generate(input: IpAddressWithPrefix<IpAddr>) -> TokenStream {
-        let IpAddressWithPrefix { address, prefix } = input;
+impl Generator<StrictAddrSubnet<IpAddr>> for NetGen {
+    fn generate(input: StrictAddrSubnet<IpAddr>) -> TokenStream {
+        let StrictAddrSubnet { address, prefix } = input;
         let address = Self::generate(address);
-        // SAFETY: AddrSubnetEither's invariants were already checked.
+        // SAFETY: AddrSubnetEither's invariants were already checked by the
+        // 'FromStr' impl of `StrictAddrSubnet<IpAddr>`.
         quote! {
             unsafe {
                 net_types::ip::AddrSubnetEither::new_unchecked(#address, #prefix)
@@ -417,11 +418,12 @@ impl Generator<IpAddressWithPrefix<IpAddr>> for NetGen {
     }
 }
 
-impl Generator<IpAddressWithPrefix<Ipv4Addr>> for NetGen {
-    fn generate(input: IpAddressWithPrefix<Ipv4Addr>) -> TokenStream {
-        let IpAddressWithPrefix { address, prefix } = input;
+impl Generator<StrictAddrSubnet<Ipv4Addr>> for NetGen {
+    fn generate(input: StrictAddrSubnet<Ipv4Addr>) -> TokenStream {
+        let StrictAddrSubnet { address, prefix } = input;
         let address = Self::generate(address);
-        // SAFETY: AddrSubnet's invariants were already checked.
+        // SAFETY: AddrSubnet's invariants were already checked by the `FromStr`
+        // impl of `StrictAddrSubnet<Ipv4Addr>`.
         quote! {
             unsafe {
                 net_types::ip::AddrSubnet::<net_types::ip::Ipv4Addr>::new_unchecked(
@@ -432,11 +434,12 @@ impl Generator<IpAddressWithPrefix<Ipv4Addr>> for NetGen {
     }
 }
 
-impl Generator<IpAddressWithPrefix<Ipv6Addr>> for NetGen {
-    fn generate(input: IpAddressWithPrefix<Ipv6Addr>) -> TokenStream {
-        let IpAddressWithPrefix { address, prefix } = input;
+impl Generator<StrictAddrSubnet<Ipv6Addr>> for NetGen {
+    fn generate(input: StrictAddrSubnet<Ipv6Addr>) -> TokenStream {
+        let StrictAddrSubnet { address, prefix } = input;
         let address = Self::generate(address);
-        // SAFETY: AddrSubnet's invariants were already checked.
+        // SAFETY: AddrSubnet's invariants were already checked by the `FromStr`
+        // impl of `StrictAddrSubnet<Ipv6Addr>`.
         quote! {
             unsafe {
                 net_types::ip::AddrSubnet::<net_types::ip::Ipv6Addr>::new_unchecked(
@@ -619,15 +622,97 @@ where
     }
 }
 
+#[derive(PartialEq, Debug)]
+/// Helper struct to parse AddrSubnet from string.
+struct StrictAddrSubnet<A> {
+    address: A,
+    prefix: u8,
+}
+
+#[derive(thiserror::Error, PartialEq, Debug)]
+enum AddrSubnetParseError {
+    #[error(transparent)]
+    IpError(#[from] VersionedIpPrefixError),
+    #[error(transparent)]
+    IpParseError(#[from] IpAddressWithPrefixParseError),
+    #[error("invalid address witness: {0}")]
+    InvalidWitness(IpAddr),
+    #[error("address {0} is not unicast in subnet /{1}")]
+    NotUnicastInSubnet(IpAddr, u8),
+}
+
+impl FromStr for StrictAddrSubnet<Ipv4Addr> {
+    type Err = AddrSubnetParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let IpAddressWithPrefix { address, prefix } = s.parse::<IpAddressWithPrefix<Ipv4Addr>>()?;
+        match net_types::ip::AddrSubnet::<net_types::ip::Ipv4Addr>::new(address.into(), prefix) {
+            Ok(_) => Ok(StrictAddrSubnet { address, prefix }),
+            Err(AddrSubnetError::InvalidWitness) => {
+                Err(AddrSubnetParseError::InvalidWitness(address.into()))
+            }
+            Err(AddrSubnetError::NotUnicastInSubnet) => {
+                Err(AddrSubnetParseError::NotUnicastInSubnet(address.into(), prefix))
+            }
+            Err(AddrSubnetError::PrefixTooLong) => {
+                unreachable!("checked by IpAddressWithPrefix")
+            }
+        }
+    }
+}
+
+impl FromStr for StrictAddrSubnet<Ipv6Addr> {
+    type Err = AddrSubnetParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let IpAddressWithPrefix { address, prefix } = s.parse::<IpAddressWithPrefix<Ipv6Addr>>()?;
+        match net_types::ip::AddrSubnet::<net_types::ip::Ipv6Addr>::new(address.into(), prefix) {
+            Ok(_) => Ok(StrictAddrSubnet { address, prefix }),
+            Err(AddrSubnetError::InvalidWitness) => {
+                Err(AddrSubnetParseError::InvalidWitness(address.into()))
+            }
+            Err(AddrSubnetError::NotUnicastInSubnet) => {
+                Err(AddrSubnetParseError::NotUnicastInSubnet(address.into(), prefix))
+            }
+            Err(AddrSubnetError::PrefixTooLong) => {
+                unreachable!("checked by IpAddressWithPrefix")
+            }
+        }
+    }
+}
+
+impl FromStr for StrictAddrSubnet<IpAddr> {
+    type Err = AddrSubnetParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let IpAddressWithPrefix { address, prefix } = s.parse::<IpAddressWithPrefix<IpAddr>>()?;
+        match net_types::ip::AddrSubnetEither::<
+            net_types::SpecifiedAddr<net_types::ip::IpAddr>,
+        >::new(address.into(), prefix)
+        {
+            Ok(_) => Ok(StrictAddrSubnet { address, prefix }),
+            Err(AddrSubnetError::InvalidWitness) => {
+                Err(AddrSubnetParseError::InvalidWitness(address))
+            }
+            Err(AddrSubnetError::NotUnicastInSubnet) => {
+                Err(AddrSubnetParseError::NotUnicastInSubnet(address, prefix))
+            }
+            Err(AddrSubnetError::PrefixTooLong) => {
+                unreachable!("checked by IpAddressWithPrefix")
+            }
+        }
+    }
+}
+
 declare_macro!(net_ip, NetGen, IpAddr);
 declare_macro!(net_ip_v4, NetGen, Ipv4Addr);
 declare_macro!(net_ip_v6, NetGen, Ipv6Addr);
 declare_macro!(net_mac, NetGen, MacAddress);
 declare_macro!(net_subnet_v4, NetGen, StrictSubnet<Ipv4Addr>);
 declare_macro!(net_subnet_v6, NetGen, StrictSubnet<Ipv6Addr>);
-declare_macro!(net_addr_subnet_v4, NetGen, IpAddressWithPrefix<Ipv4Addr>);
-declare_macro!(net_addr_subnet_v6, NetGen, IpAddressWithPrefix<Ipv6Addr>);
-declare_macro!(net_addr_subnet, NetGen, IpAddressWithPrefix<IpAddr>);
+declare_macro!(net_addr_subnet_v4, NetGen, StrictAddrSubnet<Ipv4Addr>);
+declare_macro!(net_addr_subnet_v6, NetGen, StrictAddrSubnet<Ipv6Addr>);
+declare_macro!(net_addr_subnet, NetGen, StrictAddrSubnet<IpAddr>);
 
 fn net_prefix_length_impl<I: net_types::ip::Ip>(
     input: proc_macro::TokenStream,
@@ -778,6 +863,66 @@ mod tests {
         assert_eq!(
             "ff:00:ff::/14".parse::<StrictSubnet<Ipv6Addr>>(),
             Err(SubnetParseError::HostBitsSet("ff:00:ff::".parse().unwrap(), 14))
+        );
+    }
+
+    #[test]
+    fn test_strict_addr_subnet_valid() {
+        assert_eq!(
+            "192.168.0.1/24".parse::<StrictAddrSubnet<Ipv4Addr>>(),
+            Ok(StrictAddrSubnet { prefix: 24, address: [192, 168, 0, 1].into() })
+        );
+        assert_eq!(
+            "fe80::1/64".parse::<StrictAddrSubnet<Ipv6Addr>>(),
+            Ok(StrictAddrSubnet { prefix: 64, address: "fe80::1".parse().unwrap() })
+        );
+        assert_eq!(
+            "192.168.0.1/24".parse::<StrictAddrSubnet<IpAddr>>(),
+            Ok(StrictAddrSubnet { prefix: 24, address: [192, 168, 0, 1].into() })
+        );
+        assert_eq!(
+            "fe80::1/64".parse::<StrictAddrSubnet<IpAddr>>(),
+            Ok(StrictAddrSubnet { prefix: 64, address: "fe80::1".parse().unwrap() })
+        );
+    }
+
+    #[test]
+    fn test_strict_addr_subnet_invalid_witness() {
+        assert_eq!(
+            "0.0.0.0/24".parse::<StrictAddrSubnet<Ipv4Addr>>(),
+            Err(AddrSubnetParseError::InvalidWitness([0, 0, 0, 0].into()))
+        );
+        assert_eq!(
+            "::/64".parse::<StrictAddrSubnet<Ipv6Addr>>(),
+            Err(AddrSubnetParseError::InvalidWitness("::".parse().unwrap()))
+        );
+        assert_eq!(
+            "0.0.0.0/24".parse::<StrictAddrSubnet<IpAddr>>(),
+            Err(AddrSubnetParseError::InvalidWitness([0, 0, 0, 0].into()))
+        );
+        assert_eq!(
+            "::/64".parse::<StrictAddrSubnet<IpAddr>>(),
+            Err(AddrSubnetParseError::InvalidWitness("::".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn test_strict_addr_subnet_not_unicast_in_subnet() {
+        assert_eq!(
+            "224.0.0.1/24".parse::<StrictAddrSubnet<Ipv4Addr>>(),
+            Err(AddrSubnetParseError::NotUnicastInSubnet([224, 0, 0, 1].into(), 24))
+        );
+        assert_eq!(
+            "ff02::1/64".parse::<StrictAddrSubnet<Ipv6Addr>>(),
+            Err(AddrSubnetParseError::NotUnicastInSubnet("ff02::1".parse().unwrap(), 64))
+        );
+        assert_eq!(
+            "224.0.0.1/24".parse::<StrictAddrSubnet<IpAddr>>(),
+            Err(AddrSubnetParseError::NotUnicastInSubnet([224, 0, 0, 1].into(), 24))
+        );
+        assert_eq!(
+            "ff02::1/64".parse::<StrictAddrSubnet<IpAddr>>(),
+            Err(AddrSubnetParseError::NotUnicastInSubnet("ff02::1".parse().unwrap(), 64))
         );
     }
 }

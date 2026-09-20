@@ -103,15 +103,10 @@ pub struct DeliveryBlobWriter {
     /// Either Stage::Writing with an associated Handle to this blob within the filesystem, or
     /// Stage::Complete once the blob has finished writing.
     stage: Stage,
-    /// Total number of bytes we expect for this delivery blob (via fuchsia.fxfs/BlobWriter.GetVmo).
-    /// This is checked against the header + payload size encoded within the delivery blob.
-    expected_size: Option<u64>,
-    /// Total number of bytes that have been written to this delivery blob so far. When this reaches
-    /// [`Self::expected_size`], the blob will be verified.
-    total_written: u64,
-    /// Vmo for the ring buffer used for the fuchsia.fxfs/BlobWriter protocol.
-    vmo: Option<zx::Vmo>,
-    /// Temporary buffer used to copy data from [`Self::vmo`].
+    /// Ring buffer used for the fuchsia.fxfs/BlobWriter protocol. Initialized when
+    /// [`Self::get_vmo`] is called.
+    ring_buffer: Option<RingBuffer>,
+    /// Temporary buffer used to copy data from [`Self::ring_buffer`].
     buffer: Vec<u8>,
     /// The header for this delivery blob. Decoded once we have enough data.
     header: Option<DeliveryBlob>,
@@ -157,9 +152,7 @@ impl DeliveryBlobWriter {
             hash,
             parent,
             stage: Stage::Writing(handle),
-            expected_size: None,
-            total_written: 0,
-            vmo: None,
+            ring_buffer: None,
             buffer: Default::default(),
             header: None,
             tree_builder: BufferedMerkleRootBuilder::new(BlobMetadataLeafHashCollector::new()),
@@ -189,6 +182,10 @@ impl DeliveryBlobWriter {
         self.header.as_ref().unwrap()
     }
 
+    fn ring_buffer(&self) -> &RingBuffer {
+        self.ring_buffer.as_ref().unwrap()
+    }
+
     fn decompressor(&self) -> &ChunkedDecompressor {
         self.decompressor.as_ref().unwrap()
     }
@@ -215,8 +212,8 @@ impl DeliveryBlobWriter {
                 self.storage_size()
             )
         })?;
-        let final_write =
-            (self.payload_persisted as usize + self.buffer.len()) == self.header().payload_length;
+        let final_write = self.payload_persisted.checked_add(self.buffer.len() as u64)
+            == Some(self.header().payload_length as u64);
         let block_size = self.stage.handle().block_size();
         let flush_threshold =
             std::cmp::max(block_size.get() as usize, PAYLOAD_BUFFER_FLUSH_THRESHOLD);
@@ -269,7 +266,8 @@ impl DeliveryBlobWriter {
         // `update_merkle_tree_fut`.
         try_join!(overwrite_fut, update_merkle_tree_fut)?;
         self.buffer.drain(..len);
-        self.payload_persisted += len as u64;
+        self.payload_persisted =
+            self.payload_persisted.checked_add(len as u64).ok_or(FxfsError::OutOfRange)?;
         Ok(())
     }
 
@@ -449,70 +447,80 @@ impl DeliveryBlobWriter {
         Ok(())
     }
 
-    fn truncate(&mut self, length: u64) -> Result<(), Error> {
-        if self.expected_size.is_some() {
-            return Err(Status::BAD_STATE).context("Blob was already truncated.");
+    /// Attempts to decode the delivery blob header from `self.buffer`.
+    /// Returns `Ok(true)` if the header is decoded (or was already decoded), or `Ok(false)` if
+    /// more data is needed.
+    fn decode_delivery_blob_header(&mut self) -> Result<bool, Error> {
+        if self.header.is_some() {
+            return Ok(true);
         }
-        if length < MINIMUM_HEADER_SIZE as u64 {
-            return Err(Status::INVALID_ARGS).context("Invalid size (too small).");
+        // Type 3 delivery blobs are currently UNSTABLE / EXPERIMENTAL and subject to change,
+        // so they are gated by `allow_type3_blobs` (defaults to false).
+        let allow_type3 = self.parent.store().filesystem().options().allow_type3_blobs;
+        let Some((header, payload)) = DeliveryBlob::parse(&self.buffer, allow_type3)
+            .context("Failed to decode delivery blob header.")?
+        else {
+            return Ok(false); // Not enough data to decode header yet.
+        };
+        let expected_size = self.ring_buffer().expected_size();
+        let delivery_size: u64 = (header.header.header_length as u64)
+            .checked_add(header.payload_length as u64)
+            .ok_or(FxfsError::OutOfRange)?;
+        if expected_size != delivery_size {
+            return Err(FxfsError::IntegrityError).with_context(|| {
+                format!(
+                    "Expected size ({}) does not match size from blob header ({})!",
+                    expected_size, delivery_size
+                )
+            });
         }
-        self.expected_size = Some(length);
-        Ok(())
+        let header_len = self.buffer.len() - payload.len();
+        self.buffer.drain(..header_len);
+        self.header = Some(header);
+        Ok(true)
+    }
+
+    /// Attempts to decode the chunked archive header and initialize the decompressor for compressed
+    /// blobs. Returns `Ok(true)` if initialized (or uncompressed/already initialized), or
+    /// `Ok(false)` if more data is needed.
+    fn decode_archive_header(&mut self) -> Result<bool, Error> {
+        if !self.header().is_compressed || self.decompressor.is_some() {
+            return Ok(true);
+        }
+        let archive_length = self.header().payload_length;
+        let Some((decoded_archive, chunk_data)) = decode_archive(&self.buffer, archive_length)
+            .context("Failed to decode archive header")?
+        else {
+            return Ok(false); // Not enough data to decode archive header/seek table.
+        };
+        // We store the seek table out-of-line with the data, so we don't persist that
+        // part of the payload directly.
+        let archive_header_len = self.buffer.len() - chunk_data.len();
+        self.buffer.drain(..archive_header_len);
+        self.payload_offset = archive_header_len as u64;
+        self.payload_persisted = self.payload_offset;
+        let hash = self.hash;
+        self.decompressor = Some(
+            ChunkedDecompressor::new_with_error_handler(
+                decoded_archive,
+                Box::new(move |chunk_index, chunk_info, chunk_data| {
+                    on_decompression_error(hash, chunk_index, chunk_info, chunk_data);
+                }),
+            )
+            .context("Failed to create decompressor")?,
+        );
+        Ok(true)
     }
 
     /// Process the data that exists in the writer's buffer. The writer cannot recover from errors,
     /// so this function should not be invoked after it returns any errors.
     async fn process_buffer(&mut self) -> Result<(), Error> {
-        // Decode delivery blob header.
-        if self.header.is_none() {
-            // Type 3 delivery blobs are currently UNSTABLE / EXPERIMENTAL and subject to change,
-            // so they are gated by `allow_type3_blobs` (defaults to false).
-            let allow_type3 = self.parent.store().filesystem().options().allow_type3_blobs;
-            let Some((header, payload)) = DeliveryBlob::parse(&self.buffer, allow_type3)
-                .context("Failed to decode delivery blob header.")?
-            else {
-                return Ok(()); // Not enough data to decode header yet.
-            };
-            let expected_size = self.expected_size.unwrap_or_default() as usize;
-            let delivery_size = header.header.header_length as usize + header.payload_length;
-            if expected_size != delivery_size {
-                return Err(FxfsError::IntegrityError).with_context(|| {
-                    format!(
-                        "Expected size ({}) does not match size from blob header ({})!",
-                        expected_size, delivery_size
-                    )
-                });
-            }
-            self.buffer = payload.to_vec();
-            self.header = Some(header);
+        if !self.decode_delivery_blob_header()? {
+            return Ok(());
         }
-
-        // If blob is compressed, decode chunked archive header & initialize decompressor.
-        if self.header().is_compressed && self.decompressor.is_none() {
-            let prev_buff_len = self.buffer.len();
-            let archive_length = self.header().payload_length;
-            let Some((decoded_archive, chunk_data)) = decode_archive(&self.buffer, archive_length)
-                .context("Failed to decode archive header")?
-            else {
-                return Ok(()); // Not enough data to decode archive header/seek table.
-            };
-            // We store the seek table out-of-line with the data, so we don't persist that
-            // part of the payload directly.
-            self.buffer = Vec::from(chunk_data);
-            self.payload_offset = (prev_buff_len - self.buffer.len()) as u64;
-            self.payload_persisted = self.payload_offset;
-            let hash = self.hash.clone();
-            self.decompressor = Some(
-                ChunkedDecompressor::new_with_error_handler(
-                    decoded_archive,
-                    Box::new(move |chunk_index, chunk_info, chunk_data| {
-                        on_decompression_error(hash, chunk_index, chunk_info, chunk_data);
-                    }),
-                )
-                .context("Failed to create decompressor")?,
-            );
+        if !self.decode_archive_header()? {
+            return Ok(());
         }
-
         // Write payload to disk and update Merkle tree.
         if !self.buffer.is_empty() {
             // This ends up being a large future, so we box it.
@@ -522,19 +530,12 @@ impl DeliveryBlobWriter {
     }
 
     fn get_vmo(&mut self, size: u64) -> Result<zx::Vmo, Error> {
-        self.truncate(size)
-            .with_context(|| format!("Failed to truncate blob {} to size {}", self.hash, size))?;
-        if self.vmo.is_some() {
-            return Err(FxfsError::AlreadyExists)
-                .with_context(|| format!("VMO was already created for blob {}", self.hash));
+        if self.ring_buffer.is_some() {
+            return Err(Status::BAD_STATE).context("Blob was already truncated.");
         }
-        let vmo = zx::Vmo::create(*RING_BUFFER_SIZE).with_context(|| {
-            format!("Failed to create VMO of size {} for writing", *RING_BUFFER_SIZE)
-        })?;
-        let vmo_dup = vmo
-            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-            .context("Failed to duplicate VMO handle")?;
-        self.vmo = Some(vmo);
+        let (ring_buffer, vmo_dup) = RingBuffer::new(size)
+            .with_context(|| format!("Failed to truncate blob {} to size {}", self.hash, size))?;
+        self.ring_buffer = Some(ring_buffer);
         Ok(vmo_dup)
     }
 
@@ -545,46 +546,14 @@ impl DeliveryBlobWriter {
     /// be latched by the caller instead of calling this function again. The writer can be closed,
     /// and a new one can be opened to attempt writing the delivery blob again.
     async fn bytes_ready(&mut self, bytes_written: u64) -> Result<(), Error> {
-        if bytes_written > *RING_BUFFER_SIZE {
-            return Err(FxfsError::OutOfRange).with_context(|| {
-                format!(
-                    "bytes_written ({}) exceeds size of ring buffer ({})",
-                    bytes_written, *RING_BUFFER_SIZE
-                )
-            });
-        }
-        let expected_size = self
-            .expected_size
-            .ok_or(Status::BAD_STATE)
-            .context("Must call BlobWriter.GetVmo before writing data to blob.")?;
-        if (self.total_written + bytes_written) > expected_size {
-            return Err(Status::BUFFER_TOO_SMALL).with_context(|| {
-                format!(
-                    "Wrote more bytes than passed to BlobWriter.GetVmo (expected = {}, written = {}).",
-                    expected_size,
-                    self.total_written + bytes_written
-                )
-            });
-        }
-        let Some(ref vmo) = self.vmo else {
-            return Err(Status::BAD_STATE)
-                .context("BlobWriter.GetVmo must be called before BlobWriter.BytesReady.");
+        let (write_offset, expected_size) = {
+            let ring_buffer = self
+                .ring_buffer
+                .as_mut()
+                .ok_or(Status::BAD_STATE)
+                .context("BlobWriter.GetVmo must be called before BlobWriter.BytesReady.")?;
+            (ring_buffer.read(bytes_written, &mut self.buffer)?, ring_buffer.expected_size())
         };
-        // Extend our write buffer by the amount of data that was written.
-        let prev_len = self.buffer.len();
-        self.buffer.resize(prev_len + bytes_written as usize, 0);
-        let mut buf = &mut self.buffer[prev_len..];
-        let write_offset = self.total_written;
-        self.total_written += bytes_written;
-        // Copy data from the ring buffer into our internal buffer.
-        let vmo_offset = write_offset % *RING_BUFFER_SIZE;
-        if vmo_offset + bytes_written > *RING_BUFFER_SIZE {
-            let split = (*RING_BUFFER_SIZE - vmo_offset) as usize;
-            vmo.read(&mut buf[0..split], vmo_offset).context("failed to read from VMO")?;
-            vmo.read(&mut buf[split..], 0).context("failed to read from VMO")?;
-        } else {
-            vmo.read(&mut buf, vmo_offset).context("failed to read from VMO")?;
-        }
         // Process the data from the buffer.
         self.process_buffer().await.with_context(|| {
             // LINT.IfChange(blob_write_failure)
@@ -596,7 +565,7 @@ impl DeliveryBlobWriter {
         })?;
         // If all bytes for this delivery blob were written successfully, attempt to verify the blob
         // and add it to the parent directory.
-        if self.total_written == expected_size {
+        if self.ring_buffer().is_complete() {
             self.complete().await?;
         }
         Ok(())
@@ -648,7 +617,7 @@ impl DeliveryBlobWriter {
 }
 
 fn parse_seek_table(
-    seek_table: &Vec<ChunkInfo>,
+    seek_table: &[ChunkInfo],
 ) -> Result<(/*uncompressed_size*/ u64, /*chunk_size*/ u64, /*compressed_offsets*/ Vec<u64>), Error>
 {
     let uncompressed_size = seek_table.last().unwrap().decompressed_range.end;
@@ -686,6 +655,86 @@ fn parse_seek_table(
     Ok((uncompressed_size.try_into()?, aligned_chunk_size, compressed_offsets))
 }
 
+/// Manages the ring buffer used for the fuchsia.fxfs/BlobWriter protocol.
+struct RingBuffer {
+    /// Total number of bytes we expect for this delivery blob (via fuchsia.fxfs/BlobWriter.GetVmo).
+    /// This is checked against the header + payload size encoded within the delivery blob.
+    expected_size: u64,
+    /// Total number of bytes that have been written to this delivery blob so far. When this reaches
+    /// [`Self::expected_size`], the entire blob will have been received.
+    total_written: u64,
+    /// Vmo for the ring buffer used for the fuchsia.fxfs/BlobWriter protocol.
+    vmo: zx::Vmo,
+}
+
+impl RingBuffer {
+    fn new(expected_size: u64) -> Result<(Self, zx::Vmo), Error> {
+        if expected_size < MINIMUM_HEADER_SIZE as u64 {
+            return Err(Status::INVALID_ARGS).context("Invalid size (too small).");
+        }
+        let vmo = zx::Vmo::create(*RING_BUFFER_SIZE).with_context(|| {
+            format!("Failed to create VMO of size {} for writing", *RING_BUFFER_SIZE)
+        })?;
+        let vmo_dup = vmo
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .context("Failed to duplicate VMO handle")?;
+        Ok((Self { expected_size, total_written: 0, vmo }, vmo_dup))
+    }
+
+    fn expected_size(&self) -> u64 {
+        self.expected_size
+    }
+
+    fn is_complete(&self) -> bool {
+        self.total_written == self.expected_size
+    }
+
+    /// Reads `bytes_written` from the VMO and appends them to `buf`. Returns the offset at which
+    /// the write started.
+    fn read(&mut self, bytes_written: u64, buf: &mut Vec<u8>) -> Result<u64, Error> {
+        if bytes_written > *RING_BUFFER_SIZE {
+            return Err(FxfsError::OutOfRange).with_context(|| {
+                format!(
+                    "bytes_written ({}) exceeds size of ring buffer ({})",
+                    bytes_written, *RING_BUFFER_SIZE
+                )
+            });
+        }
+        let write_offset = self.total_written;
+        self.total_written = write_offset
+            .checked_add(bytes_written)
+            .ok_or(Status::OUT_OF_RANGE)
+            .context("Total written bytes overflowed")?;
+        if self.total_written > self.expected_size {
+            return Err(Status::BUFFER_TOO_SMALL).with_context(|| {
+                format!(
+                    "Wrote more bytes than passed to BlobWriter.GetVmo\
+                     (expected = {}, written = {}).",
+                    self.expected_size, self.total_written
+                )
+            });
+        }
+        // Extend our write buffer by the amount of data that was written.
+        let prev_len = buf.len();
+        let new_len = prev_len.checked_add(bytes_written as usize).ok_or(Status::OUT_OF_RANGE)?;
+        buf.resize(new_len, 0);
+
+        let new_section = &mut buf[prev_len..];
+        // Copy data from the ring buffer into our internal buffer.
+        let vmo_offset = write_offset % *RING_BUFFER_SIZE;
+        if vmo_offset + bytes_written > *RING_BUFFER_SIZE {
+            let split = (*RING_BUFFER_SIZE - vmo_offset) as usize;
+            self.vmo
+                .read(&mut new_section[0..split], vmo_offset)
+                .context("failed to read from VMO")?;
+            self.vmo.read(&mut new_section[split..], 0).context("failed to read from VMO")?;
+        } else {
+            self.vmo.read(new_section, vmo_offset).context("failed to read from VMO")?;
+        }
+        Ok(write_offset)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,7 +742,7 @@ mod tests {
     use crate::fuchsia::testing::{TestFixture, TestFixtureOptions};
     use core::ops::Range;
     use delivery_blob::{CompressionMode, Type1Blob, Type3Blob};
-    use fidl_fuchsia_fxfs::{BlobCreatorMarker, CreateBlobError};
+    use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobWriterProxy, CreateBlobError};
     use fidl_fuchsia_io::UnlinkOptions;
     use fuchsia_async::epoch::Epoch;
     use fuchsia_async::{self as fasync, TimeoutExt as _};
@@ -718,6 +767,30 @@ mod tests {
         list_of_writes
     }
 
+    async fn write_delivery_blob_in_chunks(writer: &BlobWriterProxy, vmo: &zx::Vmo, data: &[u8]) {
+        let vmo_size = vmo.get_size().expect("failed to get vmo size");
+        let list_of_writes = generate_list_of_writes(data.len() as u64);
+        for range in list_of_writes {
+            let len = range.end - range.start;
+            vmo.write(&data[range.start as usize..range.end as usize], range.start % vmo_size)
+                .expect("failed to write to vmo");
+            writer
+                .bytes_ready(len)
+                .await
+                .expect("transport error on bytes_ready")
+                .expect("failed to write data to vmo");
+        }
+    }
+
+    async fn write_delivery_blob_all_at_once(writer: &BlobWriterProxy, vmo: &zx::Vmo, data: &[u8]) {
+        vmo.write(data, 0).expect("failed to write to vmo");
+        writer
+            .bytes_ready(data.len() as u64)
+            .await
+            .expect("transport error on bytes_ready")
+            .expect("failed to write data to vmo");
+    }
+
     /// Tests for the new write API.
     #[fuchsia::test(threads = 10)]
     async fn test_new_write_empty_blob() {
@@ -735,24 +808,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            let vmo_size = vmo.get_size().expect("failed to get vmo size");
-            let list_of_writes = generate_list_of_writes(compressed_data.len() as u64);
-            let mut write_offset = 0;
-            for range in list_of_writes {
-                let len = range.end - range.start;
-                vmo.write(
-                    &compressed_data[range.start as usize..range.end as usize],
-                    write_offset % vmo_size,
-                )
-                .expect("failed to write to vmo");
-                let _ = writer
-                    .bytes_ready(len)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
-                write_offset += len;
-            }
+            write_delivery_blob_in_chunks(&writer, &vmo, &compressed_data).await;
         }
         assert_eq!(fixture.read_blob(hash).await, data);
         fixture.close().await;
@@ -777,6 +833,36 @@ mod tests {
                     .map_err(Status::err_from_raw)
                     .expect_err("get_vmo unexpectedly succeeded"),
                 zx::Status::INVALID_ARGS
+            );
+        }
+        fixture.close().await;
+    }
+
+    /// Calling bytes_ready with a value that would cause integer overflow should fail.
+    #[fuchsia::test(threads = 10)]
+    async fn test_reject_exceeds_ring_buffer_size() {
+        let fixture = new_blob_fixture().await;
+        let data = vec![1; 100];
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Never);
+
+        {
+            let writer =
+                fixture.create_blob(&hash.into(), false).await.expect("failed to create blob");
+            let _vmo = writer
+                .get_vmo(delivery_data.len() as u64)
+                .await
+                .expect("transport error on get_vmo")
+                .expect("failed to get vmo");
+
+            assert_eq!(
+                writer
+                    .bytes_ready(*RING_BUFFER_SIZE + 10)
+                    .await
+                    .expect("transport error on bytes_ready")
+                    .map_err(Status::err_from_raw)
+                    .expect_err("bytes_ready unexpectedly succeeded"),
+                zx::Status::OUT_OF_RANGE
             );
         }
         fixture.close().await;
@@ -878,40 +964,8 @@ mod tests {
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
 
-            let vmo_size = vmo.get_size().expect("failed to get vmo size");
-            let list_of_writes = generate_list_of_writes(compressed_data.len() as u64);
-            let mut write_offset = 0;
-            for range in &list_of_writes {
-                let len = range.end - range.start;
-                vmo.write(
-                    &compressed_data[range.start as usize..range.end as usize],
-                    write_offset % vmo_size,
-                )
-                .expect("failed to write to vmo");
-                let _ = writer
-                    .bytes_ready(len)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
-                write_offset += len;
-            }
-
-            write_offset = 0;
-            for range in &list_of_writes {
-                let len = range.end - range.start;
-                vmo_2
-                    .write(
-                        &compressed_data[range.start as usize..range.end as usize],
-                        write_offset % vmo_size,
-                    )
-                    .expect("failed to write to vmo");
-                writer_2
-                    .bytes_ready(len)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
-                write_offset += len;
-            }
+            write_delivery_blob_in_chunks(&writer, &vmo, &compressed_data).await;
+            write_delivery_blob_in_chunks(&writer_2, &vmo_2, &compressed_data).await;
         }
         assert_eq!(fixture.read_blob(hash).await, data);
         fixture.close().await;
@@ -935,25 +989,13 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            let vmo_size = vmo.get_size().expect("failed to get vmo size");
             // Write all but the last byte to avoid completing the blob.
-            let list_of_writes = generate_list_of_writes((compressed_data.len() as u64) - 1);
-            let mut write_offset = 0;
-            for range in list_of_writes {
-                let len = range.end - range.start;
-                vmo.write(
-                    &compressed_data[range.start as usize..range.end as usize],
-                    write_offset % vmo_size,
-                )
-                .expect("failed to write to vmo");
-                let _ = writer
-                    .bytes_ready(len)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
-                write_offset += len;
-            }
+            write_delivery_blob_in_chunks(
+                &writer,
+                &vmo,
+                &compressed_data[0..compressed_data.len() - 1],
+            )
+            .await;
             // At least 4MiB should now be allocated in fxfs.
             assert!(fixture.fs().allocator().get_allocated_bytes() > BLOB_SIZE);
         }
@@ -996,24 +1038,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            let vmo_size = vmo.get_size().expect("failed to get vmo size");
-            let list_of_writes = generate_list_of_writes(compressed_data.len() as u64);
-            let mut write_offset = 0;
-            for range in list_of_writes {
-                let len = range.end - range.start;
-                vmo.write(
-                    &compressed_data[range.start as usize..range.end as usize],
-                    write_offset % vmo_size,
-                )
-                .expect("failed to write to vmo");
-                let _ = writer
-                    .bytes_ready(len)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
-                write_offset += len;
-            }
+            write_delivery_blob_in_chunks(&writer, &vmo, &compressed_data).await;
         }
         assert_eq!(fixture.read_blob(hash).await, data);
         fixture.close().await;
@@ -1036,13 +1061,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
 
             assert_eq!(fixture.read_blob(hash).await, data);
             assert_eq!(
@@ -1073,25 +1092,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            let vmo_size = vmo.get_size().expect("failed to get vmo size");
-
-            let list_of_writes = generate_list_of_writes(compressed_data.len() as u64);
-            let mut write_offset = 0;
-            for range in list_of_writes {
-                let len = range.end - range.start;
-                vmo.write(
-                    &compressed_data[range.start as usize..range.end as usize],
-                    write_offset % vmo_size,
-                )
-                .expect("failed to write to vmo");
-                let _ = writer
-                    .bytes_ready(len)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
-                write_offset += len;
-            }
+            write_delivery_blob_in_chunks(&writer, &vmo, &compressed_data).await;
         }
         assert_eq!(fixture.read_blob(hash).await, data);
         fixture.close().await;
@@ -1138,25 +1139,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            let vmo_size = vmo.get_size().expect("failed to get vmo size");
-
-            let list_of_writes = generate_list_of_writes(compressed_data.len() as u64);
-            let mut write_offset = 0;
-            for range in list_of_writes {
-                let len = range.end - range.start;
-                vmo.write(
-                    &compressed_data[range.start as usize..range.end as usize],
-                    write_offset % vmo_size,
-                )
-                .expect("failed to write to vmo");
-                let _ = writer
-                    .bytes_ready(len)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo.");
-                write_offset += len;
-            }
+            write_delivery_blob_in_chunks(&writer, &vmo, &compressed_data).await;
             // Ensure that the blob is readable and matches what we expect.
             assert_eq!(fixture.read_blob(hash).await, data);
         }
@@ -1217,13 +1200,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
 
             assert_eq!(fixture.read_blob(hash).await, data);
         };
@@ -1238,13 +1215,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
 
             let new_blob = fixture.get_blob(hash).await.expect("Looking up blob");
             assert_ne!(new_blob.object_id(), old_id);
@@ -1293,13 +1264,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
 
             assert_eq!(fixture.read_blob(hash).await, data);
         };
@@ -1318,13 +1283,7 @@ mod tests {
                     .await
                     .expect("transport error on get_vmo")
                     .expect("failed to get vmo");
-
-                vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-                writer
-                    .bytes_ready(delivery_data.len() as u64)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
+                write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
             }
 
             let (new_id, _, _) =
@@ -1366,13 +1325,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
 
             assert_eq!(fixture.read_blob(hash).await, data);
         }
@@ -1404,13 +1357,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
 
             let new_blob = fixture.get_blob(hash).await.expect("Looking up blob");
             assert_ne!(new_blob.object_id(), old_id);
@@ -1449,13 +1396,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
         };
 
         let finished = Arc::new(AtomicBool::new(false));
@@ -1480,13 +1421,7 @@ mod tests {
                     .await
                     .expect("transport error on get_vmo")
                     .expect("failed to get vmo");
-
-                vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-                writer
-                    .bytes_ready(delivery_data.len() as u64)
-                    .await
-                    .expect("transport error on bytes_ready")
-                    .expect("failed to write data to vmo");
+                write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
                 // Add barrier and await graveyard so that we don't fill up the disk.
                 Epoch::global().barrier().await;
                 graveyard.flush().await;
@@ -1582,13 +1517,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
         }
 
         assert_eq!(fixture.read_blob(hash).await, blob_data);
@@ -1627,13 +1556,7 @@ mod tests {
                 .await
                 .expect("transport error on get_vmo")
                 .expect("failed to get vmo");
-
-            vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-            writer
-                .bytes_ready(delivery_data.len() as u64)
-                .await
-                .expect("transport error on bytes_ready")
-                .expect("failed to write data to vmo");
+            write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
         }
 
         assert_eq!(fixture.read_blob(blob_hash).await, blob_data);
@@ -1704,15 +1627,17 @@ mod tests {
             .await
             .expect("transport error on get_vmo")
             .expect("failed to get vmo");
-        vmo.write(&delivery_data, 0).expect("failed to write to vmo");
-
-        writer
-            .bytes_ready(delivery_data.len() as u64)
-            .await
-            .expect("transport error on bytes_ready")
-            .expect("failed to write data");
+        write_delivery_blob_all_at_once(&writer, &vmo, &delivery_data).await;
 
         assert_eq!(fixture.read_blob(hash).await, data);
         fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    fn test_reject_overflow() {
+        let (mut ring_buffer, _vmo) = RingBuffer::new(u64::MAX).unwrap();
+        ring_buffer.total_written = u64::MAX - 10;
+        let mut buf = Vec::new();
+        ring_buffer.read(11, &mut buf).expect_err("Should overflow");
     }
 }

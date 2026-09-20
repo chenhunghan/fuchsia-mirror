@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use bitflags::bitflags;
-use starnix_uapi::file_mode::Access;
 use starnix_uapi::{PROT_EXEC, PROT_GROWSDOWN, PROT_READ, PROT_WRITE};
 
 bitflags! {
@@ -58,19 +57,5 @@ impl ProtectionFlags {
 
     pub fn access_flags(&self) -> Self {
         *self & Self::ACCESS_FLAGS
-    }
-
-    pub fn to_access(&self) -> Access {
-        let mut access = Access::empty();
-        if self.contains(ProtectionFlags::READ) {
-            access |= Access::READ;
-        }
-        if self.contains(ProtectionFlags::WRITE) {
-            access |= Access::WRITE;
-        }
-        if self.contains(ProtectionFlags::EXEC) {
-            access |= Access::EXEC;
-        }
-        access
     }
 }

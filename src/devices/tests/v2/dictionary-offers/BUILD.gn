@@ -20,6 +20,11 @@ fidl("fuchsia.dictionaryoffers.test") {
   public_deps = [ "//sdk/fidl/fuchsia.driver.framework" ]
 }
 
+fuchsia_driver_dml("child-dml") {
+  dml = "meta/child.dml"
+  driver_name = "child"
+}
+
 driver_bind_rules("root_bind") {
   disable_autobind = true
   bind_output = "dictionary_offers_root.bindbc"
@@ -49,7 +54,7 @@ fuchsia_driver_component("root") {
 driver_bind_rules("child_bind") {
   testonly = true
   deps = [ "//src/devices/bind/fuchsia" ]
-  rules = "meta/child.bind"
+  dml_label = ":child-dml"
   bind_output = "dictionary_offers_child.bindbc"
 }
 
@@ -73,8 +78,8 @@ fuchsia_cc_driver("child_driver") {
 }
 
 fuchsia_driver_component("child") {
+  dml_label = ":child-dml"
   testonly = true
-  manifest = "meta/child.cml"
   deps = [
     ":child_bind",
     ":child_driver",

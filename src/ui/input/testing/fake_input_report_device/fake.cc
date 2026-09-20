@@ -26,12 +26,7 @@ void FakeInputDevice::GetDescriptor(GetDescriptorCallback callback) {
 
 void FakeInputDevice::GetInputReportsReader(
     fidl::InterfaceRequest<fuchsia::input::report::InputReportsReader> reader) {
-  fbl::AutoLock lock(&lock_);
-  if (reader_) {
-    reader.Close(ZX_ERR_ALREADY_BOUND);
-    return;
-  }
-  reader_.emplace(std::move(reader), binding_.dispatcher(), this);
+  reader.Close(ZX_ERR_NOT_SUPPORTED);
 }
 
 void FakeInputDevice::GetInputReportsReaderV2(
@@ -84,9 +79,6 @@ void FakeInputDevice::GetFeatureReport(GetFeatureReportCallback callback) {
 void FakeInputDevice::SetReports(std::vector<fuchsia::input::report::InputReport> reports) {
   fbl::AutoLock lock(&lock_);
   reports_ = std::move(reports);
-  if (reader_) {
-    reader_->QueueCallback();
-  }
   if (reader_v2_) {
     std::vector<fuchsia::input::report::InputReport> reports_to_send;
     fidl::Clone(reports_, &reports_to_send);
@@ -97,11 +89,6 @@ void FakeInputDevice::SetReports(std::vector<fuchsia::input::report::InputReport
 void FakeInputDevice::SetReports(std::vector<fuchsia::input::report::FeatureReport> reports) {
   fbl::AutoLock lock(&lock_);
   feature_reports_ = std::move(reports);
-}
-
-std::vector<fuchsia::input::report::InputReport> FakeInputDevice::ReadReports() {
-  fbl::AutoLock lock(&lock_);
-  return std::move(reports_);
 }
 
 }  // namespace fake_input_report_device

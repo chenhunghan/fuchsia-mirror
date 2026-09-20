@@ -15,7 +15,7 @@ from collections import namedtuple
 from functools import reduce
 from operator import add
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 from fuchsia.tools.fuchsia_task_lib import (
     FuchsiaTask,
@@ -89,7 +89,7 @@ def parse_workflow_args() -> None:
     ARGUMENTS = WorkflowArguments(global_arguments=workflow_arguments, **args)
 
 
-def run(*command: Union[Path, str], **kwargs: Dict[str, Any]) -> None:
+def run(*command: Path | str, **kwargs: dict[str, Any]) -> None:
     if ARGUMENTS.verbose:
         print("Executing command: ", command)
     if ARGUMENTS.dry_run:
@@ -115,9 +115,9 @@ class Entity(ABC):
         task_num: int = 1,
         mnemonic: str,
         mnemonic_suffix: str,
-        explicit_args: List[Tuple[float, str]],
-        propagated_args: List[Tuple[float, str]],
-        global_args: List[Tuple[float, str]],
+        explicit_args: list[tuple[float, str]],
+        propagated_args: list[tuple[float, str]],
+        global_args: list[tuple[float, str]],
     ) -> None:
         self._entity_collection = entity_collection
         self._label = label
@@ -150,21 +150,21 @@ class Entity(ABC):
     def label(self) -> str:
         return self._label
 
-    def sort_arguments(self, args: List[Tuple[float, str]]) -> List[str]:
+    def sort_arguments(self, args: list[tuple[float, str]]) -> list[str]:
         return list(
             (list(zip(*sorted(args, key=lambda arg: arg[0]))) or [None, []])[1]
         )
 
     @property
-    def explicit_args(self) -> List[str]:
+    def explicit_args(self) -> list[str]:
         return self.sort_arguments(self._explicit_args)
 
     @property
-    def propagated_args(self) -> List[str]:
+    def propagated_args(self) -> list[str]:
         return self.sort_arguments(self._propagated_args)
 
     @property
-    def global_args(self) -> List[str]:
+    def global_args(self) -> list[str]:
         return self.sort_arguments(self._global_args)
 
     @property
@@ -226,7 +226,7 @@ class Task(Entity):
     @classmethod
     def create(
         cls,
-        entity: Dict[str, Any],
+        entity: dict[str, Any],
         **entity_kwargs,
     ) -> "Task":
         return Task(
@@ -240,7 +240,7 @@ class Task(Entity):
         )
 
     @property
-    def effective_args(self) -> List[str]:
+    def effective_args(self) -> list[str]:
         meta_args = [
             arg
             for meta_arg in [
@@ -307,7 +307,7 @@ class Task(Entity):
 
 
 class Workflow(Entity):
-    def __init__(self, *, sequence: List[Entity], **entity_kwargs) -> None:
+    def __init__(self, *, sequence: list[Entity], **entity_kwargs) -> None:
         super().__init__(**entity_kwargs)
         self._sequence = sequence
 
@@ -319,8 +319,8 @@ class Workflow(Entity):
     def create(
         cls,
         entity_collection: "EntityCollection",
-        entity: Dict[str, Any],
-        propagated_args: List[Tuple[float, str]],
+        entity: dict[str, Any],
+        propagated_args: list[tuple[float, str]],
         task_num: int = 1,
         **entity_kwargs,
     ) -> "Workflow":
@@ -349,10 +349,10 @@ class Workflow(Entity):
         )
 
     @property
-    def sequence(self) -> List[Entity]:
+    def sequence(self) -> list[Entity]:
         return self._sequence
 
-    def run(self, total_tasks: Optional[int] = None) -> None:
+    def run(self, total_tasks: int | None = None) -> None:
         print(
             Terminal.if_no_color("<progress> ")
             + f'{Terminal.bold("Running workflow:")} {Terminal.green(self.name)}'
@@ -364,16 +364,16 @@ class Workflow(Entity):
 class EntityCollection:
     def __init__(
         self,
-        entities: Dict[str, Dict[str, Any]],
+        entities: dict[str, dict[str, Any]],
         entrypoint: str,
-        args: List[str],
+        args: list[str],
         global_working_dir: Path,
     ) -> None:
         self._data_entities = entities
         self._args = args
         self._global_working_dir = global_working_dir
-        self._mnemonics_by_label: Dict[str, List[str]] = {}
-        self._entity_by_mnemonic: Dict[str, Entity] = {}
+        self._mnemonics_by_label: dict[str, list[str]] = {}
+        self._entity_by_mnemonic: dict[str, Entity] = {}
         self._last_task = None
         self._entrypoint = self.create(
             label=entrypoint,
@@ -384,7 +384,7 @@ class EntityCollection:
     def is_ambiguous(self, mnemonic: str) -> bool:
         return len(self._mnemonics_by_label.get(mnemonic, [])) > 1
 
-    def _determine_mnemonics(self, label: str) -> Tuple[str, str]:
+    def _determine_mnemonics(self, label: str) -> tuple[str, str]:
         mnemonic = re.search(r"[\w\.\-_]+$", label)[0]
         associated_mnemonics = self._mnemonics_by_label.get(mnemonic, [])
 
@@ -400,8 +400,8 @@ class EntityCollection:
         self,
         label: str,
         task_num: int,
-        propagated_args: List[Tuple[float, str]],
-    ) -> Union[Workflow, Task]:
+        propagated_args: list[tuple[float, str]],
+    ) -> Workflow | Task:
         mnemonic, suffix = self._determine_mnemonics(label)
         entity_type = self._data_entities[label]["type"]
         entity = {
@@ -423,7 +423,7 @@ class EntityCollection:
         return entity
 
     @property
-    def last_task(self) -> Optional[Task]:
+    def last_task(self) -> Task | None:
         return self._last_task
 
     @property
@@ -435,9 +435,9 @@ class EntityCollection:
         return self._entrypoint
 
     def from_manifest(
-        entities: Dict[str, Dict[str, Any]],
+        entities: dict[str, dict[str, Any]],
         entrypoint: str,
-        args: List[str],
+        args: list[str],
         global_working_dir: Path,
     ) -> Entity:
         return EntityCollection(
@@ -448,9 +448,9 @@ class EntityCollection:
 class WorkflowRunner:
     def __init__(
         self,
-        entities: Dict[str, Dict[str, Any]],
+        entities: dict[str, dict[str, Any]],
         entrypoint: str,
-        args: List[str],
+        args: list[str],
     ) -> None:
         self._working_directory = Path(tempfile.gettempdir()) / (
             "workflow.%s" % re.search(r"[\w\.\-_]+$", entrypoint)[0]
@@ -475,7 +475,7 @@ class WorkflowRunner:
 
         def preorder_traversal(
             node: Entity,
-            prefixes: List[str] = [],
+            prefixes: list[str] = [],
             is_last_child: bool = False,
         ) -> None:
             def print_entry(first_line: Any, *additional_lines: Any):

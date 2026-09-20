@@ -52,7 +52,7 @@ JsonFilesMap: T.TypeAlias = dict[str, JsonFileContent]
 MetaJson: T.TypeAlias = JsonFileContent
 
 
-def get_unique_sequence(seq: T.Sequence[T.Any]) -> T.List[T.Any]:
+def get_unique_sequence(seq: T.Sequence[T.Any]) -> list[T.Any]:
     """Remove duplicates from an input sequence, preserving order."""
     result = []
     visited = set()
@@ -64,7 +64,7 @@ def get_unique_sequence(seq: T.Sequence[T.Any]) -> T.List[T.Any]:
     return result
 
 
-def collect_directory_files(src_root: str | Path) -> T.List[str]:
+def collect_directory_files(src_root: str | Path) -> list[str]:
     """Collect list of all files from a root directory.
 
     Args:
@@ -194,8 +194,8 @@ class PrebuildMap(object):
             else:
                 self._labels_map[atom_label] = atom
 
-        self._build_dir: T.Optional[Path] = None
-        self._fuchsia_source_dir: T.Optional[Path] = None
+        self._build_dir: Path | None = None
+        self._fuchsia_source_dir: Path | None = None
 
     def set_build_dir(self, build_dir: Path) -> None:
         self._build_dir = build_dir.resolve()
@@ -229,18 +229,18 @@ class PrebuildMap(object):
     def values(self) -> T.Sequence[AtomInfo]:
         return [*self._labels_map.values()]
 
-    def items(self) -> T.Sequence[T.Tuple[str, AtomInfo]]:
+    def items(self) -> T.Sequence[tuple[str, AtomInfo]]:
         return [*self._labels_map.items()]
 
     def resolve_label(self, label: str) -> str:
         """Resolve a label through aliases."""
         return self._alias_map.get(label, label)
 
-    def resolve_labels(self, labels: T.Sequence[str]) -> T.List[str]:
+    def resolve_labels(self, labels: T.Sequence[str]) -> list[str]:
         """Resolve list of labels through aliases."""
         return [self.resolve_label(l) for l in labels]
 
-    def resolve_unique_labels(self, labels: T.Sequence[str]) -> T.List[str]:
+    def resolve_unique_labels(self, labels: T.Sequence[str]) -> list[str]:
         """Resolve list of labels through aliases, removing duplicates."""
         return get_unique_sequence(self.resolve_labels(labels))
 
@@ -250,7 +250,7 @@ class PrebuildMap(object):
 
     def _deps_labels_to_atom_types(
         self, deps_labels: T.Sequence[str], atom_types: T.Sequence[str]
-    ) -> T.List[str]:
+    ) -> list[str]:
         return sorted(
             self.label_to_idk_name(d)
             for d in deps_labels
@@ -259,19 +259,19 @@ class PrebuildMap(object):
 
     def labels_to_bind_library_names(
         self, deps_labels: T.Sequence[str]
-    ) -> T.List[str]:
+    ) -> list[str]:
         """Convert a list of labels into a list of bind_library IDK names."""
         return self._deps_labels_to_atom_types(deps_labels, ("bind_library",))
 
     def labels_to_fidl_library_names(
         self, deps_labels: T.Sequence[str]
-    ) -> T.List[str]:
+    ) -> list[str]:
         """Convert a list of labels into a list of fidl_library IDK names."""
         return self._deps_labels_to_atom_types(deps_labels, ("fidl_library",))
 
     def labels_to_cc_library_names(
         self, deps_labels: T.Sequence[str]
-    ) -> T.List[str]:
+    ) -> list[str]:
         """Convert a list of labels into a list of cc_xxxx_library IDK names."""
         return self._deps_labels_to_atom_types(
             deps_labels, ("cc_source_library", "cc_prebuilt_library")
@@ -394,7 +394,7 @@ class PrebuildMap(object):
             additional_files_read: A set of additional files read.
         """
 
-        meta_json: T.Optional[MetaJson]
+        meta_json: MetaJson | None
         additional_atom_files: dict[str, str]
         additional_json_files: JsonFilesMap
         additional_files_read: set[str]
@@ -794,7 +794,7 @@ class PrebuildMap(object):
         assert type(api_level) is str, "API levels are always strings."
         versioned_root = f"{root}/{api_level}"
 
-        files: T.List[str] = []
+        files: list[str] = []
 
         def get_gn_generated_path(path: str) -> str:
             if not path.startswith("GN_GENERATED("):
@@ -923,7 +923,7 @@ class IdkGenerator(object):
         self,
         prebuild_manifest: T.Sequence[AtomInfo],
         build_dir: Path,
-        fuchsia_source_dir: T.Optional[Path],
+        fuchsia_source_dir: Path | None,
     ):
         self.collection_meta_path: str | None = None
 

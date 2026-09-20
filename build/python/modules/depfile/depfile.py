@@ -57,8 +57,9 @@ melon/output: \
 """
 import os
 import shlex
+from collections.abc import Iterable
 from os import PathLike
-from typing import Any, Iterable, Self, TextIO, Union
+from typing import Any, Self, TextIO, Union
 
 FilePath = Union[str, PathLike[Any]]
 
@@ -96,7 +97,7 @@ class DepFile:
         """Add an input to the depfile"""
         self.deps.add(self._rebase(input))
 
-    def update(self, other: Union[Self, Iterable[FilePath]]) -> None:
+    def update(self, other: Self | Iterable[FilePath]) -> None:
         """Add each input to this depfile"""
         # If other is another DepFile, just snag the values from it's internal
         # dict.

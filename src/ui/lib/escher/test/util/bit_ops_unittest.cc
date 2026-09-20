@@ -4,6 +4,9 @@
 
 #include "src/ui/lib/escher/util/bit_ops.h"
 
+#include <utility>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 namespace {
@@ -104,6 +107,39 @@ TEST(BitOps, RotateLeft) {
   TestRotateLeft<uint16_t>();
   TestRotateLeft<uint32_t>();
   TestRotateLeft<uint64_t>();
+}
+
+TEST(BitOps, ForEachBitIndex) {
+  std::vector<uint32_t> indices;
+  auto collect = [&indices](uint32_t bit) { indices.push_back(bit); };
+
+  ForEachBitIndex(0u, collect);
+  EXPECT_TRUE(indices.empty());
+
+  ForEachBitIndex(0x80000001u, collect);
+  EXPECT_EQ(indices, (std::vector<uint32_t>{0u, 31u}));
+}
+
+TEST(BitOps, ForEachBitRange) {
+  using Ranges = std::vector<std::pair<uint32_t, uint32_t>>;
+  auto collect = [](uint32_t value) {
+    Ranges ranges;
+    ForEachBitRange(value,
+                    [&ranges](uint32_t bit, uint32_t range) { ranges.emplace_back(bit, range); });
+    return ranges;
+  };
+
+  EXPECT_EQ(collect(0u), Ranges());
+  EXPECT_EQ(collect(0b1011u), (Ranges{{0u, 2u}, {3u, 1u}}));
+
+  // Ranges which extend all the way to the most-significant bit are the
+  // interesting cases: they make the internal shift amount 32, which used to
+  // be undefined behavior.  On x86 the shift wrapped around to zero, so the
+  // range was never cleared and these calls looped forever.
+  EXPECT_EQ(collect(0x80000000u), (Ranges{{31u, 1u}}));
+  EXPECT_EQ(collect(0xF0000000u), (Ranges{{28u, 4u}}));
+  EXPECT_EQ(collect(0xC0000003u), (Ranges{{0u, 2u}, {30u, 2u}}));
+  EXPECT_EQ(collect(0xFFFFFFFFu), (Ranges{{0u, 32u}}));
 }
 
 }  // namespace

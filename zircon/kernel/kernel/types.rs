@@ -82,3 +82,33 @@ pub const fn cpu_num_to_mask(num: cpu_num_t) -> cpu_mask_t {
     }
     1 << num
 }
+
+/// Returns a mask with the bits for every CPU except `num` set.
+///
+/// Mirrors `mask_all_but_one()` from `zircon/kernel/include/kernel/cpu.h`.
+#[inline]
+pub const fn mask_all_but_one(num: cpu_num_t) -> cpu_mask_t {
+    CPU_MASK_ALL ^ cpu_num_to_mask(num)
+}
+
+/// Returns the number of the highest CPU set in `mask`, or 0 if the mask is empty.
+///
+/// Mirrors `highest_cpu_set()` from `zircon/kernel/include/kernel/cpu.h`.
+#[inline]
+pub const fn highest_cpu_set(mask: cpu_mask_t) -> cpu_num_t {
+    if mask == 0 {
+        return 0;
+    }
+    (cpu_mask_t::BITS - 1) - mask.leading_zeros()
+}
+
+/// Returns the number of the lowest CPU set in `mask`, or 0 if the mask is empty.
+///
+/// Mirrors `lowest_cpu_set()` from `zircon/kernel/include/kernel/cpu.h`.
+#[inline]
+pub const fn lowest_cpu_set(mask: cpu_mask_t) -> cpu_num_t {
+    if mask == 0 {
+        return 0;
+    }
+    mask.trailing_zeros()
+}

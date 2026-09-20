@@ -5,8 +5,9 @@
 use crate::security;
 use crate::task::CurrentTask;
 use crate::vfs::{
-    CheckAccessReason, FileHandle, FileObject, FsLockDepType, FsNodeHandle, FsNodeLinkBehavior,
-    FsStr, FsString, LookupVec, MountInfo, Mounts, NamespaceNode, UnlinkKind, inotify_hook, path,
+    CheckAccessReason, DirectoryMode, FileHandle, FileObject, FsLockDepType, FsNodeHandle,
+    FsNodeLinkBehavior, FsStr, FsString, LookupVec, MountInfo, Mounts, NamespaceNode, UnlinkKind,
+    inotify_hook, path,
 };
 use atomic_bitflags::atomic_bitflags;
 use bitflags::bitflags;
@@ -528,7 +529,7 @@ impl DirEntry {
         mount: &MountInfo,
         name: &FsStr,
         kind: UnlinkKind,
-        must_be_directory: bool,
+        directory_mode: DirectoryMode,
     ) -> Result<(), Errno> {
         assert!(!DirEntry::is_reserved_name(name));
 
@@ -545,7 +546,7 @@ impl DirEntry {
         // Example: If we're unlinking a symlink `/foo/bar/`, this would
         // result in `ENOTDIR` because of the trailing slash, even if
         // `UnlinkKind::NonDirectory` was used.
-        if must_be_directory && !child_to_unlink.node.is_dir() {
+        if directory_mode == DirectoryMode::MustBeDirectory && !child_to_unlink.node.is_dir() {
             return error!(ENOTDIR);
         }
 

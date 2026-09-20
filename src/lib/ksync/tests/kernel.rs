@@ -38,6 +38,14 @@ mod ksync_tests {
     }
 
     #[ksync::guarded]
+    struct GuardedMonitoredSpinlockObj {
+        #[mutex]
+        mu: ksync::KMutex<ksync::RawMonitoredSpinlock>,
+        #[guarded_by(mu)]
+        value: u32,
+    }
+
+    #[ksync::guarded]
     struct GuardedCriticalMutexObj {
         #[mutex]
         mu: ksync::KMutex<ksync::RawCriticalMutex>,
@@ -102,6 +110,10 @@ mod ksync_tests {
             lock: *const core::ffi::c_void,
             expected_id: *const core::ffi::c_void,
         ) -> bool;
+        fn cpp_verify_monitored_spinlock_id(
+            lock: *const core::ffi::c_void,
+            expected_id: *const core::ffi::c_void,
+        ) -> bool;
         fn cpp_verify_brwlock_id(
             lock: *const core::ffi::c_void,
             expected_id: *const core::ffi::c_void,
@@ -161,6 +173,37 @@ mod ksync_tests {
                 &obj.mu as *const _ as *const core::ffi::c_void,
                 <GuardedSpinlockObjMuClass as ksync::LockClass>::ID,
             ));
+        }
+    }
+
+    /// test Rust KMonitoredSpinlock ID and acquire/release with source_tag!
+    #[test]
+    fn monitored_spinlock_id_and_ops() {
+        stack_pin_init!(let obj = pin_init!(GuardedMonitoredSpinlockObj {
+            mu <- ksync::KMutex::init(),
+            value: 10.into(),
+        }));
+        unsafe {
+            assert_true!(cpp_verify_monitored_spinlock_id(
+                &obj.mu as *const _ as *const core::ffi::c_void,
+                <GuardedMonitoredSpinlockObjMuClass as ksync::LockClass>::ID,
+            ));
+        }
+
+        // Acquire with default IrqSavePolicy and source_tag!
+        {
+            ksync::lock!(let mut guard = obj.lock_mu(ksync::source_tag!()));
+            expect_true!(*guard.value() == 10);
+            *guard.as_mut().value_mut() = 20;
+            expect_true!(*guard.value() == 20);
+        }
+
+        // Verify persistence and acquire with explicit policy
+        {
+            ksync::lock!(
+                let guard = obj.lock_mu_policy::<ksync::IrqSavePolicy>(ksync::source_tag!())
+            );
+            expect_true!(*guard.value() == 20);
         }
     }
 

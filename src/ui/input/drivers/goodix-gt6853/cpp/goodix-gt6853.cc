@@ -217,12 +217,7 @@ void Gt6853Device::DdkUnbind(ddk::UnbindTxn txn) {
 
 void Gt6853Device::GetInputReportsReader(GetInputReportsReaderRequestView request,
                                          GetInputReportsReaderCompleter::Sync& completer) {
-  zx_status_t status = input_report_readers_.CreateReader(dispatcher_, std::move(request->reader));
-  if (status == ZX_OK) {
-#ifdef GT6853_TEST
-    sync_completion_signal(&next_reader_wait_);  // Only for tests.
-#endif
-  }
+  ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
 }
 
 void Gt6853Device::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,

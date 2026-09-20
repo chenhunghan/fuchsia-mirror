@@ -8,10 +8,17 @@ import("//build/drivers.gni")
 import("//build/test.gni")
 import("//build/testing/cc_test_executable.gni")
 
+fuchsia_driver_dml("hidctl-dml") {
+  dml = "meta/hidctl.dml"
+  driver_name = "hidctl"
+}
+
 driver_bind_rules("hidctl_bind") {
-  rules = "meta/hidctl.bind"
+  bind_output = "hidctl.bindbc"
+  dml_label = ":hidctl-dml"
   tests = "meta/bind_tests.json"
   deps = [
+    "//src/devices/bind/fuchsia",
     "//src/devices/bind/fuchsia.test",
     "//src/devices/bind/fuchsia.test.platform",
   ]
@@ -41,10 +48,10 @@ fuchsia_cc_driver("hidctl-driver") {
 }
 
 fuchsia_driver_component("hidctl") {
+  dml_label = ":hidctl-dml"
   component_name = "hidctl"
   deps = [ ":hidctl-driver" ]
   info = "meta/hidctl-info.json"
-  manifest = "meta/hidctl.cml"
 }
 
 cc_test_executable("hidctl-test") {

@@ -138,7 +138,6 @@ pub(crate) trait TransportState<I: Ip>: Transport<I> + Send + Sync + 'static {
     type SocketInfo: IntoFidl<LocalAddress<I, WeakDeviceId<BindingsCtx>, Self::LocalIdentifier>>
         + TryIntoFidl<RemoteAddress<I, WeakDeviceId<BindingsCtx>, u16>, Error = ErrnoError>;
     type SendError: IntoErrno;
-    type SendToError: IntoErrno;
     type DscpAndEcnError: IntoErrno;
 
     fn create_unbound(
@@ -303,18 +302,12 @@ pub(crate) trait TransportState<I: Ip>: Transport<I> + Send + Sync + 'static {
     fn send<B: BufferMut>(
         ctx: &mut Ctx,
         id: &Self::SocketId,
-        body: B,
-    ) -> Result<(), Self::SendError>;
-
-    fn send_to<B: BufferMut>(
-        ctx: &mut Ctx,
-        id: &Self::SocketId,
-        remote: (
+        remote: Option<(
             Option<ZonedAddr<SpecifiedAddr<I::Addr>, DeviceId<BindingsCtx>>>,
             Self::RemoteIdentifier,
-        ),
+        )>,
         body: B,
-    ) -> Result<(), Self::SendToError>;
+    ) -> Result<(), Self::SendError>;
 
     fn set_mark(ctx: &mut Ctx, id: &Self::SocketId, domain: MarkDomain, mark: Mark);
 
@@ -365,7 +358,7 @@ impl OptionFromU16 for NonZeroU16 {
 #[derive(Error, Debug)]
 pub(crate) enum UdpSendError {
     #[error(transparent)]
-    Core(#[from] udp::SendError),
+    Core(#[from] udp::SendToError),
     #[error(transparent)]
     PendingDatagramSocket(#[from] PendingDatagramSocketError),
     #[error("cannot send on non-connected UDP socket")]
@@ -375,7 +368,13 @@ pub(crate) enum UdpSendError {
 impl From<Either<udp::SendError, ExpectedConnError>> for UdpSendError {
     fn from(value: Either<udp::SendError, ExpectedConnError>) -> Self {
         match value {
-            Either::Left(e) => e.into(),
+            Either::Left(e) => Self::Core(match e {
+                udp::SendError::NotWriteable => udp::SendToError::NotWriteable,
+                udp::SendError::SendBufferFull => udp::SendToError::SendBufferFull,
+                udp::SendError::InvalidLength => udp::SendToError::InvalidLength,
+                udp::SendError::IpSock(err) => udp::SendToError::Send(err),
+                udp::SendError::RemotePortUnset => udp::SendToError::RemotePortUnset,
+            }),
             Either::Right(ExpectedConnError) => Self::NotConnected,
         }
     }
@@ -387,35 +386,6 @@ impl IntoErrno for UdpSendError {
             UdpSendError::Core(err) => err.to_errno(),
             UdpSendError::PendingDatagramSocket(err) => err.to_errno(),
             UdpSendError::NotConnected => fposix::Errno::Edestaddrreq,
-        }
-    }
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum UdpSendToError {
-    #[error(transparent)]
-    LocalAddress(#[from] LocalAddressError),
-    #[error(transparent)]
-    Core(#[from] udp::SendToError),
-    #[error(transparent)]
-    PendingDatagramSocketError(#[from] PendingDatagramSocketError),
-}
-
-impl From<Either<LocalAddressError, udp::SendToError>> for UdpSendToError {
-    fn from(value: Either<LocalAddressError, udp::SendToError>) -> Self {
-        match value {
-            Either::Left(e) => e.into(),
-            Either::Right(e) => e.into(),
-        }
-    }
-}
-
-impl IntoErrno for UdpSendToError {
-    fn to_errno(&self) -> fidl_fuchsia_posix::Errno {
-        match self {
-            UdpSendToError::LocalAddress(err) => err.to_errno(),
-            UdpSendToError::Core(err) => err.to_errno(),
-            UdpSendToError::PendingDatagramSocketError(err) => err.to_errno(),
         }
     }
 }
@@ -441,7 +411,6 @@ where
     type RemoteIdentifier = udp::UdpRemotePort;
     type SocketInfo = SocketInfo<I::Addr, WeakDeviceId<BindingsCtx>>;
     type SendError = UdpSendError;
-    type SendToError = UdpSendToError;
     type DscpAndEcnError = NotDualStackCapableError;
 
     fn create_unbound(
@@ -686,6 +655,10 @@ where
     fn send<B: BufferMut>(
         ctx: &mut Ctx,
         id: &Self::SocketId,
+        remote: Option<(
+            Option<ZonedAddr<SpecifiedAddr<I::Addr>, DeviceId<BindingsCtx>>>,
+            Self::RemoteIdentifier,
+        )>,
         body: B,
     ) -> Result<(), Self::SendError> {
         if let Some(err) = Self::take_pending_error(ctx, id) {
@@ -695,24 +668,12 @@ where
         // NOTE: It's possible an ICMP error arrived on the socket between the
         // check above and now. However, it's not possible for the application
         // to detect the difference between that and the error coming in later.
-        ctx.api().udp().send(id, body).map_err(|e| e.into())
-    }
-
-    fn send_to<B: BufferMut>(
-        ctx: &mut Ctx,
-        id: &Self::SocketId,
-        (remote_ip, remote_port): (
-            Option<ZonedAddr<SpecifiedAddr<I::Addr>, DeviceId<BindingsCtx>>>,
-            Self::RemoteIdentifier,
-        ),
-        body: B,
-    ) -> Result<(), Self::SendToError> {
-        if let Some(err) = Self::take_pending_error(ctx, id) {
-            return Err(UdpSendToError::PendingDatagramSocketError(err));
+        match remote {
+            Some((remote_ip, remote_port)) => {
+                ctx.api().udp().send_to(id, remote_ip, remote_port, body, ()).map_err(|e| e.into())
+            }
+            None => ctx.api().udp().send(id, body, ()).map_err(|e| e.into()),
         }
-
-        // NOTE: See the comment above in send() about a possible race.
-        ctx.api().udp().send_to(id, remote_ip, remote_port, body).map_err(|e| e.into())
     }
 
     fn set_mark(ctx: &mut Ctx, id: &Self::SocketId, domain: MarkDomain, mark: Mark) {
@@ -806,6 +767,23 @@ impl OptionFromU16 for u16 {
     }
 }
 
+#[derive(Error, Debug)]
+pub(crate) enum IcmpSendError {
+    #[error(transparent)]
+    CoreSendTo(#[from] core_socket::SendToError<packet_formats::error::ParseError>),
+    #[error(transparent)]
+    CoreSend(#[from] core_socket::SendError<packet_formats::error::ParseError>),
+}
+
+impl IntoErrno for IcmpSendError {
+    fn to_errno(&self) -> fidl_fuchsia_posix::Errno {
+        match self {
+            IcmpSendError::CoreSendTo(err) => err.to_errno(),
+            IcmpSendError::CoreSend(err) => err.to_errno(),
+        }
+    }
+}
+
 #[netstack3_core::context_ip_bounds(I, BindingsCtx)]
 impl<I> TransportState<I> for IcmpEcho
 where
@@ -826,11 +804,7 @@ where
     type LocalIdentifier = NonZeroU16;
     type RemoteIdentifier = u16;
     type SocketInfo = SocketInfo<I::Addr, WeakDeviceId<BindingsCtx>>;
-    type SendError = core_socket::SendError<packet_formats::error::ParseError>;
-    type SendToError = either::Either<
-        LocalAddressError,
-        core_socket::SendToError<packet_formats::error::ParseError>,
-    >;
+    type SendError = IcmpSendError;
     type DscpAndEcnError = NotSupportedError;
 
     fn create_unbound(
@@ -1124,21 +1098,18 @@ where
     fn send<B: BufferMut>(
         ctx: &mut Ctx,
         id: &Self::SocketId,
-        body: B,
-    ) -> Result<(), Self::SendError> {
-        ctx.api().icmp_echo().send(id, body)
-    }
-
-    fn send_to<B: BufferMut>(
-        ctx: &mut Ctx,
-        id: &Self::SocketId,
-        (remote_ip, _remote_id): (
+        remote: Option<(
             Option<ZonedAddr<SpecifiedAddr<I::Addr>, DeviceId<BindingsCtx>>>,
             Self::RemoteIdentifier,
-        ),
+        )>,
         body: B,
-    ) -> Result<(), Self::SendToError> {
-        ctx.api().icmp_echo().send_to(id, remote_ip, body)
+    ) -> Result<(), Self::SendError> {
+        match remote {
+            Some((remote_ip, _remote_id)) => {
+                ctx.api().icmp_echo().send_to(id, remote_ip, body, ()).map_err(|e| e.into())
+            }
+            None => ctx.api().icmp_echo().send(id, body, ()).map_err(|e| e.into()),
+        }
     }
 
     fn set_mark(ctx: &mut Ctx, id: &Self::SocketId, domain: MarkDomain, mark: Mark) {
@@ -1192,6 +1163,7 @@ where
     fn to_errno(&self) -> fposix::Errno {
         match self {
             core_socket::SendToError::NotWriteable => fposix::Errno::Epipe,
+            core_socket::SendToError::LocalAddress(err) => err.to_errno(),
             core_socket::SendToError::SendBufferFull => fposix::Errno::Eagain,
             core_socket::SendToError::InvalidLength => fposix::Errno::Emsgsize,
             core_socket::SendToError::Zone(err) => err.to_errno(),
@@ -2411,11 +2383,7 @@ where
             .transpose()?;
         let len = data.len() as i64;
         let body = Buf::new(data, ..);
-        match remote {
-            Some(remote) => T::send_to(ctx, id, remote, body).map_err(|e| e.into_errno_error()),
-            None => T::send(ctx, id, body).map_err(|e| e.into_errno_error()),
-        }
-        .map(|()| len)
+        T::send(ctx, id, remote, body).map_err(|e| e.into_errno_error()).map(|()| len)
     }
 
     fn bind_to_device_id(self, device: Option<DeviceId<BindingsCtx>>) -> Result<(), ErrnoError> {

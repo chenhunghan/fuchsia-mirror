@@ -192,6 +192,10 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             switch, outlet = self._lookup_power_switch(device)
             if switch is not None:
                 device.set_power_switch(power_switch=switch, outlet=outlet)
+
+            hub, port = self._lookup_usb_power_hub(device)
+            if hub is not None:
+                device.set_usb_power_hub(usb_power_hub=hub, port=port)
         if (
             self.tracing_on == TracingOn.TEARDOWN_CLASS
             or self.tracing_on == TracingOn.TEARDOWN_CLASS_ON_FAIL
@@ -279,6 +283,8 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             * Stops, terminates and downloads the trace data for all devices and stores
               it under "<log_path>/teardown_class<_on_fail>" directory if `tracing_on`
               test param is set to "teardown_class" or "teardown_class_on_fail".
+            * Powers on any configured power switch outlets and USB power hub ports
+              for all Fuchsia devices.
         """
         for device in self.fuchsia_devices:
             if (
@@ -310,6 +316,28 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             await self._collect_snapshot(
                 directory=self._teardown_class_artifacts
             )
+
+        for device in self.fuchsia_devices:
+            switch, outlet = self._lookup_power_switch(device)
+            if switch is not None:
+                try:
+                    switch.power_on(outlet=outlet)
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Failed to power on power switch for %s with error: %s",
+                        device.device_name,
+                        err,
+                    )
+            usb_power_hub, port = self._lookup_usb_power_hub(device)
+            if usb_power_hub is not None:
+                try:
+                    usb_power_hub.power_on(port=port)
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Failed to power on USB power hub for %s with error: %s",
+                        device.device_name,
+                        err,
+                    )
 
     async def on_fail(self, record: TestResultRecord) -> None:
         """on_fail is called once when a test case fails.
@@ -524,7 +552,7 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
 
     def _lookup_usb_power_hub(
         self, fx_device: fuchsia_device.FuchsiaDevice
-    ) -> tuple[usb_power_hub.UsbPowerHub, int | None]:
+    ) -> tuple[usb_power_hub.UsbPowerHub | None, int | None]:
         device_config: dict[str, object] = self._get_device_config(
             controller_type="FuchsiaDevice",
             identifier_key="name",
@@ -548,13 +576,15 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
                 usb_power_hub_class(**usb_power_hub_hw),
                 usb_power_hub_port,
             )
-        else:
+        elif usb_power_hub_using_dmc.DMC_PATH_KEY in os.environ:
             return (
                 usb_power_hub_using_dmc.UsbPowerHubUsingDmc(
                     device_name=fx_device.device_name,
                 ),
                 None,
             )
+        else:
+            return (None, None)
 
     async def _log_message_to_devices(
         self, message: str, level: custom_types.LEVEL

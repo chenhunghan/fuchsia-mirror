@@ -159,7 +159,10 @@ import("//build/toolchain/rbe.gni")
 #   See //build/tools/bazel2gn/README.md for details.
 #
 #      proc_macro_deps (optional)
-#        For proc_macro dependencies, has the same semantics as deps in GN.
+#        For proc_macro dependencies, has the same semantics as deps in GN,
+#        except that these are always built in `$host_toolchain`, since
+#        procedural macros run as compiler plugins on the build machine.
+#        Entries must not specify a toolchain.
 #
 # Example of usage:
 #
@@ -237,9 +240,6 @@ template("rustc_binary") {
   if (defined(invoker.deps)) {
     deps += invoker.deps
   }
-  if (defined(invoker.proc_macro_deps)) {
-    deps += invoker.proc_macro_deps
-  }
 
   # if "with_unit_tests" is set to true, generate an additional rust test target
   # TODO(https://fxbug.dev/42152447): accept a string.
@@ -306,9 +306,11 @@ template("rustc_binary") {
                              "features",
                              "inputs",
                              "link_args",
+                             "lint_config",
                              "output_dir",
                              "output_extension",
                              "pool",
+                             "proc_macro_deps",
                              "quiet_clippy",
                              "rustenv",
                              "rustflags",

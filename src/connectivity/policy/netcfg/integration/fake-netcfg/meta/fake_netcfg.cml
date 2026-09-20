@@ -15,6 +15,7 @@
             protocol: [
                 "fuchsia.net.policy.properties.Networks",
                 "fuchsia.net.policy.socketproxy.NetworkRegistry",
+                "fuchsia.net.reachability.Monitor",
             ],
         },
     ],
@@ -23,6 +24,7 @@
             protocol: [
                 "fuchsia.net.policy.properties.Networks",
                 "fuchsia.net.policy.socketproxy.NetworkRegistry",
+                "fuchsia.net.reachability.Monitor",
             ],
             from: "self",
         },

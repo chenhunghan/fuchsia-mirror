@@ -32,6 +32,7 @@ kernel_rust_mod("generic32-rs") {
     "//sdk/rust/zbi",
     "//sdk/rust/zx-status",
     "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/regio",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",

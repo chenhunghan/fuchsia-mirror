@@ -393,7 +393,7 @@ impl<DS: DataStore, TS: SystemTimeSource> Server<DS, TS> {
             }
             std::collections::hash_map::Entry::Vacant(_vacant) => None,
         };
-        match current {
+        let newly_allocated = match current {
             Some(current) => {
                 // If there is a lease record with a currently leased address, and the offered address
                 // does not match that leased address, then the offered address was calculated contrary
@@ -402,6 +402,7 @@ impl<DS: DataStore, TS: SystemTimeSource> Server<DS, TS> {
                     current, offered,
                     "server offered address does not match address in lease record"
                 );
+                false
             }
             None => {
                 match pool.allocate_addr(offered) {
@@ -410,11 +411,26 @@ impl<DS: DataStore, TS: SystemTimeSource> Server<DS, TS> {
                     // irrecoverable inconsistency.
                     Err(e) => panic!("fatal server address allocation failure: {}", e),
                 }
+                true
             }
         };
         if let Some(store) = store {
-            let () =
-                store.insert(entry.key(), &record).context("failed to store client in stash")?;
+            if let Err(e) =
+                store.insert(entry.key(), &record).context("failed to store client in stash")
+            {
+                // The lease record is not inserted into `records` on this path, so expired lease
+                // reclamation (which only considers `records`) would never release the address.
+                // Undo the allocation performed above to avoid leaking the address, which would
+                // otherwise allow a client to exhaust the pool by repeatedly triggering data store
+                // failures.
+                if newly_allocated {
+                    match pool.release_addr(offered) {
+                        Ok(()) => (),
+                        Err(_) => unreachable!("address was just allocated above"),
+                    }
+                }
+                return Err(e);
+            }
         }
         let _ = entry.insert_entry(record);
         Ok(())
@@ -1525,7 +1541,7 @@ pub mod tests {
     use anyhow::Error;
     use assert_matches::assert_matches;
     use bstr::BString;
-    use datastore::{ActionRecordingDataStore, DataStoreAction};
+    use datastore::{ActionRecordingDataStore, DataStoreAction, FailingDataStore};
     use dhcp_protocol::{AtLeast, AtMostBytes};
     use fidl_fuchsia_net_ext::IntoExt as _;
     use net_declare::net::prefix_length_v4;
@@ -1625,6 +1641,34 @@ pub mod tests {
 
             fn delete(&mut self, client_id: &ClientIdentifier) -> Result<(), Self::Error> {
                 Ok(self.push_action(DataStoreAction::Delete { client_id: client_id.clone() }))
+            }
+        }
+
+        /// A `DataStore` whose `insert` always fails, emulating e.g. a stash key which is too
+        /// long to be encoded.
+        pub struct FailingDataStore;
+
+        impl DataStore for FailingDataStore {
+            type Error = ActionRecordingError;
+
+            fn insert(
+                &mut self,
+                _client_id: &ClientIdentifier,
+                _record: &LeaseRecord,
+            ) -> Result<(), Self::Error> {
+                Err(ActionRecordingError(anyhow::anyhow!("insert failed")))
+            }
+
+            fn store_options(&mut self, _opts: &[DhcpOption]) -> Result<(), Self::Error> {
+                Err(ActionRecordingError(anyhow::anyhow!("store_options failed")))
+            }
+
+            fn store_parameters(&mut self, _params: &ServerParameters) -> Result<(), Self::Error> {
+                Err(ActionRecordingError(anyhow::anyhow!("store_parameters failed")))
+            }
+
+            fn delete(&mut self, _client_id: &ClientIdentifier) -> Result<(), Self::Error> {
+                Err(ActionRecordingError(anyhow::anyhow!("delete failed")))
             }
         }
     }
@@ -1734,7 +1778,9 @@ pub mod tests {
         .ok_or(ProtocolError::MissingOption(code))
     }
 
-    fn new_test_minimal_server_with_time_source() -> (Server, TestSystemTime) {
+    fn new_test_minimal_server_with_store<DS: DataStore>(
+        store: DS,
+    ) -> (Server<DS>, TestSystemTime) {
         let time_source = TestSystemTime::with_current_time();
         let params = test_server_params(
             vec![random_ipv4_generator()],
@@ -1746,7 +1792,7 @@ pub mod tests {
                 records: HashMap::new(),
                 pool: AddressPool::new(params.managed_addrs.pool_range()),
                 params,
-                store: Some(ActionRecordingDataStore::new()),
+                store: Some(store),
                 options_repo: HashMap::from_iter(vec![
                     (OptionCode::Router, DhcpOption::Router([random_ipv4_generator()].into())),
                     (
@@ -1760,6 +1806,10 @@ pub mod tests {
             },
             time_source.clone(),
         )
+    }
+
+    fn new_test_minimal_server_with_time_source() -> (Server, TestSystemTime) {
+        new_test_minimal_server_with_store(ActionRecordingDataStore::new())
     }
 
     fn new_test_minimal_server() -> Server {
@@ -2126,6 +2176,29 @@ pub mod tests {
             server.store.expect("missing store").actions().as_slice(),
             [DataStoreAction::StoreClientRecord {client_id: id, ..}] if *id == client_id
         );
+    }
+
+    // Regression test for https://fxbug.dev/518910836: if the data store rejects the client
+    // record, the offered address must be returned to the pool. Otherwise the address is leaked
+    // forever, since expired lease reclamation only considers addresses which have a lease
+    // record.
+    #[test]
+    fn dispatch_with_discover_data_store_failure_does_not_leak_addr() {
+        let (mut server, _time_source) = new_test_minimal_server_with_store(FailingDataStore);
+        let disc = new_test_discover();
+        let client_id = ClientIdentifier::from(&disc);
+
+        let offer_ip = random_ipv4_generator();
+        assert!(server.pool.universe.insert(offer_ip));
+        let available_before: Vec<_> = server.pool.available().collect();
+
+        assert_matches!(server.dispatch(disc), Err(ServerError::DataStoreUpdateFailure(_)));
+
+        assert_eq!(server.records.get(&client_id), None);
+        assert!(!server.pool.addr_is_allocated(offer_ip));
+        let available_after: Vec<_> = server.pool.available().collect();
+        assert_eq!(available_before, available_after);
+        assert!(server.pool.allocated.is_empty(), "{:?}", server.pool.allocated);
     }
 
     fn dispatch_with_discover_updates_stash_helper(

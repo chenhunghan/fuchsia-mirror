@@ -81,7 +81,7 @@ def is_fuchsia_dir(path: FilePath) -> bool:
     return (Path(path) / ".jiri_manifest").exists()
 
 
-def find_fuchsia_dir(from_path: T.Optional[FilePath] = None) -> Path:
+def find_fuchsia_dir(from_path: FilePath | None = None) -> Path:
     """Find the Fuchsia checkout from a specific path.
 
     Args:
@@ -104,7 +104,7 @@ def find_fuchsia_dir(from_path: T.Optional[FilePath] = None) -> Path:
             )
 
 
-def find_fx_build_dir(fuchsia_dir: FilePath) -> T.Optional[Path]:
+def find_fx_build_dir(fuchsia_dir: FilePath) -> Path | None:
     """Find the build directory set through 'fx set' or 'fx use'.
 
     Args:
@@ -124,7 +124,7 @@ def find_fx_build_dir(fuchsia_dir: FilePath) -> T.Optional[Path]:
     return None
 
 
-def find_host_binary_path(program: str) -> T.Optional[Path]:
+def find_host_binary_path(program: str) -> Path | None:
     """Find the absolute path of a given program. Like the UNIX `which` command.
 
     Args:
@@ -162,7 +162,7 @@ def get_bazel_relative_topdir(fuchsia_dir: FilePath) -> tuple[str, set[Path]]:
 
 def find_bazel_launcher_path(
     fuchsia_dir: FilePath, build_dir: FilePath
-) -> T.Optional[Path]:
+) -> Path | None:
     """Find the path of the Bazel launcher script.
 
     Args:
@@ -180,7 +180,7 @@ def find_bazel_launcher_path(
 
 def find_bazel_workspace_path(
     fuchsia_dir: FilePath, build_dir: FilePath
-) -> T.Optional[Path]:
+) -> Path | None:
     """Find the path of the Bazel workspace.
 
     Args:
@@ -785,7 +785,7 @@ class BazelPaths(BuildPaths):
 
     @staticmethod
     def new(
-        fuchsia_dir: T.Optional[Path] = None, build_dir: T.Optional[Path] = None
+        fuchsia_dir: Path | None = None, build_dir: Path | None = None
     ) -> "BazelPaths":
         """Create new instance.
 
@@ -1030,7 +1030,7 @@ class MockCommandRunner(CommandRunner):
 
         super().__init__(log_cmd=_log_command, log_result=_log_result)
         self._result_queue: list[CommandResult] = []
-        self._command_filter: T.Optional[MockCommandFilter] = None
+        self._command_filter: MockCommandFilter | None = None
 
     def set_command_filter(self, command_filter: MockCommandFilter) -> None:
         """Set a command filter.
@@ -1145,7 +1145,7 @@ class NinjaRunner(object):
         self,
         ninja: Path,
         build_dir: Path,
-        command_runner: T.Optional[CommandRunner] = None,
+        command_runner: CommandRunner | None = None,
     ):
         """Create instance.
 
@@ -1370,7 +1370,7 @@ class BazelQueryCache(object):
         query_args: list[str],
         launcher: BazelLauncher,
         log: None | LogFunc = None,
-    ) -> T.Optional[list[str]]:
+    ) -> list[str] | None:
         """Run a bazel query and return its output as a series of lines.
 
         Args:

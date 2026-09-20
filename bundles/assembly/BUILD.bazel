@@ -229,11 +229,6 @@ assembly_input_bundle(
         },
         {
             "set": "bootfs",
-            "package_target": "//bundles/assembly/bazel_inputs/src/devices/block/drivers/core:package",
-            "driver_components": ["meta/block.core.cm"],
-        },
-        {
-            "set": "bootfs",
             "package_target": "//bundles/assembly/bazel_inputs/src/devices/block/drivers/sdmmc:package",
             "driver_components": ["meta/sdmmc.cm"],
         },

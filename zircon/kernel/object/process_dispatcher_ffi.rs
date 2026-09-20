@@ -9,8 +9,10 @@ use super::handle::{HandleValue, KernelHandle};
 use super::job_dispatcher::JobDispatcher;
 use super::process_dispatcher::ProcessDispatcher;
 use super::thread_dispatcher::ThreadDispatcher;
+use crate::arch_rs::UserEntryState;
+use crate::kernel::thread::Thread;
 use core::mem::MaybeUninit;
-use zx_types::{zx_handle_t, zx_info_process_t, zx_rights_t, zx_status_t, zx_vaddr_t};
+use zx_types::{zx_handle_t, zx_info_process_t, zx_koid_t, zx_rights_t, zx_status_t, zx_vaddr_t};
 
 unsafe extern "C" {
     /// Returns a raw pointer to the current process dispatcher.
@@ -291,7 +293,7 @@ unsafe extern "C" {
     ///
     /// `process` must point to a valid `ProcessDispatcher`.
     pub(crate) fn cpp_process_dispatcher_vdso_base_address(
-        process: *mut ProcessDispatcher,
+        process: *const ProcessDispatcher,
     ) -> usize;
 
     /// Returns the hardware trace context ID of `process`.
@@ -303,4 +305,65 @@ unsafe extern "C" {
     pub(crate) fn cpp_process_dispatcher_hw_trace_context_id(
         process: *const ProcessDispatcher,
     ) -> usize;
+
+    /// Grows the futex state pool of `process`.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher`.
+    pub(crate) fn cpp_process_futex_grow_pool(process: *const ProcessDispatcher) -> zx_status_t;
+
+    /// Shrinks the futex state pool of `process`.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher`.
+    pub(crate) fn cpp_process_futex_shrink_pool(process: *const ProcessDispatcher) -> zx_status_t;
+
+    /// Attaches the normal address space of `process` to `core_thread`.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher` and `core_thread` must point to a
+    /// valid `Thread`.
+    pub(crate) fn cpp_process_attach_aspace_to_thread(
+        process: *const ProcessDispatcher,
+        core_thread: *mut Thread,
+    ) -> zx_status_t;
+
+    /// Returns the koid of the parent job of `process`.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher`.
+    pub(crate) fn cpp_process_get_job_koid(process: *const ProcessDispatcher) -> zx_koid_t;
+
+    /// Makes `thread` runnable and adds it to the C++ thread list of `process`.
+    ///
+    /// Ownership of `thread` within the process thread list stays on the C++ side; this only
+    /// hands the thread over to `ProcessDispatcher::AddInitializedThread`, which takes the
+    /// process lock itself.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher`, `thread` to a valid initialized
+    /// `ThreadDispatcher` that is not already in a thread list, and `entry` to a valid
+    /// `UserEntryState`.
+    pub(crate) fn cpp_process_add_initialized_thread(
+        process: *const ProcessDispatcher,
+        thread: *const ThreadDispatcher,
+        ensure_initial_thread: bool,
+        entry: *const UserEntryState,
+    ) -> zx_status_t;
+
+    /// Removes `thread` from the C++ thread list of `process`.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher` and `thread` must point to a valid
+    /// `ThreadDispatcher` that is in the thread list of `process`.
+    pub(crate) fn cpp_process_remove_thread(
+        process: *const ProcessDispatcher,
+        thread: *const ThreadDispatcher,
+    );
 }

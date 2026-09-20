@@ -78,6 +78,10 @@ struct LayerObject {
   UberStructLayer::SolidColorModeProperties solid_color_mode;
   Mode mode = Mode::kInvisible;
 
+  // When true, `image_mode.sample_rect` automatically tracks the bound image's
+  // full dimensions. Cleared when a custom non-zero `sample_rect` is set.
+  bool sample_rect_is_full_image = true;
+
   // Stored optimization hints from LayerProperties.
   std::vector<types::Rectangle> hint_damage_rects;
   std::vector<types::Rectangle> hint_visible_rects;

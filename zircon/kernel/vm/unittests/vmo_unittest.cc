@@ -2019,7 +2019,7 @@ bool vmo_reclamation_test() {
 
   // Reclamation should drop the number of committed pages.
   EXPECT_TRUE(make_private_attribution_counts(kPageSize, 0) == vmo->GetAttributedMemory());
-  EXPECT_TRUE(verify_continuous_attribution_bytes(*vmo, kAllocSize));
+  EXPECT_TRUE(verify_continuous_attribution_bytes(*vmo, kPageSize));
   ASSERT_EQ(reclaim(vmo, pages[0], 0, VmCowPages::EvictionAction::FollowHint), 1u);
   EXPECT_TRUE((vm::AttributionCounts{}) == vmo->GetAttributedMemory());
   EXPECT_TRUE(verify_continuous_attribution_bytes(*vmo, 0));

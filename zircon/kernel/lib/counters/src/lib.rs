@@ -5,10 +5,12 @@
 // https://opensource.org/licenses/MIT
 
 use core::cmp::{max, min};
+use core::mem::{offset_of, size_of_val};
 use core::ptr;
 use core::sync::atomic::{AtomicI64, Ordering};
 
 use crate::kernel::percpu::PerCpu;
+use crate::platform_rs::timer::{DurationMono, current_mono_time};
 use counters_bindings as bindings;
 
 /// The maximum number of CPUs that this counter descriptor supports.
@@ -249,3 +251,25 @@ macro_rules! define_kcounter {
     };
 }
 pub use define_kcounter;
+
+/// kernel.ld uses this and fills in the descriptor table size after it and then
+/// places the sorted descriptor table after that (and then pads to page size),
+/// so as to fully populate the counters::DescriptorVmo layout.
+#[unsafe(link_section = ".kcounter.desc.header")]
+#[used]
+static VMO_HEADER: [u64; 2] = [bindings::counters_DescriptorVmo_kMagic, SMP_MAX_CPUS as u64];
+
+zr::static_assert!(
+    size_of_val(&VMO_HEADER) == offset_of!(bindings::counters_DescriptorVmo, descriptor_table_size)
+);
+
+// This counter tracks how long it takes for Zircon to reach the last init level
+// It also can show if the target does not reset the internal clock upon reboot
+// which is true also for mexec (netboot) scenario.
+define_kcounter!(INIT_TIME, "init.target.time.msec", Sum);
+
+fn counters_init(_level: init::LkInitLevel) {
+    INIT_TIME.add(DurationMono::from_nanos(current_mono_time().0).into_millis());
+}
+
+init::lk_init_hook!(kcounters, counters_init, init::LkInitLevel(init::LK_INIT_LEVEL_USER.0 - 1));

@@ -30,23 +30,33 @@ namespace {
 
 using VmoFile = elfldltl::VmoFile<Diagnostics>;
 
-using SystemPageAllocator = trivial_allocator::ZirconVmar;
-
-auto MakeStartupSystemPageAllocator(StartupData& startup) {
-  return SystemPageAllocator{startup.vmar};
+// For the initial-exec allocator, always get individual pages and populate
+// page tables eagerly for each page as it's mapped.  The page will always be
+// written immediately after it's allocated, so faulting it in is just slower.
+auto MakeStartupInitialExecAllocator(StartupData& startup) {
+  using PageMemory = trivial_allocator::ZirconVmar<1, ZX_VM_MAP_RANGE>;
+  return MakeInitialExecAllocator(PageMemory{startup.vmar});
 }
 
-auto MakeStartupScratchAllocator(SystemPageAllocator system) {
-  return MakeScratchAllocator(std::move(system));
+using InitialExecAllocator =
+    decltype(MakeStartupInitialExecAllocator(std::declval<StartupData&>()));
+
+// For the scratch allocator, space will be allocated in the reservation VMAR.
+// It's going to be destroyed as a whole at the end, so allocations in it can
+// be completely leaked.  Use a large minimum allocation granularity (2MiB) so
+// that additional mapping syscalls are rare, but let each actual page be
+// faulted in as needed so no extra RAM pages are taken from the system.
+auto MakeStartupScratchAllocator(const VmarReservation& reserve_vmar) {
+  constexpr size_t kScratchPageSize = 2 << 20;
+  return trivial_allocator::BasicLeakyAllocator{trivial_allocator::PageAllocator{
+      trivial_allocator::ZirconVmar<kScratchPageSize>{reserve_vmar.vmar()}}};
 }
 
-using ScratchAllocator = decltype(MakeStartupScratchAllocator(SystemPageAllocator{}));
+using ScratchAllocator =
+    decltype(MakeStartupScratchAllocator(std::declval<const VmarReservation&>()));
 
-auto MakeStartupInitialExecAllocator(SystemPageAllocator system) {
-  return MakeInitialExecAllocator(std::move(system));
-}
-
-using InitialExecAllocator = decltype(MakeStartupInitialExecAllocator(SystemPageAllocator{}));
+// The reservation VMAR needs to allow mappings for scratch use.
+constexpr zx_vm_option_t kReserveVmarFlags = ZX_VM_CAN_MAP_READ | ZX_VM_CAN_MAP_WRITE;
 
 struct LoadExecutableResult : public StartupLoadResult {
   StartupModule* module = nullptr;
@@ -146,7 +156,7 @@ VmarReservation CreateReservationVmar(Diagnostics& diag, zx::unowned_vmar vmar, 
   zx_info_vmar_t bottom = VmarBottomHalf(info, page_size);
 
   VmarReservation reservation;
-  auto result = reservation.Init(vmar->borrow(), info, bottom);
+  auto result = reservation.Init(vmar->borrow(), info, bottom, kReserveVmarFlags);
   if (result.is_error()) [[unlikely]] {
     diag.SystemError("cannot reserve lower half [", bottom.base, ", ", bottom.base + bottom.len,
                      ") of root VMAR [", info.base, ", ", info.base + info.len,
@@ -187,14 +197,14 @@ extern "C" StartLdResult StartLd(zx_handle_t handle, void* vdso) {
   Diagnostics diag{startup};
 
   // Reserve the bottom half of the root VMAR to force all allocations and
-  // loaded modules into the top half of the address space. This helps facilitate
-  // large allocations to be placed into the bottom half of the address space
-  // for things like sanitizers.
+  // loaded modules into the top half of the address space. This helps
+  // facilitate large allocations to be placed into the bottom half of the
+  // address space for things like sanitizers.
   //
-  // The reserve_vmar object's destructor will automatically remove this reservation
-  // (by destroying the child VMAR) when it goes out of scope at the end of StartLd,
-  // just before returning to start the executable, ensuring libc has free access
-  // to the bottom half of the address space.
+  // The reserve_vmar object's destructor will automatically remove this
+  // reservation (by destroying the child VMAR) when it goes out of scope at
+  // the end of StartLd, just before returning to start the executable,
+  // ensuring libc has free access to the bottom half of the address space.
   VmarReservation reserve_vmar =
       CreateReservationVmar(diag, startup.vmar.borrow(), bootstrap.page_size());
   CheckErrors(diag);
@@ -216,10 +226,11 @@ extern "C" StartLdResult StartLd(zx_handle_t handle, void* vdso) {
       PublishProfdata(diag, startup.vmar.borrow(), bootstrap.self_module().build_id);
 
   // Set up the allocators.  These objects hold zx::unowned_vmar copies but do
-  // not own the VMAR handle.
-  auto system_page_allocator = MakeStartupSystemPageAllocator(startup);
-  auto scratch = MakeStartupScratchAllocator(system_page_allocator);
-  auto initial_exec = MakeStartupInitialExecAllocator(system_page_allocator);
+  // not own the VMAR handle.  The scratch allocator takes advantage of the
+  // reserve_vmar so no additional bookkeeping is required to reclaim it all
+  // when the object goes out of scope and the whole VMAR is destroyed.
+  auto scratch = MakeStartupScratchAllocator(reserve_vmar);
+  auto initial_exec = MakeStartupInitialExecAllocator(startup);
 
   // Load the main executable.
   LoadExecutableResult main =

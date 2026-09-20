@@ -5,6 +5,7 @@
 use anyhow::{Context, Error};
 use fidl_fuchsia_bluetooth_snoop::PacketFormat;
 use fidl_fuchsia_feedback::{Attachment, CrashReport, CrashReporterProxy};
+use fidl_fuchsia_firmware_crash as fcrash;
 use fidl_fuchsia_hardware_bluetooth::VendorCrashParameters;
 use fidl_fuchsia_mem as fmem;
 use log::{error, info, warn};
@@ -133,6 +134,7 @@ pub(crate) struct CoreDumpCollector {
     offset: u64,
     program_name: String,
     crash_signature: String,
+    crash_timestamp: zx::BootInstant,
     logged_drop: bool,
 }
 
@@ -149,6 +151,7 @@ impl CoreDumpCollector {
             offset: header_buf.len() as u64,
             program_name,
             crash_signature,
+            crash_timestamp: zx::BootInstant::get(),
             logged_drop: false,
         })
     }
@@ -185,6 +188,37 @@ impl CoreDumpCollector {
         }
 
         self.offset = new_offset;
+    }
+
+    pub fn file_firmware_report(&self, reporter: &fcrash::ReporterProxy) {
+        if let Err(e) = self.vmo.set_content_size(&self.offset) {
+            warn!("Failed to set VMO content size for firmware crash report: {:?}", e);
+        }
+        let rights =
+            zx::Rights::BASIC | zx::Rights::READ | zx::Rights::MAP | zx::Rights::GET_PROPERTY;
+        let vmo = match self.vmo.duplicate_handle(rights) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to duplicate VMO for firmware crash report: {:?}", e);
+                return;
+            }
+        };
+
+        let trimmed = self.crash_signature.trim();
+        let reason = if trimmed.is_empty() { DEFAULT_CRASH_SIGNATURE } else { trimmed };
+        let reason = &reason[..reason.floor_char_boundary(fcrash::MAX_REASON_LENGTH as usize)];
+        let crash = fcrash::Crash {
+            subsystem_name: Some("bluetooth".to_string()),
+            timestamp: Some(self.crash_timestamp),
+            reason: Some(reason.to_string()),
+            crash_dump: Some(vmo),
+            ..Default::default()
+        };
+
+        match reporter.report(crash) {
+            Ok(()) => info!("Firmware crash report sent successfully for bluetooth"),
+            Err(e) => warn!("FIDL error reporting firmware crash: {:?}", e),
+        }
     }
 
     pub async fn file_report(self, crash_reporter: &CrashReporterProxy) {
@@ -227,6 +261,7 @@ impl CoreDumpCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     #[fuchsia::test]
     async fn test_core_dump_collector_initialization() {
@@ -259,7 +294,6 @@ mod tests {
     #[fuchsia::test]
     async fn test_core_dump_collector_file_report() {
         use fidl_fuchsia_feedback::{CrashReporterMarker, CrashReporterRequest};
-        use futures::StreamExt;
 
         let mut collector =
             CoreDumpCollector::new("test_prog".to_string(), "test_sig".to_string()).unwrap();
@@ -377,5 +411,99 @@ mod tests {
             state.process_packet(&continuing_packet),
             CrashEventStatus::ContinuingCrashEvent
         );
+    }
+
+    #[fuchsia::test]
+    async fn test_core_dump_collector_file_firmware_report() {
+        let mut collector =
+            CoreDumpCollector::new("test_prog".to_string(), "test_sig".to_string()).unwrap();
+        let packet = SnoopPacket::new(
+            true,
+            PacketFormat::Event,
+            zx::MonotonicInstant::from_nanos(0),
+            vec![0xFF, 0x01, 0x1B],
+        );
+        let expected_offset =
+            collector.offset + PCAP_PACKET_HEADER_SIZE as u64 + packet.payload.len() as u64;
+        collector.on_packet(&packet);
+
+        let (proxy, mut stream) =
+            fidl::endpoints::create_proxy_and_stream::<fcrash::ReporterMarker>();
+        collector.file_firmware_report(&proxy);
+
+        let req = stream.next().await.expect("received request").expect("valid request");
+        let fcrash::ReporterRequest::Report { payload, .. } = req else {
+            panic!("Unexpected request: {req:?}");
+        };
+        assert_eq!(payload.subsystem_name.as_deref(), Some("bluetooth"));
+        assert_eq!(payload.timestamp, Some(collector.crash_timestamp));
+        assert_eq!(payload.reason.as_deref(), Some("test_sig"));
+
+        let vmo = payload.crash_dump.expect("crash dump present");
+        let content_size = vmo.get_content_size().expect("content size");
+        assert_eq!(content_size, expected_offset);
+
+        let mut header = [0u8; PCAP_GLOBAL_HEADER_SIZE];
+        vmo.read(&mut header, 0).expect("read header");
+        assert_eq!(&header[0..4], &[0xa1, 0xb2, 0xc3, 0xd4]);
+    }
+
+    #[fuchsia::test]
+    async fn test_core_dump_collector_file_firmware_report_reason_clamped() {
+        let long_sig = "a".repeat(200);
+        let collector = CoreDumpCollector::new("test_prog".to_string(), long_sig).unwrap();
+
+        let (proxy, mut stream) =
+            fidl::endpoints::create_proxy_and_stream::<fcrash::ReporterMarker>();
+        collector.file_firmware_report(&proxy);
+
+        let req = stream.next().await.expect("received request").expect("valid request");
+        let fcrash::ReporterRequest::Report { payload, .. } = req else {
+            panic!("Unexpected request: {req:?}");
+        };
+        assert_eq!(payload.reason.as_deref(), Some(&"a".repeat(128)[..]));
+    }
+
+    #[fuchsia::test]
+    async fn test_core_dump_collector_file_firmware_report_reason_multibyte_utf8_clamped() {
+        let multibyte_sig = format!("{}🦀", "a".repeat(127));
+        let collector = CoreDumpCollector::new("test_prog".to_string(), multibyte_sig).unwrap();
+
+        let (proxy, mut stream) =
+            fidl::endpoints::create_proxy_and_stream::<fcrash::ReporterMarker>();
+        collector.file_firmware_report(&proxy);
+
+        let req = stream.next().await.expect("received request").expect("valid request");
+        let fcrash::ReporterRequest::Report { payload, .. } = req else {
+            panic!("Unexpected request: {req:?}");
+        };
+        assert_eq!(payload.reason.as_deref(), Some(&"a".repeat(127)[..]));
+    }
+
+    #[fuchsia::test]
+    async fn test_core_dump_collector_file_firmware_report_whitespace_signature_fallback() {
+        let collector = CoreDumpCollector::new("test_prog".to_string(), "   ".to_string()).unwrap();
+
+        let (proxy, mut stream) =
+            fidl::endpoints::create_proxy_and_stream::<fcrash::ReporterMarker>();
+        collector.file_firmware_report(&proxy);
+
+        let req = stream.next().await.expect("received request").expect("valid request");
+        let fcrash::ReporterRequest::Report { payload, .. } = req else {
+            panic!("Unexpected request: {req:?}");
+        };
+        assert_eq!(payload.reason.as_deref(), Some(DEFAULT_CRASH_SIGNATURE));
+    }
+
+    #[fuchsia::test]
+    async fn test_core_dump_collector_file_firmware_report_disconnected() {
+        let collector =
+            CoreDumpCollector::new("test_prog".to_string(), "test_sig".to_string()).unwrap();
+
+        let (proxy, stream) = fidl::endpoints::create_proxy_and_stream::<fcrash::ReporterMarker>();
+        drop(stream); // Server disconnected
+
+        // Should log warning on FIDL error and not panic.
+        collector.file_firmware_report(&proxy);
     }
 }

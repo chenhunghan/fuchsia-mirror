@@ -6,8 +6,9 @@
 import dataclasses
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Set
+from typing import Any
 
 import depfile as depfile
 from gn_label import GnLabel
@@ -18,7 +19,7 @@ class FileAccess:
     """Manages access to the real file system, while keeping track of depfiles."""
 
     fuchsia_source_path_str: str | Path
-    visited_files: Set[str] = dataclasses.field(default_factory=set)
+    visited_files: set[str] = dataclasses.field(default_factory=set)
 
     def read_text(self, label: GnLabel) -> str:
         """Reads the file into a text string"""

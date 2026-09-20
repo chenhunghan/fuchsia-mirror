@@ -37,6 +37,7 @@ wlancfg_tests_for_wlan_presubmit = [
 wlancfg_tests_for_postsubmit = [
   "//src/connectivity/wlan/tests/wlancfg:beacon_loss_test",
   "//src/connectivity/wlan/tests/wlancfg:hidden_networks_test",
+  "//src/connectivity/wlan/tests/wlancfg:ping_test",
   "//src/connectivity/wlan/tests/wlancfg:policy_scan_test",
   "//src/connectivity/wlan/tests/wlancfg:regulatory_recovery_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_misc_scenario_test",
@@ -53,15 +54,13 @@ wlancfg_tests_for_fyi = [
   "//src/connectivity/wlan/tests/wlancfg:dhcpv4_duplicate_address_test",
   "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_basic_test",
   "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_combinatorial_options_test",
-  "//src/connectivity/wlan/tests/wlancfg:ping_test",
   "//src/connectivity/wlan/tests/wlancfg:saved_networks_test",
   "//src/connectivity/wlan/tests/wlancfg:vape_interop_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_bss_transition_management_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_target_security_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_ap_test_quick",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_dut_test_quick",
+  "//src/connectivity/wlan/tests/wlancfg:reboot_soft_test",
+  "//src/connectivity/wlan/tests/wlancfg:reboot_hard_test",
   "//src/connectivity/wlan/tests/wlancfg:soft_ap_lifecycle_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_dut_wpa2_test",
 ]
 
 # Tests longer than ~20 minutes consume significant resources and significantly
@@ -71,10 +70,4 @@ wlancfg_tests_for_fyi_long = [
   "//src/connectivity/wlan/tests/wlancfg:channel_switch_test_with_soft_ap",
   "//src/connectivity/wlan/tests/wlancfg:channel_switch_test_without_soft_ap",
   "//src/connectivity/wlan/tests/wlancfg:connection_stress_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_ap_open_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_ap_wpa2_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_ap_wpa3_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_dut_open_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_dut_wpa2_test",
-  "//src/connectivity/wlan/tests/wlancfg:reboot_dut_wpa3_test",
 ]

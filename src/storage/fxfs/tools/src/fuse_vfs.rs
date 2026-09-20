@@ -110,7 +110,11 @@ impl FuseFs {
                 if let ReplacedChild::Object(object_id) = replaced_child {
                     self.fs
                         .graveyard()
-                        .tombstone_object(dir.store().store_object_id(), object_id)
+                        .tombstone_object(
+                            dir.store().store_object_id(),
+                            object_id,
+                            replace_context.truncate_guard.as_ref(),
+                        )
                         .await?;
 
                     // Remove object's handle from cache if it exists.
@@ -188,7 +192,11 @@ impl FuseFs {
             if let ReplacedChild::Object(object_id) = replaced_child {
                 self.fs
                     .graveyard()
-                    .tombstone_object(new_dir.store().store_object_id(), object_id)
+                    .tombstone_object(
+                        new_dir.store().store_object_id(),
+                        object_id,
+                        replace_context.truncate_guard.as_ref(),
+                    )
                     .await?;
 
                 // Remove object's handle from cache if it exists.

@@ -14,9 +14,9 @@
 
 __BEGIN_CDECLS
 
-uint64_t cpp_get_count(vm_page_state state);
-void cpp_add_to_initial_count(vm_page_state state, uint64_t n);
-void cpp_vm_page_dump(vm_page_t* page);
+void rust_vm_page_dump(const vm_page_t* page);
+uint64_t rust_vm_page_get_count(vm_page_state state);
+void rust_vm_page_add_to_initial_count(vm_page_state state, uint64_t n);
 
 __END_CDECLS
 

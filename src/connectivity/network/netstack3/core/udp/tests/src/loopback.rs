@@ -37,6 +37,7 @@ fn loopback_bind_to_device<I: IpExt + TestIpExt>(bind_to_device: bool) {
         Some(ZonedAddr::Unzoned(I::TEST_ADDRS.local_ip)),
         LOCAL_PORT.into(),
         Buf::new(HELLO.to_vec(), ..),
+        Default::default(),
     )
     .unwrap();
 

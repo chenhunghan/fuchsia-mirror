@@ -9,19 +9,7 @@ _test_configs = [
     label = "localhost_tcp"
     protocol = "tcp"
     direction = "loopback"
-    netstack = "netstack2"
-  },
-  {
-    label = "localhost_tcp"
-    protocol = "tcp"
-    direction = "loopback"
     netstack = "netstack3"
-  },
-  {
-    label = "localhost_udp"
-    protocol = "udp"
-    direction = "loopback"
-    netstack = "netstack2"
   },
   {
     label = "localhost_udp"

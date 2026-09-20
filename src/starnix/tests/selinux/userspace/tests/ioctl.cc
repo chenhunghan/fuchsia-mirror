@@ -3,7 +3,10 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -152,6 +155,45 @@ TEST(IoctlTest, FilteredCommandDeniedByPermission) {
   ASSERT_TRUE(RunSubprocessAs(kTestSecurityContext, [&] {
     size_t value = 0;
     EXPECT_THAT(ioctl(test_fd.value().get(), 0xabcd, &value), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+/// Check that a socket ioctl (e.g. SIOCGIFADDR, SIOCGIFFLAGS, SIOCGIFINDEX) is granted when `ioctl`
+/// on the socket is allowed by the policy, and that internal kernel emulation (such as Netlink
+/// queries) does not require netlink permissions from the calling user task.
+TEST(IoctlTest, SocketIoctlAllowedWithoutNetlinkPermission) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  constexpr char kTestSecurityContext[] = "test_u:test_r:test_ioctl_socket_allowed_t:s0";
+  ASSERT_TRUE(RunSubprocessAs(kTestSecurityContext, [&] {
+    fbl::unique_fd sock(socket(AF_INET, SOCK_DGRAM, 0));
+    ASSERT_TRUE(sock.is_valid()) << strerror(errno);
+
+    ifreq ifr = {};
+    ifr.ifr_addr.sa_family = AF_INET;
+    strncpy(ifr.ifr_name, "lo", IFNAMSIZ);
+
+    EXPECT_THAT(ioctl(sock.get(), SIOCGIFADDR, &ifr), SyscallSucceeds());
+    EXPECT_THAT(ioctl(sock.get(), SIOCGIFFLAGS, &ifr), SyscallSucceeds());
+    EXPECT_THAT(ioctl(sock.get(), SIOCGIFINDEX, &ifr), SyscallSucceeds());
+  }));
+}
+
+/// Check that a socket ioctl is denied when `ioctl` permission on the socket is disallowed by
+/// policy.
+TEST(IoctlTest, SocketIoctlDeniedWithoutIoctlPermission) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  constexpr char kTestSecurityContext[] = "test_u:test_r:test_ioctl_socket_denied_t:s0";
+  ASSERT_TRUE(RunSubprocessAs(kTestSecurityContext, [&] {
+    fbl::unique_fd sock(socket(AF_INET, SOCK_DGRAM, 0));
+    ASSERT_TRUE(sock.is_valid()) << strerror(errno);
+
+    ifreq ifr = {};
+    ifr.ifr_addr.sa_family = AF_INET;
+    strncpy(ifr.ifr_name, "lo", IFNAMSIZ);
+
+    EXPECT_THAT(ioctl(sock.get(), SIOCGIFADDR, &ifr), SyscallFailsWithErrno(EACCES));
   }));
 }
 

@@ -15,8 +15,8 @@ use crate::task::{
     SyslogAccess, Task, ThreadGroup, max_priority_for_sched_policy, min_priority_for_sched_policy,
 };
 use crate::vfs::{
-    FdNumber, FileHandle, FileMapping, FileWriteGuardMode, MountNamespaceFile, OpenAccessCheck,
-    PidFdFileObject, UserBuffersOutputBuffer, VecOutputBuffer,
+    FdNumber, FileHandle, MountNamespaceFile, PidFdFileObject, UserBuffersOutputBuffer,
+    VecOutputBuffer,
 };
 use starnix_logging::{log_error, log_info, log_trace, track_stub};
 use starnix_syscalls::SyscallResult;
@@ -242,51 +242,12 @@ pub fn sys_execveat(
         open_flags |= OpenFlags::NOFOLLOW;
     }
 
-    let executable = if path.is_empty() {
-        if flags & AT_EMPTY_PATH == 0 {
-            // If AT_EMPTY_PATH is not set, this is an error.
-            return error!(ENOENT);
-        }
+    if path.is_empty() && flags & AT_EMPTY_PATH == 0 {
+        // If AT_EMPTY_PATH is not set, an empty path is an error.
+        return error!(ENOENT);
+    }
 
-        // O_PATH allowed for:
-        //
-        //   Passing the file descriptor as the dirfd argument of
-        //   openat() and the other "*at()" system calls.  This
-        //   includes linkat(2) with AT_EMPTY_PATH (or via procfs
-        //   using AT_SYMLINK_FOLLOW) even if the file is not a
-        //   directory.
-        //
-        // See https://man7.org/linux/man-pages/man2/open.2.html
-        let file = current_task.files().get_allowing_opath(dir_fd)?;
-
-        // We are forced to reopen the file with O_RDONLY to get access to the underlying VMO.
-        // Note that skip the access check in the arguments in case the file mode does
-        // not actually have the read permission bit.
-        //
-        // This can happen because a file could have --x--x--x mode permissions and then
-        // be opened with O_PATH. Internally, the file operations would all be stubbed out
-        // for that file, which is undesirable here.
-        //
-        // See https://man7.org/linux/man-pages/man3/fexecve.3.html#DESCRIPTION
-
-        // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
-        //
-        //   EACCES The file or a script interpreter is not a regular file.
-        if !file.name.entry.node.is_reg() {
-            return error!(EACCES);
-        }
-
-        // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
-        //
-        //   EACCES Execute permission is denied for the file or a script or ELF
-        //          interpreter.
-        //
-        //   EACCES The filesystem is mounted noexec.
-        let file = file.name.open(current_task, OpenAccessCheck::for_exec())?;
-        FileMapping::new(file, Some(FileWriteGuardMode::ExecMapping))?
-    } else {
-        current_task.open_file_for_exec(dir_fd, path.as_ref(), open_flags)?
-    };
+    let executable = current_task.open_file_for_exec(dir_fd, path.as_ref(), open_flags)?;
 
     // This path can affect script resolution (the path is appended to the script args)
     // and the auxiliary value `AT_EXECFN` from the syscall `getauxval()`

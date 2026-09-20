@@ -260,6 +260,20 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         data.mutable_layer = Self::new_mutable_layer();
     }
 
+    /// Clears all in-memory caches (object cache and persistent layer chunk caches) for this tree.
+    pub fn clear_cache(&self) {
+        if let Some(cache) = &self.cache {
+            cache.clear();
+        }
+        for layer in self.immutable_layer_set().layers {
+            layer.clear_cached_data();
+        }
+    }
+
+    pub fn cache_len(&self) -> usize {
+        self.cache.as_ref().map_or(0, |c| c.len())
+    }
+
     pub fn report_compaction_metrics(
         &self,
         bytes_written: u64,
@@ -723,7 +737,7 @@ mod tests {
     use fuchsia_sync::{Mutex, MutexGuard};
 
     use rand::rng;
-    use rand::seq::SliceRandom;
+    use rand::seq::SliceRandom as _;
 
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -1266,6 +1280,10 @@ mod tests {
         fn invalidate(&self, _key: &K, _value: Option<V>) {
             self.inner.lock().invalidations += 1;
         }
+
+        fn clear(&self) {
+            self.inner.lock().result = None;
+        }
     }
 
     #[fuchsia::test]
@@ -1471,11 +1489,16 @@ mod tests {
     struct MockLayer {
         exists_result: Existence,
         drop_event: Mutex<Option<Arc<DropEvent>>>,
+        cleared: std::sync::atomic::AtomicBool,
     }
 
     impl MockLayer {
         fn new(exists_result: Existence) -> Self {
-            Self { exists_result, drop_event: Mutex::new(Some(Arc::new(DropEvent::new()))) }
+            Self {
+                exists_result,
+                drop_event: Mutex::new(Some(Arc::new(DropEvent::new()))),
+                cleared: std::sync::atomic::AtomicBool::new(false),
+            }
         }
     }
 
@@ -1486,6 +1509,10 @@ mod tests {
             _bound: std::ops::Bound<&K>,
         ) -> Result<BoxedLayerIterator<'_, K, V>, Error> {
             unimplemented!()
+        }
+
+        fn clear_cached_data(&self) {
+            self.cleared.store(true, Ordering::Relaxed);
         }
 
         fn lock(&self) -> Option<Arc<DropEvent>> {
@@ -1511,6 +1538,32 @@ mod tests {
         async fn key_exists(&self, _key: &K) -> Result<Existence, Error> {
             Ok(self.exists_result)
         }
+    }
+
+    #[fuchsia::test]
+    async fn test_clear_cache() {
+        let item = Item::new(TestKey(1..1), 1);
+        let cache = Box::new(AuditCache::new());
+        let inner = cache.inner.clone();
+        let tree = LSMTree::new(emit_left_merge_fn, Some(cache));
+
+        let layer1 = Arc::new(MockLayer::new(Existence::MaybeExists));
+        let layer2 = Arc::new(MockLayer::new(Existence::MaybeExists));
+        tree.set_layers(vec![
+            layer1.clone() as Arc<dyn Layer<TestKey, u64>>,
+            layer2.clone() as Arc<dyn Layer<TestKey, u64>>,
+        ]);
+
+        inner.lock().result = Some(AuditCacheResult::Value(item.value));
+        assert_eq!(tree.find_value(&item.key).await.expect("find_value failed"), Some(item.value));
+        assert!(!layer1.cleared.load(Ordering::Relaxed));
+        assert!(!layer2.cleared.load(Ordering::Relaxed));
+
+        tree.clear_cache();
+
+        assert!(inner.lock().result.is_none());
+        assert!(layer1.cleared.load(Ordering::Relaxed));
+        assert!(layer2.cleared.load(Ordering::Relaxed));
     }
 
     #[fuchsia::test]

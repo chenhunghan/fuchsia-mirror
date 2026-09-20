@@ -15,6 +15,7 @@ use linked_hash_map::LinkedHashMap;
 use ref_cast::RefCast;
 use smallvec::SmallVec;
 use starnix_crypt::CryptService;
+use starnix_logging::log_warn;
 use starnix_sync::{
     DynamicLockDepMutex, FileSystemEntriesLock, FileSystemPermanentLock, FsRename,
     FsRenameRecursive, FuseFsRenameLevel, LockDepMutex,
@@ -500,19 +501,27 @@ impl FileSystem {
         self.ops.update_flags(self, current_task, flags)
     }
 
-    pub fn purge_all_entries(&self) {
+    pub fn sub_filesystems(&self) -> Vec<Arc<FileSystem>> {
+        self.ops.sub_filesystems()
+    }
+
+    pub fn purge_dcache(&self) {
         if let DirEntryCache::Lru(l) = &self.dcache {
-            let purged = {
-                let mut entries = l.entries.lock();
-                let mut purged = Vec::with_capacity(entries.len());
-                while let Some((entry, _)) = entries.pop_front() {
-                    purged.push(entry.0);
-                }
-                purged
-            };
+            let entries = std::mem::take(&mut *l.entries.lock());
             // Entries will get dropped here outside of the lock.
-            std::mem::drop(purged);
+            std::mem::drop(entries);
         }
+    }
+
+    pub fn drop_backend_caches(&self) {
+        if let Err(e) = self.ops.drop_caches(self) {
+            log_warn!("drop_caches failed for filesystem {:?}: {:?}", self.name(), e);
+        }
+    }
+
+    pub fn purge_all_entries(&self) {
+        self.purge_dcache();
+        self.drop_backend_caches();
     }
 }
 
@@ -631,6 +640,15 @@ pub trait FileSystemOps: AsAny + Send + Sync + 'static {
 
     fn sync(&self, _fs: &FileSystem, _current_task: &CurrentTask) -> Result<(), Errno> {
         Ok(())
+    }
+
+    fn drop_caches(&self, _fs: &FileSystem) -> Result<(), Errno> {
+        Ok(())
+    }
+
+    /// Returns any underlying filesystems wrapped by this filesystem (e.g. OverlayFs lower/upper).
+    fn sub_filesystems(&self) -> Vec<Arc<FileSystem>> {
+        Vec::new()
     }
 }
 

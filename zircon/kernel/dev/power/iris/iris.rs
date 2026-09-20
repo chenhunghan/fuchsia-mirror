@@ -515,38 +515,39 @@ pub unsafe extern "C" fn iris_power_init(
 
     dprintf!(INFO, "POWER: Registered iris power domains\n");
 
-    // When boot boosting is enabled, cap the maximum processing rates to boot OPPs during startup
-    // to prevent excessive thermal dissipation before userspace thermal services initialize.
+    // When boot boosting is enabled, lock processing rates to boot OPPs during startup to ensure
+    // responsive boot performance, prevent the system from dropping to lower OPPs during I/O gaps,
+    // and prevent excessive thermal dissipation before userspace thermal services initialize.
     //
     // Note: power_management_set_rate_limits operates in userspace rate units (scale of 1000)
     // where rate = round(capacity * 1000 / max_system_capacity=1024):
-    // - Domain 0 (Little, CPUs 0-1): Boot OPP 8 (1.882 GHz, cap 200) -> max rate 196
-    // - Domain 1 (Medium 1, CPUs 2-4): Boot OPP 11 (1.785 GHz, cap 556) -> max rate 543
-    // - Domain 2 (Medium 2, CPUs 5-6): Boot OPP 11 (1.785 GHz, cap 555) -> max rate 542
-    // - Domain 3 (Big, CPU 7): Boot OPP 10 (2.208 GHz, cap 811) -> max rate 792
+    // - Domain 0 (Little, CPUs 0-1): Boot OPP 8 (1.882 GHz, cap 200) -> rate 196
+    // - Domain 1 (Medium 1, CPUs 2-4): Boot OPP 11 (1.785 GHz, cap 556) -> rate 543
+    // - Domain 2 (Medium 2, CPUs 5-6): Boot OPP 11 (1.785 GHz, cap 555) -> rate 542
+    // - Domain 3 (Big, CPU 7): Boot OPP 10 (2.208 GHz, cap 811) -> rate 792
     if power_management_boot_boost_enabled() {
-        if let Err(status) = power_management_set_rate_limits(0x03, 0, 196) {
+        if let Err(status) = power_management_set_rate_limits(0x03, 196, 196) {
             dprintf!(
                 CRITICAL,
                 "POWER: Failed to set iris domain 0 boot performance limits: {}\n",
                 status.into_raw()
             );
         }
-        if let Err(status) = power_management_set_rate_limits(0x1c, 0, 543) {
+        if let Err(status) = power_management_set_rate_limits(0x1c, 543, 543) {
             dprintf!(
                 CRITICAL,
                 "POWER: Failed to set iris domain 1 boot performance limits: {}\n",
                 status.into_raw()
             );
         }
-        if let Err(status) = power_management_set_rate_limits(0x60, 0, 542) {
+        if let Err(status) = power_management_set_rate_limits(0x60, 542, 542) {
             dprintf!(
                 CRITICAL,
                 "POWER: Failed to set iris domain 2 boot performance limits: {}\n",
                 status.into_raw()
             );
         }
-        if let Err(status) = power_management_set_rate_limits(0x80, 0, 792) {
+        if let Err(status) = power_management_set_rate_limits(0x80, 792, 792) {
             dprintf!(
                 CRITICAL,
                 "POWER: Failed to set iris domain 3 boot performance limits: {}\n",

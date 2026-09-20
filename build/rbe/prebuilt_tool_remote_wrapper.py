@@ -14,8 +14,9 @@ import argparse
 import os
 import subprocess
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any
 
 import cl_utils
 import fuchsia
@@ -250,7 +251,7 @@ class PrebuiltToolAction(object):
         return self._local_only
 
     @property
-    def local_tool(self) -> Optional[Path]:
+    def local_tool(self) -> Path | None:
         for tok in self.local_command:
             if "=" not in tok:
                 return Path(tok)
@@ -266,7 +267,7 @@ class PrebuiltToolAction(object):
         )
 
     @property
-    def remote_tool(self) -> Optional[Path]:
+    def remote_tool(self) -> Path | None:
         # selects the binary for the remote execution platform
         if self.local_tool is None:
             return None

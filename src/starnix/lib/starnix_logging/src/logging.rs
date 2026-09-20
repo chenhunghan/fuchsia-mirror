@@ -55,6 +55,18 @@ impl fmt::Display for TaskDebugInfo {
     }
 }
 
+/// Helper type for logging macros that implements `Display` by reading the current thread's
+/// `TaskDebugInfo` on demand, avoiding the need for an enclosing closure.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct CurrentTaskInfo;
+
+impl fmt::Display for CurrentTaskInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        with_current_task_info(|task| fmt::Display::fmt(task, f))
+    }
+}
+
 #[inline]
 pub const fn trace_debug_logs_enabled() -> bool {
     // Allow trace and debug logs if we are in a debug (non-release) build
@@ -66,20 +78,16 @@ pub const fn trace_debug_logs_enabled() -> bool {
 macro_rules! log_trace {
     ($($key:tt $(:$capture:tt)? $(= $value:expr)?),+; $($arg:tt)+) => {
         if $crate::trace_debug_logs_enabled() {
-            $crate::with_current_task_info(|_task_info| {
-                $crate::__log::trace!(
-                    tag:% = _task_info,
-                    $($key $(:$capture)* $(= $value)*),+;
-                    $($arg)*
-                );
-            })
+            $crate::__log::trace!(
+                tag:% = $crate::CurrentTaskInfo,
+                $($key $(:$capture)* $(= $value)*),+;
+                $($arg)*
+            );
         }
     };
     ($($arg:tt)*) => {
         if $crate::trace_debug_logs_enabled() {
-            $crate::with_current_task_info(|_task_info| {
-                $crate::__log::trace!(tag:% = _task_info; $($arg)*)
-            })
+            $crate::__log::trace!(tag:% = $crate::CurrentTaskInfo; $($arg)*)
         }
     };
 }
@@ -100,20 +108,16 @@ macro_rules! log_syscall {
 macro_rules! log_debug {
     ($($key:tt $(:$capture:tt)? $(= $value:expr)?),+; $($arg:tt)+) => {
         if $crate::trace_debug_logs_enabled() {
-            $crate::with_current_task_info(|_task_info| {
-                $crate::__log::debug!(
-                    tag:% = _task_info,
-                    $($key $(:$capture)* $(= $value)*),+;
-                    $($arg)*
-                );
-            })
+            $crate::__log::debug!(
+                tag:% = $crate::CurrentTaskInfo,
+                $($key $(:$capture)* $(= $value)*),+;
+                $($arg)*
+            );
         }
     };
     ($($arg:tt)*) => {
         if $crate::trace_debug_logs_enabled() {
-            $crate::with_current_task_info(|_task_info| {
-                $crate::__log::debug!(tag:% = _task_info; $($arg)*)
-            })
+            $crate::__log::debug!(tag:% = $crate::CurrentTaskInfo; $($arg)*)
         }
     };
 }
@@ -142,19 +146,15 @@ macro_rules! log_error {
 #[macro_export]
 macro_rules! log {
     ($lvl:expr, $($key:tt $(:$capture:tt)? $(= $value:expr)?),+; $($arg:tt)+) => {
-        $crate::with_current_task_info(|_task_info| {
-            $crate::__log::log!(
-                $lvl,
-                tag:% = _task_info,
-                $($key $(:$capture)* $(= $value)*),+;
-                $($arg)*
-            );
-        })
+        $crate::__log::log!(
+            $lvl,
+            tag:% = $crate::CurrentTaskInfo,
+            $($key $(:$capture)* $(= $value)*),+;
+            $($arg)*
+        )
     };
     ($lvl:expr, $($arg:tt)+) => {
-        $crate::with_current_task_info(|_task_info| {
-            $crate::__log::log!($lvl, tag:% = _task_info; $($arg)*);
-        })
+        $crate::__log::log!($lvl, tag:% = $crate::CurrentTaskInfo; $($arg)*)
     };
 }
 
@@ -166,10 +166,14 @@ pub fn impossible_error(status: zx::Status) -> Errno {
 }
 
 pub fn set_zx_name(obj: &impl zx::AsHandleRef, name: impl AsRef<[u8]>) {
-    obj.as_handle_ref()
-        .set_name(&zx::Name::from_bytes_lossy(name.as_ref()))
-        .map_err(impossible_error)
-        .unwrap();
+    match obj.as_handle_ref().set_name(&zx::Name::from_bytes_lossy(name.as_ref())) {
+        // ZX_ERR_BAD_STATE occurs if the target thread has exited or is in the
+        // DYING/DEAD state. Allow it since the thread is in the process of tearing down.
+        Ok(()) | Err(zx::Status::BAD_STATE) => {}
+        Err(status) => {
+            impossible_error(status);
+        }
+    }
 }
 
 pub fn with_zx_name<O: zx::AsHandleRef>(obj: O, name: impl AsRef<[u8]>) -> O {
@@ -198,7 +202,7 @@ pub fn set_current_task_info(
 /// purposes of writing kernel logic beyond logging for debugging purposes, those should be accessed
 /// through the `CurrentTask` type as an argument explicitly passed to your function.
 #[doc(hidden)]
-pub fn with_current_task_info<T>(f: impl Fn(&dyn fmt::Display) -> T) -> T {
+pub fn with_current_task_info<T>(mut f: impl FnMut(&dyn fmt::Display) -> T) -> T {
     match CURRENT_TASK_INFO.try_with(|task_info| f(&task_info.borrow())) {
         Ok(value) => value,
         Err(_) => f(&TaskDebugInfo::Unknown),
@@ -226,5 +230,50 @@ impl SyscallLogFilter {
     pub fn matches(&self, command: &TaskCommand) -> bool {
         let matcher = self.match_string.as_bytes();
         command.as_bytes().windows(matcher.len()).any(|w| w == matcher)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" {
+        fn zx_thread_self() -> zx::sys::zx_handle_t;
+    }
+
+    #[test]
+    fn test_set_zx_name_on_terminated_thread() {
+        let mut terminated_thread = None;
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                terminated_thread = Some(
+                    #[allow(clippy::undocumented_unsafe_blocks)]
+                    unsafe {
+                        let thread = zx::Unowned::<zx::Thread>::from_raw_handle(zx_thread_self());
+                        thread.duplicate_handle(zx::Rights::SAME_RIGHTS)
+                    }
+                    .unwrap(),
+                );
+            });
+        });
+        let terminated_thread = terminated_thread.expect("failed to obtain thread handle");
+        let _ = terminated_thread
+            .wait_one(zx::Signals::THREAD_TERMINATED, zx::MonotonicInstant::INFINITE);
+
+        // The scoped thread has terminated and is in ZX_THREAD_STATE_DEAD.
+        // In the Zircon microkernel, ThreadDispatcher::set_name returns ZX_ERR_BAD_STATE
+        // because core_thread_ is nullptr.
+        // Before fix: set_zx_name calls impossible_error(BAD_STATE) and panics.
+        // After fix: set_zx_name tolerates ZX_ERR_BAD_STATE and returns Ok(()).
+        set_zx_name(&terminated_thread, b"dead-thread-name");
+    }
+
+    #[test]
+    #[should_panic(expected = "encountered impossible error: BAD_HANDLE")]
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    fn test_set_zx_name_invalid_handle_panics() {
+        let invalid =
+            unsafe { zx::Unowned::<zx::Thread>::from_raw_handle(zx::sys::ZX_HANDLE_INVALID) };
+        set_zx_name(&invalid, b"any-name");
     }
 }

@@ -643,6 +643,7 @@ pub mod console {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn tokenize_command<'a>(
         in_str: &'a [u8],
         continue_slice: &mut Option<&'a [u8]>,

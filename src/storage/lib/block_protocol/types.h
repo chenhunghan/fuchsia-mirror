@@ -57,7 +57,7 @@ struct BlockFifoRequest {
   uint64_t trace_flow_id = 0;
   // The data unit number used as an inline crypto tweak. Only used if the request flags include
   // `INLINE_ENCRYPTION_ENABLED`.
-  uint32_t dun = 0;
+  uint64_t dun = 0;
   // The keyslot for the key used to encrypt/decrypt the request's data if the request flags include
   // `INLINE_ENCRYPTION_ENABLED`.
   uint8_t slot = 0;
@@ -70,8 +70,6 @@ struct BlockFifoRequest {
   // The total number of uncompressed bytes for this request (only applicable for the first request
   // in a group).
   uint32_t uncompressed_bytes = 0;
-
-  uint32_t padding2 = 0;
 };
 
 struct BlockFifoResponse {

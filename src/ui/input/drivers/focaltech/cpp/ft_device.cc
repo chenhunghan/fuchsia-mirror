@@ -349,10 +349,7 @@ zx::result<> FtDevice::Start(fdf::DriverContext context) {
 
 void FtDevice::GetInputReportsReader(GetInputReportsReaderRequestView request,
                                      GetInputReportsReaderCompleter::Sync& completer) {
-  const zx_status_t status = readers_.CreateReader(dispatcher(), std::move(request->reader));
-  if (status != ZX_OK) {
-    fdf::error("Failed to create reader: {}", zx_status_get_string(status));
-  }
+  ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
 }
 
 void FtDevice::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,

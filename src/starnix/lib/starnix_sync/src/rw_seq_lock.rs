@@ -2,11 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{LockDepGuard, LockDepMutex, LockLevel, ThreadAffinity, ThreadAffinityGuard};
+use crate::{
+    LockDepGuard, LockDepMutex, LockLevel, ThreadAffinity, ThreadAffinityGuard, assert_lock_level,
+};
 use fuchsia_rcu::RcuDroppable;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Number of times a reader retries the lock-free path before falling back to taking the lock.
+const MAX_SPIN_COUNT: usize = 10;
 
 /// A sequence lock that combines a standard lock (like a Mutex) with a sequence
 /// counter. This allows lock-free concurrent reads by spinning if a write is in
@@ -42,15 +47,28 @@ impl<L> RwSeqLock<L> {
     pub const fn new(lock: L) -> Self {
         Self { seq: AtomicUsize::new(0), lock, affinity: ThreadAffinity::new() }
     }
+}
 
+impl<T, L: LockLevel> RwSeqLock<LockDepMutex<T, L>> {
     /// Executes the given closure `f` and returns its result, guaranteeing that
     /// no writer was holding the lock while the closure was running.
     ///
-    /// If a write is in progress, this method will spin until the write finishes.
-    /// If a write begins while the closure is executing, the closure will be retried.
+    /// If a write is in progress, this method spins until the write finishes. If a write begins
+    /// while the closure is executing, the closure is retried. After `MAX_SPIN_COUNT` failed
+    /// attempts, the underlying lock is taken so that an active writer cannot starve readers.
+    ///
+    /// Because of that fallback, this method may acquire a lock of level `L`: the caller must be
+    /// allowed to acquire `L`, `f` must not acquire a lock at a level lower than or equal to `L`,
+    /// and `f` must not call `read_seq` on the same lock. All of this is checked on every call,
+    /// not only when the fallback triggers.
     pub fn read_seq<R, F: Fn() -> R>(&self, f: F) -> R {
         self.affinity.assert_not_attached();
-        loop {
+
+        // Check the lock ordering on every call, so that a violation doesn't depend on the timing
+        // of the writers.
+        let lock_level_guard = assert_lock_level::<L>();
+
+        for _ in 0..MAX_SPIN_COUNT {
             let seq1 = self.seq.load(Ordering::Acquire);
             if seq1 % 2 != 0 {
                 // A writer is currently holding the lock.
@@ -72,10 +90,17 @@ impl<L> RwSeqLock<L> {
                 return result;
             }
         }
-    }
-}
 
-impl<T, L: LockLevel> RwSeqLock<LockDepMutex<T, L>> {
+        // Writers are too active: take the underlying lock, which excludes them for the duration
+        // of the closure. Take the inner lock directly, as `lock()` would bump the sequence and
+        // force every other reader down this same path. Release the lock level token first: the
+        // acquisition does the same ordering check, and lockdep would otherwise report a
+        // self-deadlock on level `L`.
+        drop(lock_level_guard);
+        let _guard = self.lock.lock();
+        f()
+    }
+
     /// Acquires the underlying lock for writing.
     ///
     /// This increments the sequence counter (making it odd) to indicate to readers
@@ -151,6 +176,47 @@ mod tests {
 
         let read_val2 = lock.read_seq(|| data.load(Ordering::Relaxed));
         assert_eq!(read_val2, 1);
+    }
+
+    #[test]
+    fn test_rw_seq_lock_read_falls_back_to_locking() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::Duration;
+
+        struct TestData {
+            lock: RwSeqLock<LockDepMutex<(), TestLevel>>,
+            val: AtomicU32,
+            barrier: Barrier,
+        }
+
+        let data = Arc::new(TestData {
+            lock: RwSeqLock::new(Default::default()),
+            val: AtomicU32::new(0),
+            barrier: Barrier::new(2),
+        });
+
+        // Hold the write lock for as long as the reader runs, so that every lock-free attempt
+        // fails and the reader is forced down the fallback path.
+        let guard = data.lock.lock();
+
+        let reader = thread::spawn({
+            let data = data.clone();
+            move || {
+                data.barrier.wait();
+                data.lock.read_seq(|| data.val.load(Ordering::Relaxed))
+            }
+        });
+
+        data.barrier.wait();
+        // Leave the reader enough time to exhaust its attempts and block on the lock. The test
+        // stays correct otherwise, it just stops covering the fallback path.
+        thread::sleep(Duration::from_millis(50));
+
+        data.val.store(42, Ordering::Relaxed);
+        drop(guard);
+
+        assert_eq!(reader.join().unwrap(), 42);
     }
 
     #[test]

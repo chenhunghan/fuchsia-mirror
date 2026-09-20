@@ -418,10 +418,6 @@ struct Args {
     #[argh(option)]
     output_fuchsiaperf: Option<std::path::PathBuf>,
 
-    /// run with Netstack3
-    #[argh(switch)]
-    netstack3: bool,
-
     /// run with trace events enabled
     #[argh(switch)]
     tracing: bool,
@@ -433,7 +429,7 @@ struct Args {
 
 #[fuchsia::main]
 async fn main() {
-    let Args { output_fuchsiaperf, netstack3, tracing, pcap } = argh::from_env();
+    let Args { output_fuchsiaperf, tracing, pcap } = argh::from_env();
     let iter_count = if output_fuchsiaperf.is_some() {
         1000
     } else {
@@ -445,21 +441,9 @@ async fn main() {
     };
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
 
-    let test_suite = if netstack3 {
-        "fuchsia.network.socket.tun.netstack3"
-    } else {
-        "fuchsia.network.socket.tun"
-    };
-    let (client_realm, server_realm, mut fidl_proxies) = if netstack3 {
-        setup(&sandbox, NetstackVersion::ProdNetstack3, pcap).await
-    } else {
-        if tracing {
-            setup(&sandbox, NetstackVersion::Netstack2 { tracing: true, fast_udp: false }, pcap)
-                .await
-        } else {
-            setup(&sandbox, NetstackVersion::ProdNetstack2, pcap).await
-        }
-    };
+    let test_suite = "fuchsia.network.socket.tun.netstack3";
+    let (client_realm, server_realm, mut fidl_proxies) =
+        setup(&sandbox, NetstackVersion::ProdNetstack3, pcap).await;
 
     let tracer = if tracing {
         // TODO(https://fxbug.dev/42096938): Use race-free trace provider

@@ -49,16 +49,50 @@ class VirtioInputTest : public zxtest::Test {
 
   void SetUp() override { loop_.StartThread("virtio-input-test-loop"); }
 
+  class ReaderV2EventHandler
+      : public fidl::WireAsyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+   public:
+    explicit ReaderV2EventHandler(
+        fit::function<
+            void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+            callback)
+        : callback_(std::move(callback)) {}
+
+    void SetCallback(
+        fit::function<
+            void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+            callback) {
+      callback_ = std::move(callback);
+    }
+
+    void OnInputReports(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*
+                            event) override {
+      if (callback_) {
+        callback_(event);
+      }
+    }
+
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+   private:
+    fit::function<void(
+        fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+        callback_;
+  };
+
   template <typename HidDeviceType>
-  fidl::WireClient<fuchsia_input_report::InputReportsReader> GetReader(HidDeviceType& device) {
-    auto reader_endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> GetReader(
+      HidDeviceType& device, std::shared_ptr<ReaderV2EventHandler> event_handler) {
+    fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> reader_endpoints =
+        fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
 
     device.SyncCall([&](HidDeviceBase* device) {
-      device->GetInputReportsReader(async_get_default_dispatcher(),
-                                    std::move(reader_endpoints.server));
+      EXPECT_EQ(ZX_OK, device->GetInputReportsReaderV2(async_get_default_dispatcher(),
+                                                       std::move(reader_endpoints.server), 50));
     });
-    auto reader = fidl::WireClient<fuchsia_input_report::InputReportsReader>(
-        std::move(reader_endpoints.client), input_report_loop_.dispatcher());
+    fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader(
+        std::move(reader_endpoints.client), input_report_loop_.dispatcher(), event_handler.get());
     EXPECT_OK(input_report_loop_.RunUntilIdle());
 
     return reader;
@@ -121,7 +155,10 @@ TEST_F(VirtioInputTest, MultiTouchFingerEvents) {
   async_patterns::TestDispatcherBound<HidTouch> touch{
       loop_.dispatcher(),        std::in_place, x_info, y_info, std::string{"test_product"},
       std::string{"test_serial"}};
-  auto reader = GetReader(touch);
+  std::shared_ptr<ReaderV2EventHandler> event_handler =
+      std::make_shared<ReaderV2EventHandler>(nullptr);
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader =
+      GetReader(touch, event_handler);
 
   // Assert that a single finger works.
   SendTouchEvent(touch, VIRTIO_INPUT_EV_ABS, VIRTIO_INPUT_EV_MT_SLOT, 0);
@@ -131,28 +168,27 @@ TEST_F(VirtioInputTest, MultiTouchFingerEvents) {
   SendTouchEvent(touch, VIRTIO_INPUT_EV_ABS, VIRTIO_INPUT_EV_MT_POSITION_Y,
                  static_cast<uint16_t>(Y_VAL));
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_touch());
-    auto& touch_report = report.touch();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
 
-    ASSERT_TRUE(touch_report.has_contacts());
-    ASSERT_EQ(touch_report.contacts().size(), 1);
-    EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0);
-    EXPECT_EQ(touch_report.contacts()[0].position_x(),
-              X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
-    EXPECT_EQ(touch_report.contacts()[0].position_y(),
-              Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), 1u);
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(touch_report.contacts()[0].position_x(),
+                  X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(),
+                  Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   touch.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -162,29 +198,28 @@ TEST_F(VirtioInputTest, MultiTouchFingerEvents) {
   SendTouchEvent(touch, VIRTIO_INPUT_EV_ABS, VIRTIO_INPUT_EV_MT_SLOT, 1);
   SendTouchEvent(touch, VIRTIO_INPUT_EV_ABS, VIRTIO_INPUT_EV_MT_TRACKING_ID, 2);
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_touch());
-    auto& touch_report = report.touch();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
 
-    ASSERT_TRUE(touch_report.has_contacts());
-    ASSERT_EQ(touch_report.contacts().size(), 2);
-    EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0);
-    EXPECT_EQ(touch_report.contacts()[0].position_x(),
-              X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
-    EXPECT_EQ(touch_report.contacts()[0].position_y(),
-              Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
-    EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1);
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), 2u);
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(touch_report.contacts()[0].position_x(),
+                  X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(),
+                  Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
+        EXPECT_EQ(touch_report.contacts()[1].contact_id(), 1u);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   touch.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -196,28 +231,27 @@ TEST_F(VirtioInputTest, MultiTouchFingerEvents) {
   // being 1.
   SendTouchEvent(touch, VIRTIO_INPUT_EV_ABS, VIRTIO_INPUT_EV_MT_TRACKING_ID, -1);
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_touch());
-    auto& touch_report = report.touch();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
 
-    ASSERT_TRUE(touch_report.has_contacts());
-    ASSERT_EQ(touch_report.contacts().size(), 1);
-    EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0);
-    EXPECT_EQ(touch_report.contacts()[0].position_x(),
-              X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
-    EXPECT_EQ(touch_report.contacts()[0].position_y(),
-              Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), 1u);
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(touch_report.contacts()[0].position_x(),
+                  X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(),
+                  Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   touch.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -233,28 +267,27 @@ TEST_F(VirtioInputTest, MultiTouchFingerEvents) {
   SendTouchEvent(touch, VIRTIO_INPUT_EV_ABS, VIRTIO_INPUT_EV_MT_POSITION_Y,
                  static_cast<uint16_t>(NEW_Y_VAL));
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_touch());
-    auto& touch_report = report.touch();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
 
-    ASSERT_TRUE(touch_report.has_contacts());
-    ASSERT_EQ(touch_report.contacts().size(), 1);
-    EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0);
-    EXPECT_EQ(touch_report.contacts()[0].position_x(),
-              X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
-    EXPECT_EQ(touch_report.contacts()[0].position_y(),
-              Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), 1u);
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), 0u);
+        EXPECT_EQ(touch_report.contacts()[0].position_x(),
+                  X_VAL * HidTouch::kXPhysicalMaxMicrometer / VAL_MAX);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(),
+                  Y_VAL * HidTouch::kYPhysicalMaxMicrometer / VAL_MAX);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   touch.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -297,7 +330,10 @@ TEST_F(VirtioInputTest, MouseReportDescriptor) {
 TEST_F(VirtioInputTest, MouseTest) {
   async_patterns::TestDispatcherBound<HidMouse> hid_mouse{
       loop_.dispatcher(), std::in_place, std::string("test_product"), std::string("test_serial")};
-  auto reader = GetReader(hid_mouse);
+  std::shared_ptr<ReaderV2EventHandler> event_handler =
+      std::make_shared<ReaderV2EventHandler>(nullptr);
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader =
+      GetReader(hid_mouse, event_handler);
 
   // Send the Virtio mouse keys.
   virtio_input_event_t event = {};
@@ -306,24 +342,23 @@ TEST_F(VirtioInputTest, MouseTest) {
   event.code = 0x110;  // BTN_LEFT.
   hid_mouse.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_mouse());
-    auto& mouse_report = report.mouse();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-    ASSERT_TRUE(mouse_report.has_pressed_buttons());
-    ASSERT_EQ(mouse_report.pressed_buttons().size(), 1);
-    EXPECT_EQ(mouse_report.pressed_buttons()[0], 1);
+        ASSERT_TRUE(mouse_report.has_pressed_buttons());
+        ASSERT_EQ(mouse_report.pressed_buttons().size(), 1u);
+        EXPECT_EQ(mouse_report.pressed_buttons()[0], 1);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   hid_mouse.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -337,25 +372,24 @@ TEST_F(VirtioInputTest, MouseTest) {
   event.code = 0x111;  // BTN_RIGHT.
   hid_mouse.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_mouse());
-    auto& mouse_report = report.mouse();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-    ASSERT_TRUE(mouse_report.has_pressed_buttons());
-    ASSERT_EQ(mouse_report.pressed_buttons().size(), 2);
-    EXPECT_EQ(mouse_report.pressed_buttons()[0], 1);
-    EXPECT_EQ(mouse_report.pressed_buttons()[1], 2);
+        ASSERT_TRUE(mouse_report.has_pressed_buttons());
+        ASSERT_EQ(mouse_report.pressed_buttons().size(), 2u);
+        EXPECT_EQ(mouse_report.pressed_buttons()[0], 1);
+        EXPECT_EQ(mouse_report.pressed_buttons()[1], 2);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   hid_mouse.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -369,24 +403,23 @@ TEST_F(VirtioInputTest, MouseTest) {
   event.code = 0x110;  // BTN_LEFT.
   hid_mouse.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_mouse());
-    auto& mouse_report = report.mouse();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-    ASSERT_TRUE(mouse_report.has_pressed_buttons());
-    ASSERT_EQ(mouse_report.pressed_buttons().size(), 1);
-    EXPECT_EQ(mouse_report.pressed_buttons()[0], 2);
+        ASSERT_TRUE(mouse_report.has_pressed_buttons());
+        ASSERT_EQ(mouse_report.pressed_buttons().size(), 1u);
+        EXPECT_EQ(mouse_report.pressed_buttons()[0], 2);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   hid_mouse.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -400,25 +433,24 @@ TEST_F(VirtioInputTest, MouseTest) {
   event.code = 0x112;  // BTN_MID.
   hid_mouse.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_mouse());
-    auto& mouse_report = report.mouse();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-    ASSERT_TRUE(mouse_report.has_pressed_buttons());
-    ASSERT_EQ(mouse_report.pressed_buttons().size(), 2);
-    EXPECT_EQ(mouse_report.pressed_buttons()[0], 2);
-    EXPECT_EQ(mouse_report.pressed_buttons()[1], 3);
+        ASSERT_TRUE(mouse_report.has_pressed_buttons());
+        ASSERT_EQ(mouse_report.pressed_buttons().size(), 2u);
+        EXPECT_EQ(mouse_report.pressed_buttons()[0], 2);
+        EXPECT_EQ(mouse_report.pressed_buttons()[1], 3);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   hid_mouse.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -432,23 +464,22 @@ TEST_F(VirtioInputTest, MouseTest) {
   event.value = 0x0abc;
   hid_mouse.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_mouse());
-    auto& mouse_report = report.mouse();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-    ASSERT_TRUE(mouse_report.has_movement_x());
-    EXPECT_EQ(mouse_report.movement_x(), 0x0abc);
+        ASSERT_TRUE(mouse_report.has_movement_x());
+        EXPECT_EQ(mouse_report.movement_x(), 0x0abc);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   hid_mouse.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -462,23 +493,22 @@ TEST_F(VirtioInputTest, MouseTest) {
   event.value = 0x0123;
   hid_mouse.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_mouse());
-    auto& mouse_report = report.mouse();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-    ASSERT_TRUE(mouse_report.has_movement_y());
-    EXPECT_EQ(mouse_report.movement_y(), 0x0123);
+        ASSERT_TRUE(mouse_report.has_movement_y());
+        EXPECT_EQ(mouse_report.movement_y(), 0x0123);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   hid_mouse.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -492,23 +522,22 @@ TEST_F(VirtioInputTest, MouseTest) {
   event.value = 0x0345;
   hid_mouse.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
 
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
+  event_handler->SetCallback(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
 
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_mouse());
-    auto& mouse_report = report.mouse();
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_mouse());
+        const fuchsia_input_report::wire::MouseInputReport& mouse_report = report.mouse();
 
-    ASSERT_TRUE(mouse_report.has_scroll_v());
-    EXPECT_EQ(mouse_report.scroll_v(), 0x0345);
+        ASSERT_TRUE(mouse_report.has_scroll_v());
+        EXPECT_EQ(mouse_report.scroll_v(), 0x0345);
 
-    input_report_loop_.Quit();
-  });
+        input_report_loop_.Quit();
+      });
 
   hid_mouse.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);
@@ -560,7 +589,28 @@ TEST_F(VirtioInputTest, KeyboardReportDescriptor) {
 TEST_F(VirtioInputTest, KeyboardTest) {
   async_patterns::TestDispatcherBound<HidKeyboard> hid_keyboard{
       loop_.dispatcher(), std::in_place, std::string("test_product"), std::string("test_serial")};
-  auto reader = GetReader(hid_keyboard);
+  std::shared_ptr<ReaderV2EventHandler> event_handler = std::make_shared<ReaderV2EventHandler>(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+
+        ASSERT_EQ(reports.size(), 1u);
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
+
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_keyboard());
+        const fuchsia_input_report::wire::KeyboardInputReport& keyboard_report = report.keyboard();
+
+        ASSERT_TRUE(keyboard_report.has_pressed_keys3());
+        ASSERT_EQ(keyboard_report.pressed_keys3().size(), 4u);
+        EXPECT_EQ(keyboard_report.pressed_keys3()[0], fuchsia_input::wire::Key::kLeftShift);
+        EXPECT_EQ(keyboard_report.pressed_keys3()[1], fuchsia_input::wire::Key::kA);
+        EXPECT_EQ(keyboard_report.pressed_keys3()[2], fuchsia_input::wire::Key::kRightAlt);
+        EXPECT_EQ(keyboard_report.pressed_keys3()[3], fuchsia_input::wire::Key::kDown);
+
+        input_report_loop_.Quit();
+      });
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader =
+      GetReader(hid_keyboard, event_handler);
 
   // Send the Virtio keys.
   virtio_input_event_t event = {};
@@ -577,28 +627,6 @@ TEST_F(VirtioInputTest, KeyboardTest) {
 
   event.code = 108;  // KEY_DOWN
   hid_keyboard.SyncCall([&](HidDeviceBase* device) { device->ReceiveEvent(&event); });
-
-  reader->ReadInputReports().Then([&](auto& result) {
-    ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result->is_ok());
-    auto& reports = result->value()->reports;
-
-    ASSERT_EQ(reports.size(), 1);
-    auto& report = reports[0];
-
-    ASSERT_TRUE(report.has_event_time());
-    ASSERT_TRUE(report.has_keyboard());
-    auto& keyboard_report = report.keyboard();
-
-    ASSERT_TRUE(keyboard_report.has_pressed_keys3());
-    ASSERT_EQ(keyboard_report.pressed_keys3().size(), 4);
-    EXPECT_EQ(keyboard_report.pressed_keys3()[0], fuchsia_input::wire::Key::kLeftShift);
-    EXPECT_EQ(keyboard_report.pressed_keys3()[1], fuchsia_input::wire::Key::kA);
-    EXPECT_EQ(keyboard_report.pressed_keys3()[2], fuchsia_input::wire::Key::kRightAlt);
-    EXPECT_EQ(keyboard_report.pressed_keys3()[3], fuchsia_input::wire::Key::kDown);
-
-    input_report_loop_.Quit();
-  });
 
   hid_keyboard.SyncCall(&HidDeviceBase::SendReportToAllReaders);
   EXPECT_EQ(input_report_loop_.Run(), ZX_ERR_CANCELED);

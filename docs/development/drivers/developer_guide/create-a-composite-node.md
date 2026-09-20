@@ -56,7 +56,7 @@ Fuchsia drivers:
   within a Fuchsia system.
 - [**Composite nodes**][composite-node-concepts]: A node with multiple parent nodes,
   enabling access to multiple resources in a Fuchsia system.
-- [**Driver framework (DFv2)**][driver-concepts]: A new framework that manages drivers
+- [**Driver framework**][driver-concepts]: A framework that manages drivers
   and nodes in Fuchsia.
 
 ### What is a composite node specification? {:#what-is-a-composite-node-specification}
@@ -326,29 +326,9 @@ accept BIND_I2C_BUS_ID { fuchsia.i2c.BIND_I2C_BUS_ID.I2C_2 }
 accept BIND_I2C_ADDRESS { fuchsia.i2c.BIND_I2C_ADDRESS.FOCALTECH_TOUCH }
 ```
 
-#### Defining bind rules in DFv1 {:#defining-bind-rules-in-dfv1}
+#### Defining bind rules {:#defining-bind-rules}
 
-In DFv1, composite node specifications are written using the DDKTL
-(Device Driver Kit Template Library). The functions to write the bind rules are
-in [`composite-node-spec.h`][composite-node-spec-h].
-
-With the DDK library and bind libraries codegen values, we can write the
-following:
-
-```none {:.devsite-disable-click-to-copy}
-const ddk::BindRule kI2cBindRules[] = {
-    ddk::MakeAcceptBindRule(bind_fuchsia::SERVICE,
-                            "fuchsia.hardware.i2c.Service"),
-    ddk::MakeAcceptBindRule(bind_fuchsia::I2C_BUS_ID,
-                            bind_fuchsia_i2c::BIND_I2C_BUS_ID_I2C_2),
-    ddk::MakeAcceptBindRule(bind_fuchsia::I2C_ADDRESS,
-                            bind_fuchsia_focaltech_platform::BIND_I2C_ADDRESS_TOUCH),
-};
-```
-
-#### Defining bind rules in DFv2 {:#defining-bind-rules-in-dfv2}
-
-In DFv2, composite node specifications are defined by the `CompositeNodeSpec`
+Composite node specifications are defined by the `CompositeNodeSpec`
 protocol from [`composite_node_spec.fidl`][composite-node-spec-fidl] in the
 `fuchsia.driver.framework` FIDL library. The
 [`composite_node_spec.h`][composite-node-spec-h-sdk] library in the
@@ -380,26 +360,9 @@ node properties, following the same format. The property key can be
 integer-based or string-based while the property value can be an integer,
 boolean, string or enum type.
 
-#### Defining properties in DFv1 {:#defining-properties-in-dfv1}
+#### Defining properties {:#defining-properties}
 
-In DFv1, composite node specifications are written using [DDKTL][ddktl] and the
-functions to write the bind rules are in
-[`composite-node-spec.h`][composite-node-spec-h]. You can
-define properties using the DDK library and bind libraries codegen values as
-shown below:
-
-```none {:.devsite-disable-click-to-copy}
-const device_bind_prop_t kI2cProperties[] = {
-    ddk::MakeProperty(bind_fuchsia::SERVICE,
-                      "fuchsia.hardware.i2c.Service"),
-    ddk::MakeProperty(bind_fuchsia::I2C_ADDRESS,
-                      bind_fuchsia_focaltech_platform::BIND_I2C_ADDRESS_TOUCH),
-};
-```
-
-#### Defining properties in DFv2 {:#defining-properties-in-dfv2}
-
-In DFv2, composite node specifications are written for
+Composite node specifications are written for
 [`composite_node_spec.fidl`][composite-node-spec-fidl] in the
 `fuchsia.driver.framework` FIDL library. The
 [`node_add_args.h`][node-add-args-h] library in `//sdk/lib/driver/component/cpp`
@@ -423,80 +386,8 @@ loaded in a Fuchsia system, which is typically a board driver. (For more
 information on this process, see
 [How does the driver framework create a composite node in a Fuchsia system?](#how-does-df-create-a-composite-node-in-a-fuchsia-system))
 
-### Adding a composite node specification in DFv1 {:#adding-a-composite-node-specification-in-dfv1}
-
-In DFv1, a driver can add composite node specifications through [DDKTL][ddktl]
-with the `DdkAddCompositeNodeSpec()` function.
-
-The driver must first define a `CompositeNodeSpec` object in the
-[`composite-node-spec.h`][composite-node-spec-h-ddktl] library. Using the example
-bind rules and properties in the previous section, you can define
-a `CompositeNodeSpec` object with an I2C parent specification as following:
-
-```none {:.devsite-disable-click-to-copy}
-const ddk::BindRule kI2cBindRules[] = {
-    ddk::MakeAcceptBindRule(bind_fuchsia::SERVICE,
-                            "fuchsia.hardware.i2c.Service"),
-    ddk::MakeAcceptBindRule(bind_fuchsia::I2C_BUS_ID,
-                            bind_fuchsia_i2c::BIND_I2C_BUS_ID_I2C_2),
-    ddk::MakeAcceptBindRule(bind_fuchsia::I2C_ADDRESS,
-                            bind_fuchsia_focaltech_platform::BIND_I2C_ADDRESS_TOUCH),
-};
-
-const device_bind_prop_t kI2cProperties[] = {
-    ddk::MakeProperty(bind_fuchsia::SERVICE,
-                      "fuchsia.hardware.i2c.Service"),
-    ddk::MakeProperty(bind_fuchsia::I2C_ADDRESS,
-                      bind_fuchsia_focaltech_platform::BIND_I2C_ADDRESS_TOUCH),
-};
-
-auto spec = ddk::CompositeNodeSpec(kI2cBindRules, kI2cProperties);
-```
-
-Any additional nodes can be added with the `AddParentSpec()` function. For
-instance, if we want to add a parent specification for a GPIO interpret pin, we
-can write the following:
-
-```none {:.devsite-disable-click-to-copy}
-const ddk::BindRule kGpioInterruptRules[] = {
-    ddk::MakeAcceptBindRule(bind_fuchsia::PROTOCOL,
-                            bind_fuchsia_gpio::BIND_PROTOCOL_DEVICE),
-    ddk::MakeAcceptBindRule(bind_fuchsia::GPIO_PIN,
-                bind_fuchsia_amlogic_platform_s905d2::GPIOZ_PIN_ID_PIN_4),
-};
-
-const device_bind_prop_t kGpioInterruptProperties[] = {
-    ddk::MakeProperty(bind_fuchsia::PROTOCOL,
-                      bind_fuchsia_gpio::BIND_PROTOCOL_DEVICE),
-    ddk::MakeProperty(bind_fuchsia_gpio::FUNCTION,
-                      bind_fuchsia_gpio::FUNCTION_TOUCH_INTERRUPT)};
-
-desc.AddParentSpec(kGpioInterruptRules, kGpioInterruptProperties);
-```
-
-Once the `CompositeNodeSpec` object is ready, you can add it with
-`DdkAddCompositeNodeSpec()`, where `spec` is an object containing the composite
-node specification, for example:
-
-```cpp {:.devsite-disable-click-to-copy}
-auto status = DdkAddCompositeNodeSpec("ft3x27_touch", spec);
-```
-
-Since a `CompositeNodeSpec` object follows the builder pattern, this can be
-simplified to:
-
-```cpp {:.devsite-disable-click-to-copy}
-auto status =
-     DdkAddCompositeNodeSpec("ft3x27_touch",
-          ddk::CompositeNodeSpec(kFocaltechI2cRules, kFocaltechI2cProperties)
-              .AddParentSpec(kGpioInterruptRules, kGpioInterruptProperties)
-              .set_metadata(metadata);
-```
-
-### Adding a composite node specification in DFv2 {:#adding-a-composite-node-specification-in-dfv2}
-
-In DFv2, we use the `CompositeNodeManager` protocol from the
-`fuchsia.driver.framework` FIDL API to add a composite node specification:
+To add a composite node specification, use the `CompositeNodeManager` protocol
+from the `fuchsia.driver.framework` FIDL API:
 
 ```cpp {:.devsite-disable-click-to-copy}
 @discoverable
@@ -510,7 +401,7 @@ protocol CompositeNodeManager {
 
 If the composite node needs a parent from a node on the platform bus, then the
 board driver can add the composite node specification through the
-[`platform_bus.fidl`][platform-bus-fidl] API. This applies to both DFv1 and DFv2.
+[`platform_bus.fidl`][platform-bus-fidl] API.
 
 ```cpp {:.devsite-disable-click-to-copy}
 /// Adds a composite node specification to the bus. This will add a platform device specified
@@ -548,8 +439,8 @@ std::vector<fuchsia_driver_framework::ParentSpec> spec = {
 ```
 
 (For more details on the library used in the example above, see
-[Defining properties in DFv2](#defining-properties-in-dfv2) and
-[Defining bind rules in DFv2](#defining-bind-rules-in-dfv2).)
+[Defining properties](#defining-properties) and
+[Defining bind rules](#defining-bind-rules).)
 
 Once the composite node specification is defined, the board driver can connect
 to the platform bus through the `PlatformBus` FIDL protocol and use the client
@@ -750,12 +641,9 @@ For more information on the `ffx driver` command, see
 [bind-dir]: https://cs.opensource.google/fuchsia/fuchsia/+/main:/src/devices/bind/
 [fuchsia-i2c]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/bind/fuchsia.i2c/
 [bind-libraries-codegen-tutorial]: /docs/development/drivers/tutorials/bind-libraries-codegen.md
-[composite-node-spec-h]: https://cs.opensource.google/fuchsia/fuchsia/+/main:/src/lib/ddktl/include/ddktl/composite-node-spec.h
 [composite-node-spec-fidl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:/sdk/fidl/fuchsia.driver.framework/composite_node_spec.fidl
 [composite-node-spec-h-sdk]: https://cs.opensource.google/fuchsia/fuchsia/+/main:/sdk/lib/driver/component/cpp/composite_node_spec.h
-[ddktl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddktl/
 [node-add-args-h]: https://cs.opensource.google/fuchsia/fuchsia/+/main:/sdk/lib/driver/component/cpp/node_add_args.h
-[composite-node-spec-h-ddktl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddktl/include/ddktl/composite-node-spec.h?q=MakeAcceptBindRule&ss=fuchsia
 [platform-bus-fidl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:/sdk/fidl/fuchsia.hardware.platform.bus/platform-bus.fidl
 [view-driver-information]: /docs/development/tools/ffx/workflows/view-driver-information.md
 

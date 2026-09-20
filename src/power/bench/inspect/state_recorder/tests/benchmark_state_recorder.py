@@ -52,7 +52,6 @@ class StateRecorderMemoryBenchmarkTest(fuchsia_base_test.FuchsiaBaseTest):
             ]
             + (["--lazy-record"] if lazy_record else []),
             include_target=True,
-            include_target_name=True,
             machine=MachineFormat.RAW,
         )
         _LOGGER.info("Running command: %s", " ".join(cmd))

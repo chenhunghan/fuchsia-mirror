@@ -32,13 +32,6 @@ mod transport;
 #[cfg(any(test, feature = "testutils"))]
 pub mod testutil;
 
-/// Data structures.
-pub mod data_structures {
-    /// Read-copy-update data structures.
-    pub mod rcu {
-        pub use netstack3_base::rcu::{ReadGuard, SynchronizedWriterRcu, WriteGuard};
-    }
-}
 /// The device layer.
 pub mod device {
     #[path = "."]

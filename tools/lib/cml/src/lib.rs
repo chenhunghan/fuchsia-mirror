@@ -841,6 +841,8 @@ pub fn format_cml(buffer: &str, file: Option<&std::path::Path>) -> Result<Vec<u8
         options_by_path: hashmap! {
             "/*" => hashset! {
                 PathOption::PropertyNameOrder(vec![
+                    "name",
+                    "composite_name",
                     "include",
                     "program",
                     "children",
@@ -848,9 +850,12 @@ pub fn format_cml(buffer: &str, file: Option<&std::path::Path>) -> Result<Vec<u8
                     "capabilities",
                     "use",
                     "offer",
+                    "offers",
                     "expose",
                     "environments",
                     "facets",
+                    "config",
+                    "metadata_mappings",
                 ])
             },
             "/*/program" => hashset! {
@@ -965,5 +970,35 @@ mod tests {
             result.is_err(),
             "parse should fail because the underlying Document rejected unknown fields"
         );
+    }
+
+    #[test]
+    fn test_format_cml_top_level_name() {
+        let input = r#"{
+    use: [
+        {
+            protocol: "fuchsia.logger.LogSink",
+        },
+    ],
+    program: {
+        runner: "elf",
+    },
+    composite_name: "my_composite",
+    name: "my_component",
+}"#;
+        let formatted = format_cml(input, None).expect("failed to format");
+        let formatted_str = std::str::from_utf8(&formatted).unwrap();
+        let expected = r#"{
+    name: "my_component",
+    composite_name: "my_composite",
+    program: {
+        runner: "elf",
+    },
+    use: [
+        { protocol: "fuchsia.logger.LogSink" },
+    ],
+}
+"#;
+        assert_eq!(formatted_str, expected);
     }
 }

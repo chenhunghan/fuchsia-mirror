@@ -164,6 +164,40 @@ INSTANTIATE_TEST_SUITE_P(BpfMapCreateTestSuite, BpfMapCreateTest,
                            return std::string(info.param.short_domain);
                          });
 
+struct BpfProgLoadTestParam {
+  const char* test_name;
+  const char* label;
+  bool should_succeed;
+
+  BpfProgLoadTestParam(const char* test_name, const char* label, bool should_succeed)
+      : test_name(test_name), label(label), should_succeed(should_succeed) {}
+};
+
+class BpfProgLoadTest : public ::testing::TestWithParam<BpfProgLoadTestParam> {};
+
+TEST_P(BpfProgLoadTest, Load) {
+  auto [test_name, label, should_succeed] = GetParam();
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessAs(label, [&] {
+    fbl::unique_fd fd = LoadProgram();
+    if (should_succeed) {
+      EXPECT_THAT(fd.get(), SyscallSucceeds());
+    } else {
+      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
+    }
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    BpfProgLoadTestSuite, BpfProgLoadTest,
+    ::testing::Values(BpfProgLoadTestParam("load", "test_u:test_r:bpf_prog_load_t:s0", true),
+                      BpfProgLoadTestParam("no_prog_load", "test_u:test_r:bpf_no_prog_load_t:s0",
+                                           false)),
+    [](const ::testing::TestParamInfo<BpfProgLoadTestParam>& info) {
+      return std::string(info.param.test_name);
+    });
+
 class BpfMapTest : public ::testing::TestWithParam<BpfMapTestParam> {};
 
 TEST_P(BpfMapTest, Map) {

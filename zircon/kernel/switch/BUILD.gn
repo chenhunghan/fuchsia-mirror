@@ -390,6 +390,16 @@ variant("kernel_config") {
   ]
 
   rustflags += [ "--cfg=debug_print_level=\"$kernel_debug_print_level\"" ]
+  foreach(level,
+          [
+            1,
+            2,
+            3,
+          ]) {
+    if (vm_tracing_level >= level) {
+      rustflags += [ "--cfg=vm_tracing_level_at_least_$level" ]
+    }
+  }
   if (console_enable_history) {
     rustflags += [ "--cfg=feature=\"console_enable_history\"" ]
   }

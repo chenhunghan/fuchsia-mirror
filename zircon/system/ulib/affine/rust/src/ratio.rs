@@ -174,13 +174,14 @@ impl Ratio {
         assert!(denominator != 0);
 
         if value >= 0 {
-            // LIMIT == 0x7FFFFFFFFFFFFFFF
-            let limit = i64::MAX as u64;
-            let round_up = match ROUND {
-                Round::UP | Round::AWAY_FROM_ZERO => true,
-                _ => false,
+            const LIMIT: u64 = i64::MAX as u64; // 0x7FFFFFFFFFFFFFFF
+            let value = value as u64;
+            let scaled = match ROUND {
+                Round::UP | Round::AWAY_FROM_ZERO => {
+                    scale_unsigned::<true, LIMIT>(value, numerator, denominator)
+                }
+                _ => scale_unsigned::<false, LIMIT>(value, numerator, denominator),
             };
-            let scaled = scale_unsigned(value as u64, numerator, denominator, round_up, limit);
             scaled as i64
         } else {
             // LIMIT == 0x8000000000000000
@@ -197,14 +198,15 @@ impl Ratio {
             // distance of MIN from zero means that saturated results will likewise
             // get properly flipped back to MIN during the return.
             //
-            let limit = 0x8000000000000000u64; // i64::MIN.unsigned_abs()
-            let round_up = match ROUND {
-                Round::DOWN | Round::AWAY_FROM_ZERO => true,
-                _ => false,
+            const LIMIT: u64 = 0x8000000000000000; // i64::MIN.unsigned_abs()
+            let value = value.unsigned_abs();
+            let scaled = match ROUND {
+                Round::DOWN | Round::AWAY_FROM_ZERO => {
+                    scale_unsigned::<true, LIMIT>(value, numerator, denominator)
+                }
+                _ => scale_unsigned::<false, LIMIT>(value, numerator, denominator),
             };
-            let scaled =
-                scale_unsigned(value.unsigned_abs(), numerator, denominator, round_up, limit);
-            if scaled == 0x8000000000000000 { i64::MIN } else { -(scaled as i64) }
+            if scaled == LIMIT { i64::MIN } else { -(scaled as i64) }
         }
     }
 
@@ -257,24 +259,56 @@ fn binary_gcd(mut a: u64, mut b: u64) -> u64 {
     a << twos
 }
 
-// Scales a uint64_t value by the ratio of two uint32_t values. If round_up is
-// true, the result is rounded up rather than down. Saturates at `limit` on overflow.
-fn scale_unsigned(value: u64, numerator: u32, denominator: u32, round_up: bool, limit: u64) -> u64 {
-    let prod = (value as u128) * (numerator as u128);
-    let q = prod / (denominator as u128);
-    let r = prod % (denominator as u128);
+// Scales a u64 value by the ratio of two u32 values. If ROUND_UP is true, the
+// result is rounded up rather than down. Saturates at LIMIT on overflow.
+fn scale_unsigned<const ROUND_UP: bool, const LIMIT: u64>(
+    value: u64,
+    numerator: u32,
+    denominator: u32,
+) -> u64 {
+    let numerator = numerator as u64;
+    let denominator = denominator as u64;
+    const LOW_32_BITS: u64 = u32::MAX as u64;
 
-    if q >= (limit as u128) {
-        return limit;
+    // high and low are the product of the numerator and the high and low halves
+    // (respectively) of value, with the high end of low moved into the low end
+    // of high.
+    let low_product = numerator * (value & LOW_32_BITS);
+    let high = numerator * (value >> 32) + (low_product >> 32);
+    let mut low = low_product & LOW_32_BITS;
+
+    // Ignoring overflow and remainder, the result we want is:
+    // ((high << 32) + low) / denominator.
+
+    // Compute the divmod of high/D
+    let high_q = high / denominator;
+    let high_r = high % denominator;
+
+    // If high_q is larger than the overflow limit, then we can just get out now.
+    // The overflow limit will be different depending on whether we are scaling
+    // a non-negative number (0x7FFFFFFF) or a negative number (0x80000000)
+    if high_q > LIMIT >> 32 {
+        return LIMIT;
     }
 
-    let mut result = q as u64;
-    if round_up && r != 0 {
-        result += 1;
-        if result >= limit {
-            return limit;
-        }
+    // The remainder of high/D are the high bits of low. Or them in, and do the
+    // divmod for the low portion
+    low |= high_r << 32;
+
+    let low_q = low / denominator;
+    let low_r = low % denominator;
+    let result = (high_q << 32) | low_q;
+    if result >= LIMIT {
+        return LIMIT;
     }
+
+    // `result` is strictly less than LIMIT, so `result + 1` neither overflows
+    // nor exceeds LIMIT; if it is exactly LIMIT, that is the saturated value we
+    // would have returned anyway.
+    if ROUND_UP && low_r != 0 {
+        return result + 1;
+    }
+
     result
 }
 
@@ -786,5 +820,183 @@ mod tests {
 
         let r = Ratio::new(0, 1);
         assert!(!r.invertible());
+    }
+
+    // The two limits used by `Ratio::scale_with_round`; the limit for
+    // non-negative values, and the limit for the distance from zero of
+    // negative values.
+    const POSITIVE_LIMIT: u64 = i64::MAX as u64; // 0x7fffffffffffffff
+    const NEGATIVE_LIMIT: u64 = 0x8000000000000000; // i64::MIN.unsigned_abs()
+
+    // Invokes `scale_unsigned` and checks its result.  The rounding direction
+    // and the limit are const generic parameters, so they are spelled as
+    // literals here rather than being gathered into a table of test vectors.
+    macro_rules! check_scale_unsigned {
+        ($value:expr, $numerator:expr, $denominator:expr, $round_up:expr, $limit:expr,
+         $expected:expr $(,)?) => {{
+            let value: u64 = $value;
+            let numerator: u32 = $numerator;
+            let denominator: u32 = $denominator;
+            let expected: u64 = $expected;
+            let res = scale_unsigned::<{ $round_up }, { $limit }>(value, numerator, denominator);
+            assert_eq!(
+                res, expected,
+                "Expected scale_unsigned::<{}, {:#x}>({:#x}, {}, {}) to produce {:#x}; got {:#x}",
+                $round_up, $limit, value, numerator, denominator, expected, res
+            );
+        }};
+    }
+
+    // Exercises the `high_q > (LIMIT >> 32)` early-out, which both saturates
+    // and keeps the subsequent `high_q << 32` from overflowing.
+    #[test]
+    fn test_scale_unsigned_early_out() {
+        // high_q == 0x80000000, which is one more than POSITIVE_LIMIT >> 32;
+        // take the early out.
+        check_scale_unsigned!(0x8000000000000000, 1, 1, false, POSITIVE_LIMIT, POSITIVE_LIMIT);
+
+        // The same value against the negative limit; high_q is now exactly
+        // NEGATIVE_LIMIT >> 32, so there is no early out and the value is
+        // scaled exactly.
+        check_scale_unsigned!(0x8000000000000000, 1, 1, false, NEGATIVE_LIMIT, 0x8000000000000000);
+
+        // high_q == POSITIVE_LIMIT >> 32 exactly; no early out, and the result
+        // is well under the limit.
+        check_scale_unsigned!(0x7fffffff00000000, 1, 1, false, POSITIVE_LIMIT, 0x7fffffff00000000);
+
+        // The largest possible intermediates: high and low are each just shy of
+        // 2^64.  The first takes the early out; the second has
+        // high_q == (u64::MAX >> 32) and so does not.
+        check_scale_unsigned!(u64::MAX, u32::MAX, 1, true, POSITIVE_LIMIT, POSITIVE_LIMIT);
+        check_scale_unsigned!(u64::MAX, u32::MAX, u32::MAX, false, u64::MAX, u64::MAX);
+    }
+
+    // Exercises the `result >= LIMIT` saturation, which is only reachable when
+    // high_q is exactly `LIMIT >> 32` and the low half pushes the result past
+    // the limit.
+    #[test]
+    fn test_scale_unsigned_result_saturation() {
+        // result == NEGATIVE_LIMIT + 1, reached without the early out.
+        check_scale_unsigned!(0x8000000000000001, 1, 1, false, NEGATIVE_LIMIT, NEGATIVE_LIMIT);
+
+        // result == NEGATIVE_LIMIT exactly, which also saturates (to the same
+        // value it would have produced).
+        check_scale_unsigned!(0x4000000000000000, 2, 1, false, NEGATIVE_LIMIT, NEGATIVE_LIMIT);
+
+        // result == POSITIVE_LIMIT exactly.
+        check_scale_unsigned!(POSITIVE_LIMIT, 1, 1, true, POSITIVE_LIMIT, POSITIVE_LIMIT);
+
+        // Saturation of a small limit, where high_q is 0 and low_q alone
+        // exceeds the limit.
+        check_scale_unsigned!(1000, 3, 1, false, 100, 100);
+    }
+
+    // Exercises the rounding-up path, in particular the case where rounding up
+    // would produce exactly the limit.
+    #[test]
+    fn test_scale_unsigned_round_up_at_limit() {
+        // result == NEGATIVE_LIMIT - 1 with a non-zero remainder; rounding up
+        // produces exactly the limit.
+        check_scale_unsigned!(u64::MAX, 1, 2, true, NEGATIVE_LIMIT, NEGATIVE_LIMIT);
+
+        // The same inputs without rounding up produce the truncated value.
+        check_scale_unsigned!(u64::MAX, 1, 2, false, NEGATIVE_LIMIT, NEGATIVE_LIMIT - 1);
+
+        // result == POSITIVE_LIMIT - 1 with a non-zero remainder; rounding up
+        // produces exactly the limit.
+        check_scale_unsigned!(0xfffffffffffffffd, 1, 2, true, POSITIVE_LIMIT, POSITIVE_LIMIT);
+
+        // result == POSITIVE_LIMIT - 2 with a non-zero remainder; rounding up
+        // stays below the limit.
+        check_scale_unsigned!(0xfffffffffffffffb, 1, 2, true, POSITIVE_LIMIT, POSITIVE_LIMIT - 1);
+
+        // An exact result is never rounded up.
+        check_scale_unsigned!(0xfffffffffffffffc, 1, 2, true, POSITIVE_LIMIT, POSITIVE_LIMIT - 1);
+
+        // Rounding up a small result.
+        check_scale_unsigned!(198, 48000, 44100, true, POSITIVE_LIMIT, 216);
+        check_scale_unsigned!(198, 48000, 44100, false, POSITIVE_LIMIT, 215);
+    }
+
+    // A straightforward 128-bit reference implementation of the scaling
+    // operation, used to validate the 64-bit implementation.
+    fn scale_unsigned_reference(
+        value: u64,
+        numerator: u32,
+        denominator: u32,
+        round_up: bool,
+        limit: u64,
+    ) -> u64 {
+        let prod = (value as u128) * (numerator as u128);
+        let q = prod / (denominator as u128);
+        let r = prod % (denominator as u128);
+
+        if q >= (limit as u128) {
+            return limit;
+        }
+
+        let mut result = q as u64;
+        if round_up && r != 0 {
+            result += 1;
+            if result >= limit {
+                return limit;
+            }
+        }
+
+        result
+    }
+
+    // Compares `scale_unsigned` against the reference implementation across a
+    // range of values, numerators, and denominators, for one particular
+    // rounding direction and limit.
+    fn check_against_reference<const ROUND_UP: bool, const LIMIT: u64>() {
+        let values = [
+            0,
+            1,
+            2,
+            0xffff_ffff,
+            0x1_0000_0000,
+            0x1_0000_0001,
+            0x7fff_ffff_ffff_fffe,
+            POSITIVE_LIMIT,
+            NEGATIVE_LIMIT,
+            0x8000_0000_0000_0001,
+            0xffff_ffff_ffff_fffd,
+            u64::MAX,
+            0x1517ffffeae80,
+            1234567890,
+        ];
+        let numerators = [0, 1, 2, 3, 48000, 44100, 1000001, 0x7fff_ffff, u32::MAX];
+        let denominators = [1, 2, 3, 7, 44100, 1000000, 0x7fff_ffff, u32::MAX];
+
+        for &value in &values {
+            for &numerator in &numerators {
+                for &denominator in &denominators {
+                    let res = scale_unsigned::<ROUND_UP, LIMIT>(value, numerator, denominator);
+                    let expected =
+                        scale_unsigned_reference(value, numerator, denominator, ROUND_UP, LIMIT);
+                    assert_eq!(
+                        res, expected,
+                        "Expected scale_unsigned::<{}, {:#x}>({:#x}, {}, {}) to produce \
+                         {:#x}; got {:#x}",
+                        ROUND_UP, LIMIT, value, numerator, denominator, expected, res
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_scale_unsigned_matches_reference() {
+        macro_rules! check_against_reference_for_limits {
+            ($($limit:expr),* $(,)?) => {
+                $(
+                    check_against_reference::<false, { $limit }>();
+                    check_against_reference::<true, { $limit }>();
+                )*
+            };
+        }
+
+        check_against_reference_for_limits!(0, 1, 2, 100, POSITIVE_LIMIT, NEGATIVE_LIMIT, u64::MAX,);
     }
 }

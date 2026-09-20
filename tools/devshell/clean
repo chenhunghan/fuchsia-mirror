@@ -18,6 +18,20 @@ fx-config-read
 
 set -e
 
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help)
+      fx-command-help
+      exit 0
+      ;;
+    *)
+      fx-error "Unknown argument: $1"
+      fx-command-help
+      exit 1
+      ;;
+  esac
+fi
+
 (set -x; fx-gn clean "$FUCHSIA_BUILD_DIR")
 
 # Ensure //build/regenerator is invoked to regenerate a working Bazel workspace.

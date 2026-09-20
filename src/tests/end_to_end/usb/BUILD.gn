@@ -12,10 +12,9 @@ group("tests") {
   ]
 }
 
-# For backward compatibility if anyone references these directly
-group("usb_test") {
+group("usb_enumeration_test") {
   testonly = true
-  public_deps = [ "functional:usb_test($host_toolchain)" ]
+  public_deps = [ "functional:usb_enumeration_test($host_toolchain)" ]
 }
 
 group("usb_virtual_disconnect_test") {

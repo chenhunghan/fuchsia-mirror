@@ -164,6 +164,7 @@ template("antlion_host_test") {
   host_test(target_name) {
     forward_variables_from(invoker,
                            [
+                             "build_only",
                              "environments",
                              "isolated",
                              "package_deps",

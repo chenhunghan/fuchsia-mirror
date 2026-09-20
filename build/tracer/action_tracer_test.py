@@ -9,7 +9,8 @@ import subprocess
 import textwrap
 import time
 import unittest
-from typing import AbstractSet, Iterable
+from collections.abc import Iterable
+from typing import AbstractSet
 from unittest import mock
 
 import action_tracer

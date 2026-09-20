@@ -3,7 +3,6 @@
 # found in the LICENSE file.
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from serialization import serialize_fields_as
 
@@ -25,7 +24,7 @@ class PackageMetaData:
     name: str
     version: int = 0
 
-    def __init__(self, name: str, version: Optional[int] = None) -> None:
+    def __init__(self, name: str, version: int | None = None) -> None:
         self.name = name
         if version is not None:
             self.version = version
@@ -46,8 +45,8 @@ class BlobEntry:
 
     path: FilePath
     merkle: str
-    size: Optional[int] = None
-    source_path: Optional[FilePath] = None
+    size: int | None = None
+    source_path: FilePath | None = None
 
     def compare_with(
         self, other: "BlobEntry", allow_source_path_differences: bool = False
@@ -97,10 +96,10 @@ class PackageManifest:
     version: str = "1"
     # TODO(https://fxbug.dev/42066050): Change this to `paths_relative`, because it
     # applies to both blob source and subpackage manifest.
-    blob_sources_relative: Optional[str] = None
+    blob_sources_relative: str | None = None
     subpackages: list[SubpackageEntry] = field(default_factory=list)
-    repository: Optional[str] = None
-    abi_revision: Optional[str] = None
+    repository: str | None = None
+    abi_revision: str | None = None
 
     def set_paths_relative(self, relative_to_file: bool) -> None:
         self.blob_sources_relative = (

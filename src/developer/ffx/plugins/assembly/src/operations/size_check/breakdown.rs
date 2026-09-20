@@ -4,6 +4,7 @@
 
 use crate::operations::size_check::common::wrap_text;
 use crate::operations::size_check::diff::{BlobDiff, PackageDiff, PackageReferenceDiff, SizeDiff};
+use anyhow::{Context, Result};
 use assembled_system::BlobfsContents;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
@@ -48,8 +49,11 @@ pub struct SizeResult {
 }
 
 impl SizeBreakdown {
-    pub fn print(&self) {
-        println!("{}", self.get_print_lines().join("\n"));
+    pub fn print<W: std::io::Write>(&self, writer: &mut W) -> Result<()> {
+        for line in self.get_print_lines() {
+            writeln!(writer, "{}", line).context("Failed to write size breakdown output")?;
+        }
+        Ok(())
     }
 
     pub fn calculate_size(&self) -> SizeResult {
@@ -491,6 +495,11 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         assert_eq!(expected_lines, lines);
+
+        let mut output = Vec::new();
+        breakdown.print(&mut output).unwrap();
+        let expected_output = expected_lines.join("\n") + "\n";
+        assert_eq!(String::from_utf8(output).unwrap(), expected_output);
     }
 
     #[test]

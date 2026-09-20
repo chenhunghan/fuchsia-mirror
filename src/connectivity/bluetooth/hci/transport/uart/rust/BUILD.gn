@@ -39,16 +39,31 @@ fuchsia_rust_driver("bt-transport-uart-rust-driver") {
 
   configs += [ "//build/config/rust/lints:clippy_warn_all" ]
 
-  sources = [ "src/lib.rs" ]
+  sources = [
+    "src/lib.rs",
+    "src/serial.rs",
+    "src/tests/fake_serial.rs",
+    "src/tests/mod.rs",
+  ]
 
   deps = [
     ":bt-transport-uart-rust-config",
+    "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust_next",
+    "//sdk/fidl/fuchsia.hardware.serialimpl:fuchsia.hardware.serialimpl_rust_next",
     "//sdk/lib/driver/component/rust",
+    "//sdk/lib/driver/runtime/rust/fidl",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust_next/fidl_next",
     "//src/lib/fuchsia-async",
     "//third_party/rust_crates:log",
   ]
 
-  test_deps = [ "//src/lib/fuchsia" ]
+  test_deps = [
+    "//sdk/lib/driver/runtime/rust",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-sync",
+  ]
 }
 
 fuchsia_driver_component("bt-transport-uart-rust") {
@@ -67,6 +82,11 @@ fuchsia_driver_package("uart-rust") {
 
 fuchsia_unittest_package("bt-transport-uart-rust-tests") {
   deps = [ ":bt-transport-uart-rust-driver_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }
 
 group("tests") {

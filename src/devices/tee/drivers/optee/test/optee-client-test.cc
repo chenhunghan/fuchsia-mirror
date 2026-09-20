@@ -20,8 +20,11 @@
 #include <stdlib.h>
 #include <zircon/types.h>
 
+#include <chrono>
 #include <memory>
 #include <set>
+#include <thread>
+#include <vector>
 
 #include <ddktl/suspend-txn.h>
 #include <tee-client-api/tee-client-types.h>
@@ -41,6 +44,9 @@ namespace frpmb = fuchsia_hardware_rpmb;
 
 constexpr fuchsia_tee::wire::Uuid kOpteeOsUuid = {
     0x486178E0, 0xE7F8, 0x11E3, {0xBC, 0x5E, 0x00, 0x02, 0xA5, 0xD5, 0xC5, 0x1B}};
+
+constexpr fuchsia_tee::wire::Uuid kProvisioningTaUuid = {
+    0xd83c3c4a, 0x9e8d, 0x4e4e, {0xad, 0x30, 0x9d, 0x40, 0xe1, 0x37, 0xf6, 0x89}};
 
 class OpteeClientTestBase : public OpteeControllerBase, public zxtest::Test {
  public:
@@ -195,6 +201,52 @@ TEST_F(OpteeClientTest, OpenSessionsClosedOnClientUnbind) {
   optee_client = nullptr;
 
   EXPECT_TRUE(open_sessions().empty());
+}
+
+TEST_F(OpteeClientTest, ProvisioningTaCommandFiltering) {
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_tee::Application>::Create();
+  auto optee_client = std::make_unique<OpteeClient>(
+      this, fidl::ClientEnd<fuchsia_tee_manager::Provider>(), optee::Uuid{kProvisioningTaUuid});
+
+  fidl::BindServer(loop_.dispatcher(), std::move(server_end), optee_client.get());
+
+  fidl::WireSyncClient<fuchsia_tee::Application> fidl_client(std::move(client_end));
+  fidl::VectorView<fuchsia_tee::wire::Parameter> parameter_set;
+  auto open_res = fidl_client->OpenSession2(std::move(parameter_set));
+  EXPECT_OK(open_res.status());
+  uint32_t session_id = open_res.value().session_id;
+
+  // Command 0 (WRITE_EFUSE) should be blocked
+  {
+    fidl::VectorView<fuchsia_tee::wire::Parameter> parameter_set;
+    auto res = fidl_client->InvokeCommand(session_id, 0, std::move(parameter_set));
+    EXPECT_OK(res.status());
+    EXPECT_EQ(res.value().op_result.return_code(), TEEC_ERROR_ACCESS_DENIED);
+  }
+
+  // Command 3 (DEC_HASH) should be blocked
+  {
+    fidl::VectorView<fuchsia_tee::wire::Parameter> parameter_set;
+    auto res = fidl_client->InvokeCommand(session_id, 3, std::move(parameter_set));
+    EXPECT_OK(res.status());
+    EXPECT_EQ(res.value().op_result.return_code(), TEEC_ERROR_ACCESS_DENIED);
+  }
+
+  // Command 1 (KEY_STORE) should be allowed (and return NOT_IMPLEMENTED from mock)
+  {
+    fidl::VectorView<fuchsia_tee::wire::Parameter> parameter_set;
+    auto res = fidl_client->InvokeCommand(session_id, 1, std::move(parameter_set));
+    EXPECT_OK(res.status());
+    EXPECT_EQ(res.value().op_result.return_code(), TEEC_ERROR_NOT_IMPLEMENTED);
+  }
+
+  // Command 2 (KEY_QUERY) should be allowed (and return NOT_IMPLEMENTED from mock)
+  {
+    fidl::VectorView<fuchsia_tee::wire::Parameter> parameter_set;
+    auto res = fidl_client->InvokeCommand(session_id, 2, std::move(parameter_set));
+    EXPECT_OK(res.status());
+    EXPECT_EQ(res.value().op_result.return_code(), TEEC_ERROR_NOT_IMPLEMENTED);
+  }
 }
 
 class FakeRpmb : public fidl::WireServer<frpmb::Rpmb> {
@@ -1026,6 +1078,50 @@ TEST_F(OpteeClientTestWaitQueue, SleepWakeup) {
   status = sync_completion_wait(&completion, ZX_TIME_INFINITE);
   EXPECT_OK(status);
   EXPECT_EQ(invoke_done_cnt_, 3);
+  EXPECT_EQ(this->WaitQueueSize(), 0);
+}
+
+TEST_F(OpteeClientTestWaitQueue, DirectConcurrentWaiters) {
+  constexpr uint64_t kKey = 42;
+  constexpr int kNumWaiters = 5;
+  std::vector<std::thread> threads;
+  std::atomic<int> ready_waiters{0};
+  std::atomic<int> completed_waiters{0};
+
+  for (int i = 0; i < kNumWaiters; ++i) {
+    threads.push_back(std::thread([this, &ready_waiters, &completed_waiters]() {
+      ready_waiters++;
+      this->WaitQueueWait(kKey);
+      completed_waiters++;
+    }));
+  }
+
+  // Wait for all threads to start.
+  while (ready_waiters < kNumWaiters) {
+    std::this_thread::yield();
+  }
+  // Give them a little more time to enter Wait()
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // The wait queue should now have 1 key.
+  EXPECT_EQ(this->WaitQueueSize(), 1);
+
+  // Signal them one by one.
+  for (int i = 0; i < kNumWaiters; ++i) {
+    EXPECT_EQ(completed_waiters, i);
+    this->WaitQueueSignal(kKey);
+    // Wait for the signaled thread to finish.
+    while (completed_waiters < i + 1) {
+      std::this_thread::yield();
+    }
+  }
+
+  // All threads should have completed.
+  for (auto &t : threads) {
+    t.join();
+  }
+
+  EXPECT_EQ(completed_waiters, kNumWaiters);
   EXPECT_EQ(this->WaitQueueSize(), 0);
 }
 

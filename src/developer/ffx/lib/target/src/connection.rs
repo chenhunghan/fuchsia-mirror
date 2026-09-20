@@ -438,7 +438,6 @@ pub mod testing {
                 input: Box::new(circuit_writer),
                 errors: self.error_receiver.clone(),
                 main_task: Some(rcs_task),
-                ssh_host_address: None,
             }))
         }
     }

@@ -14,6 +14,7 @@
 
 #include "diagnostics.h"
 #include "dynamic.h"
+#include "layout.h"
 #include "link.h"
 #include "memory.h"
 #include "relocation.h"
@@ -52,7 +53,7 @@ inline SymbolInfo<typename Self::Elf> LinkStaticPieWithVdso(
     DynamicObservers&&... dynamic_observers) {
   using namespace std::literals;
   using Elf = Self::Elf;
-  using size_type = typename Elf::size_type;
+  using size_type = Elf::size_type;
   using Sym = Elf::Sym;
   using TlsDescGot = Elf::template TlsDescGot<>;
 
@@ -120,12 +121,12 @@ inline SymbolInfo<typename Self::Elf> LinkStaticPieWithVdso(
 }
 
 // This distills the vDSO symbols and load bias from the image in memory.
-template <class Elf, class DiagnosticsType>
+template <ElfApi Elf, class DiagnosticsType>
 inline std::pair<SymbolInfo<Elf>, uintptr_t> GetVdsoSymbols(DiagnosticsType& diagnostics,
                                                             const void* vdso_base) {
-  using Ehdr = typename Elf::Ehdr;
-  using Phdr = typename Elf::Phdr;
-  using Dyn = typename Elf::Dyn;
+  using Ehdr = Elf::Ehdr;
+  using Phdr = Elf::Phdr;
+  using Dyn = Elf::Dyn;
 
   SymbolInfo<Elf> vdso_symbols;
 
@@ -176,7 +177,7 @@ inline std::pair<SymbolInfo<Elf>, uintptr_t> GetVdsoSymbols(DiagnosticsType& dia
 template <class Self, class DiagnosticsType>
 inline SymbolInfo<typename Self::Elf> LinkStaticPieWithVdso(  //
     const Self& self, DiagnosticsType& diagnostics, const void* vdso_base) {
-  using Elf = typename Self::Elf;
+  using Elf = Self::Elf;
 
   // Fetch the vDSO symbol table.
   auto [vdso_symbols, vdso_bias] = GetVdsoSymbols<Elf>(diagnostics, vdso_base);

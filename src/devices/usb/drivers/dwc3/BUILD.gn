@@ -8,8 +8,13 @@ import("//build/test.gni")
 
 # Note: Don't move this to bazel until bazel supports code coverage.
 
+fuchsia_driver_dml("dwc3-dml") {
+  dml = "meta/dwc3.dml"
+  driver_name = "dwc3"
+}
+
 driver_bind_rules("dwc3_bind") {
-  rules = "meta/dwc3.bind"
+  dml_label = ":dwc3-dml"
   bind_output = "dwc3.bindbc"
   tests = "meta/tests.json"
   deps = [

@@ -13,6 +13,7 @@
 #include <zircon/syscalls/profile.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -38,10 +39,10 @@ namespace {
 
 constexpr char kConfigFileExtension[] = ".profiles";
 
-std::string ToString(const std::vector<Parameter> params) {
+std::string ToString(const std::vector<Parameter>& params) {
   std::ostringstream stream;
   stream << "{ ";
-  for (auto param : params) {
+  for (const auto& param : params) {
     stream << param.key() << ": ";
     switch (param.value().Which()) {
       case ParameterValue::Tag::kIntValue:
@@ -673,39 +674,39 @@ fit::result<std::string, ConfiguredProfiles> LoadConfigs(const std::string& conf
 }
 
 fit::result<zx_status_t, Role> Role::Create(std::string_view name,
-                                            std::vector<Parameter> selectors) {
+                                            std::span<const Parameter> selectors) {
   // Validate the name. It should have no selectors embedded in it.
   Role role;
   if (!re2::RE2::FullMatch(name, kReRoleName, &role.name_)) {
     FX_LOG_KV(WARNING, "Bad role name.", FX_KV("role_name", name), FX_KV("tag", "RoleManager"));
     return fit::error(ZX_ERR_INVALID_ARGS);
   }
-  for (auto selector : selectors) {
-    role.selectors_.insert(std::pair{selector.key(), selector.value()});
+  for (const auto& selector : selectors) {
+    role.selectors_.try_emplace(selector.key(), selector.value());
   }
   return fit::ok(std::move(role));
 }
 
 // ToLong attempts to convert the given string into a long and populates *out with the result.
 // Returns true if str is indeed a long, false otherwise.
-bool ToLong(std::string str, long* out) {
-  char* end = nullptr;
-  long value = std::strtol(str.c_str(), &end, 10);
-  if (end == str.c_str() || *end != '\0' || value == LONG_MAX || value == LONG_MIN) {
+bool ToLong(std::string_view str, long* out) {
+  long value = 0;
+  auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), value);
+  if (ec != std::errc{} || ptr != str.data() + str.size()) {
     return false;
   }
   *out = value;
   return true;
 }
 
-// ToDouble attempts to convert the given string into a long and populates *out with the result.
+// ToDouble attempts to convert the given string into a double and populates *out with the result.
 // Returns true if str is indeed a double, false otherwise.
 // Note that this will return true for any whole number, so it's important that the caller checks
 // if the number is a long using ToLong before calling this function.
-bool ToDouble(std::string str, double* out) {
-  char* end = nullptr;
-  double value = std::strtod(str.c_str(), &end);
-  if (end == str.c_str() || *end != '\0' || value == HUGE_VAL) {
+bool ToDouble(std::string_view str, double* out) {
+  double value = 0.0;
+  auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), value);
+  if (ec != std::errc{} || ptr != str.data() + str.size()) {
     return false;
   }
   *out = value;
@@ -748,7 +749,7 @@ fit::result<zx_status_t, Role> Role::Create(std::string_view name_with_selectors
   return fit::ok(std::move(role));
 }
 
-bool Role::HasSelector(std::string selector) const {
+bool Role::HasSelector(std::string_view selector) const {
   auto search = selectors_.find(selector);
   return search != selectors_.end();
 }
@@ -791,27 +792,27 @@ bool Role::operator==(const Role& other) const {
   if (selectors_.size() != other.selectors_.size()) {
     return false;
   }
-  for (auto selector : selectors_) {
-    auto it = other.selectors_.find(selector.first);
+  for (const auto& [key, value] : selectors_) {
+    auto it = other.selectors_.find(key);
     if (it == other.selectors_.end()) {
       return false;
     }
-    if (selector.second.Which() != it->second.Which()) {
+    if (value.Which() != it->second.Which()) {
       return false;
     }
-    switch (selector.second.Which()) {
+    switch (value.Which()) {
       case ParameterValue::Tag::kIntValue:
-        if (selector.second.int_value().value() != it->second.int_value().value()) {
+        if (value.int_value().value() != it->second.int_value().value()) {
           return false;
         }
         break;
       case ParameterValue::Tag::kFloatValue:
-        if (selector.second.float_value().value() != it->second.float_value().value()) {
+        if (value.float_value().value() != it->second.float_value().value()) {
           return false;
         }
         break;
       case ParameterValue::Tag::kStringValue:
-        if (selector.second.string_value().value() != it->second.string_value().value()) {
+        if (value.string_value().value() != it->second.string_value().value()) {
           return false;
         }
         break;

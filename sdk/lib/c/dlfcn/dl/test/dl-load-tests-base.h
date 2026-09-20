@@ -24,7 +24,7 @@ namespace dl::testing {
 class DlLoadTestsBase : public DlTestsBase {
  public:
   using File = elfldltl::UniqueFdFile<Diagnostics>;
-  using Loader = elfldltl::MmapLoader;
+  using Loader = elfldltl::MmapLoader<>;
   using SystemError = elfldltl::PosixError;
 
   // This owns state necessary for dynamic TLS (__tls_get_addr) to be usable.

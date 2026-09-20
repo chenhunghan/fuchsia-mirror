@@ -19,4 +19,12 @@ FFI_ALWAYS_INLINE void cpp_scanner_push_disable_count(void) { scanner_push_disab
 
 FFI_ALWAYS_INLINE void cpp_scanner_pop_disable_count(void) { scanner_pop_disable_count(); }
 
+FFI_ALWAYS_INLINE bool cpp_scanner_needs_accessed_scan(zx_instant_mono_t update_time) {
+  return scanner_needs_accessed_scan(update_time);
+}
+
+FFI_ALWAYS_INLINE void cpp_scanner_wait_for_accessed_scan(zx_instant_mono_t update_time) {
+  scanner_wait_for_accessed_scan(update_time);
+}
+
 }  // extern "C"

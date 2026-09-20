@@ -8,8 +8,9 @@
 import dataclasses
 import enum
 import re
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import AbstractSet, Callable, Iterable, Optional, Sequence
+from typing import AbstractSet
 
 
 class LexError(ValueError):
@@ -185,7 +186,7 @@ class _ParserState(enum.Enum):
     DONE = 3
 
 
-def _parse_one_dep(toks: Iterable[Token]) -> Optional[Dep]:
+def _parse_one_dep(toks: Iterable[Token]) -> Dep | None:
     """Parse a single dependency.
 
     Args:

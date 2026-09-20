@@ -23,6 +23,8 @@ bool should_skip_no_feature(ktl::source_location caller = ktl::source_location::
   return true;
 }
 
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the continuous attribution tracker supports a "stubbed out" state.
 bool continuous_attribution_tracker_stub() {
   BEGIN_TEST;
@@ -54,6 +56,8 @@ bool continuous_attribution_tracker_stub() {
   END_TEST;
 }
 
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the initial state of the ContinuousAttributionTracker is zero.
 bool continuous_attribution_tracker_create() {
   BEGIN_TEST;
@@ -65,6 +69,8 @@ bool continuous_attribution_tracker_create() {
   END_TEST;
 }
 
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the move and assignment transfers data to the new ContinuousAttributionTracker
 // object.
 bool continuous_attribution_tracker_transfer() {
@@ -100,6 +106,8 @@ bool continuous_attribution_tracker_transfer() {
   END_TEST;
 }
 
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the high-water mark accumulates values since last reset.
 bool continuous_attribution_tracker_high_water_mark() {
   BEGIN_TEST;
@@ -128,6 +136,8 @@ bool continuous_attribution_tracker_high_water_mark() {
   END_TEST;
 }
 
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the continuous attribution tracker supports large counts.
 bool continuous_attribution_tracker_extreme() {
   BEGIN_TEST;
@@ -139,7 +149,8 @@ bool continuous_attribution_tracker_extreme() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 bool continuous_attribution_tracker_populate_vmo() {
   BEGIN_TEST;
 
@@ -177,7 +188,8 @@ bool continuous_attribution_tracker_populate_vmo() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the correct tracker is provided to the unidirectional clone and parent.
 bool continuous_attribution_tracker_unidirectional_child() {
   BEGIN_TEST;
@@ -223,7 +235,8 @@ bool continuous_attribution_tracker_unidirectional_child() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the correct tracker is provided to the bidirectional clone and parent.
 bool continuous_attribution_tracker_bidirectional_child() {
   BEGIN_TEST;
@@ -276,7 +289,8 @@ bool continuous_attribution_tracker_bidirectional_child() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that zeroing an anonymous VMO decreases the populated slots count.
 bool continuous_attribution_tracker_zero_anonymous() {
   BEGIN_TEST;
@@ -323,7 +337,8 @@ bool continuous_attribution_tracker_zero_anonymous() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that zeroing a pager-backed VMO decreases the populated slots count.
 bool continuous_attribution_tracker_zero_pager_backed() {
   BEGIN_TEST;
@@ -362,7 +377,8 @@ bool continuous_attribution_tracker_zero_pager_backed() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that zeroing a child of a pager-backed VMO correctly updates the populated bytes count.
 bool continuous_attribution_tracker_zero_pager_clone() {
   BEGIN_TEST;
@@ -411,7 +427,8 @@ bool continuous_attribution_tracker_zero_pager_clone() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that removing a page from a hidden parent decrements populated bytes count.
 bool continuous_attribution_tracker_require_move_page() {
   BEGIN_TEST;
@@ -466,7 +483,8 @@ bool continuous_attribution_tracker_require_move_page() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the populated slots count is decremented during the removal of parent content markers
 // in hidden VMOs.
 bool continuous_attribution_tracker_hidden_no_parent_content() {
@@ -509,7 +527,8 @@ bool continuous_attribution_tracker_hidden_no_parent_content() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the populated slots count is decremented when pages are evicted from VmCowPages.
 bool continuous_attribution_tracker_reclaim_page() {
   BEGIN_TEST;
@@ -528,14 +547,68 @@ bool continuous_attribution_tracker_reclaim_page() {
 
   EXPECT_EQ(1u, vmo->DebugGetCowPages()->DebugGetPopulatedSlotsCount());
 
-  ASSERT_OK(vmo->DebugGetCowPages()->EvictLoanedPage(committed_page, 0));
+  // Only pages in an isolate queue can be reclaimed, so move the page there as the scanner would.
+  pmm_page_queues()->MoveToReclaimDontNeed(committed_page);
+
+  VmCowReclaimResult result = vmo->DebugGetCowPages()->ReclaimPage(
+      committed_page, 0, VmCowPages::EvictionAction::FollowHint, nullptr);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(1u, result.value().num_pages);
 
   EXPECT_EQ(0u, vmo->DebugGetCowPages()->DebugGetPopulatedSlotsCount());
 
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
+// Test that the populated slots count is decremented when a loaned page is evicted from
+// VmCowPages.
+bool continuous_attribution_tracker_evict_loaned_page() {
+  BEGIN_TEST;
+
+  if (should_skip_no_feature()) {
+    END_TEST;
+  }
+
+  AutoVmScannerDisable disable_scanner;
+
+  const bool loaning_was_enabled = PhysicalPageBorrowingConfig::Get().is_loaning_enabled();
+  PhysicalPageBorrowingConfig::Get().set_loaning_enabled(true);
+  auto cleanup = fit::defer([loaning_was_enabled] {
+    PhysicalPageBorrowingConfig::Get().set_loaning_enabled(loaning_was_enabled);
+  });
+
+  // Provide a place for ReplacePageWithLoaned to borrow from.
+  fbl::RefPtr<VmObjectPaged> contiguous_vmo;
+  ASSERT_OK(VmObjectPaged::CreateContiguous(PMM_ALLOC_FLAG_ANY, kPageSize, /*alignment_log2=*/0,
+                                            &contiguous_vmo));
+  ASSERT_OK(contiguous_vmo->DecommitRange(0, kPageSize));
+
+  vm_page_t *committed_page;
+
+  fbl::RefPtr<VmObjectPaged> vmo;
+  ASSERT_OK(make_partially_committed_pager_vmo(3, /*committed_pages=*/1, /*trap_dirty=*/false,
+                                               /*resizable=*/false, false, &committed_page, &vmo));
+
+  fbl::RefPtr<VmCowPages> cow_pages = vmo->DebugGetCowPages();
+  ASSERT_OK(cow_pages->ReplacePageWithLoaned(committed_page, /*offset=*/0));
+
+  vm_page_t *loaned_page = vmo->DebugGetPage(0);
+  ASSERT_NONNULL(loaned_page);
+  ASSERT_TRUE(loaned_page->is_loaned());
+
+  EXPECT_EQ(1u, cow_pages->DebugGetPopulatedSlotsCount());
+
+  ASSERT_OK(cow_pages->EvictLoanedPage(loaned_page, 0));
+
+  EXPECT_EQ(0u, cow_pages->DebugGetPopulatedSlotsCount());
+
+  END_TEST;
+}
+
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the populated slots count is decremented when compression clears a slot after finding a
 // zero page.
 bool continuous_attribution_tracker_zero_page_compression() {
@@ -574,7 +647,8 @@ bool continuous_attribution_tracker_zero_page_compression() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the populated slots count is decremented when zero page deduplication finds and removes
 // a zero page.
 bool continuous_attribution_tracker_zero_page_deduplication() {
@@ -603,7 +677,8 @@ bool continuous_attribution_tracker_zero_page_deduplication() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that content removed from a hidden parent due to 0 share count is reflected in the populated
 // slots count.
 bool continuous_attribution_tracker_release_hidden() {
@@ -651,7 +726,8 @@ bool continuous_attribution_tracker_release_hidden() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that DecommitRange decrements the populated slots count based on the number of populated
 // pages it removes.
 bool continuous_attribution_tracker_decommit_range() {
@@ -679,7 +755,8 @@ bool continuous_attribution_tracker_decommit_range() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Check that DetachSource decrements the populated slots count for the removal of clean content.
 bool continuous_attribution_tracker_detach_source() {
   BEGIN_TEST;
@@ -703,7 +780,8 @@ bool continuous_attribution_tracker_detach_source() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the populated slots count is decremented when loaned pages are removed from a VMO as
 // it's upgraded to being high priority.
 bool continuous_attribution_tracker_remove_loaned_high_priority() {
@@ -738,29 +816,21 @@ bool continuous_attribution_tracker_remove_loaned_high_priority() {
   ASSERT_NONNULL(before_page);
   ASSERT_OK(cow_pages->ReplacePageWithLoaned(before_page, /*offset=*/0));
 
-  auto change_priority = [&vmo](int64_t delta) {
-    PriorityChanger pc = vmo->MakePriorityChanger(delta);
-    if (delta > 0) {
-      pc.PrepareMayNotAlreadyBeHighPriority();
-    }
-    Guard<CriticalMutex> guard{AliasedLock, vmo->lock(), pc.lock()};
-    pc.ChangeHighPriorityCountLocked();
-  };
-
   EXPECT_EQ(1u, vmo->DebugGetCowPages()->DebugGetPopulatedSlotsCount());
 
-  change_priority(1);
+  change_vmo_high_priority_count(*vmo, 1);
 
   EXPECT_EQ(0u, vmo->DebugGetCowPages()->DebugGetPopulatedSlotsCount());
 
-  change_priority(-1);
+  change_vmo_high_priority_count(*vmo, -1);
 
   EXPECT_EQ(0u, vmo->DebugGetCowPages()->DebugGetPopulatedSlotsCount());
 
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that failing to add a sequence of pages correctly updates the populated slots count on
 // cleanup.
 bool continuous_attribution_tracker_add_pages() {
@@ -801,7 +871,8 @@ bool continuous_attribution_tracker_add_pages() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Regression test for https://fxbug.dev/483815044. Transfer a spurious parent content marker to a
 // child, and check that it can be decommitted successfully.
 bool continuous_attribution_tracker_merge_spurious_parent_content() {
@@ -870,7 +941,8 @@ bool continuous_attribution_tracker_merge_spurious_parent_content() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that the dead transition of a VMO correctly redistributes content between hidden parents and
 // children.
 bool continuous_attribution_tracker_merge_into_child() {
@@ -938,7 +1010,8 @@ bool continuous_attribution_tracker_merge_into_child() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that ReleaseOwnedPagesRangeLocked correctly updates the populated slot count when it can
 // work entirely within the local page list.
 bool continuous_attribution_tracker_release_owned_self() {
@@ -967,7 +1040,8 @@ bool continuous_attribution_tracker_release_owned_self() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that ReleaseOwnedPagesRangeLocked correctly updates the populated slot count in hidden
 // parents.
 bool continuous_attribution_tracker_release_owned_parent() {
@@ -1011,7 +1085,8 @@ bool continuous_attribution_tracker_release_owned_parent() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that TakePages decrements the populated slots count in response to content it removes from
 // the page list.
 bool continuous_attribution_tracker_take_pages() {
@@ -1039,7 +1114,8 @@ bool continuous_attribution_tracker_take_pages() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that TakePages decrements the populated slots count in response to content it removes from
 // the page list if there is a parent.
 bool continuous_attribution_tracker_take_pages_parent() {
@@ -1077,7 +1153,8 @@ bool continuous_attribution_tracker_take_pages_parent() {
   END_TEST;
 }
 
-// TODO(https://fxbug.dev/549880387): Convert to Rust.
+// TODO(https://fxbug.dev/549880387): Delete in favor of the Rust version in
+// continuous_attribution_unittest.rs.
 // Test that deduplicating a zero page in a hidden parent creates a persistent
 // disconnect between the child's attribution tracker and GetAttributedMemory.
 //
@@ -1135,6 +1212,7 @@ VM_UNITTEST(continuous_attribution_tracker_zero_pager_clone)
 VM_UNITTEST(continuous_attribution_tracker_require_move_page)
 VM_UNITTEST(continuous_attribution_tracker_hidden_no_parent_content)
 VM_UNITTEST(continuous_attribution_tracker_reclaim_page)
+VM_UNITTEST(continuous_attribution_tracker_evict_loaned_page)
 VM_UNITTEST(continuous_attribution_tracker_zero_page_compression)
 VM_UNITTEST(continuous_attribution_tracker_zero_page_deduplication)
 VM_UNITTEST(continuous_attribution_tracker_release_hidden)

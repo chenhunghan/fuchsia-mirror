@@ -795,7 +795,8 @@ mod tests {
 
         blobfs.format().await.expect("failed to format blobfs");
         blobfs.fsck().await.expect("failed to fsck blobfs");
-        let _ = blobfs.serve().await.expect("failed to serve blobfs");
+        let serving = blobfs.serve().await.expect("failed to serve blobfs");
+        serving.shutdown().await.expect("failed to shutdown blobfs");
     }
 
     #[fuchsia::test]
@@ -919,7 +920,8 @@ mod tests {
 
         minfs.format().await.expect("failed to format minfs");
         minfs.fsck().await.expect("failed to fsck minfs");
-        let _ = minfs.serve().await.expect("failed to serve minfs");
+        let serving = minfs.serve().await.expect("failed to serve minfs");
+        serving.shutdown().await.expect("failed to shutdown minfs");
     }
 
     #[fuchsia::test]

@@ -6,16 +6,21 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("xhci-dml") {
+  dml = "meta/xhci.dml"
+  driver_name = "xhci"
+}
+
 driver_bind_rules("usb_xhci_bind") {
-  rules = "meta/xhci.bind"
+  dml_label = ":xhci-dml"
   bind_output = "xhci.bindbc"
   tests = "meta/tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
     "//src/devices/bind/fuchsia.acpi",
     "//src/devices/bind/fuchsia.pci",
-    "//src/devices/bind/fuchsia.pci:serial",
-    "//src/devices/bind/fuchsia.pci:serial.usb",
+    "//src/devices/bind/fuchsia.pci:fuchsia.pci.serial",
+    "//src/devices/bind/fuchsia.pci:fuchsia.pci.serial.usb",
     "//src/devices/bind/fuchsia.platform",
   ]
 }

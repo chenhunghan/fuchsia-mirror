@@ -958,3 +958,373 @@ func TestRequestsChunking(t *testing.T) {
 		}
 	})
 }
+
+func TestParseTestLocation(t *testing.T) {
+	testCases := []struct {
+		name  string
+		label string
+		want  *resultpb.TestLocation
+	}{
+		{
+			name:  "standard GN label with target",
+			label: "//src/sys/test_manager:test-manager-unittests",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys/test_manager",
+			},
+		},
+		{
+			name:  "GN label with toolchain",
+			label: "//src/sys/test_manager:test-manager-unittests(//build/toolchain:x64)",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys/test_manager",
+			},
+		},
+		{
+			name:  "GN label with trailing slash in dir",
+			label: "//src/sys/test_manager/:test-manager-unittests",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys/test_manager",
+			},
+		},
+		{
+			name:  "Bazel single at label",
+			label: "@//src/sys/test_manager:test-manager-unittests",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys/test_manager",
+			},
+		},
+		{
+			name:  "Bazel double at label",
+			label: "@@//src/sys/test_manager:test-manager-unittests",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys/test_manager",
+			},
+		},
+		{
+			name:  "Label with triple slashes",
+			label: "///src:test",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src",
+			},
+		},
+		{
+			name:  "Label with triple slashes and file target",
+			label: "///src/tests:test_runner.py",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/tests/test_runner.py",
+			},
+		},
+		{
+			name:  "Target with python script extension",
+			label: "//src/tests:test_runner.py",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/tests/test_runner.py",
+			},
+		},
+		{
+			name:  "Target with cc extension",
+			label: "//zircon/system/ulib/c/test:libc-test.cc",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//zircon/system/ulib/c/test/libc-test.cc",
+			},
+		},
+		{
+			name:  "Target with .cm component manifest",
+			label: "//src/sys/test_manager:test-manager.cm",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys/test_manager",
+			},
+		},
+		{
+			name:  "Root package target",
+			label: "//:tests",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//",
+			},
+		},
+		{
+			name:  "Root package target with file extension",
+			label: "//:test.py",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//test.py",
+			},
+		},
+		{
+			name:  "Package directory only without colon",
+			label: "//src/sys/test_manager",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys/test_manager",
+			},
+		},
+		{
+			name:  "Vendor google subsystem label",
+			label: "//vendor/google/subsystem/tests:my_test",
+			want: &resultpb.TestLocation{
+				Repo:     VendorGoogleRepo,
+				FileName: "//subsystem/tests",
+			},
+		},
+		{
+			name:  "Vendor google root target",
+			label: "//vendor/google:my_test",
+			want: &resultpb.TestLocation{
+				Repo:     VendorGoogleRepo,
+				FileName: "//",
+			},
+		},
+		{
+			name:  "Vendor google file target",
+			label: "//vendor/google:test.py",
+			want: &resultpb.TestLocation{
+				Repo:     VendorGoogleRepo,
+				FileName: "//test.py",
+			},
+		},
+		{
+			name:  "Vendor google nested file target",
+			label: "//vendor/google/pkg:test.py",
+			want: &resultpb.TestLocation{
+				Repo:     VendorGoogleRepo,
+				FileName: "//pkg/test.py",
+			},
+		},
+		{
+			name:  "Empty label",
+			label: "",
+			want:  nil,
+		},
+		{
+			name:  "Whitespace label",
+			label: "   ",
+			want:  nil,
+		},
+		{
+			name:  "Label with spaces",
+			label: "some source label",
+			want:  nil,
+		},
+		{
+			name:  "Label without leading slashes",
+			label: "src/sys:test",
+			want:  nil,
+		},
+		{
+			name:  "Path escaping root with ..",
+			label: "//../../outside:test",
+			want:  nil,
+		},
+		{
+			name:  "Label with triple slashes escaping root with ..",
+			label: "///../../outside:test",
+			want:  nil,
+		},
+		{
+			name:  "Toolchain missing closing parenthesis",
+			label: "//src/sys:test(//build/toolchain:x64",
+			want:  nil,
+		},
+		{
+			name:  "Toolchain only without label",
+			label: "(//build/toolchain:x64)",
+			want:  nil,
+		},
+		{
+			name:  "Unmatched closing parenthesis",
+			label: "//src/sys:test)",
+			want:  nil,
+		},
+		{
+			name:  "Label with parentheses in path without toolchain",
+			label: "//src/foo(bar):baz",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/foo(bar)",
+			},
+		},
+		{
+			name:  "Label with parentheses in path and toolchain",
+			label: "//src/foo(bar):baz(//build/toolchain:x64)",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/foo(bar)",
+			},
+		},
+		{
+			name:  "Label with parentheses in directory path",
+			label: "//src/foo(bar)/tests:my_test",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/foo(bar)/tests",
+			},
+		},
+		{
+			name:  "Toolchain with @// prefix",
+			label: "//src/sys:test(@//build/toolchain:x64)",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys",
+			},
+		},
+		{
+			name:  "Toolchain with @@// prefix",
+			label: "//src/sys:test(@@//build/toolchain:x64)",
+			want: &resultpb.TestLocation{
+				Repo:     DefaultRepo,
+				FileName: "//src/sys",
+			},
+		},
+		{
+			name:  "Invalid toolchain ending in parenthesis",
+			label: "//src/sys:test(invalid)",
+			want:  nil,
+		},
+		{
+			name:  "Filename exceeds max length",
+			label: "//" + strings.Repeat("a/", MaxLocationFileNameLength/2+1) + ":my_test",
+			want:  nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseTestLocation(tc.label)
+			if tc.want == nil {
+				if err == nil {
+					t.Errorf("parseTestLocation(%q) expected error, got nil", tc.label)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("parseTestLocation(%q) unexpected error: %v", tc.label, err)
+				}
+				if !proto.Equal(got, tc.want) {
+					t.Errorf("parseTestLocation(%q) = %+v, want %+v", tc.label, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSetTestMetadata_Location(t *testing.T) {
+	t.Run("SourceLabel takes precedence", func(t *testing.T) {
+		detail := runtests.TestDetails{
+			SourceLabel: "//src/sys/foo:foo_test",
+			GNLabel:     "//src/gn/bar:bar_test",
+		}
+		r := &sinkpb.TestResult{}
+		setTestMetadata(r, detail, "foo")
+		if r.TestMetadata == nil || r.TestMetadata.Location == nil {
+			t.Fatalf("expected Location to be populated")
+		}
+		want := &resultpb.TestLocation{
+			Repo:     DefaultRepo,
+			FileName: "//src/sys/foo",
+		}
+		if !proto.Equal(r.TestMetadata.Location, want) {
+			t.Errorf("Location mismatch: got %+v, want %+v", r.TestMetadata.Location, want)
+		}
+	})
+
+	t.Run("GNLabel is used as fallback when SourceLabel is empty", func(t *testing.T) {
+		detail := runtests.TestDetails{
+			GNLabel: "//src/gn/bar:bar_test(//build/toolchain:x64)",
+		}
+		r := &sinkpb.TestResult{}
+		setTestMetadata(r, detail, "bar")
+		if r.TestMetadata == nil || r.TestMetadata.Location == nil {
+			t.Fatalf("expected Location to be populated from GNLabel fallback")
+		}
+		want := &resultpb.TestLocation{
+			Repo:     DefaultRepo,
+			FileName: "//src/gn/bar",
+		}
+		if !proto.Equal(r.TestMetadata.Location, want) {
+			t.Errorf("Location mismatch: got %+v, want %+v", r.TestMetadata.Location, want)
+		}
+	})
+
+	t.Run("invalid label leaves location nil", func(t *testing.T) {
+		detail := runtests.TestDetails{
+			SourceLabel: "invalid label with spaces",
+		}
+		r := &sinkpb.TestResult{}
+		setTestMetadata(r, detail, "invalid")
+		if r.TestMetadata == nil {
+			t.Fatalf("expected TestMetadata to not be nil")
+		}
+		if r.TestMetadata.Location != nil {
+			t.Errorf("expected Location to be nil, got %+v", r.TestMetadata.Location)
+		}
+	})
+}
+
+func TestTestDetailsToResultSink_Location(t *testing.T) {
+	outputRoot := t.TempDir()
+	detail := &runtests.TestDetails{
+		Name:        "foo_test",
+		SourceLabel: "//src/sys/foo:foo_test",
+		Status:      runtests.TestSuccess,
+		StartTime:   time.Now(),
+	}
+	result, _, _, err := testDetailsToResultSink([]*resultpb.StringPair{}, detail, outputRoot)
+	if err != nil {
+		t.Fatalf("testDetailsToResultSink failed: %v", err)
+	}
+	if result.TestMetadata == nil || result.TestMetadata.Location == nil {
+		t.Fatalf("expected TestMetadata.Location to be set")
+	}
+	want := &resultpb.TestLocation{
+		Repo:     DefaultRepo,
+		FileName: "//src/sys/foo",
+	}
+	if !proto.Equal(result.TestMetadata.Location, want) {
+		t.Errorf("Location diff: got %+v, want %+v", result.TestMetadata.Location, want)
+	}
+}
+
+func TestTestCaseToResultSink_Location(t *testing.T) {
+	outputRoot := t.TempDir()
+	detail := &runtests.TestDetails{
+		Name:        "vendor_test",
+		SourceLabel: "//vendor/google/tests:vendor_test",
+		Status:      runtests.TestSuccess,
+		StartTime:   time.Now(),
+		TestResult: runtests.TestResult{
+			Cases: []runtests.TestCaseResult{
+				{
+					DisplayName: "vendor_test/case_1",
+					SuiteName:   "suite",
+					CaseName:    "case_1",
+					Status:      runtests.TestSuccess,
+				},
+			},
+		},
+	}
+	results, _, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, detail, outputRoot)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	res := results[0]
+	if res.TestMetadata == nil || res.TestMetadata.Location == nil {
+		t.Fatalf("expected TestMetadata.Location to be set")
+	}
+	want := &resultpb.TestLocation{
+		Repo:     VendorGoogleRepo,
+		FileName: "//tests",
+	}
+	if !proto.Equal(res.TestMetadata.Location, want) {
+		t.Errorf("Location diff: got %+v, want %+v", res.TestMetadata.Location, want)
+	}
+}

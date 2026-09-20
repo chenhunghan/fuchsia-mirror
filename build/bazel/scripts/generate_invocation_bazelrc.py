@@ -15,7 +15,7 @@ This script is intended to work for both developer (fx) and infra builds.
 import argparse
 import os
 import sys
-from typing import Iterable
+from collections.abc import Iterable
 
 _SCRIPT_DIR = os.path.dirname(__file__)
 

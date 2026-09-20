@@ -8,8 +8,9 @@ import io
 import os
 import sys
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from unittest import mock
 
 import cl_utils

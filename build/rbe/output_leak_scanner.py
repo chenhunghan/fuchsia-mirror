@@ -25,8 +25,8 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import cl_utils
 import fuchsia

@@ -51,6 +51,8 @@ pub fn main(args: TokenStream, input: TokenStream) -> TokenStream {
 ///                      `.await` is not a stall if something preceding the await will guarantee
 ///                      that it finishes within one loop of the Executor. Defaults to true.
 ///                      This argument is not currently available for host tests.
+///  - `allow_interrupts` - boolean toggle for whether to allow binding interrupts to the executor
+///                         port. Defaults to false.
 ///  - `add_test_attr` - boolean toggle for whether to apply the `#[test]` attribute to the
 ///                      function. When daisy-chaining with other proc macros, it may be desirable
 ///                      to omit this attribute. Default true.

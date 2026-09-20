@@ -2,43 +2,39 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! This library coordinates pager-backed blob VMOs, driver-level page fault handling, and
-//! Merkle verification.
+//! Coordinates pager-backed blob VMOs, driver-level page fault handling, and cryptographic
+//! verification.
 //!
-//! # Architecture
-//! When clients request a blob via `create_vmo`, `BlobPagerAndVerifier` checks `BlobCacheManager`.
-//! If the blob is missing, the caller marks the cache entry as `Pending` and asks Fxfs to register
-//! the blob's disk extents. Once Fxfs returns the mapping key, the caller creates a pager-backed
-//! VMO and caches the resulting `CachedBlob`.
+//! # Overview
+//! `BlobPagerAndVerifier` manages pager-backed VMOs for blobs. It decouples page fault servicing
+//! from the filesystem by having the block driver read and decompress raw disk blocks directly,
+//! while `BlobPagerAndVerifier` cryptographically verifies the pages before supplying them to
+//! the pager VMO to unblock client reads.
 //!
-//! If concurrent requests arrive while the blob is still `Pending`, they listen on an
-//! `event_listener::Event`. Once the primary creator finishes (or fails), it notifies all waiting
-//! listeners so they can clone the ready VMO without contacting Fxfs again.
+//! # Blob Opening and Caching
+//! When a client requests a blob via `create_vmo`:
+//! - **If already cached**: Clones and returns a new read-only child VMO immediately.
+//! - **If currently opening**: Suspends until the in-flight request finishes, then clones and
+//!   returns a child VMO once ready.
+//! - **If not in cache**: Registers the blob's extent mappings with Fxfs, creates the pager-backed
+//!   VMO, caches it, and returns a child VMO to the caller.
 //!
 //! # Page Fault Handling and Verification
-//! 1. When a client reads from an offset in a blob VMO that has not yet been loaded into memory,
-//!    the kernel generates a page request on the VMO's pager port, which the block driver waits
-//!    on directly.
-//! 2. The driver reads and decompresses the raw disk blocks according to the blob's extent
-//!    mappings, then writes the unverified pages into a shared delivery queue VMO.
-//! 3. The driver also transmits the blob's Merkle tree leaf hashes over the delivery queue, which
-//!    initializes a `ReadSizedMerkleVerifier` on the cached blob.
-//! 4. As decompressed chunks arrive, `BlobPagerAndVerifier` verifies the pages against the expected
-//!    Merkle leaves:
-//!    - On success, it supplies the pages to the kernel pager (`zx_pager_supply_pages`), unblocking
-//!      the client read.
-//!    - On verification failure, it fails the page range with `ZX_ERR_IO_DATA_INTEGRITY`.
+//! 1. When a client reads an unpopulated page, the kernel generates a page request on the pager
+//!    port, which the block driver monitors directly.
+//! 2. The driver reads and decompresses the disk blocks according to the blob's extent mappings,
+//!    then writes unverified pages and Merkle metadata into a shared delivery queue VMO.
+//! 3. `BlobPagerAndVerifier` verifies the incoming pages against the blob's Merkle tree:
+//!    - On success, it supplies the verified pages to the pager VMO (`zx_pager_supply_pages`),
+//!      unblocking the client read.
+//!    - On verification failure, it fails the request with `ZX_ERR_IO_DATA_INTEGRITY`.
 //!
-//! # Lifecycle and Eviction
-//! 1. Handles returned to clients are child VMOs cloned from the parent pager VMO.
-//! 2. `BlobCacheManager` holds strong references (`Arc<CachedBlob>`) to keep active blobs in the
-//!    cache.
-//! 3. When all clients close their child VMOs, the kernel fires `ZX_VMO_ZERO_CHILDREN` on the
-//!    parent VMO.
-//! 4. The cache manager observes this signal, confirms no new child VMOs were opened in the
-//!    meantime, and evicts the blob from the cache.
-//! 5. Once all references (`Arc<CachedBlob>`) are dropped, a request to close the blob's extent
-//!    mapping session with Fxfs will be sent.
+//! # Eviction and Teardown
+//! 1. Clients receive read-only child VMOs cloned from the parent pager VMO.
+//! 2. When all client handles to a blob are dropped, the kernel notifies the cache via
+//!    `ZX_VMO_ZERO_CHILDREN`.
+//! 3. The cache evicts the inactive blob and closes its mapping session with Fxfs, reclaiming
+//!    driver extent tracking and kernel pager resources.
 
 mod delivery;
 
@@ -72,8 +68,8 @@ impl fasync::PacketReceiver for ZeroChildrenReceiver {
         if let zx::PacketContents::SignalOne(signals) = packet.contents() {
             if signals.observed().contains(zx::Signals::VMO_ZERO_CHILDREN) {
                 if let Some(cached_blob) = self.blob.get().and_then(|w| w.upgrade()) {
-                    if let Some(cache_manager) = cached_blob.cache_manager.upgrade() {
-                        cache_manager.on_zero_children(&cached_blob);
+                    if let Some(cache) = cached_blob.cache.upgrade() {
+                        cache.on_zero_children(&cached_blob);
                     }
                 }
             }
@@ -94,12 +90,12 @@ struct CachedBlob {
     vmo: zx::Vmo,
     // The Merkle root hash of the blob (its unique identifier).
     root_hash: [u8; 32],
-    // Weak back-reference to BlobCacheManager to avoid an Arc reference cycle, since the cache
-    // manager already holds an Arc to this blob.
-    cache_manager: Weak<BlobCacheManager>,
+    // Weak back-reference to Cache to avoid an Arc reference cycle, since the cache already
+    // holds an Arc to this blob.
+    cache: Weak<Cache>,
     // Session key assigned by Fxfs for this blob mapping, used in driver delivery commands and when
     // closing the session.
-    vmo_key: u32,
+    vmo_key: u64,
     // Blob size in bytes.
     len: u64,
     // Keeps ZeroChildrenReceiver registered on the async loop while this blob is alive.
@@ -125,11 +121,10 @@ impl CachedBlob {
 
 impl Drop for CachedBlob {
     fn drop(&mut self) {
-        if let Some(cache_manager) = self.cache_manager.upgrade() {
-            cache_manager.pending_leaves.lock().remove(&self.vmo_key);
-            let session = cache_manager.mapping_session.clone();
+        if let Some(cache) = self.cache.upgrade() {
+            let session = cache.mapping_session.clone();
             let vmo_key = self.vmo_key;
-            cache_manager.scope.spawn(async move {
+            cache.scope.spawn(async move {
                 let _ = session.close(vmo_key).await;
             });
         }
@@ -137,75 +132,175 @@ impl Drop for CachedBlob {
 }
 
 enum BlobState {
-    // The blob is currently being opened: Fxfs is registering its disk extents, and the
-    // pager-backed VMO is being created. Concurrent requests wait on this event until the primary
-    // creator finishes (or fails) and wakes them.
-    Pending(Arc<event_listener::Event>),
-    // The blob's pager-backed VMO has been created and cached. Eviction is triggered when all
-    // client child VMOs are closed (`ZX_VMO_ZERO_CHILDREN`).
+    // The blob is actively opening: extents are being registered with Fxfs and the pager VMO is
+    // being created. Concurrent requests wait on `event`. Early Merkle leaves delivered by the
+    // driver are placed directly into `verifier`.
+    Opening {
+        root_hash: [u8; 32],
+        event: Arc<event_listener::Event>,
+        verifier: Option<ReadSizedMerkleVerifier>,
+    },
+    // The blob's pager-backed VMO is created and cached. Eviction is triggered when all client
+    // child VMOs are closed (`ZX_VMO_ZERO_CHILDREN`).
     Ready(Arc<CachedBlob>),
 }
 
-// A Drop guard to clean up the cache entry if create_vmo fails.
-struct PendingCacheEntryGuard {
-    cache_manager: Arc<BlobCacheManager>,
-    identifier: Option<[u8; 32]>,
+struct CacheState {
+    next_key: u64,
+    // Maps blob Merkle root hash to the client-allocated mapping session key.
+    keys_by_hash: HashMap<[u8; 32], u64>,
+    blob_states_by_key: HashMap<u64, BlobState>,
 }
 
-impl PendingCacheEntryGuard {
-    fn dismiss(&mut self) {
-        self.identifier = None;
-    }
-}
-
-impl Drop for PendingCacheEntryGuard {
-    fn drop(&mut self) {
-        if let Some(id) = self.identifier.take() {
-            let mut blob_states = self.cache_manager.blob_states_by_hash.lock();
-            // If the creation failed, clear out the pending state.
-            if let Some(BlobState::Pending(completion_event)) = blob_states.remove(&id) {
-                // Wake up all suspended tasks concurrently waiting on this blob.
-                completion_event.notify(usize::MAX);
-            }
+impl Default for CacheState {
+    fn default() -> Self {
+        Self {
+            next_key: 1,
+            keys_by_hash: HashMap::default(),
+            blob_states_by_key: HashMap::default(),
         }
     }
 }
 
-// The outcome of looking up or reserving an entry in `BlobCacheManager`.
+impl CacheState {
+    fn generate_key(&mut self) -> u64 {
+        let key = self.next_key;
+        self.next_key += 1;
+        key
+    }
+}
+
+// Holds a pending reservation for a blob actively being opened.
+//
+// If dropped before `commit` is called (e.g. due to an early FIDL failure, pager VMO creation
+// failure, or cancellation), the `Drop` implementation rolls back the reservation: it evicts the
+// key from the cache, queues a close request with Fxfs, and unblocks waiting tasks.
+struct PendingEntry {
+    cache: Arc<Cache>,
+    key: u64,
+}
+
+impl PendingEntry {
+    fn key(&self) -> u64 {
+        self.key
+    }
+
+    // Fulfills the pending entry by constructing the `CachedBlob`, atomically transitioning the
+    // cache entry from `Opening` to `Ready`, and notifying waiting tasks.
+    fn commit(self, vmo: zx::Vmo, size: u64) -> Arc<CachedBlob> {
+        let zero_children_receiver = ZeroChildrenReceiver { blob: OnceLock::new() };
+        let zero_children_registration =
+            fasync::EHandle::local().register_receiver(zero_children_receiver);
+
+        let (cached, event) = {
+            let mut state = self.cache.state.lock();
+            let (root_hash, event, verifier) = match state.blob_states_by_key.remove(&self.key) {
+                Some(BlobState::Opening { root_hash, event, verifier }) => {
+                    (root_hash, event, verifier)
+                }
+                _ => {
+                    unreachable!("Blob for key {} was unexpectedly not in Opening state", self.key)
+                }
+            };
+
+            let merkle_verifier = OnceLock::new();
+            if let Some(verifier) = verifier {
+                let _ = merkle_verifier.set(verifier);
+            }
+
+            let cached = Arc::new(CachedBlob {
+                vmo,
+                root_hash,
+                cache: Arc::downgrade(&self.cache),
+                vmo_key: self.key,
+                len: size,
+                registration: zero_children_registration,
+                merkle_verifier,
+            });
+
+            cached
+                .registration
+                .receiver()
+                .blob
+                .set(Arc::downgrade(&cached))
+                .expect("Failed to bind CachedBlob to ZeroChildrenReceiver: already initialized");
+
+            state.blob_states_by_key.insert(self.key, BlobState::Ready(cached.clone()));
+
+            (cached, event)
+        };
+
+        cached.wait_for_zero_children();
+        event.notify(usize::MAX);
+        cached
+    }
+}
+
+impl Drop for PendingEntry {
+    fn drop(&mut self) {
+        let event = {
+            let mut state = self.cache.state.lock();
+            match state.blob_states_by_key.get(&self.key) {
+                // If the blob committed successfully, there is nothing to roll back.
+                Some(BlobState::Ready(_)) => return,
+                Some(BlobState::Opening { .. }) => {
+                    if let Some(BlobState::Opening { root_hash, event, .. }) =
+                        state.blob_states_by_key.remove(&self.key)
+                    {
+                        state.keys_by_hash.remove(&root_hash);
+                        event
+                    } else {
+                        return;
+                    }
+                }
+                None => {
+                    log::error!(
+                        key = self.key;
+                        "PendingEntry::drop: key unexpectedly absent from cache"
+                    );
+                    return;
+                }
+            }
+        };
+
+        // Queue the close on Fxfs before waking waiters.
+        // Note: If `open()` was never called or returned an error, closing this key is safe
+        // because the block driver ignores `CloseBlob` for unknown keys. However, if `open()` was
+        // in-flight when cancelled, or if `open()` succeeded but subsequent operations failed, this
+        // close prevents leaking extent mappings.
+        let session = self.cache.mapping_session.clone();
+        let key = self.key;
+        self.cache.scope.spawn(async move {
+            let _ = session.close(key).await;
+        });
+
+        // Wake up all suspended tasks concurrently waiting on this blob.
+        event.notify(usize::MAX);
+    }
+}
+
+// The outcome of looking up or reserving an entry in `Cache`.
 enum CacheLookup {
     // The VMO has been created and cached. Returns a child of it.
     Ready(zx::Vmo),
     // The VMO is currently being created by another request. Contains a listener to await
     // completion.
     Pending(event_listener::EventListener),
-    // The blob is absent. Provides a drop-safe guard to be used with creation. If the task crashes
-    // or returns an early error, the pending state will be cleared from the cache.
-    Missing(PendingCacheEntryGuard),
+    // The blob is absent. Provides a drop-safe pending entry to be used with creation. If the task
+    // crashes or returns an early error, the pending state will be cleared from the cache.
+    Missing(PendingEntry),
 }
 
-// BlobCacheManager coordinates the concurrent creation, caching, and verification of pager-backed
-// blobs.
-struct BlobCacheManager {
-    blob_states_by_hash: Mutex<HashMap<[u8; 32], BlobState>>,
-    // Index of open blobs by their Fxfs session key, can be used to look up blobs during driver
-    // delivery.
-    blobs_by_key: Mutex<HashMap<u32, Arc<CachedBlob>>>,
-    // Stages Merkle leaf hashes if a `RegisterBlob` command arrives before `session.open()` returns
-    // the key over FIDL to populate `blobs_by_key`. Staged leaves are transferred once `create_vmo`
-    // finishes.
-    //
-    // TODO(https://fxbug.dev/535489428): Consider switching to client-allocated keys in
-    // MappingSession.Open(key, identifier). If the client allocates the key upfront, we eliminate
-    // the early arrival of `RegisterBlob` before the session key is returned over FIDL and we won't
-    // need `pending_leaves`.
-    pending_leaves: Mutex<HashMap<u32, Box<[Hash]>>>,
+// Coordinates the concurrent creation, caching, and verification of pager-backed blobs.
+struct Cache {
+    state: Mutex<CacheState>,
     mapping_session: fmapping::MappingSessionProxy,
     pager: Arc<zx::Pager>,
     delivery_vmo: zx::Vmo,
     scope: fasync::ScopeHandle,
 }
 
-impl BlobCacheManager {
+impl Cache {
     fn new(
         mapping_session: fmapping::MappingSessionProxy,
         pager: Arc<zx::Pager>,
@@ -213,9 +308,7 @@ impl BlobCacheManager {
         scope: fasync::ScopeHandle,
     ) -> Self {
         Self {
-            blob_states_by_hash: Mutex::new(HashMap::new()),
-            blobs_by_key: Mutex::new(HashMap::new()),
-            pending_leaves: Mutex::new(HashMap::new()),
+            state: Mutex::new(CacheState::default()),
             mapping_session,
             pager,
             delivery_vmo,
@@ -227,46 +320,63 @@ impl BlobCacheManager {
         &self.delivery_vmo
     }
 
-    fn get_by_key(&self, key: u32) -> Option<Arc<CachedBlob>> {
-        self.blobs_by_key.lock().get(&key).cloned()
+    fn get_by_key(&self, key: u64) -> Option<Arc<CachedBlob>> {
+        let state = self.state.lock();
+        match state.blob_states_by_key.get(&key) {
+            Some(BlobState::Ready(cached)) => Some(cached.clone()),
+            _ => None,
+        }
     }
 
-    // Checks the cache for an open blob and handles three cases:
-    // 1. Ready:   The blob is cached. Creates and returns a new read-only child VMO.
-    // 2. Pending: Another task is actively opening the blob. Returns an event listener so the
-    //             caller can await completion without duplicate work.
-    // 3. Missing: The blob is absent. Atomically reserves the slot by marking it `Pending`. The
-    //             returned drop guard ensures the reservation is cleaned up if the caller fails
-    //             or aborts.
-    fn get_or_reserve(self: &Arc<Self>, identifier: &[u8; 32]) -> Result<CacheLookup, Error> {
-        let mut blob_states = self.blob_states_by_hash.lock();
-        match blob_states.get(identifier) {
-            Some(BlobState::Ready(arc_blob)) => {
-                let child = arc_blob
-                    .create_child()
-                    .map_err(|s| anyhow!("Failed to create child VMO: {s}"))?;
-                Ok(CacheLookup::Ready(child))
-            }
-            Some(BlobState::Pending(completion_event)) => {
-                Ok(CacheLookup::Pending(completion_event.listen()))
-            }
-            None => {
-                let completion_event = Arc::new(event_listener::Event::new());
-                blob_states.insert(*identifier, BlobState::Pending(completion_event));
-                Ok(CacheLookup::Missing(PendingCacheEntryGuard {
-                    cache_manager: self.clone(),
-                    identifier: Some(*identifier),
-                }))
+    #[cfg(test)]
+    fn is_merkle_initialized(&self, key: u64) -> bool {
+        let state = self.state.lock();
+        match state.blob_states_by_key.get(&key) {
+            Some(BlobState::Opening { verifier, .. }) => verifier.is_some(),
+            Some(BlobState::Ready(blob)) => blob.merkle_verifier.get().is_some(),
+            None => false,
+        }
+    }
+
+    /// Looks up the blob in the cache and returns its current [`CacheLookup`] state:
+    ///
+    /// - [`CacheLookup::Ready`]: The blob is already cached. Returns a new read-only child VMO.
+    /// - [`CacheLookup::Pending`]: Another task is actively opening this blob. Returns an
+    ///   `EventListener` so the caller can await completion without duplicate work.
+    /// - [`CacheLookup::Missing`]: The blob is absent. Atomically reserves the key and slot
+    ///   by inserting `BlobState::Opening`, returning a [`PendingEntry`] for the caller to fulfill.
+    fn lookup(self: &Arc<Self>, identifier: &[u8; 32]) -> Result<CacheLookup, Error> {
+        let mut state = self.state.lock();
+        if let Some(&key) = state.keys_by_hash.get(identifier) {
+            match state.blob_states_by_key.get(&key) {
+                Some(BlobState::Ready(cached)) => {
+                    let child = cached
+                        .create_child()
+                        .map_err(|s| anyhow!("Failed to create child VMO: {s}"))?;
+                    return Ok(CacheLookup::Ready(child));
+                }
+                Some(BlobState::Opening { event, .. }) => {
+                    return Ok(CacheLookup::Pending(event.listen()));
+                }
+                None => unreachable!("keys_by_hash pointed to non-existent key {key}"),
             }
         }
+
+        let event = Arc::new(event_listener::Event::new());
+        let key = state.generate_key();
+        state.keys_by_hash.insert(*identifier, key);
+        state
+            .blob_states_by_key
+            .insert(key, BlobState::Opening { root_hash: *identifier, event, verifier: None });
+        Ok(CacheLookup::Missing(PendingEntry { cache: self.clone(), key }))
     }
 
     fn on_zero_children(&self, blob: &Arc<CachedBlob>) {
         // On zero children, evict the blob from the cache and close its Fxfs mapping session.
-        // We must hold this lock before checking `num_children` so `get_or_reserve` cannot clone
+        // We must hold this lock before checking `num_children` so `lookup` cannot clone
         // a child between this check and the following eviction, which would leave that client
         // holding a VMO whose storage mappings have already been closed.
-        let mut blob_states = self.blob_states_by_hash.lock();
+        let mut state = self.state.lock();
         if let Ok(info) = blob.vmo.info() {
             if info.num_children > 0 {
                 // A concurrent client acquired a child VMO before we processed this packet.
@@ -275,74 +385,38 @@ impl BlobCacheManager {
                 return;
             }
         }
-        // Evict from `blob_states_by_hash`. Use `Arc::ptr_eq` to guard against races where this
-        // blob was already removed or replaced by a new instance for the same hash before this
-        // delayed `ZERO_CHILDREN` packet was processed on the async loop.
-        if let hash_map::Entry::Occupied(entry) = blob_states.entry(blob.root_hash) {
+        // Evict from `keys_by_hash`.
+        if let hash_map::Entry::Occupied(entry) = state.keys_by_hash.entry(blob.root_hash) {
+            if *entry.get() == blob.vmo_key {
+                entry.remove();
+            }
+        }
+        // Evict from `blob_states_by_key`.
+        if let hash_map::Entry::Occupied(entry) = state.blob_states_by_key.entry(blob.vmo_key) {
             if let BlobState::Ready(cached) = entry.get() {
                 if Arc::ptr_eq(cached, blob) {
                     entry.remove();
                 }
             }
         }
-        // Evict from `blobs_by_key`.
-        let mut key_map = self.blobs_by_key.lock();
-        if let hash_map::Entry::Occupied(entry) = key_map.entry(blob.vmo_key) {
-            if Arc::ptr_eq(entry.get(), blob) {
-                entry.remove();
-                // TODO(https://fxbug.dev/535489428): we can probably reduce the number of locks
-                // if we switch to client-allocated keys in MappingSession.Open(key, identifier).
-                self.pending_leaves.lock().remove(&blob.vmo_key);
-            }
-        }
     }
 
-    fn finalize_pending_request(&self, identifier: &[u8; 32], result: Option<&Arc<CachedBlob>>) {
-        let mut blob_states = self.blob_states_by_hash.lock();
-        let mut entry = match blob_states.entry(*identifier) {
-            hash_map::Entry::Occupied(e) => e,
-            hash_map::Entry::Vacant(_) => unreachable!("Cache entry was unexpectedly missing"),
-        };
-
-        let event = match entry.get() {
-            BlobState::Pending(event) => event.clone(),
-            _ => unreachable!("Cache entry was unexpectedly not Pending"),
-        };
-
-        if let Some(cached) = result {
-            entry.insert(BlobState::Ready(cached.clone()));
-            let mut key_map = self.blobs_by_key.lock();
-            key_map.insert(cached.vmo_key, cached.clone());
-            if let Some(hashes) = self.pending_leaves.lock().remove(&cached.vmo_key) {
-                if let Err(error) = Self::initialize_merkle_verifier(cached, hashes) {
-                    log::error!(error:?; "Failed to initialize verifier from early leaves");
-                }
-            }
-        } else {
-            entry.remove();
-        }
-
-        event.notify(usize::MAX);
-    }
-
-    fn initialize_merkle_verifier(blob: &CachedBlob, hashes: Box<[Hash]>) -> Result<(), Error> {
+    fn create_merkle_verifier(
+        root_hash: &[u8; 32],
+        vmo_key: u64,
+        hashes: Box<[Hash]>,
+    ) -> Result<ReadSizedMerkleVerifier, Error> {
         // For blobs <= 8192 bytes (a single block), the Merkle tree consists of only a single leaf,
         // which is identical to the root hash itself. Fxfs omits storing leaf hashes on disk for
         // single-block blobs to save space, resulting in empty leaf metadata read by the block
         // server. In that case, synthesise the single leaf from the blob's Merkle root hash.
-        let hashes =
-            if hashes.is_empty() { Box::new([Hash::from(blob.root_hash)]) } else { hashes };
+        let hashes = if hashes.is_empty() { Box::new([Hash::from(*root_hash)]) } else { hashes };
 
-        match MerkleVerifier::new(Hash::from(blob.root_hash), hashes) {
-            Ok(verifier) => {
-                let sized_verifier =
-                    ReadSizedMerkleVerifier::new(verifier, delivery::DELIVERY_DATA_SIZE)
-                        .map_err(|e| anyhow!("Failed to create ReadSizedMerkleVerifier: {e:?}"))?;
-                let _ = blob.merkle_verifier.set(sized_verifier);
-                Ok(())
-            }
+        match MerkleVerifier::new(Hash::from(*root_hash), hashes) {
+            Ok(verifier) => ReadSizedMerkleVerifier::new(verifier, delivery::DELIVERY_DATA_SIZE)
+                .map_err(|e| anyhow!("Failed to create ReadSizedMerkleVerifier: {e:?}")),
             Err(e) => {
-                bail!("Failed to verify merkle leaves for key {}: {e:?}", blob.vmo_key);
+                bail!("Failed to verify merkle leaves for key {vmo_key}: {e:?}");
             }
         }
     }
@@ -373,7 +447,7 @@ impl BlobCacheManager {
     }
 }
 
-impl delivery::DeliveryQueueProvider for BlobCacheManager {
+impl delivery::DeliveryQueueProvider for Cache {
     fn deliver_pages(
         &self,
         key: u64,
@@ -381,7 +455,7 @@ impl delivery::DeliveryQueueProvider for BlobCacheManager {
         unverified_pages: UnverifiedPages<'_>,
     ) -> Result<(), Error> {
         let cached_blob = self
-            .get_by_key(key as u32)
+            .get_by_key(key)
             .ok_or_else(|| anyhow!("Unknown or expired key {key} in deliver_pages"))?;
 
         let page_size = zx::system_get_page_size() as u64;
@@ -441,7 +515,7 @@ impl delivery::DeliveryQueueProvider for BlobCacheManager {
 
     fn register_blob(&self, key: u64, leaf_data: PtrByteSlice<'_>) -> Result<(), Error> {
         if leaf_data.len() % HASH_SIZE != 0 {
-            bail!("RegisterBlob invalid leaf length must be a multiple of HAHS_SIZE");
+            bail!("RegisterBlob invalid leaf length must be a multiple of HASH_SIZE");
         }
 
         let hashes: Vec<Hash> = (0..(leaf_data.len() / HASH_SIZE))
@@ -453,24 +527,38 @@ impl delivery::DeliveryQueueProvider for BlobCacheManager {
             })
             .collect();
 
-        let cached_blob = self.get_by_key(key as u32);
-
-        if let Some(blob) = cached_blob {
-            if blob.merkle_verifier.get().is_some() {
-                log::warn!("RegisterBlob received for blob {key} but it is already initialized");
-                return Ok(());
+        let mut state = self.state.lock();
+        match state.blob_states_by_key.get_mut(&key) {
+            Some(BlobState::Opening { root_hash, verifier, .. }) => {
+                if verifier.is_some() {
+                    log::warn!(key;
+                        "RegisterBlob received for blob but it is already initialized"
+                    );
+                    return Ok(());
+                }
+                *verifier =
+                    Some(Self::create_merkle_verifier(root_hash, key, hashes.into_boxed_slice())?);
+                Ok(())
             }
-            Self::initialize_merkle_verifier(&blob, hashes.into_boxed_slice())?;
-        } else {
-            // `RegisterBlob` can arrive before `create_vmo` registers the cached blob. When Fxfs
-            // commits the blob's extent mappings  during `Open`, it immediately signals the block
-            // driver over the shared `mapping_vmo`. The driver processes the mappings and sends
-            // `RegisterBlob` over `delivery_vmo`. This can all occur before FIDL response of
-            // `session.open().await`. Stash the leaf hashes so that `finalize_pending_request` can
-            // initialise the verifier once `create_vmo` finishes.
-            self.pending_leaves.lock().insert(key as u32, hashes.into_boxed_slice());
+            Some(BlobState::Ready(cached)) => {
+                if cached.merkle_verifier.get().is_some() {
+                    log::warn!(key;
+                        "RegisterBlob received for blob but it is already initialized"
+                    );
+                    return Ok(());
+                }
+                let verifier = Self::create_merkle_verifier(
+                    &cached.root_hash,
+                    key,
+                    hashes.into_boxed_slice(),
+                )?;
+                let _ = cached.merkle_verifier.set(verifier);
+                Ok(())
+            }
+            None => {
+                bail!("RegisterBlob received for unknown or expired key {key}");
+            }
         }
-        Ok(())
     }
 }
 
@@ -488,14 +576,14 @@ pub struct BlobPagerAndVerifier {
     _mapper_session: fblock::MapperSessionProxy,
     port: zx::Port,
     pager: Arc<zx::Pager>,
-    cache_manager: Arc<BlobCacheManager>,
+    cache: Arc<Cache>,
     _scope: fasync::Scope,
 }
 
 impl BlobPagerAndVerifier {
     /// Returns a reference to the shared delivery queue VMO.
     pub fn delivery_vmo(&self) -> &zx::Vmo {
-        self.cache_manager.delivery_vmo()
+        self.cache.delivery_vmo()
     }
 
     /// Creates a new BlobPagerAndVerifier.
@@ -549,21 +637,21 @@ impl BlobPagerAndVerifier {
             .map_err(|e| anyhow!("Mapper.OpenSession failed: {e:?}"))?;
 
         let scope = fasync::Scope::new();
-        let cache_manager = Arc::new(BlobCacheManager::new(
+        let cache = Arc::new(Cache::new(
             mapping_session,
             pager.clone(),
             delivery_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?,
             scope.to_handle(),
         ));
         let _delivery_processor =
-            delivery::DeliveryQueueProcessor::spawn(receiver, cache_manager.clone(), delivery_vmo)?;
+            delivery::DeliveryQueueProcessor::spawn(receiver, cache.clone(), delivery_vmo)?;
 
         Ok(Self {
             _delivery_processor,
             _mapper_session: mapper_session,
             port,
             pager,
-            cache_manager,
+            cache,
             _scope: scope,
         })
     }
@@ -571,27 +659,28 @@ impl BlobPagerAndVerifier {
     /// Create pager owned VMO for the blob identified by its Merkle Root Hash.
     pub async fn create_vmo(&self, identifier: &[u8; 32]) -> Result<zx::Vmo, Error> {
         loop {
-            let mut guard = match self.cache_manager.get_or_reserve(identifier)? {
+            let entry = match self.cache.lookup(identifier)? {
                 CacheLookup::Ready(child) => return Ok(child),
                 CacheLookup::Pending(listener) => {
                     listener.await;
                     continue; // Re-evaluate cache now that the blocking event triggered
                 }
-                CacheLookup::Missing(guard) => guard,
+                CacheLookup::Missing(entry) => entry,
             };
 
+            let key = entry.key();
+
             // Ask Fxfs to register the blob and write its extent mappings into the shared mapping
-            // VMO, returning a key that is used to generate the pager-backed VMO.
-            let (size, key) = self
-                .cache_manager
+            // VMO, using the client-allocated key.
+            let size = self
+                .cache
                 .mapping_session
-                .open(identifier)
+                .open(key, identifier)
                 .await
                 .context("FIDL error calling MappingSession.Open")?
                 .map_err(|e| anyhow!("MappingSession.Open failed for blob: {e:?}"))?;
 
-            let vmo =
-                self.pager.create_vmo(zx::VmoOptions::empty(), &self.port, key as u64, size)?;
+            let vmo = self.pager.create_vmo(zx::VmoOptions::empty(), &self.port, key, size)?;
 
             // Create the initial child. We vend children of this VMO to clients so we can track
             // when all children are dropped to evict the blob from cache.
@@ -599,29 +688,7 @@ impl BlobPagerAndVerifier {
                 .create_child(zx::VmoChildOptions::REFERENCE | zx::VmoChildOptions::NO_WRITE, 0, 0)
                 .map_err(|s| anyhow!("Failed to create child VMO: {}", s))?;
 
-            let zero_children_receiver = ZeroChildrenReceiver { blob: OnceLock::new() };
-            let zero_children_registration =
-                fasync::EHandle::local().register_receiver(zero_children_receiver);
-
-            let cached = Arc::new(CachedBlob {
-                vmo,
-                root_hash: *identifier,
-                cache_manager: Arc::downgrade(&self.cache_manager),
-                vmo_key: key,
-                len: size,
-                registration: zero_children_registration,
-                merkle_verifier: OnceLock::new(),
-            });
-
-            cached.registration.receiver().blob.set(Arc::downgrade(&cached)).map_err(|_| {
-                anyhow!("Failed to bind CachedBlob to ZeroChildrenReceiver: already initialized")
-            })?;
-
-            cached.wait_for_zero_children();
-
-            // All initialization succeeded: dismiss the drop guard and store the cached blob.
-            guard.dismiss();
-            self.cache_manager.finalize_pending_request(identifier, Some(&cached));
+            entry.commit(vmo, size);
 
             return Ok(first_child);
         }
@@ -633,11 +700,12 @@ mod tests {
     use super::*;
     use crate::delivery::DELIVERY_DATA_SIZE;
     use futures::TryStreamExt;
+    use futures::channel::oneshot;
     use mapping::{DeliveryCommand, RawDeliveryCommand};
     use vmo_fifo::SyncSender;
 
     const TEST_BLOB_SIZE: u64 = (DELIVERY_DATA_SIZE * 2) as u64;
-    const TEST_VMO_KEY: u32 = 42;
+    const TEST_VMO_KEY: u64 = 1;
 
     // Used for testing BlobPagerAndVerifier interactions.
     // We arbitrarily allocate a 32KiB buffer so the payload spans multiple VMO pages.
@@ -647,7 +715,7 @@ mod tests {
         pager_and_verifier: Arc<BlobPagerAndVerifier>,
         mapping_task: fasync::Task<()>,
         mapper_task: fasync::Task<()>,
-        close_signal: Option<futures::channel::oneshot::Receiver<()>>,
+        close_signal: Option<oneshot::Receiver<()>>,
         delivery_vmo: zx::Vmo,
         pub valid_root: [u8; 32],
         pub valid_leaves: Vec<u8>,
@@ -669,7 +737,7 @@ mod tests {
             let (mapping_proxy, mut mapping_stream) =
                 fidl::endpoints::create_proxy_and_stream::<fmapping::MappingProviderMarker>();
 
-            let (close_tx, close_rx) = futures::channel::oneshot::channel();
+            let (close_tx, close_rx) = oneshot::channel();
             let mapping_task = fasync::Task::spawn(async move {
                 let mut close_tx = Some(close_tx);
                 if let Some(fmapping::MappingProviderRequest::OpenSession { session, responder }) =
@@ -685,14 +753,19 @@ mod tests {
                         session_stream.try_next().await.expect("try_next failed")
                     {
                         match request {
-                            fmapping::MappingSessionRequest::Open { identifier, responder } => {
+                            fmapping::MappingSessionRequest::Open {
+                                key,
+                                identifier,
+                                responder,
+                            } => {
                                 assert_eq!(identifier, expected_hash);
+                                assert_eq!(key, TEST_VMO_KEY);
                                 open_calls += 1;
                                 assert_eq!(
                                     open_calls, 1,
                                     "Open should only be called once per identifier"
                                 );
-                                responder.send(Ok((blob_size, TEST_VMO_KEY))).expect("send failed");
+                                responder.send(Ok(blob_size)).expect("send failed");
                             }
                             fmapping::MappingSessionRequest::Close { key, responder } => {
                                 assert_eq!(key, TEST_VMO_KEY);
@@ -710,7 +783,7 @@ mod tests {
             let (mapper_proxy, mut mapper_stream) =
                 fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
 
-            let (tx_delivery, rx_delivery) = futures::channel::oneshot::channel();
+            let (tx_delivery, rx_delivery) = oneshot::channel();
             let mapper_task = fasync::Task::spawn(async move {
                 if let Some(fblock::MapperRequest::OpenSession {
                     delivery_queue, responder, ..
@@ -748,8 +821,8 @@ mod tests {
     }
 
     struct ExpectedReadThread {
-        started_rx: Option<futures::channel::oneshot::Receiver<()>>,
-        done_rx: futures::channel::oneshot::Receiver<()>,
+        started_rx: Option<oneshot::Receiver<()>>,
+        done_rx: oneshot::Receiver<()>,
         handle: std::thread::JoinHandle<()>,
     }
 
@@ -774,8 +847,8 @@ mod tests {
     ) -> ExpectedReadThread {
         let vmo_clone =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle failed");
-        let (started_tx, started_rx) = futures::channel::oneshot::channel();
-        let (done_tx, done_rx) = futures::channel::oneshot::channel();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
 
         let handle = std::thread::spawn(move || {
             let mut buf = vec![0u8; size];
@@ -832,8 +905,12 @@ mod tests {
             env.pager_and_verifier.create_vmo(&env.valid_root).await.expect("create_vmo failed");
 
         {
-            let cache = env.pager_and_verifier.cache_manager.blob_states_by_hash.lock();
-            assert!(matches!(cache.get(&env.valid_root), Some(BlobState::Ready { .. })));
+            let state = env.pager_and_verifier.cache.state.lock();
+            assert_eq!(state.keys_by_hash.get(&env.valid_root), Some(&TEST_VMO_KEY));
+            assert!(matches!(
+                state.blob_states_by_key.get(&TEST_VMO_KEY),
+                Some(BlobState::Ready(_))
+            ));
         }
 
         drop(child_vmo);
@@ -843,11 +920,117 @@ mod tests {
         env.close_signal.take().expect("Missing signal").await.expect("Failed to close");
 
         {
-            let cache = env.pager_and_verifier.cache_manager.blob_states_by_hash.lock();
-            assert!(cache.get(&env.valid_root).is_none());
+            let state = env.pager_and_verifier.cache.state.lock();
+            assert!(state.keys_by_hash.get(&env.valid_root).is_none());
+            assert!(state.blob_states_by_key.get(&TEST_VMO_KEY).is_none());
         }
 
         env.teardown().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_create_vmo_multiple_distinct_blobs() {
+        use futures::StreamExt;
+
+        let (mapping_proxy, mut mapping_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fmapping::MappingProviderMarker>();
+        let (mapper_proxy, mut mapper_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
+
+        let (close_tx, mut close_rx) = futures::channel::mpsc::unbounded();
+        let mapping_task = fasync::Task::spawn(async move {
+            if let Some(fmapping::MappingProviderRequest::OpenSession { session, responder }) =
+                mapping_stream.try_next().await.expect("try_next failed")
+            {
+                let mapping_vmo = zx::Vmo::create(zx::system_get_page_size().into())
+                    .expect("zx::Vmo::create failed");
+                responder.send(Ok(mapping_vmo)).expect("send failed");
+
+                let mut session_stream = session.into_stream();
+                while let Some(request) = session_stream.try_next().await.expect("try_next failed")
+                {
+                    match request {
+                        fmapping::MappingSessionRequest::Open { responder, .. } => {
+                            responder.send(Ok(8192)).expect("send failed");
+                        }
+                        fmapping::MappingSessionRequest::Close { key, responder } => {
+                            responder.send(Ok(())).expect("send failed");
+                            let _ = close_tx.unbounded_send(key);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        let mapper_task = fasync::Task::spawn(async move {
+            if let Some(fblock::MapperRequest::OpenSession { responder, .. }) =
+                mapper_stream.try_next().await.expect("try_next failed")
+            {
+                responder.send(Ok(())).expect("send failed");
+            }
+        });
+
+        let pager_and_verifier = Arc::new(
+            BlobPagerAndVerifier::new(&mapping_proxy, &mapper_proxy)
+                .await
+                .expect("BlobPagerAndVerifier::new failed"),
+        );
+
+        let hash1: [u8; 32] = [0x11; 32];
+        let hash2: [u8; 32] = [0x22; 32];
+        let hash3: [u8; 32] = [0x33; 32];
+
+        let vmo1 = pager_and_verifier.create_vmo(&hash1).await.expect("create_vmo 1 failed");
+        let vmo2 = pager_and_verifier.create_vmo(&hash2).await.expect("create_vmo 2 failed");
+        let vmo3 = pager_and_verifier.create_vmo(&hash3).await.expect("create_vmo 3 failed");
+
+        let (key1, key2, key3) = {
+            let state = pager_and_verifier.cache.state.lock();
+            let k1 = *state.keys_by_hash.get(&hash1).expect("hash1 missing");
+            let k2 = *state.keys_by_hash.get(&hash2).expect("hash2 missing");
+            let k3 = *state.keys_by_hash.get(&hash3).expect("hash3 missing");
+            assert_ne!(k1, k2);
+            assert_ne!(k2, k3);
+            assert_ne!(k1, k3);
+            assert!(matches!(state.blob_states_by_key.get(&k1), Some(BlobState::Ready(_))));
+            assert!(matches!(state.blob_states_by_key.get(&k2), Some(BlobState::Ready(_))));
+            assert!(matches!(state.blob_states_by_key.get(&k3), Some(BlobState::Ready(_))));
+            (k1, k2, k3)
+        };
+
+        // Evict blob 2 by dropping its only child VMO
+        drop(vmo2);
+        let closed_key = close_rx.next().await.expect("expected close signal");
+        assert_eq!(closed_key, key2);
+
+        // Verify blob 2 was evicted while blob 1 and 3 remain cached
+        {
+            let state = pager_and_verifier.cache.state.lock();
+            assert!(state.keys_by_hash.get(&hash2).is_none());
+            assert!(state.blob_states_by_key.get(&key2).is_none());
+            assert_eq!(state.keys_by_hash.get(&hash1), Some(&key1));
+            assert_eq!(state.keys_by_hash.get(&hash3), Some(&key3));
+            assert!(matches!(state.blob_states_by_key.get(&key1), Some(BlobState::Ready(_))));
+            assert!(matches!(state.blob_states_by_key.get(&key3), Some(BlobState::Ready(_))));
+        }
+
+        // Re-open blob 2: it should generate a new key and open successfully
+        let vmo2_new = pager_and_verifier.create_vmo(&hash2).await.expect("re-create vmo 2 failed");
+        {
+            let state = pager_and_verifier.cache.state.lock();
+            let k = *state.keys_by_hash.get(&hash2).expect("hash2 missing after re-open");
+            assert_ne!(k, key2);
+            assert!(matches!(state.blob_states_by_key.get(&k), Some(BlobState::Ready(_))));
+        }
+
+        drop(vmo1);
+        drop(vmo3);
+        drop(vmo2_new);
+
+        drop(pager_and_verifier);
+        mapping_task.await;
+        mapper_task.await;
     }
 
     #[fuchsia::test]
@@ -857,7 +1040,7 @@ mod tests {
         let (mapper_proxy, mut mapper_stream) =
             fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
 
-        let (mock_opened_tx, mock_opened_rx) = futures::channel::oneshot::channel();
+        let (mock_opened_tx, mock_opened_rx) = oneshot::channel();
         let mapping_task = fasync::Task::spawn(async move {
             let mut mock_opened_tx = Some(mock_opened_tx);
             if let Some(fmapping::MappingProviderRequest::OpenSession { session, responder }) =
@@ -915,18 +1098,20 @@ mod tests {
         // state is updated.
         mock_opened_rx.await.expect("Open exited abruptly");
         {
-            let cache = pager_and_verifer.cache_manager.blob_states_by_hash.lock();
-            assert!(matches!(cache.get(identifier), Some(BlobState::Pending(_))));
+            let state = pager_and_verifer.cache.state.lock();
+            assert_eq!(state.keys_by_hash.get(identifier), Some(&1));
+            assert!(matches!(state.blob_states_by_key.get(&1), Some(BlobState::Opening { .. })));
         }
 
         // Simulate a failed create_vmo (future abort drops execution context)
         abort_handle.abort();
         let _ = primary_task.await;
 
-        // The cache should be cleared after due to PendingCacheEntryGuard being dropped
+        // The cache should be cleared after due to PendingEntry being dropped
         {
-            let cache = pager_and_verifer.cache_manager.blob_states_by_hash.lock();
-            assert!(cache.get(identifier).is_none());
+            let state = pager_and_verifer.cache.state.lock();
+            assert!(state.keys_by_hash.get(identifier).is_none());
+            assert!(state.blob_states_by_key.get(&1).is_none());
         }
 
         drop(pager_and_verifer);
@@ -941,8 +1126,8 @@ mod tests {
         let (mapper_proxy, mut mapper_stream) =
             fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
 
-        let (open_received_tx, open_received_rx) = futures::channel::oneshot::channel();
-        let (reply_tx, reply_rx) = futures::channel::oneshot::channel();
+        let (open_received_tx, open_received_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
 
         let mapping_task = fasync::Task::spawn(async move {
             if let Some(fmapping::MappingProviderRequest::OpenSession { session, responder }) =
@@ -990,8 +1175,11 @@ mod tests {
         // Wait until the primary caller is handling OpenSession (cache is Pending).
         open_received_rx.await.expect("open_received_rx failed");
         {
-            let cache = pager_and_verifier.cache_manager.blob_states_by_hash.lock();
-            assert!(matches!(cache.get(&hash), Some(BlobState::Pending(_))));
+            let state = pager_and_verifier.cache.state.lock();
+            assert!(matches!(
+                state.keys_by_hash.get(&hash).and_then(|k| state.blob_states_by_key.get(k)),
+                Some(BlobState::Opening { .. })
+            ));
         }
 
         // A second caller arrives while the primary creation is still pending.
@@ -1008,13 +1196,156 @@ mod tests {
 
         // Cache should be empty.
         {
-            let cache = pager_and_verifier.cache_manager.blob_states_by_hash.lock();
-            assert!(cache.get(&hash).is_none());
+            let state = pager_and_verifier.cache.state.lock();
+            assert!(state.keys_by_hash.get(&hash).is_none());
+            assert!(state.blob_states_by_key.is_empty());
         }
 
         drop(pager_and_verifier);
         drop(mapping_task);
         drop(mapper_task);
+    }
+
+    #[fuchsia::test]
+    async fn test_register_blob_arrives_before_open_completes() {
+        // Test that if `RegisterBlob` arrives while `session.open().await` is still pending
+        // (the arrival race), the blob's Merkle tree is retained and page reads succeed once
+        // `create_vmo` completes.
+        let (mapping_proxy, mut mapping_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fmapping::MappingProviderMarker>();
+        let (mapper_proxy, mut mapper_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
+
+        let blob_data = vec![0x42u8; TEST_BLOB_SIZE as usize];
+        let (root, leaf_hashes) =
+            fuchsia_merkle::MerkleRootBuilder::new(Vec::new()).complete(&blob_data);
+        let expected_hash: [u8; 32] = root.into();
+
+        let mut flat_leaves = Vec::new();
+        for hash in &leaf_hashes {
+            flat_leaves.extend_from_slice(hash.as_bytes());
+        }
+
+        let (tx_delivery, rx_delivery) = oneshot::channel();
+        let (open_key_tx, open_key_rx) = oneshot::channel();
+        let (resume_open_tx, resume_open_rx) = oneshot::channel();
+        let (close_tx, close_rx) = oneshot::channel();
+
+        let mapping_task = fasync::Task::spawn(async move {
+            let mut close_tx = Some(close_tx);
+            let mut open_key_tx = Some(open_key_tx);
+            let mut resume_open_rx = Some(resume_open_rx);
+            if let Some(fmapping::MappingProviderRequest::OpenSession { session, responder }) =
+                mapping_stream.try_next().await.expect("try_next failed")
+            {
+                let mapping_vmo = zx::Vmo::create(zx::system_get_page_size().into())
+                    .expect("zx::Vmo::create failed");
+                responder.send(Ok(mapping_vmo)).expect("send failed");
+
+                let mut session_stream = session.into_stream();
+                while let Some(request) = session_stream.try_next().await.expect("try_next failed")
+                {
+                    match request {
+                        fmapping::MappingSessionRequest::Open { key, identifier, responder } => {
+                            assert_eq!(identifier, expected_hash);
+                            // Send key to test thread so it can deliver leaves before Open returns
+                            if let Some(tx) = open_key_tx.take() {
+                                tx.send(key).expect("open_key_tx failed");
+                            }
+                            if let Some(rx) = resume_open_rx.take() {
+                                rx.await.expect("resume_open_rx failed");
+                            }
+                            responder.send(Ok(TEST_BLOB_SIZE)).expect("send failed");
+                        }
+                        fmapping::MappingSessionRequest::Close { key: _, responder } => {
+                            responder.send(Ok(())).expect("send failed");
+                            if let Some(tx) = close_tx.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        let mapper_task = fasync::Task::spawn(async move {
+            if let Some(fblock::MapperRequest::OpenSession { delivery_queue, responder, .. }) =
+                mapper_stream.try_next().await.expect("try_next failed")
+            {
+                tx_delivery.send(delivery_queue).expect("send failed");
+                responder.send(Ok(())).expect("send failed");
+            }
+        });
+
+        let pager_and_verifier = Arc::new(
+            BlobPagerAndVerifier::new(&mapping_proxy, &mapper_proxy)
+                .await
+                .expect("BlobPagerAndVerifier::new failed"),
+        );
+
+        let delivery_vmo =
+            rx_delivery.await.expect("rx_delivery wait failed").expect("delivery_vmo was None");
+        let mut sender = SyncSender::<RawDeliveryCommand>::new(
+            delivery_vmo
+                .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                .expect("duplicate_handle failed"),
+            zx::system_get_page_size() as usize,
+            mapping::PENDING_DELIVERY_COMMANDS_CAPACITY,
+        )
+        .expect("SyncSender::new failed");
+
+        let verifier_clone = pager_and_verifier.clone();
+        let create_task =
+            fasync::Task::spawn(async move { verifier_clone.create_vmo(&expected_hash).await });
+
+        // Wait until `open()` is called and get the client-allocated key
+        let key = open_key_rx.await.expect("open_key_rx failed");
+
+        // While `open()` is still pending, send `RegisterBlob`
+        let mut payload =
+            sender.reserve_payload(flat_leaves.len()).expect("reserve_payload failed");
+        payload.data().copy_from_slice(&flat_leaves);
+        let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
+            key: key as u64,
+            offset: payload.offset(),
+            length: flat_leaves.len() as u32,
+        }
+        .into();
+        payload.commit(raw_cmd).expect("commit failed");
+
+        // Wait until delivery thread processes `RegisterBlob` on the pending entry
+        while !pager_and_verifier.cache.is_merkle_initialized(key) {
+            fasync::Timer::new(std::time::Duration::from_millis(5)).await;
+        }
+
+        // Resume Open and wait for `create_vmo` to finish
+        resume_open_tx.send(()).expect("resume_open_tx failed");
+        let vmo = create_task.await.expect("create_vmo failed");
+
+        // We should be able to deliver data and read it immediately
+        let chunk = &blob_data[..DELIVERY_DATA_SIZE];
+        let mut data_payload = sender.reserve_payload(chunk.len()).expect("reserve_payload failed");
+        data_payload.data().copy_from_slice(chunk);
+        let data_cmd: RawDeliveryCommand = DeliveryCommand::Data {
+            key: key as u64,
+            offset: data_payload.offset(),
+            length: chunk.len() as u32,
+            target_offset: 0,
+        }
+        .into();
+        data_payload.commit(data_cmd).expect("commit failed");
+
+        let mut read_buf = vec![0u8; DELIVERY_DATA_SIZE];
+        vmo.read(&mut read_buf, 0).expect("read failed");
+        assert_eq!(read_buf, chunk);
+
+        drop(vmo);
+        close_rx.await.expect("close_rx failed");
+
+        drop(pager_and_verifier);
+        mapping_task.await;
+        mapper_task.await;
     }
 
     #[fuchsia::test]
@@ -1042,7 +1373,7 @@ mod tests {
         bad_payload.data().copy_from_slice(&corrupted_leaves);
 
         let bad_raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: bad_payload.offset(),
             length: corrupted_leaves.len() as u32,
         }
@@ -1052,11 +1383,8 @@ mod tests {
         // Yield to allow background thread to process the invalid merkle
         fasync::Timer::new(std::time::Duration::from_millis(5)).await;
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
 
         // merkle_verifier should remain as None as the leaves are corrupted
         assert!(blob.merkle_verifier.get().is_none());
@@ -1067,7 +1395,7 @@ mod tests {
         payload.data().copy_from_slice(&env.valid_leaves);
 
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
         }
@@ -1098,11 +1426,8 @@ mod tests {
         )
         .expect("SyncSender::new failed");
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
 
         // Test with unknown/expired key
         let mut invalid_key_payload =
@@ -1121,7 +1446,7 @@ mod tests {
         // Test out-of-bounds offset/length
         let oob_payload = sender.reserve_payload(8).expect("reserve_payload failed");
         let oob_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: u32::MAX - 4, // Malicious offset
             length: 8,
         }
@@ -1133,7 +1458,7 @@ mod tests {
         // Test invalid leaf length (not a multiple of HASH_SIZE)
         let invalid_len_payload = sender.reserve_payload(10).expect("reserve_payload failed");
         let invalid_len_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: invalid_len_payload.offset(),
             length: 10,
         }
@@ -1166,18 +1491,15 @@ mod tests {
             sender.reserve_payload(env.valid_leaves.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&env.valid_leaves);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
         while blob.merkle_verifier.get().is_none() {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
@@ -1189,7 +1511,7 @@ mod tests {
         payload.data().copy_from_slice(&test_payload);
 
         let cmd: RawDeliveryCommand = DeliveryCommand::Data {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             target_offset: 0,
             length: test_payload.len() as u32,
             offset: payload.offset(),
@@ -1228,18 +1550,15 @@ mod tests {
             sender.reserve_payload(env.valid_leaves.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&env.valid_leaves);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
         while blob.merkle_verifier.get().is_none() {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
@@ -1252,7 +1571,7 @@ mod tests {
             sender.reserve_payload(corrupted_data.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&corrupted_data);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: corrupted_data.len() as u32,
             target_offset: 0,
@@ -1310,18 +1629,15 @@ mod tests {
             sender.reserve_payload(env.valid_leaves.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&env.valid_leaves);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
         while blob.merkle_verifier.get().is_none() {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
@@ -1332,7 +1648,7 @@ mod tests {
         // Start a reader on page 0 and deliver the valid first chunk (0..chunk_size).
         let paged_vmo_clone1 =
             paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle failed");
-        let (tx1, rx1) = futures::channel::oneshot::channel();
+        let (tx1, rx1) = oneshot::channel();
         let expected_page0 = env.blob_data[..page_size].to_vec();
         let thread1 = std::thread::spawn(move || {
             let mut buf = vec![0u8; page_size];
@@ -1347,7 +1663,7 @@ mod tests {
             sender.reserve_payload(valid_chunk.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(valid_chunk);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: valid_chunk.len() as u32,
             target_offset: 0,
@@ -1376,7 +1692,7 @@ mod tests {
             sender.reserve_payload(corrupted_chunk.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&corrupted_chunk);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: corrupted_chunk.len() as u32,
             target_offset: chunk_size as u64,
@@ -1417,18 +1733,15 @@ mod tests {
             sender.reserve_payload(env.valid_leaves.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&env.valid_leaves);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
         while blob.merkle_verifier.get().is_none() {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
@@ -1453,7 +1766,7 @@ mod tests {
             sender.reserve_payload(valid_chunk1.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(valid_chunk1);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: valid_chunk1.len() as u32,
             target_offset: 0,
@@ -1472,7 +1785,7 @@ mod tests {
             sender.reserve_payload(corrupted_chunk2.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&corrupted_chunk2);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: corrupted_chunk2.len() as u32,
             target_offset: chunk_size as u64,
@@ -1515,7 +1828,7 @@ mod tests {
         let mut payload = sender.reserve_payload(chunk.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(chunk);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: chunk.len() as u32,
             target_offset: 0,
@@ -1549,18 +1862,15 @@ mod tests {
             sender.reserve_payload(env.valid_leaves.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&env.valid_leaves);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
         while blob.merkle_verifier.get().is_none() {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
@@ -1569,7 +1879,7 @@ mod tests {
         let paged_vmo_clone =
             paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle failed");
 
-        let (tx, rx) = futures::channel::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let thread = std::thread::spawn(move || {
             let mut buf = vec![0u8; expected_data.len()];
             paged_vmo_clone.read(&mut buf, 0).expect("failed to read from paged vmo");
@@ -1583,7 +1893,7 @@ mod tests {
             let mut payload = sender.reserve_payload(chunk.len()).expect("reserve_payload failed");
             payload.data().copy_from_slice(chunk);
             let raw_cmd: RawDeliveryCommand = DeliveryCommand::Data {
-                key: TEST_VMO_KEY as u64,
+                key: TEST_VMO_KEY,
                 offset: payload.offset(),
                 length: chunk.len() as u32,
                 target_offset: (i * chunk_size) as u64,
@@ -1620,18 +1930,15 @@ mod tests {
             sender.reserve_payload(env.valid_leaves.len()).expect("reserve_payload failed");
         payload.data().copy_from_slice(&env.valid_leaves);
         let raw_cmd: RawDeliveryCommand = DeliveryCommand::RegisterBlob {
-            key: TEST_VMO_KEY as u64,
+            key: TEST_VMO_KEY,
             offset: payload.offset(),
             length: env.valid_leaves.len() as u32,
         }
         .into();
         payload.commit(raw_cmd).expect("commit failed");
 
-        let blob = env
-            .pager_and_verifier
-            .cache_manager
-            .get_by_key(TEST_VMO_KEY)
-            .expect("get_by_key failed");
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
         while blob.merkle_verifier.get().is_none() {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
@@ -1646,7 +1953,7 @@ mod tests {
         payload1
             .commit(
                 DeliveryCommand::Data {
-                    key: TEST_VMO_KEY as u64,
+                    key: TEST_VMO_KEY,
                     target_offset: 0,
                     length: chunk1.len() as u32,
                     offset: off1,
@@ -1668,7 +1975,7 @@ mod tests {
         payload2
             .commit(
                 DeliveryCommand::Data {
-                    key: TEST_VMO_KEY as u64,
+                    key: TEST_VMO_KEY,
                     target_offset: DELIVERY_DATA_SIZE as u64,
                     length: chunk2_len_aligned as u32,
                     offset: off2,

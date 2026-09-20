@@ -2,457 +2,409 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Used to resolve most non-OTA packages on products that support ephemeral resolution.
-//! * always uses open package tracking
-//! * has a hard-coded priority of authorities (url to hash mappings):
-//!   1. base index
-//!   2. upgradable packages
-//!   3. eager packages
-//!   4. the remote TUF repositories managed by pkg-resolver
-//!   5. the cache index in case of certain TUF errors
-
 use crate::upgradable_packages::UpgradablePackages;
 use anyhow::{Context as _, anyhow};
 use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg as fpkg;
 use fidl_fuchsia_pkg_ext as fpkg_ext;
+use fuchsia_inspect as finspect;
+use fuchsia_sync::Mutex;
 use fuchsia_url::fuchsia_pkg::{AbsolutePackageUrl, PackageUrl};
 use futures::stream::TryStreamExt as _;
-use log::error;
+use log::{error, warn};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 const SLOW_CACHE_FALLBACK_WARN_DURATION: zx::MonotonicDuration =
     zx::MonotonicDuration::from_seconds(10);
 const SLOW_CACHE_FALLBACK_WARN_SQUELCH_DURATION: zx::MonotonicDuration =
     zx::MonotonicDuration::from_minutes(10);
+const INSPECT_RECENT_RESOLVE_COUNT: usize = 50;
 
-/// The package resolver implementation used by the full component resolver.
-pub(crate) struct FullResolver {
-    base_index: Arc<crate::BaseIndex>,
+/// Used to resolve most non-OTA packages on products that support ephemeral resolution.
+/// * always uses open package tracking
+/// * has a hard-coded priority of authorities (url to hash mappings):
+///   1. base index
+///   2. upgradable packages
+///   3. eager packages
+///   4. the remote TUF repositories managed by pkg-resolver
+///   5. the cache index in case of certain TUF errors
+pub(crate) struct Resolver {
+    base_resolver: Arc<crate::base_package_resolver::Resolver>,
     upgradable_packages: Option<Arc<UpgradablePackages>>,
     tuf_authority: fpkg::AuthorityProxy,
     cache_index: Arc<crate::CacheIndex>,
     package_fetcher: crate::package_fetcher::PackageFetcher,
     authenticator: context_authenticator::ContextAuthenticator,
     open_packages: crate::RootDirCache,
-    executability_restrictions: system_image::ExecutabilityRestrictions,
+    executability_decider: crate::executability::Decider,
+    scope: package_directory::ExecutionScope,
+
+    // Only used for inspect.
+    inspect_active: finspect::Node,
+    inspect_recent: Mutex<fuchsia_inspect_contrib::nodes::BoundedListNode>,
+    request_count: std::sync::atomic::AtomicU64,
+    _inspect: finspect::Node,
 }
 
-impl FullResolver {
+impl Resolver {
     pub(crate) fn new(
-        base_index: Arc<crate::BaseIndex>,
+        base_resolver: Arc<crate::base_package_resolver::Resolver>,
         upgradable_packages: Option<Arc<UpgradablePackages>>,
         tuf_authority: fpkg::AuthorityProxy,
         cache_index: Arc<crate::CacheIndex>,
         package_fetcher: crate::package_fetcher::PackageFetcher,
         authenticator: context_authenticator::ContextAuthenticator,
         open_packages: crate::RootDirCache,
-        executability_restrictions: system_image::ExecutabilityRestrictions,
-    ) -> Self {
-        Self {
-            base_index,
+        executability_decider: crate::executability::Decider,
+        scope: package_directory::ExecutionScope,
+        inspect: finspect::Node,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            base_resolver,
             upgradable_packages,
             tuf_authority,
             cache_index,
             package_fetcher,
             authenticator,
             open_packages,
-            executability_restrictions,
-        }
-    }
-}
-
-impl crate::component_resolver::PackageResolver for FullResolver {
-    type Error = Error;
-
-    async fn resolve_and_serve(
-        &self,
-        url: &fuchsia_url::fuchsia_pkg::AbsolutePackageUrl,
-        dir: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-        scope: package_directory::ExecutionScope,
-    ) -> Result<fpkg::ResolutionContext, Error> {
-        resolve_and_serve(
-            url,
-            dir,
-            self.base_index.as_ref(),
-            self.upgradable_packages.as_deref(),
-            &self.tuf_authority,
-            self.cache_index.as_ref(),
-            &self.package_fetcher,
-            self.authenticator.clone(),
-            &self.open_packages,
-            self.executability_restrictions,
+            executability_decider,
             scope,
+            inspect_active: inspect.create_child("active"),
+            inspect_recent: Mutex::new(fuchsia_inspect_contrib::nodes::BoundedListNode::new(
+                inspect.create_child("recent"),
+                INSPECT_RECENT_RESOLVE_COUNT,
+            )),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            _inspect: inspect,
+        })
+    }
+
+    pub(crate) async fn serve_request_stream(
+        self: Arc<Self>,
+        stream: fpkg::PackageResolverRequestStream,
+    ) -> anyhow::Result<()> {
+        stream
+            .map_err(anyhow::Error::new)
+            .try_for_each_concurrent(None, |req| async {
+                match req {
+                    fpkg::PackageResolverRequest::Resolve { package_url, dir, responder } => {
+                        self.handle_resolve_request(package_url, dir, responder).await
+                    }
+                    fpkg::PackageResolverRequest::ResolveWithContext {
+                        package_url,
+                        context,
+                        dir,
+                        responder,
+                    } => {
+                        self.handle_resolve_with_context_request(
+                            package_url,
+                            context,
+                            dir,
+                            responder,
+                        )
+                        .await
+                    }
+                    fpkg::PackageResolverRequest::GetHash { package_url, responder } => {
+                        self.handle_get_hash_request(package_url, responder).await
+                    }
+                }
+            })
+            .await
+    }
+
+    async fn handle_resolve_request(
+        &self,
+        package_url: String,
+        dir: ServerEnd<fio::DirectoryMarker>,
+        responder: fpkg::PackageResolverResolveResponder,
+    ) -> Result<(), anyhow::Error> {
+        match self.resolve_unparsed_and_serve(&package_url, dir).await {
+            Ok(context) => responder.send(Ok(&context)),
+            Err(e) => {
+                let fidl_error = (&e).into();
+                error!("full resolver failed to resolve {package_url}: {:#}", anyhow!(e));
+                responder.send(Err(fidl_error))
+            }
+        }
+        .context("sending fuchsia.pkg/PackageResolver-full.Resolve response")
+    }
+
+    async fn handle_resolve_with_context_request(
+        &self,
+        package_url: String,
+        context: fpkg::ResolutionContext,
+        dir: ServerEnd<fio::DirectoryMarker>,
+        responder: fpkg::PackageResolverResolveWithContextResponder,
+    ) -> Result<(), anyhow::Error> {
+        match self.resolve_with_context_unparsed_and_serve(&package_url, context, dir).await {
+            Ok(context) => responder.send(Ok(&context)),
+            Err(e) => {
+                let fidl_error = (&e).into();
+                error!(
+                    "full resolver failed to resolve with context {package_url}: {:#}",
+                    anyhow!(e)
+                );
+                responder.send(Err(fidl_error))
+            }
+        }
+        .context("sending fuchsia.pkg/PackageResolver-full.ResolveWithContext response")
+    }
+
+    async fn handle_get_hash_request(
+        &self,
+        package_url: fpkg::PackageUrl,
+        responder: fpkg::PackageResolverGetHashResponder,
+    ) -> Result<(), anyhow::Error> {
+        match self.lookup_unparsed(&package_url.url).await {
+            Ok((hash, _)) => responder.send(Ok(&fpkg::BlobId { merkle_root: hash.into() })),
+            Err(e) => {
+                let status = zx::Status::from(&e);
+                error!("full resolver failed to get hash {}: {:#}", package_url.url, anyhow!(e));
+                responder.send(Err(status.into_raw()))
+            }
+        }
+        .context("sending fuchsia.pkg/PackageResolver-full.GetHash response")
+    }
+
+    async fn resolve_with_context_unparsed_and_serve(
+        &self,
+        package_url: &str,
+        context: fpkg::ResolutionContext,
+        dir: ServerEnd<fio::DirectoryMarker>,
+    ) -> Result<fpkg::ResolutionContext, Error> {
+        self.resolve_with_context_and_serve(
+            &PackageUrl::parse(package_url).map_err(Error::InvalidUrl)?,
+            context,
+            dir,
         )
         .await
     }
 
     async fn resolve_with_context_and_serve(
         &self,
-        url: &fuchsia_url::fuchsia_pkg::PackageUrl,
+        url: &PackageUrl,
         context: fpkg::ResolutionContext,
-        dir: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-        scope: package_directory::ExecutionScope,
+        dir: ServerEnd<fio::DirectoryMarker>,
     ) -> Result<fpkg::ResolutionContext, Error> {
-        resolve_with_context_and_serve(
-            url,
-            context,
-            dir,
-            &self.base_index,
-            self.upgradable_packages.as_deref(),
-            &self.tuf_authority,
-            self.cache_index.as_ref(),
-            &self.package_fetcher,
-            self.authenticator.clone(),
-            &self.open_packages,
-            self.executability_restrictions,
-            scope,
-        )
-        .await
-    }
-}
-
-pub(crate) async fn serve_request_stream(
-    stream: fpkg::PackageResolverRequestStream,
-    base_index: Arc<crate::BaseIndex>,
-    upgradable_packages: Option<Arc<UpgradablePackages>>,
-    tuf_authority: fpkg::AuthorityProxy,
-    cache_index: Arc<crate::CacheIndex>,
-    package_fetcher: crate::package_fetcher::PackageFetcher,
-    authenticator: context_authenticator::ContextAuthenticator,
-    open_packages: crate::RootDirCache,
-    executability_restrictions: system_image::ExecutabilityRestrictions,
-    scope: package_directory::ExecutionScope,
-) -> anyhow::Result<()> {
-    stream
-        .map_err(anyhow::Error::new)
-        .try_for_each_concurrent(None, |req| async {
-            match req {
-                fpkg::PackageResolverRequest::Resolve { package_url, dir, responder } => {
-                    match resolve_unparsed_and_serve(
-                        &package_url,
-                        dir,
-                        base_index.as_ref(),
-                        upgradable_packages.as_deref(),
-                        &tuf_authority,
-                        cache_index.as_ref(),
-                        &package_fetcher,
-                        authenticator.clone(),
-                        &open_packages,
-                        executability_restrictions,
-                        scope.clone(),
-                    )
-                    .await
-                    {
-                        Ok(context) => responder.send(Ok(&context)),
-                        Err(e) => {
-                            let fidl_error = (&e).into();
-                            error!(
-                                "full resolver failed to resolve {}: {:#}",
-                                package_url,
-                                anyhow!(e)
-                            );
-                            responder.send(Err(fidl_error))
-                        }
-                    }
-                    .context("sending fuchsia.pkg/PackageResolver-full.Resolve response")
+        let root_dir = match url {
+            PackageUrl::Absolute(url) => {
+                if !context.bytes.is_empty() {
+                    return Err(Error::ContextWithAbsoluteUrl);
                 }
-                fpkg::PackageResolverRequest::ResolveWithContext {
-                    package_url,
-                    context,
-                    dir,
-                    responder,
-                } => match resolve_with_context_unparsed_and_serve(
-                    &package_url,
-                    context,
-                    dir,
-                    base_index.as_ref(),
-                    upgradable_packages.as_deref(),
-                    &tuf_authority,
-                    cache_index.as_ref(),
-                    &package_fetcher,
-                    authenticator.clone(),
-                    &open_packages,
-                    executability_restrictions,
-                    scope.clone(),
-                )
-                .await
-                {
-                    Ok(context) => responder.send(Ok(&context)),
-                    Err(e) => {
-                        let fidl_error = (&e).into();
-                        error!(
-                            "full resolver failed to resolve with context {}: {:#}",
-                            package_url,
-                            anyhow!(e)
-                        );
-                        responder.send(Err(fidl_error))
-                    }
-                }
-                .context("sending fuchsia.pkg/PackageResolver-full.ResolveWithContext response"),
-                fpkg::PackageResolverRequest::GetHash { package_url, responder } => {
-                    match lookup_unparsed(
-                        &package_url.url,
-                        base_index.as_ref(),
-                        upgradable_packages.as_deref(),
-                        &tuf_authority,
-                        cache_index.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok((hash, _)) => {
-                            responder.send(Ok(&fpkg::BlobId { merkle_root: hash.into() }))
-                        }
-                        Err(e) => {
-                            let status = zx::Status::from(&e);
-                            error!(
-                                "full resolver failed to get hash {}: {:#}",
-                                package_url.url,
-                                anyhow!(e)
-                            );
-                            responder.send(Err(status.into_raw()))
-                        }
-                    }
-                }
-                .context("sending fuchsia.pkg/PackageResolver-full.GetHash response"),
+                self.resolve_manage_inspect(url).await
             }
-        })
-        .await
-}
-
-async fn resolve_with_context_unparsed_and_serve(
-    package_url: &str,
-    context: fpkg::ResolutionContext,
-    dir: ServerEnd<fio::DirectoryMarker>,
-    base_index: &crate::BaseIndex,
-    upgradable_packages: Option<&UpgradablePackages>,
-    tuf_authority: &fpkg::AuthorityProxy,
-    cache_index: &crate::CacheIndex,
-    package_fetcher: &crate::package_fetcher::PackageFetcher,
-    authenticator: context_authenticator::ContextAuthenticator,
-    open_packages: &crate::RootDirCache,
-    executability_restrictions: system_image::ExecutabilityRestrictions,
-    scope: package_directory::ExecutionScope,
-) -> Result<fpkg::ResolutionContext, Error> {
-    resolve_with_context_and_serve(
-        &PackageUrl::parse(package_url).map_err(Error::InvalidUrl)?,
-        context,
-        dir,
-        base_index,
-        upgradable_packages,
-        tuf_authority,
-        cache_index,
-        package_fetcher,
-        authenticator,
-        open_packages,
-        executability_restrictions,
-        scope,
-    )
-    .await
-}
-
-async fn resolve_with_context_and_serve(
-    package_url: &PackageUrl,
-    context: fpkg::ResolutionContext,
-    dir: ServerEnd<fio::DirectoryMarker>,
-    base_index: &crate::BaseIndex,
-    upgradable_packages: Option<&UpgradablePackages>,
-    tuf_authority: &fpkg::AuthorityProxy,
-    cache_index: &crate::CacheIndex,
-    package_fetcher: &crate::package_fetcher::PackageFetcher,
-    authenticator: context_authenticator::ContextAuthenticator,
-    open_packages: &crate::RootDirCache,
-    executability_restrictions: system_image::ExecutabilityRestrictions,
-    scope: package_directory::ExecutionScope,
-) -> Result<fpkg::ResolutionContext, Error> {
-    let root_dir = match package_url {
-        PackageUrl::Absolute(url) => {
-            if !context.bytes.is_empty() {
-                return Err(Error::ContextWithAbsoluteUrl);
-            }
-            resolve(
-                url,
-                base_index,
-                upgradable_packages,
-                tuf_authority,
-                cache_index,
-                package_fetcher,
-                open_packages,
-            )
-            .await
-        }
-        PackageUrl::Relative(url) => {
-            resolve_subpackage(url, context, authenticator.clone(), open_packages).await
-        }
-    }?;
-    let hash = *root_dir.hash();
-    let flags = executability_status(executability_restrictions, base_index, hash).into();
-    vfs::directory::serve_on(root_dir, flags, scope, dir);
-    Ok(authenticator.create(&hash))
-}
-
-async fn resolve_unparsed_and_serve(
-    url: &str,
-    dir: ServerEnd<fio::DirectoryMarker>,
-    base_index: &crate::BaseIndex,
-    upgradable_packages: Option<&UpgradablePackages>,
-    tuf_authority: &fpkg::AuthorityProxy,
-    cache_index: &crate::CacheIndex,
-    package_fetcher: &crate::package_fetcher::PackageFetcher,
-    authenticator: context_authenticator::ContextAuthenticator,
-    open_packages: &crate::RootDirCache,
-    executability_restrictions: system_image::ExecutabilityRestrictions,
-    scope: package_directory::ExecutionScope,
-) -> Result<fpkg::ResolutionContext, Error> {
-    resolve_and_serve(
-        &url.parse().map_err(Error::InvalidUrl)?,
-        dir,
-        base_index,
-        upgradable_packages,
-        tuf_authority,
-        cache_index,
-        package_fetcher,
-        authenticator,
-        open_packages,
-        executability_restrictions,
-        scope,
-    )
-    .await
-}
-
-async fn resolve_and_serve(
-    url: &AbsolutePackageUrl,
-    dir: ServerEnd<fio::DirectoryMarker>,
-    base_index: &crate::BaseIndex,
-    upgradable_packages: Option<&UpgradablePackages>,
-    tuf_authority: &fpkg::AuthorityProxy,
-    cache_index: &crate::CacheIndex,
-    package_fetcher: &crate::package_fetcher::PackageFetcher,
-    authenticator: context_authenticator::ContextAuthenticator,
-    open_packages: &crate::RootDirCache,
-    executability_restrictions: system_image::ExecutabilityRestrictions,
-    scope: package_directory::ExecutionScope,
-) -> Result<fpkg::ResolutionContext, Error> {
-    let root_dir = resolve(
-        url,
-        base_index,
-        upgradable_packages,
-        tuf_authority,
-        cache_index,
-        package_fetcher,
-        open_packages,
-    )
-    .await?;
-    let hash = *root_dir.hash();
-    let flags = executability_status(executability_restrictions, base_index, hash).into();
-    vfs::directory::serve_on(root_dir, flags, scope, dir);
-    Ok(authenticator.create(&hash))
-}
-
-async fn resolve(
-    url: &AbsolutePackageUrl,
-    base_index: &crate::BaseIndex,
-    upgradable_packages: Option<&UpgradablePackages>,
-    tuf_authority: &fpkg::AuthorityProxy,
-    cache_index: &crate::CacheIndex,
-    package_fetcher: &crate::package_fetcher::PackageFetcher,
-    open_packages: &crate::RootDirCache,
-) -> Result<Arc<crate::root_dir::RootDir>, Error> {
-    let (pkg_id, blob_source) =
-        lookup(url, base_index, upgradable_packages, tuf_authority, cache_index).await?;
-    if let Some(root_dir) = open_packages.get(&pkg_id) {
-        return Ok(root_dir);
-    }
-    if let Some(blob_source) = blob_source {
-        return package_fetcher
-            .fetch(pkg_id, blob_source, fpkg::GcProtection::OpenPackageTracking)
-            .await
-            .map_err(Error::PackageFetcher);
-    }
-    open_packages
-        .get_or_insert(pkg_id, None)
-        .await
-        .map_err(|source| Error::CreatingRootDir { source, pkg_id })
-}
-
-async fn lookup_unparsed(
-    url: &str,
-    base_index: &crate::BaseIndex,
-    upgradable_packages: Option<&UpgradablePackages>,
-    tuf_authority: &fpkg::AuthorityProxy,
-    cache_index: &crate::CacheIndex,
-) -> Result<(fuchsia_hash::Hash, Option<http::Uri>), Error> {
-    lookup(
-        &url.parse().map_err(Error::InvalidUrl)?,
-        base_index,
-        upgradable_packages,
-        tuf_authority,
-        cache_index,
-    )
-    .await
-}
-
-// Returns the hash of the package and an optional http blob dir that contains the package's blobs.
-// If the http blob dir is present, the package blobs may not all be present in local storage,
-// otherwise the blobs are guaranteed to be present.
-async fn lookup(
-    url: &AbsolutePackageUrl,
-    base_index: &crate::BaseIndex,
-    upgradable_packages: Option<&UpgradablePackages>,
-    tuf_authority: &fpkg::AuthorityProxy,
-    cache_index: &crate::CacheIndex,
-) -> Result<(fuchsia_hash::Hash, Option<http::Uri>), Error> {
-    // Use monotonic timeline to warn on slow cache fallback to avoid warning on suspension.
-    let start_mono = zx::MonotonicInstant::get();
-    let () = match crate::base_package_resolver::lookup(url, base_index) {
-        Ok(pkg_id) => return Ok((pkg_id, None)),
-        Err(crate::base_package_resolver::Error::PackageNotInIndex) => (),
-        Err(e) => return Err(Error::BaseResolver(e)),
-    };
-
-    if let Some(upgradable_packages) = upgradable_packages
-        && let Some(hash) = upgradable_packages.get_hash(url.as_unpinned()).await
-    {
-        if url.hash().is_some() {
-            return Err(Error::PinnedUpgradablePackage);
-        }
-        return Ok((hash, None));
+            PackageUrl::Relative(url) => self.resolve_subpackage(url, context).await,
+        }?;
+        let hash = *root_dir.hash();
+        let flags = self.executability_decider.decide(hash).into();
+        vfs::directory::serve_on(root_dir, flags, self.scope.clone(), dir);
+        Ok(self.authenticator.clone().create(&hash))
     }
 
-    // TODO(https://fxbug.dev/542690903): Add eager package support.
+    async fn resolve_unparsed_and_serve(
+        &self,
+        url: &str,
+        dir: ServerEnd<fio::DirectoryMarker>,
+    ) -> Result<fpkg::ResolutionContext, Error> {
+        self.resolve_and_serve(&url.parse().map_err(Error::InvalidUrl)?, dir).await
+    }
 
-    let (tuf_err, deprecated_fallback) = match tuf_authority
-        .lookup(&fpkg::PackageUrl { url: url.as_unpinned().to_string() })
-        .await
-        .map_err(Error::AuthorityFidl)?
-    {
-        Ok((fpkg::BlobId { merkle_root }, http_blob_dir)) => {
-            // TODO(https://fxbug.dev/519687989): Forbid pinned URL authority override.
-            let pkg_id = url.hash().unwrap_or_else(|| merkle_root.into());
-            return Ok((pkg_id, Some(http_blob_dir.parse().map_err(Error::InvalidBlobDirUri)?)));
-        }
-        // TODO(https://fxbug.dev/42127880): Remove package not found cache fallback.
-        Err(e @ fpkg::AuthorityLookupError::PackageNotFound) => (e, true),
-        Err(e @ fpkg::AuthorityLookupError::RepositoryNotFound) => (e, false),
-        Err(e @ fpkg::AuthorityLookupError::UpstreamConnection) => (e, false),
-        Err(e) => return Err(Error::Authority(e)),
-    };
+    async fn resolve_and_serve(
+        &self,
+        url: &AbsolutePackageUrl,
+        dir: ServerEnd<fio::DirectoryMarker>,
+    ) -> Result<fpkg::ResolutionContext, Error> {
+        let root_dir = self.resolve_manage_inspect(url).await?;
+        let hash = *root_dir.hash();
+        let flags = self.executability_decider.decide(hash).into();
+        vfs::directory::serve_on(root_dir, flags, self.scope.clone(), dir);
+        Ok(self.authenticator.clone().create(&hash))
+    }
 
-    let Some(pkg_id) = lookup_cache_fallback(url, cache_index) else {
-        return Err(Error::Authority(tuf_err));
-    };
-    if deprecated_fallback {
-        log::warn!(
-            "Did not find {url} in a TUF repo, but did find a matching package name in the \
-             built-in cache packages set, so falling back to it. Your package repository may not \
-             be configured to serve the package correctly, or may be overriding the domain for the \
-             repository which would normally serve this package. This will be an error in a future \
-             version of Fuchsia, see https://fxbug.dev/42127862."
+    async fn resolve_manage_inspect(
+        &self,
+        url: &AbsolutePackageUrl,
+    ) -> Result<Arc<crate::root_dir::RootDir>, Error> {
+        let inspect = self.inspect_active.create_child(
+            self.request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string(),
         );
+        let res = self.resolve(url, &inspect).await;
+        inspect.record_string(
+            "result",
+            res.as_ref().err().map_or(Cow::Borrowed("success"), |e| {
+                format!("error: {}", stringify_error(e)).into()
+            }),
+        );
+        inspect.record_int("end_boot_ns", zx::BootInstant::get().into_nanos());
+        self.move_inspect_node_to_recent(inspect);
+        res
     }
-    let () = log_slow_cache_fallback(start_mono, url);
-    Ok((pkg_id, None))
+
+    async fn resolve(
+        &self,
+        url: &AbsolutePackageUrl,
+        inspect: &finspect::Node,
+    ) -> Result<Arc<crate::root_dir::RootDir>, Error> {
+        inspect.record_int("start_boot_ns", zx::BootInstant::get().into_nanos());
+        inspect.record_string("url", url.to_string());
+        let (pkg_id, blob_source) = self.lookup(url, inspect).await?;
+        inspect.record_string("hash", pkg_id.to_string());
+        inspect.record_string("blob_source", format!("{blob_source:?}"));
+        if let Some(root_dir) = self.open_packages.get(&pkg_id) {
+            return Ok(root_dir);
+        }
+        if let Some(blob_source) = blob_source {
+            return self
+                .package_fetcher
+                .fetch(pkg_id, blob_source, fpkg::GcProtection::OpenPackageTracking)
+                .await
+                .map_err(Error::PackageFetcher);
+        }
+        self.open_packages
+            .get_or_insert(pkg_id, None)
+            .await
+            .map_err(|source| Error::CreatingRootDir { source, pkg_id })
+    }
+
+    async fn lookup_unparsed(
+        &self,
+        url: &str,
+    ) -> Result<(fuchsia_hash::Hash, Option<http::Uri>), Error> {
+        // lookup_unparsed is only used by GetHash which is only used for debugging, we don't want
+        // that complicating the inspect.
+        self.lookup(&url.parse().map_err(Error::InvalidUrl)?, &finspect::Node::default()).await
+    }
+
+    // Returns the hash of the package and an optional http blob dir that contains the blobs.
+    // If the http blob dir is present, the package blobs may not all be present in local storage,
+    // otherwise the blobs are guaranteed to be present.
+    async fn lookup(
+        &self,
+        url: &AbsolutePackageUrl,
+        inspect: &finspect::Node,
+    ) -> Result<(fuchsia_hash::Hash, Option<http::Uri>), Error> {
+        // Use monotonic timeline to warn on slow cache fallback to avoid warning on suspension.
+        let start_mono = zx::MonotonicInstant::get();
+        let () = match self.base_resolver.lookup(url) {
+            Ok(pkg_id) => {
+                inspect.record_string("authority", "base");
+                return Ok((pkg_id, None));
+            }
+            Err(crate::base_package_resolver::Error::PackageNotInIndex) => (),
+            Err(e) => return Err(Error::BaseResolver(e)),
+        };
+
+        if let Some(upgradable_packages) = self.upgradable_packages.as_ref()
+            && let Some(hash) = upgradable_packages.get_hash(url.as_unpinned()).await
+        {
+            if url.hash().is_some() {
+                return Err(Error::PinnedUpgradablePackage);
+            }
+            inspect.record_string("authority", "upgradable");
+            return Ok((hash, None));
+        }
+
+        // TODO(https://fxbug.dev/542690903): Add eager package support.
+
+        let (tuf_err, deprecated_fallback) = match self
+            .tuf_authority
+            .lookup(&fpkg::PackageUrl { url: url.as_unpinned().to_string() })
+            .await
+            .map_err(Error::AuthorityFidl)?
+        {
+            Ok((fpkg::BlobId { merkle_root }, http_blob_dir)) => {
+                // TODO(https://fxbug.dev/519687989): Forbid pinned URL authority override.
+                let pkg_id = url.hash().unwrap_or_else(|| merkle_root.into());
+                inspect.record_string("authority", "tuf");
+                return Ok((
+                    pkg_id,
+                    Some(http_blob_dir.parse().map_err(Error::InvalidBlobDirUri)?),
+                ));
+            }
+            // TODO(https://fxbug.dev/42127880): Remove package not found cache fallback.
+            Err(e @ fpkg::AuthorityLookupError::PackageNotFound) => (e, true),
+            Err(e @ fpkg::AuthorityLookupError::RepositoryNotFound) => (e, false),
+            Err(e @ fpkg::AuthorityLookupError::UpstreamConnection) => (e, false),
+            Err(e) => return Err(Error::Authority(e)),
+        };
+
+        let Some(pkg_id) = lookup_cache_fallback(url, self.cache_index.as_ref()) else {
+            return Err(Error::Authority(tuf_err));
+        };
+        if deprecated_fallback {
+            log::warn!(
+                "Did not find {url} in a TUF repo, but did find a matching package name in the \
+                built-in cache packages set, so falling back to it. Your package repository may \
+                not be configured to serve the package correctly, or may be overriding the domain \
+                for the repository which would normally serve this package. This will be an error \
+                in a future version of Fuchsia, see https://fxbug.dev/42127862."
+            );
+        }
+        let () = log_slow_cache_fallback(start_mono, url);
+        inspect.record_string("authority", "cache");
+        Ok((pkg_id, None))
+    }
+
+    async fn resolve_subpackage(
+        &self,
+        url: &fuchsia_url::RelativePackageUrl,
+        context: fpkg::ResolutionContext,
+    ) -> Result<Arc<crate::root_dir::RootDir>, Error> {
+        let super_hash = self
+            .authenticator
+            .clone()
+            .authenticate(context)
+            .map_err(Error::ContextAuthenticator)?;
+        let super_package = self.open_packages.get(&super_hash).ok_or_else(|| {
+            Error::SuperpackageNotOpen { superpackage: super_hash, subpackage: url.clone() }
+        })?;
+        let sub_hash = *super_package
+            .subpackages()
+            .await
+            .map_err(Error::ReadingSubpackages)?
+            .subpackages()
+            .get(url)
+            .ok_or_else(|| Error::SubpackageNotFound {
+                subpackage: url.clone(),
+                superpackage: super_hash,
+            })?;
+        self.open_packages
+            .get_or_insert(sub_hash, None)
+            .await
+            .map_err(|source| Error::CreatingSubpackageRootDir { source, subpackage: sub_hash })
+    }
+
+    fn move_inspect_node_to_recent(&self, node: finspect::Node) {
+        self.inspect_recent.lock().add_entry(|parent| {
+            let () = parent.adopt(&node).unwrap_or_else(|e| {
+                warn!("failed to move inspect node to recent: {:#}", anyhow!(e))
+            });
+            let () = parent.record(node);
+        });
+    }
+}
+
+impl crate::component_resolver::PackageResolver for Resolver {
+    type Error = Error;
+
+    async fn resolve_and_serve(
+        &self,
+        url: &AbsolutePackageUrl,
+        dir: ServerEnd<fio::DirectoryMarker>,
+    ) -> Result<fpkg::ResolutionContext, Error> {
+        self.resolve_and_serve(url, dir).await
+    }
+
+    async fn resolve_with_context_and_serve(
+        &self,
+        url: &PackageUrl,
+        context: fpkg::ResolutionContext,
+        dir: ServerEnd<fio::DirectoryMarker>,
+    ) -> Result<fpkg::ResolutionContext, Error> {
+        self.resolve_with_context_and_serve(url, context, dir).await
+    }
 }
 
 fn lookup_cache_fallback(
@@ -508,61 +460,6 @@ fn log_slow_cache_fallback(start_ts: zx::MonotonicInstant, url: &AbsolutePackage
         resolve_duration.into_seconds(),
         SLOW_CACHE_FALLBACK_WARN_SQUELCH_DURATION.into_minutes(),
     );
-}
-
-async fn resolve_subpackage(
-    url: &fuchsia_url::RelativePackageUrl,
-    context: fpkg::ResolutionContext,
-    authenticator: context_authenticator::ContextAuthenticator,
-    open_packages: &crate::RootDirCache,
-) -> Result<Arc<crate::root_dir::RootDir>, Error> {
-    let super_hash = authenticator.authenticate(context).map_err(Error::ContextAuthenticator)?;
-    let super_package = open_packages.get(&super_hash).ok_or_else(|| {
-        Error::SuperpackageNotOpen { superpackage: super_hash, subpackage: url.clone() }
-    })?;
-    let sub_hash = *super_package
-        .subpackages()
-        .await
-        .map_err(Error::ReadingSubpackages)?
-        .subpackages()
-        .get(url)
-        .ok_or_else(|| Error::SubpackageNotFound {
-            subpackage: url.clone(),
-            superpackage: super_hash,
-        })?;
-    open_packages
-        .get_or_insert(sub_hash, None)
-        .await
-        .map_err(|source| Error::CreatingSubpackageRootDir { source, subpackage: sub_hash })
-}
-
-enum ExecutabilityStatus {
-    Allowed,
-    Forbidden,
-}
-
-fn executability_status(
-    executability_restrictions: system_image::ExecutabilityRestrictions,
-    base_packages: &crate::BaseIndex,
-    package: fuchsia_hash::Hash,
-) -> ExecutabilityStatus {
-    use ExecutabilityStatus::*;
-    use system_image::ExecutabilityRestrictions::*;
-    let is_base = base_packages.is_package(package);
-    match (is_base, executability_restrictions) {
-        (true, _) => Allowed,
-        (false, Enforce) => Forbidden,
-        (false, DoNotEnforce) => Allowed,
-    }
-}
-
-impl From<ExecutabilityStatus> for fio::Flags {
-    fn from(status: ExecutabilityStatus) -> Self {
-        match status {
-            ExecutabilityStatus::Allowed => fio::PERM_READABLE | fio::PERM_EXECUTABLE,
-            ExecutabilityStatus::Forbidden => fio::PERM_READABLE,
-        }
-    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -705,4 +602,21 @@ impl From<&Error> for zx::Status {
             InvalidContext => zx::Status::INVALID_ARGS,
         }
     }
+}
+
+// Replicates `format!("{:#}", anyhow!(err))` but without consuming `err` or converting it into an
+// `anyhow::Error`, so that the original, un-type-erased error can be propagated.
+// Normally errors should either be propagated XOR logged, but in this case we are duplicating the
+// log into inspect and doing so at the package resolver level instead of component resolver level
+// so that the history contains resolves performed on behalf of:
+//   1. the full component resolver that is in this component and uses the trait
+//   2. external clients that use the FIDL interface
+fn stringify_error(mut err: &dyn std::error::Error) -> String {
+    let mut result = err.to_string();
+    while let Some(source) = err.source() {
+        use std::fmt::Write as _;
+        let _ = write!(result, ": {source}");
+        err = source;
+    }
+    result
 }

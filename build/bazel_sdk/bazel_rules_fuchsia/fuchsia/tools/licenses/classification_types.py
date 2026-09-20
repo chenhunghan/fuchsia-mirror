@@ -5,9 +5,10 @@
 
 import dataclasses
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Callable, Collection
 from hashlib import md5
-from typing import Any, Callable, ClassVar, Collection, Dict, List
+from typing import Any, ClassVar
 
 from fuchsia.tools.licenses.common_types import *
 from fuchsia.tools.licenses.spdx_types import *
@@ -36,28 +37,28 @@ class IdentifiedSnippet:
     start_line: int
     end_line: int
 
-    conditions: Set[str] = dataclasses.field(default_factory=set)
+    conditions: set[str] = dataclasses.field(default_factory=set)
     # Conditions from overriding rules
-    overriden_conditions: Set[str] = dataclasses.field(default_factory=set)
+    overriden_conditions: set[str] = dataclasses.field(default_factory=set)
     # Optional public source code mirroring urls (supplied by some override rules)
-    public_source_mirrors: List[str] = None
+    public_source_mirrors: list[str] = None
     # Dependents that were not matched by any rule
-    dependents_unmatched_by_overriding_rules: Set[str] = dataclasses.field(
+    dependents_unmatched_by_overriding_rules: set[str] = dataclasses.field(
         default_factory=set
     )
     # Conditions that were not matched by any rule
-    conditions_unmatched_by_overriding_rules: Set[str] = dataclasses.field(
+    conditions_unmatched_by_overriding_rules: set[str] = dataclasses.field(
         default_factory=set
     )
     # all rules that matched this IdentifiedSnippet
-    overriding_rules: List["ConditionOverrideRule"] = dataclasses.field(
+    overriding_rules: list["ConditionOverrideRule"] = dataclasses.field(
         default_factory=list
     )
 
     # verification results
     verified: bool = None
     verification_message: str = None
-    verified_conditions: Set[str] = None
+    verified_conditions: set[str] = None
 
     # checksum for snippet text
     snippet_checksum: str = None
@@ -67,7 +68,7 @@ class IdentifiedSnippet:
     suggested_override_rule: "ConditionOverrideRule" = None
 
     def from_identify_license_dict(
-        dictionary: Dict[str, Any],
+        dictionary: dict[str, Any],
         location: Any,
     ) -> "IdentifiedSnippet":
         """
@@ -225,7 +226,7 @@ class IdentifiedSnippet:
     def number_of_lines(self):
         return self.end_line - self.start_line + 1
 
-    def add_snippet_text(self, lines: List[str]):
+    def add_snippet_text(self, lines: list[str]):
         text = "\n".join(lines[self.start_line - 1 : self.end_line])
         checksum = md5(text.encode("utf-8")).hexdigest()
         return dataclasses.replace(
@@ -235,7 +236,7 @@ class IdentifiedSnippet:
     def override_conditions(
         self,
         license: "LicenseClassification",
-        rules: List["ConditionOverrideRule"],
+        rules: list["ConditionOverrideRule"],
     ):
         all_matching_rules = []
 
@@ -282,7 +283,7 @@ class IdentifiedSnippet:
         else:
             return self
 
-    def _format_conditions(self, conditions: Set[str]) -> str:
+    def _format_conditions(self, conditions: set[str]) -> str:
         assert conditions, f"{conditions} cannot be empty"
         l = list(conditions)
         if len(l) == 1:
@@ -290,7 +291,7 @@ class IdentifiedSnippet:
         return str(sorted(l))
 
     def verify_conditions(
-        self, license: "LicenseClassification", allowed_conditions: Set[str]
+        self, license: "LicenseClassification", allowed_conditions: set[str]
     ):
         """Sets the 'verified' and 'verification_message' fields"""
         verified = True
@@ -419,10 +420,10 @@ class LicenseClassification:
     """Classification results for a single license"""
 
     license_id: str
-    identifications: List[IdentifiedSnippet]
+    identifications: list[IdentifiedSnippet]
     name: str = None
-    links: List[str] = None
-    dependents: List[str] = None
+    links: list[str] = None
+    dependents: list[str] = None
 
     # Whether the project is shipped.
     is_project_shipped: bool = None
@@ -580,12 +581,12 @@ class LicenseClassification:
         else:
             return self
 
-    def verify_conditions(self, allowed_conditions: Set[str]):
+    def verify_conditions(self, allowed_conditions: set[str]):
         return self._transform_identifications(
             lambda x: x.verify_conditions(self, allowed_conditions)
         )
 
-    def verification_errors(self) -> List[str]:
+    def verification_errors(self) -> list[str]:
         out = []
         for i in self.identifications:
             msg = i.detailed_verification_message(self)
@@ -593,7 +594,7 @@ class LicenseClassification:
                 out.append(msg)
         return out
 
-    def all_public_source_mirrors(self) -> List[str]:
+    def all_public_source_mirrors(self) -> list[str]:
         out = []
         for i in self.identifications:
             if i.public_source_mirrors:
@@ -601,7 +602,7 @@ class LicenseClassification:
         return sorted(list(set(out)))
 
     def determine_is_notice_shipped(
-        self, conditions_requiring_shipped_notice: List[str]
+        self, conditions_requiring_shipped_notice: list[str]
     ) -> "LicenseClassification":
         is_shipped = False
         for i in self.identifications:
@@ -614,14 +615,14 @@ class LicenseClassification:
 
 @dataclasses.dataclass(frozen=True)
 class LicensesClassifications:
-    classifications_by_id: Dict[str, LicenseClassification]
+    classifications_by_id: dict[str, LicenseClassification]
 
     def create_empty() -> "LicenseClassification":
         return LicensesClassifications(classifications_by_id={})
 
     def from_identify_license_output_json(
         identify_license_output_path: str,
-        license_paths_by_license_id: Dict[str, str],
+        license_paths_by_license_id: dict[str, str],
     ) -> "LicensesClassifications":
         import os
 
@@ -706,7 +707,7 @@ class LicensesClassifications:
 
         return LicensesClassifications(license_classifications)
 
-    def to_json_list(self) -> List[Any]:
+    def to_json_list(self) -> list[Any]:
         output = []
         for license_id in sorted(self.classifications_by_id.keys()):
             output.append(self.classifications_by_id[license_id].to_json_dict())
@@ -717,9 +718,9 @@ class LicensesClassifications:
             json.dump(self.to_json_list(), output_file, indent=4)
 
     def from_json_list(
-        input: List[Any], location: str
+        input: list[Any], location: str
     ) -> "LicensesClassifications":
-        if not isinstance(input, List):
+        if not isinstance(input, list):
             raise LicenseException(
                 f"Expected a list of classification json values, but got {type(input)}",
                 location,
@@ -790,7 +791,7 @@ class LicensesClassifications:
         )
 
     def add_classifications(
-        self, to_add: List[LicenseClassification]
+        self, to_add: list[LicenseClassification]
     ) -> "LicensesClassifications":
         new = self.classifications_by_id.copy()
         for license_classification in to_add:
@@ -798,6 +799,57 @@ class LicensesClassifications:
             assert license_id not in new, f"{license_id} already exists"
             new[license_id] = license_classification
         return dataclasses.replace(self, classifications_by_id=new)
+
+    def replace_classifications(
+        self, to_replace: list[LicenseClassification]
+    ) -> "LicensesClassifications":
+        new = self.classifications_by_id.copy()
+        for license_classification in to_replace:
+            new[license_classification.license_id] = license_classification
+        return dataclasses.replace(self, classifications_by_id=new)
+
+    @staticmethod
+    def select_majority_identifications(
+        runs: list[list[IdentifiedSnippet]],
+    ) -> tuple[list[IdentifiedSnippet], int]:
+        """Selects the majority identification result across multiple runs.
+
+        Returns a tuple of (winning_snippets, vote_count).
+        In case of a tie (e.g. 1-1-1 across 3 runs), prefers runs without
+        [UNIDENTIFIED] snippets, then higher total confidence.
+        """
+        assert runs, "runs must not be empty"
+
+        def snippet_key(s: IdentifiedSnippet) -> tuple[Any, ...]:
+            return (
+                s.identified_as,
+                s.confidence,
+                s.start_line,
+                s.end_line,
+                tuple(sorted(s.conditions)),
+            )
+
+        def run_key(snippets: list[IdentifiedSnippet]) -> tuple[Any, ...]:
+            return tuple(snippet_key(s) for s in snippets)
+
+        counts = Counter(run_key(r) for r in runs)
+        snippets_by_key = {}
+        for r in runs:
+            k = run_key(r)
+            if k not in snippets_by_key:
+                snippets_by_key[k] = r
+
+        def rank_key(k: tuple[Any, ...]) -> tuple[int, int, float]:
+            vote_count = counts[k]
+            has_unidentified = any(
+                s[0] == IdentifiedSnippet.UNIDENTIFIED_IDENTIFICATION for s in k
+            )
+            non_unidentified_score = 0 if has_unidentified else 1
+            total_confidence = sum(float(s[1]) for s in k)
+            return (vote_count, non_unidentified_score, total_confidence)
+
+        best_key = max(snippets_by_key.keys(), key=rank_key)
+        return snippets_by_key[best_key], counts[best_key]
 
     def add_licenses_information(self, spdx_index: SpdxIndex):
         return self._transform_each_classification(
@@ -817,7 +869,7 @@ class LicensesClassifications:
         )
 
     def verify_conditions(
-        self, allowed_conditions: Set[str]
+        self, allowed_conditions: set[str]
     ) -> "LicensesClassifications":
         return self._transform_each_classification(
             lambda x: x.verify_conditions(allowed_conditions)
@@ -850,7 +902,7 @@ class LicensesClassifications:
         return self.classifications_by_id.keys()
 
     def determine_is_notice_shipped(
-        self, conditions_requiring_shipped_notice: List[str]
+        self, conditions_requiring_shipped_notice: list[str]
     ):
         return self._transform_each_classification(
             lambda x: x.determine_is_notice_shipped(
@@ -865,7 +917,7 @@ class AsterixStringExpression:
 
     starts_with_asterix: bool
     ends_with_asterix: bool
-    parts: List[str]
+    parts: list[str]
 
     def create(expression: str) -> "AsterixStringExpression":
         return AsterixStringExpression(
@@ -900,12 +952,12 @@ class StringMatcher:
     Supports exact and * matches.
     """
 
-    all_expressions: List[str]
+    all_expressions: list[str]
 
-    exact_expressions: Set[str]
-    asterix_expressions: List[AsterixStringExpression]
+    exact_expressions: set[str]
+    asterix_expressions: list[AsterixStringExpression]
 
-    def create(expressions: List[str]) -> "StringMatcher":
+    def create(expressions: list[str]) -> "StringMatcher":
         assert isinstance(expressions, list)
         exact_expressions = set()
         asterix_expressions = []
@@ -936,7 +988,7 @@ class StringMatcher:
                 return True
         return False
 
-    def get_matches(self, inputs: List[str]) -> List[str]:
+    def get_matches(self, inputs: list[str]) -> list[str]:
         """
         Matches all the inputs against the internal expressions.
 
@@ -957,7 +1009,7 @@ class StringMatcher:
                 return True
         return False
 
-    def matches_all(self, inputs: List[str]) -> bool:
+    def matches_all(self, inputs: list[str]) -> bool:
         """
         Matches all the inputs against the internal expressions.
 
@@ -981,13 +1033,13 @@ class ConditionOverrideRule:
     # Will override the condition to this condition
     override_condition_to: str
     # Optional public source mirroring urls.
-    public_source_mirrors: List[str]
+    public_source_mirrors: list[str]
     # Issue tracker URL.
     bug: str
     # Email subject line containing counsel approval.
     email_subject_line: str
     # List facilitates easier to read multi-line comments in JSON.
-    comment: List[str]
+    comment: list[str]
 
     # matching
     match_license_names: StringMatcher
@@ -1095,7 +1147,7 @@ class ConditionOverrideRule:
     def suggested_for_snippet(
         license: LicenseClassification,
         snippet: IdentifiedSnippet,
-        allowed_conditions: Set[str],
+        allowed_conditions: set[str],
     ) -> "ConditionOverrideRule":
         """Creates an override rule suggestion for the given license snippet"""
         dependents = license.dependents
@@ -1127,7 +1179,7 @@ class ConditionOverrideRule:
 
 @dataclasses.dataclass(frozen=True)
 class ConditionOverrideRuleSet:
-    rules: List[ConditionOverrideRule]
+    rules: list[ConditionOverrideRule]
 
     def merge(
         self, other: "ConditionOverrideRuleSet"

@@ -12,16 +12,9 @@ import dataclasses
 import filecmp
 import json
 import os
+from collections.abc import Callable, Iterable
 from typing import (
     Any,
-    Callable,
-    DefaultDict,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Set,
-    Tuple,
 )
 
 # A namedtuple type used to model an entry from a distribution manifest, after
@@ -34,13 +27,13 @@ class ParseResult:
     """A class modelling the result of parsing a partial manifest."""
 
     # The list of distribution Entry items.
-    entries: List[Entry]
+    entries: list[Entry]
 
     # The list of parsing errors. Empty if none.
-    errors: List[str]
+    errors: list[str]
 
     # A { destination_path -> elf_runtime_dir } map.
-    elf_runtime_map: Dict[str, str]
+    elf_runtime_map: dict[str, str]
 
 
 # This supports distribution manifest as JSON files which are lists of objects
@@ -53,14 +46,14 @@ class ParseResult:
 # can be merged into a single one. Otherwise, it is a build error.
 #
 
-PartialEntry = Dict[str, str]
+PartialEntry = dict[str, str]
 
 
 def expand_manifest_items_inner(
     manifest_items: Iterable[PartialEntry],
-    opened_files: Set[str],
-    default_label: Optional[str] = None,
-) -> Tuple[List[Entry], List[PartialEntry]]:
+    opened_files: set[str],
+    default_label: str | None = None,
+) -> tuple[list[Entry], list[PartialEntry]]:
     """Expand the content of a distribution manifest file.
 
     Note that this function does not try to de-duplicate identical entries.
@@ -77,8 +70,8 @@ def expand_manifest_items_inner(
         and `extras` is a list of input items that need further processing,
         e.g. renaming entries.
     """
-    entries: List[Entry] = []
-    extras: List[PartialEntry] = []
+    entries: list[Entry] = []
+    extras: list[PartialEntry] = []
     if manifest_items is None:
         return entries, extras
     for item in manifest_items:
@@ -117,8 +110,8 @@ def expand_manifest_items_inner(
 
 def expand_partial_manifest_items(
     manifest_items: Iterable[PartialEntry],
-    opened_files: Set[str],
-    default_label: Optional[str] = None,
+    opened_files: set[str],
+    default_label: str | None = None,
 ) -> ParseResult:
     """Expand the content of a distribution manifest file.
 
@@ -141,19 +134,19 @@ def expand_partial_manifest_items(
     )
 
     # Process extra entries here.
-    errors: List[str] = []
-    unknown_renames: List[
+    errors: list[str] = []
+    unknown_renames: list[
         PartialEntry
     ] = []  # rename entries with unknown renamed_source path.
-    renamed_entries: List[Entry] = []
-    renamed_sources: Set[
+    renamed_entries: list[Entry] = []
+    renamed_sources: set[
         str
     ] = set()  # Source paths of original entries that are renamed.
-    persistent_sources: Set[
+    persistent_sources: set[
         str
     ] = set()  # Source paths of original entries that must be preserved.
 
-    elf_runtime_map: Dict[str, str] = {}  # Map destination path to the
+    elf_runtime_map: dict[str, str] = {}  # Map destination path to the
     # corresping elf runtime directory.
 
     if extras:
@@ -162,8 +155,8 @@ def expand_partial_manifest_items(
 
         # A map that associates with each destination path (e.g. 'bin/foo')
         # the extra items that have an elf_runtime_dir key in it.
-        elf_runtime_entries: Dict[
-            str, List[Dict[Any, Any]]
+        elf_runtime_entries: dict[
+            str, list[dict[Any, Any]]
         ] = collections.defaultdict(list)
 
         # A map built from all copy entries, that maps their destination path
@@ -292,7 +285,7 @@ def expand_partial_manifest_items(
     # Since this is a seldom case, detect it here and generate an error
     # message that explains how to solve the issue.
     #
-    source_to_multi_entries: Dict[str, Set[Entry]] = collections.defaultdict(
+    source_to_multi_entries: dict[str, set[Entry]] = collections.defaultdict(
         set
     )
     for e in entries:
@@ -330,9 +323,9 @@ def expand_partial_manifest_items(
 
 def expand_manifest_items(
     manifest_items: Iterable[PartialEntry],
-    opened_files: Set[str],
-    default_label: Optional[str] = None,
-) -> List[Entry]:
+    opened_files: set[str],
+    default_label: str | None = None,
+) -> list[Entry]:
     """Expand the content of a distribution manifest file.
 
     Note that this function does not try to de-duplicate identical entries.
@@ -356,7 +349,7 @@ def expand_manifest_items(
 
 
 def _entries_have_same_source(
-    entry1: Entry, entry2: Entry, opened_files: Set[str]
+    entry1: Entry, entry2: Entry, opened_files: set[str]
 ) -> bool:
     """Return True iff two entries have the same source.
 
@@ -378,8 +371,8 @@ def _entries_have_same_source(
 
 
 def expand_manifest(
-    manifest_items: Iterable[Dict[str, str]], opened_files: Set[str]
-) -> Tuple[List[Entry], str]:
+    manifest_items: Iterable[dict[str, str]], opened_files: set[str]
+) -> tuple[list[Entry], str]:
     """Expand the content of a distribution manifest into an Entry list.
 
     Note, this removes duplicate entries, if they have the same source
@@ -402,11 +395,11 @@ def expand_manifest(
 
     # Used to record that a given destination path has two or more conflicting
     # entries, with different sources.
-    source_conflicts: DefaultDict[str, Set[Entry]] = collections.defaultdict(
-        set
-    )
+    source_conflicts: collections.defaultdict[
+        str, set[Entry]
+    ] = collections.defaultdict(set)
 
-    dest_to_entries: Dict[str, Entry] = {}
+    dest_to_entries: dict[str, Entry] = {}
     for entry in input_entries:
         dest = entry.destination
         current_entry = dest_to_entries.setdefault(dest, entry)
@@ -436,7 +429,7 @@ def expand_manifest(
     )
 
 
-def distribution_entries_to_string(entries: List[Entry]) -> str:
+def distribution_entries_to_string(entries: list[Entry]) -> str:
     """Convert an Entry list to a JSON-formatted string."""
     return json.dumps(
         [e._asdict() for e in sorted(entries)],
@@ -448,7 +441,7 @@ def distribution_entries_to_string(entries: List[Entry]) -> str:
 
 def convert_fini_manifest_to_distribution_entries(
     fini_manifest_lines: Iterable[str], label: str
-) -> List[Entry]:
+) -> list[Entry]:
     """Convert a FINI manifest into an Entry list.
 
     Args:
@@ -459,7 +452,7 @@ def convert_fini_manifest_to_distribution_entries(
     Returns:
         An Entry list.
     """
-    result: List[Entry] = []
+    result: list[Entry] = []
     for line in fini_manifest_lines:
         dst, _, src = line.strip().partition("=")
         entry = Entry(destination=dst, source=src, label=label)
@@ -468,7 +461,7 @@ def convert_fini_manifest_to_distribution_entries(
     return result
 
 
-def _rewrite_elf_needed(dep: str) -> Optional[str]:
+def _rewrite_elf_needed(dep: str) -> str | None:
     """Rewrite an ELF DT_NEEDED dependency name.
 
     Args:
@@ -494,9 +487,9 @@ def verify_elf_dependencies(
     binary_name: str,
     lib_dir: str,
     deps: Iterable[str],
-    get_lib_dependencies: Callable[[str], Optional[List[str]]],
-    visited_libraries: Set[str] = set(),
-) -> List[str]:
+    get_lib_dependencies: Callable[[str], list[str] | None],
+    visited_libraries: set[str] = set(),
+) -> list[str]:
     """Verify the ELF dependencies of a given ELF binary.
 
     Args:
@@ -529,8 +522,8 @@ def verify_elf_dependencies(
     #       |     v              |
     #     libunwind.so-----------'
     #
-    errors: List[str] = []
-    queue: Set[str] = set(deps)
+    errors: list[str] = []
+    queue: set[str] = set(deps)
     while queue:
         dep = queue.pop()
         dep2 = _rewrite_elf_needed(dep)

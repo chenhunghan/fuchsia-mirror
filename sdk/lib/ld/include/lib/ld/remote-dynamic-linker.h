@@ -150,13 +150,13 @@ class RemoteDynamicLinker {
   using AbiStub = RemoteAbiStub<Elf, Machine>;
   using AbiStubPtr = AbiStub::Ptr;
   using Module = RemoteLoadModule<Elf, Zygote>;
-  using DecodedModule = typename Module::Decoded;
-  using DecodedModulePtr = typename DecodedModule::Ptr;
-  using Soname = typename Module::Soname;
-  using List = typename Module::List;
-  using size_type = typename Elf::size_type;
+  using DecodedModule = Module::Decoded;
+  using DecodedModulePtr = DecodedModule::Ptr;
+  using Soname = Module::Soname;
+  using List = Module::List;
+  using size_type = Elf::size_type;
   using TlsDescResolver = ld::StaticTlsDescResolver<Elf, Machine>;
-  using TlsdescRuntimeHooks = typename TlsDescResolver::RuntimeHooks;
+  using TlsdescRuntimeHooks = TlsDescResolver::RuntimeHooks;
 
   // The Init method takes an InitModuleList as an argument.  Each element
   // describes an initial module, which is either a root module or an
@@ -743,12 +743,12 @@ class RemoteDynamicLinker {
   }
 
  private:
-  using Loader = typename Module::Loader;
+  using Loader = Module::Loader;
 
-  using InitModuleLoad = typename InitModule::Load;
-  using LoadAnywhere = typename InitModule::LoadAnywhere;
-  using WithLoadBias = typename InitModule::WithLoadBias;
-  using AlreadyLoaded = typename InitModule::AlreadyLoaded;
+  using InitModuleLoad = InitModule::Load;
+  using LoadAnywhere = InitModule::LoadAnywhere;
+  using WithLoadBias = InitModule::WithLoadBias;
+  using AlreadyLoaded = InitModule::AlreadyLoaded;
 
   static constexpr Soname kStubSoname = abi::Abi<Elf>::kSoname;
 

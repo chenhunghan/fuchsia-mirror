@@ -3,8 +3,13 @@
 // found in the LICENSE file.
 
 #include <lib/zircon-internal/unique-backtrace.h>
-#include <stdint.h>
 #include <zircon/compiler.h>
+
+#include <__verbose_abort>  // libc++ internal
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 // In the HWASan build, this file provides weak definitions for all the
 // same entry points that are defined by the HWASan runtime library.
@@ -20,6 +25,21 @@
 // compiler-rt/lib/hwasan/*).
 
 #if __has_feature(hwaddress_sanitizer)
+
+// This is normally defined in the hermetic libc++.a, but the instrumented one
+// uses default inline instrumentation.  Because of the same legacy constraints
+// that necessitate these stubs exist at all, libc is compiled with non-default
+// (suboptimal) instrumentation that avoids generating symbol references that
+// are difficult in the bootstrap context.  Hence the prebuilt libc++.a must be
+// avoided entirely, and anything that libc++ headers used in building libc
+// itself (hermetically) might generate references to must be defined here.
+void std::__libcpp_verbose_abort(const char* format, ...) noexcept {
+  va_list args;
+  va_start(args, format);
+  fprintf(stderr, format, args);
+  va_end(args);
+  abort();
+}
 
 // These should never actually be called until the hwasan runtime is loaded.
 #define HWASAN_TRAP_STUB(name)                                           \

@@ -24,6 +24,18 @@
 #include <src/performance/memory/sampler/instrumentation/recorder.h>
 
 namespace memory_sampler {
+
+// Declared as a friend of `Recorder`; see recorder.h. Must live directly in
+// `memory_sampler` rather than the anonymous namespace below for the friend
+// declaration to name it.
+struct RecorderTestPeer {
+  // Clears the latch that suppresses repeated peer signalling, so that a test
+  // can exercise a signalling path after an earlier one already fired.
+  static void ResetPeerSignaled(Recorder& recorder) {
+    recorder.peer_signaled_.store(false, std::memory_order_relaxed);
+  }
+};
+
 namespace {
 void* const kTestAddress = reinterpret_cast<void*>(0x1000);
 constexpr size_t kTestSize = 100;
@@ -45,6 +57,7 @@ class SamplerImpl : public fidl::testing::WireTestBase<fuchsia_memory_sampler::S
   }
 #endif
 
+  void Close() { binding_.Unbind(); }
   zx::socket& socket() { return socket_; }
 
  private:
@@ -329,6 +342,153 @@ TEST(RecorderTest, ForgetAllocationFidlFallback) {
   recorder.MaybeForgetAllocation(kTestAddress);
 
   loop.RunUntilIdle();
+}
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+TEST(RecorderTest, DisconnectsOnSocketPeerClosed) {
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+  async_dispatcher_t* dispatcher = loop.dispatcher();
+  auto endpoints = fidl::CreateEndpoints<fuchsia_memory_sampler::Sampler>();
+  SamplerImpl sampler{dispatcher, std::move(endpoints->server)};
+
+  auto recorder = memory_sampler::Recorder::CreateRecorderForTesting(
+      fidl::SyncClient{std::move(endpoints->client)}, GetSamplerThatAlwaysSamples);
+
+  loop.RunUntilIdle();
+  ASSERT_TRUE(sampler.socket().is_valid());
+  EXPECT_FALSE(recorder.is_disabled());
+
+  // Close the server end of the socket.
+  sampler.socket().reset();
+
+  // Next allocation triggers socket write, detects ZX_ERR_PEER_CLOSED, and disconnects.
+  recorder.MaybeRecordAllocation(kTestAddress, kTestSize);
+  EXPECT_TRUE(recorder.is_disabled());
+
+  // Subsequent allocation/deallocation calls should be no-ops and not crash.
+  recorder.MaybeRecordAllocation(kTestAddress, kTestSize);
+  recorder.MaybeForgetAllocation(kTestAddress);
+  EXPECT_TRUE(recorder.is_disabled());
+}
+
+TEST(RecorderTest, SignalsPeerAndDropsAllocationOnBufferFull) {
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+  async_dispatcher_t* dispatcher = loop.dispatcher();
+  auto endpoints = fidl::CreateEndpoints<fuchsia_memory_sampler::Sampler>();
+  SamplerImpl sampler{dispatcher, std::move(endpoints->server)};
+
+  auto recorder = memory_sampler::Recorder::CreateRecorderForTesting(
+      fidl::SyncClient{std::move(endpoints->client)}, GetSamplerThatAlwaysSamples);
+
+  loop.RunUntilIdle();
+  ASSERT_TRUE(sampler.socket().is_valid());
+
+  // Fill the socket buffer until writes saturate.
+  void* overflow_address = nullptr;
+  zx_signals_t signals = 0;
+  for (uintptr_t i = 1; i <= 10000; ++i) {
+    void* addr = reinterpret_cast<void*>(0x10000 + i);
+    recorder.MaybeRecordAllocation(addr, kTestSize);
+    if (sampler.socket().wait_one(ZX_USER_SIGNAL_0, zx::time::infinite_past(), &signals) == ZX_OK &&
+        (signals & ZX_USER_SIGNAL_0)) {
+      overflow_address = addr;
+      break;
+    }
+  }
+
+  ASSERT_NE(overflow_address, nullptr);
+  EXPECT_FALSE(recorder.is_disabled());
+
+  // Drain the socket so it becomes writable again.
+  while (!ReadDatagram(sampler.socket()).empty()) {
+  }
+
+  // Deallocating the overflow address should NOT send any datagram, because it was
+  // dropped and never tracked in recorded_allocations_.
+  recorder.MaybeForgetAllocation(overflow_address);
+  EXPECT_TRUE(ReadDatagram(sampler.socket()).empty());
+}
+
+TEST(RecorderTest, SignalsPeerOnDeallocationBufferFull) {
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+  async_dispatcher_t* dispatcher = loop.dispatcher();
+  auto endpoints = fidl::CreateEndpoints<fuchsia_memory_sampler::Sampler>();
+  SamplerImpl sampler{dispatcher, std::move(endpoints->server)};
+
+  auto recorder = memory_sampler::Recorder::CreateRecorderForTesting(
+      fidl::SyncClient{std::move(endpoints->client)}, GetSamplerThatAlwaysSamples);
+
+  loop.RunUntilIdle();
+  ASSERT_TRUE(sampler.socket().is_valid());
+
+  // Record tracked allocations while the socket has space.
+  std::vector<void*> tracked_addresses;
+  for (uintptr_t i = 1; i <= 50; ++i) {
+    void* addr = reinterpret_cast<void*>(0x5000 + i * 8);
+    recorder.MaybeRecordAllocation(addr, kTestSize);
+    tracked_addresses.push_back(addr);
+  }
+
+  // Fill the socket buffer with other allocations until full.
+  bool buffer_saturated = false;
+  for (uintptr_t i = 1; i <= 10000; ++i) {
+    recorder.MaybeRecordAllocation(reinterpret_cast<void*>(0x20000 + i), kTestSize);
+    zx_signals_t fill_sigs = 0;
+    if (sampler.socket().wait_one(ZX_USER_SIGNAL_0, zx::time::infinite_past(), &fill_sigs) ==
+            ZX_OK &&
+        (fill_sigs & ZX_USER_SIGNAL_0)) {
+      buffer_saturated = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(buffer_saturated);
+
+  // Clear the signal on the server end and reset the client latch so we can verify that
+  // deallocation asserts it.
+  ASSERT_EQ(sampler.socket().signal(ZX_USER_SIGNAL_0, 0), ZX_OK);
+  RecorderTestPeer::ResetPeerSignaled(recorder);
+  zx_signals_t sigs = 0;
+  EXPECT_NE(sampler.socket().wait_one(ZX_USER_SIGNAL_0, zx::time::infinite_past(), &sigs), ZX_OK);
+
+  // Now deallocate tracked addresses until saturation is hit on deallocation.
+  // Because deallocation datagrams are slightly smaller than allocation datagrams,
+  // the first deallocation may fit in the leftover buffer slack, but subsequent
+  // deallocations will exhaust the slack and assert ZX_USER_SIGNAL_0.
+  bool deallocation_signaled = false;
+  for (void* addr : tracked_addresses) {
+    recorder.MaybeForgetAllocation(addr);
+    if (sampler.socket().wait_one(ZX_USER_SIGNAL_0, zx::time::infinite_past(), &sigs) == ZX_OK &&
+        (sigs & ZX_USER_SIGNAL_0)) {
+      deallocation_signaled = true;
+      break;
+    }
+  }
+
+  EXPECT_TRUE(deallocation_signaled);
+  EXPECT_FALSE(recorder.is_disabled());
+}
+#endif
+
+TEST(RecorderTest, DisconnectsOnFidlPeerClosed) {
+  auto endpoints = fidl::CreateEndpoints<fuchsia_memory_sampler::Sampler>();
+  // Close the server end of the FIDL channel immediately.
+  endpoints->server.reset();
+
+  auto recorder = memory_sampler::Recorder::CreateRecorderForTesting(
+      fidl::SyncClient{std::move(endpoints->client)}, GetSamplerThatAlwaysSamples,
+      /*use_socket=*/false);
+
+  EXPECT_FALSE(recorder.is_disabled());
+
+  // Next allocation triggers fallback FIDL call, detects channel error, and disconnects without
+  // asserting.
+  recorder.MaybeRecordAllocation(kTestAddress, kTestSize);
+  EXPECT_TRUE(recorder.is_disabled());
+
+  // Subsequent allocation/deallocation calls should be no-ops and not crash.
+  recorder.MaybeRecordAllocation(kTestAddress, kTestSize);
+  recorder.MaybeForgetAllocation(kTestAddress);
+  EXPECT_TRUE(recorder.is_disabled());
 }
 
 }  // namespace

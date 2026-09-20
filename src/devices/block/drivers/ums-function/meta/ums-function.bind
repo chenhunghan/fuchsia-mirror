@@ -6,5 +6,5 @@
 
 fuchsia.BIND_PROTOCOL == fuchsia.usb.BIND_PROTOCOL.FUNCTION;
 fuchsia.BIND_USB_CLASS == fuchsia.usb.BIND_USB_CLASS.MASS_STORAGE;
-fuchsia.BIND_USB_PROTOCOL == fuchsia.usb.massstorage.BIND_USB_PROTOCOL.BULK_ONLY;
 fuchsia.BIND_USB_SUBCLASS == fuchsia.usb.massstorage.BIND_USB_SUBCLASS.SCSI;
+fuchsia.BIND_USB_PROTOCOL == fuchsia.usb.massstorage.BIND_USB_PROTOCOL.BULK_ONLY;

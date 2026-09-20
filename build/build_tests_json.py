@@ -10,7 +10,6 @@ import json
 import os
 import pprint
 import sys
-import typing as T
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "bazel/scripts"))
@@ -20,9 +19,9 @@ from build_utils import CommandRunner
 def build_tests_json(
     build_dir: Path,
     with_bazel_tests: bool = False,
-    command_runner: T.Optional[CommandRunner] = None,
+    command_runner: CommandRunner | None = None,
     quiet: bool = True,
-) -> T.Set[Path]:
+) -> set[Path]:
     """Generate the tests.json file.
 
     tests.json is created by merging two things:

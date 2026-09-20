@@ -21138,6 +21138,7 @@ pub const BLKGETSIZE64: __u32 = 2147750514;
 pub const BLKRASET: __u32 = 4706;
 pub const EVIOCGVERSION: __u32 = 2147763457;
 pub const EVIOCGID: __u32 = 2148025602;
+pub const EVIOCGRAB: __u32 = 1074021776;
 pub const RWF_HIPRI: __u32 = 1;
 pub const RWF_DSYNC: __u32 = 2;
 pub const RWF_SYNC: __u32 = 4;
@@ -21152,6 +21153,7 @@ pub const EVIOCGBIT_EV_SW: __u32 = 2147632421;
 pub const EVIOCGBIT_EV_LED: __u32 = 2147632433;
 pub const EVIOCGBIT_EV_FF: __u32 = 2148549941;
 pub const EVIOCGBIT_EV_MSC: __u32 = 2147566884;
+pub const EVIOCGBIT_EV_SND: __u32 = 2147566898;
 pub const EVIOCGPROP: __u32 = 2147763465;
 pub const EVIOCGABS_X: __u32 = 2149074240;
 pub const EVIOCGABS_Y: __u32 = 2149074241;
@@ -21160,6 +21162,12 @@ pub const EVIOCGABS_MT_TRACKING_ID: __u32 = 2149074297;
 pub const EVIOCGABS_MT_POSITION_X: __u32 = 2149074293;
 pub const EVIOCGABS_MT_POSITION_Y: __u32 = 2149074294;
 pub const EVIOCGNAME_0: __u32 = 2147501318;
+pub const EVIOCGPHYS_0: __u32 = 2147501319;
+pub const EVIOCGUNIQ_0: __u32 = 2147501320;
+pub const EVIOCGKEY_0: __u32 = 2147501336;
+pub const EVIOCGLED_0: __u32 = 2147501337;
+pub const EVIOCGSND_0: __u32 = 2147501338;
+pub const EVIOCGSW_0: __u32 = 2147501339;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, IntoBytes, FromBytes, KnownLayout, Immutable)]
 pub struct remote_binder_start_command {

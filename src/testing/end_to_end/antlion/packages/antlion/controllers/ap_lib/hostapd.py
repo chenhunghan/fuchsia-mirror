@@ -39,6 +39,18 @@ class InterfaceInitError(Error):
 
 
 @dataclass
+class StationTelemetry:
+    """Represents RF and PHY telemetry of a station connected to an AP."""
+
+    rssi: int | None = None
+    tx_rate_mbps: float | None = None
+    rx_rate_mbps: float | None = None
+    snr: int | None = None
+    phy_mode: str | None = None
+    nss: int | None = None
+
+
+@dataclass
 class StationStatus:
     """Represents the connection status of a station on an AP."""
 
@@ -48,6 +60,9 @@ class StationStatus:
     rssi: int | None = None
     tx_rate_mbps: float | None = None
     rx_rate_mbps: float | None = None
+    snr: int | None = None
+    phy_mode: str | None = None
+    nss: int | None = None
 
 
 def _parse_bitrate(val: float, unit: str) -> float:
@@ -62,10 +77,8 @@ def _parse_bitrate(val: float, unit: str) -> float:
         return round(val / 1000000.0, 2)
 
 
-def parse_station_output(
-    output: object,
-) -> tuple[int | None, float | None, float | None]:
-    """Parses RSSI (dBm), TX rate (Mbps), and RX rate (Mbps) from station details (hostapd_cli or iw)."""
+def parse_station_output(output: object) -> StationTelemetry:
+    """Parses station telemetry from station details (hostapd_cli or iw)."""
     if hasattr(output, "stdout"):
         output = output.stdout
     if isinstance(output, bytes):
@@ -136,7 +149,60 @@ def parse_station_output(
             except ValueError:
                 pass
 
-    return rssi, tx_rate_mbps, rx_rate_mbps
+    snr: int | None = None
+    m_snr = re.search(r"\bsnr\s*[:=]\s*(-?\d+)", output, re.IGNORECASE)
+    if m_snr:
+        try:
+            snr = int(m_snr.group(1))
+        except ValueError:
+            pass
+    elif rssi is not None:
+        m_noise = re.search(r"\bnoise\s*[:=]\s*(-?\d+)", output, re.IGNORECASE)
+        if m_noise:
+            try:
+                noise = int(m_noise.group(1))
+                if noise < 0:
+                    snr = rssi - noise
+            except ValueError:
+                pass
+
+    phy_mode: str | None = None
+    if re.search(r"\[EHT\]|\bEHT[-_]|EHT-MCS", output, re.IGNORECASE):
+        phy_mode = "eht"
+    elif re.search(r"\[HE\]|\bHE[-_]|HE-MCS", output, re.IGNORECASE):
+        phy_mode = "he"
+    elif re.search(r"\[VHT\]|\bVHT[-_]|VHT-MCS", output, re.IGNORECASE):
+        phy_mode = "vht"
+    elif re.search(
+        r"\[HT\]|\bHT[-_]|HT-MCS|\bMCS\s*\d+", output, re.IGNORECASE
+    ):
+        phy_mode = "ht"
+
+    nss: int | None = None
+    m_nss = re.search(r"(?:[A-Z]+-)?NSS\s*[:= ]\s*(\d+)", output, re.IGNORECASE)
+    if m_nss:
+        try:
+            nss = int(m_nss.group(1))
+        except ValueError:
+            pass
+    if nss is None and phy_mode == "ht":
+        m_mcs = re.search(r"\bMCS\s*[:= ]\s*(\d+)", output, re.IGNORECASE)
+        if m_mcs:
+            try:
+                mcs = int(m_mcs.group(1))
+                if mcs >= 0:
+                    nss = (mcs // 8) + 1
+            except ValueError:
+                pass
+
+    return StationTelemetry(
+        rssi=rssi,
+        tx_rate_mbps=tx_rate_mbps,
+        rx_rate_mbps=rx_rate_mbps,
+        snr=snr,
+        phy_mode=phy_mode,
+        nss=nss,
+    )
 
 
 class Hostapd(object):
@@ -375,19 +441,26 @@ class Hostapd(object):
         authorized = bool(
             re.search(r"flags=.*\[AUTHORIZED\]", sta_result, re.MULTILINE)
         )
-        rssi, tx_rate_mbps, rx_rate_mbps = parse_station_output(sta_result)
-        if rssi is None or tx_rate_mbps is None or rx_rate_mbps is None:
+        telemetry = parse_station_output(sta_result)
+        if (
+            telemetry.rssi is None
+            or telemetry.tx_rate_mbps is None
+            or telemetry.rx_rate_mbps is None
+        ):
             raise Error(
                 f"Failed to obtain station telemetry for {sta_mac} from hostapd: "
-                f"rssi={rssi}, tx_rate_mbps={tx_rate_mbps}, rx_rate_mbps={rx_rate_mbps}"
+                f"rssi={telemetry.rssi}, tx_rate_mbps={telemetry.tx_rate_mbps}, rx_rate_mbps={telemetry.rx_rate_mbps}"
             )
         return StationStatus(
             auth=auth,
             assoc=assoc,
             authorized=authorized,
-            rssi=rssi,
-            tx_rate_mbps=tx_rate_mbps,
-            rx_rate_mbps=rx_rate_mbps,
+            rssi=telemetry.rssi,
+            tx_rate_mbps=telemetry.tx_rate_mbps,
+            rx_rate_mbps=telemetry.rx_rate_mbps,
+            snr=telemetry.snr,
+            phy_mode=telemetry.phy_mode,
+            nss=telemetry.nss,
         )
 
     def _bss_tm_req(

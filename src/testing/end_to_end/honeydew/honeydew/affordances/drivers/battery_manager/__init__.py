@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 
 import fidl_fuchsia_hardware_power_battery as f_battery
-import fidl_fuchsia_hardware_power_source as f_power_source
 from fuchsia_controller_py import FcTransportStatus, ZxStatus
 from honeydew import affordances_capable, errors
 from honeydew.affordances.affordance import AsyncLazyReady, ensure_ready
@@ -25,6 +24,7 @@ from honeydew.affordances.drivers.battery_manager.utils.types import (
     PowerSourceSpec,
     PowerSourceStatus,
     PowerSourceType,
+    WatchOptions,
 )
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.ffx import types as ffx_types
@@ -52,6 +52,7 @@ __all__ = [
     "PowerSourceSpec",
     "PowerSourceStatus",
     "PowerSourceType",
+    "WatchOptions",
 ]
 
 
@@ -193,16 +194,53 @@ class Battery(AsyncLazyReady):
             ) from err
 
     @ensure_ready
+    async def configure_watch(
+        self,
+        interest: BatteryStatus | None = None,
+        wake_on: BatteryStatus | None = None,
+    ) -> WatchOptions:
+        """Configures fields of interest and wake triggers for watching battery state.
+
+        Args:
+            interest: BatteryStatus mask specifying fields to be notified about.
+            wake_on: BatteryStatus mask specifying fields that should trigger system wake.
+
+        Returns:
+            WatchOptions containing effective options enabled by the driver.
+
+        Raises:
+            BatteryRequestError: If driver returns an error.
+            HoneydewBatteryError: If transport fails.
+        """
+        assert self._proxy is not None
+        fidl_options = f_battery.WatchOptions(
+            interest=interest.to_fidl() if interest else None,
+            wake_on=wake_on.to_fidl() if wake_on else None,
+        )
+        try:
+            res = await self._proxy.configure_watch(options=fidl_options)
+            if res.err is not None:
+                raise BatteryRequestError("configure_watch", res.err)
+            assert res.response is not None
+            return WatchOptions.from_fidl(res.response.effective_options)
+        except (FcTransportStatus, ZxStatus) as err:
+            raise HoneydewBatteryError(
+                "Transport error during configure_watch"
+            ) from err
+
+    @ensure_ready
     async def watch(
         self,
         interest: BatteryStatus | None = None,
         wake_on: BatteryStatus | None = None,
+        lease: int | None = None,
     ) -> BatteryStatus:
         """Hanging get for battery status updates.
 
         Args:
             interest: BatteryStatus mask specifying fields to be notified about.
             wake_on: BatteryStatus mask specifying fields that should trigger system wake.
+            lease: Optional wake lease token handle for suspend coordination.
 
         Returns:
             BatteryStatus containing the updated fields.
@@ -212,14 +250,10 @@ class Battery(AsyncLazyReady):
             HoneydewBatteryError: If transport fails.
         """
         assert self._proxy is not None
-        fidl_interest = interest.to_fidl() if interest else f_battery.Status()
-        fidl_wake_on = wake_on.to_fidl() if wake_on else f_battery.Status()
+        if interest is not None or wake_on is not None:
+            await self.configure_watch(interest=interest, wake_on=wake_on)
         try:
-            res = await self._proxy.watch(
-                interest=fidl_interest,
-                wake_on=fidl_wake_on,
-                lease=None,
-            )
+            res = await self._proxy.watch(lease=lease)
             if res.err is not None:
                 raise BatteryRequestError("watch", res.err)
             assert res.response is not None

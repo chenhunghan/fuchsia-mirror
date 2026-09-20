@@ -355,7 +355,7 @@ class PointerInjectorConfigTest
         {.capabilities =
              {Protocol{fidl::DiscoverableProtocolName<fuchsia_element::GraphicalPresenter>},
               Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::Allocator>},
-              Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::Flatland>}},
+              Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::FlatlandFactory>}},
          .source = ui_testing::PortableUITest::kTestUIStackRef,
          .targets = {ChildRef{kCppFlatlandClient}}});
   }

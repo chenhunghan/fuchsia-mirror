@@ -45,8 +45,7 @@ class InputDevice
   // fuchsia_input_report::InputDevice required methods
   void GetInputReportsReader(GetInputReportsReaderRequestView request,
                              GetInputReportsReaderCompleter::Sync& completer) override {
-    hid_device_->GetInputReportsReader(fdf::Dispatcher::GetCurrent()->async_dispatcher(),
-                                       std::move(request->reader));
+    ZX_PANIC("GetInputReportsReader (v1) is no longer supported; use GetInputReportsReaderV2");
   }
   void GetInputReportsReaderV2(GetInputReportsReaderV2RequestView request,
                                GetInputReportsReaderV2Completer::Sync& completer) override;

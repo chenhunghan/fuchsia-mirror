@@ -12,8 +12,6 @@
 #include <compare>
 #include <functional>
 
-#include <fbl/alloc_checker.h>
-
 #include "decoded-module.h"
 #include "tls.h"
 
@@ -74,17 +72,17 @@ class LoadModule {
   using Decoded = std::remove_reference_t<decltype(GetDecodedRef(std::declval<DecodedStorage&>()))>;
 
   // For convenience alias all the interesting types from Decoded.
-  using Elf = typename Decoded::Elf;
-  using Addr = typename Decoded::Addr;
-  using size_type = typename Decoded::size_type;
-  using Phdr = typename Decoded::Phdr;
-  using Sym = typename Decoded::Sym;
-  using Module = typename Decoded::Module;
-  using TlsModule = typename Decoded::TlsModule;
-  using LoadInfo = typename Decoded::LoadInfo;
-  using RelocationInfo = typename Decoded::RelocationInfo;
-  using Soname = typename Decoded::Soname;
-  using LookupResult = typename Decoded::LookupResult;
+  using Elf = Decoded::Elf;
+  using Addr = Decoded::Addr;
+  using size_type = Decoded::size_type;
+  using Phdr = Decoded::Phdr;
+  using Sym = Decoded::Sym;
+  using Module = Decoded::Module;
+  using TlsModule = Decoded::TlsModule;
+  using LoadInfo = Decoded::LoadInfo;
+  using RelocationInfo = Decoded::RelocationInfo;
+  using Soname = Decoded::Soname;
+  using LookupResult = Decoded::LookupResult;
 
   static constexpr bool kMutableDecoded = !std::is_const_v<Decoded>;
 
@@ -299,7 +297,7 @@ class LoadModule {
 template <class LoadModule>
 class LoadModuleRef {
  public:
-  using Soname = typename LoadModule::Soname;
+  using Soname = LoadModule::Soname;
 
   constexpr LoadModuleRef() = default;
 

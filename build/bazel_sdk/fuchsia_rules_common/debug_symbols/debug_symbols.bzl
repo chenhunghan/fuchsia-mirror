@@ -16,12 +16,18 @@ load(
     "FuchsiaCollectedDebugSymbolsInfo",
     "FuchsiaCollectedUnstrippedBinariesInfo",
     "FuchsiaDebugSymbolInfo",
+    "FuchsiaUnstrippedBinariesInfo",
     "FuchsiaUnstrippedBinaryInfo",
 )
 load(
     "@fuchsia_rules_common//packages:providers.bzl",
     "FuchsiaPackageResourcesInfo",
 )
+
+# The root of the workspace where the build was run.
+#
+# See https://bazel.build/docs/user-manual#running-executables.
+_DEFAULT_SOURCE_SEARCH_ROOT = "BUILD_WORKSPACE_DIRECTORY"
 
 FUCHSIA_DEBUG_SYMBOLS_ATTRS = {
     "_elf_strip_tool": attr.label(
@@ -39,7 +45,7 @@ FUCHSIA_DEBUG_SYMBOLS_ATTRS = {
     ),
 }
 
-def strip_resources(ctx, resources, build_id_path = None, source_search_root = "BUILD_WORKSPACE_DIRECTORY"):
+def strip_resources(ctx, resources, build_id_path = None, source_search_root = _DEFAULT_SOURCE_SEARCH_ROOT):
     """Generate an action to strip resources.
 
     The generated action will output a single ".build-id" directory that will contain
@@ -192,9 +198,7 @@ def _convert_fuchsia_unstripped_binary_info(binary_info):
         A `FuchsiaCollectedUnstrippedBinariesInfo` provider instance containing
         info about the unstripped binary.
     """
-    source_search_root = binary_info.source_search_root
-    if source_search_root == None:
-        source_search_root = "BUILD_WORKSPACE_DIRECTORY"
+    source_search_root = getattr(binary_info, "source_search_root", _DEFAULT_SOURCE_SEARCH_ROOT)
     return FuchsiaCollectedUnstrippedBinariesInfo(
         source_search_root_to_unstripped_binaries = {
             source_search_root: depset([
@@ -207,22 +211,51 @@ def _convert_fuchsia_unstripped_binary_info(binary_info):
         },
     )
 
+def _convert_fuchsia_unstripped_binaries_info(binaries_info):
+    """Converts a FuchsiaUnstrippedBinariesInfo provider to a FuchsiaCollectedUnstrippedBinariesInfo.
+
+    Args:
+        binaries_info: A FuchsiaUnstrippedBinariesInfo provider instance.
+    Returns:
+        A FuchsiaCollectedUnstrippedBinariesInfo provider instance containing the info about
+        converted unstripped binaries.
+    """
+    source_search_root_to_binary_info_map = {}
+    for binary_info in binaries_info.binaries:
+        source_search_root = getattr(binary_info, "source_search_root", _DEFAULT_SOURCE_SEARCH_ROOT)
+        binary_info = struct(
+            dest = binary_info.dest,
+            unstripped_file = binary_info.unstripped_file,
+            stripped_file = getattr(binary_info, "stripped_file", None),
+        )
+        source_search_root_to_binary_info_map.setdefault(source_search_root, []).append(
+            binary_info,
+        )
+
+    return FuchsiaCollectedUnstrippedBinariesInfo(
+        source_search_root_to_unstripped_binaries = {
+            source_search_root: depset(binary_infos)
+            for source_search_root, binary_infos in source_search_root_to_binary_info_map.items()
+        },
+    )
+
 def _merge_unstripped_binaries_infos(*targets_or_providers):
     """Merges collected info for unstripped binaries from targets or providers, or lists.
 
-    Finds `FuchsiaCollectedUnstrippedBinariesInfo` and `FuchsiaUnstrippedBinaryInfo`
-    provider instances in `targets_or_providers` and adds info about all the
-    unstripped binaries into a `FuchsiaCollectedUnstrippedBinariesInfo` provider instance.
+    Finds `FuchsiaCollectedUnstrippedBinariesInfo`, `FuchsiaUnstrippedBinariesInfo`, and
+    `FuchsiaUnstrippedBinaryInfo` provider instances in `targets_or_providers` and adds info
+    about all the unstripped binaries into a `FuchsiaCollectedUnstrippedBinariesInfo`
+    provider instance.
 
     Handles both provider instances and targets that have them.
 
-    `FuchsiaUnstrippedBinaryInfo` provider instances are converted into
-    `FuchsiaCollectedUnstrippedBinariesInfo` provider instances for the merge.
+    `FuchsiaUnstrippedBinaryInfo` and `FuchsiaUnstrippedBinariesInfo` provider instances are
+    converted into `FuchsiaCollectedUnstrippedBinariesInfo` provider instances for the merge.
 
     Args:
         *targets_or_providers: A list whose flattened elements must be
-            either a `FuchsiaCollectedUnstrippedBinariesInfo` or
-            `FuchsiaUnstrippedBinaryInfo` provider instance or a target.
+            `FuchsiaCollectedUnstrippedBinariesInfo`, `FuchsiaUnstrippedBinariesInfo`, or
+            `FuchsiaUnstrippedBinaryInfo` provider instances or targets.
     Returns:
         A new `FuchsiaCollectedUnstrippedBinariesInfo` provider instance, merging the content of
         the input arguments.
@@ -239,6 +272,9 @@ def _merge_unstripped_binaries_infos(*targets_or_providers):
             if hasattr(provider, "source_search_root_to_unstripped_binaries"):
                 # `target_or_provider` *is* a `FuchsiaCollectedUnstrippedBinariesInfo` provider instance.
                 collected_info = provider
+            elif hasattr(provider, "binaries"):
+                # `target_or_provider` *is* a `FuchsiaUnstrippedBinariesInfo` provider instance.
+                collected_info = _convert_fuchsia_unstripped_binaries_info(provider)
             elif hasattr(provider, "unstripped_file") and hasattr(provider, "dest"):
                 # `target_or_provider` *is* a `FuchsiaUnstrippedBinaryInfo` provider instance.
                 collected_info = _convert_fuchsia_unstripped_binary_info(provider)
@@ -251,6 +287,11 @@ def _merge_unstripped_binaries_infos(*targets_or_providers):
             if FuchsiaCollectedUnstrippedBinariesInfo in target:
                 # `target_or_provider` *has* a `FuchsiaCollectedUnstrippedBinariesInfo` provider instance.
                 collected_info = target[FuchsiaCollectedUnstrippedBinariesInfo]
+            elif FuchsiaUnstrippedBinariesInfo in target:
+                # `target_or_provider` *has* a `FuchsiaUnstrippedBinariesInfo` provider instance.
+                collected_info = _convert_fuchsia_unstripped_binaries_info(
+                    target[FuchsiaUnstrippedBinariesInfo],
+                )
             elif FuchsiaUnstrippedBinaryInfo in target:
                 # `target_or_provider` *has* a `FuchsiaUnstrippedBinaryInfo` provider instance.
                 collected_info = _convert_fuchsia_unstripped_binary_info(

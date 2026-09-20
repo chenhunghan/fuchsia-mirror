@@ -1796,6 +1796,7 @@ mod test {
     };
     use net_types::ip::{
         AddrSubnetEither, GenericOverIp, Ip, IpVersion, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr, Subnet,
+        SubnetEither,
     };
     use net_types::{SpecifiedAddr, Witness as _};
     use netlink_packet_core::{NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REPLACE, NetlinkHeader};
@@ -2597,38 +2598,64 @@ mod test {
         }
     }
 
+    fn new_del_addr_request_from_subnet(
+        kind: AddressRequestKind,
+        ack: bool,
+        subnet: SubnetEither,
+        interface_id: u64,
+    ) -> TestAddrCase {
+        let (net, prefix) = subnet.net_prefix();
+        TestAddrCase {
+            kind,
+            flags: if ack { NLM_F_ACK } else { 0 },
+            family: match subnet {
+                SubnetEither::V4(_) => AF_INET as u16,
+                SubnetEither::V6(_) => AF_INET6 as u16,
+            },
+            nlas: vec![AddressAttribute::Local(net.into())],
+            prefix_len: prefix,
+            interface_id: interface_id_as_u32(interface_id),
+            expected_request_args: None,
+            expected_response: ack.then_some(ExpectedResponse::Ack),
+        }
+    }
+
     /// Test RTM_NEWADDR and RTM_DELADDR
     // Add address tests cases.
     #[test_case(
-        TestAddrCase {
-            expected_request_args: None,
-            ..valid_new_addr_request(
-                true,
-                net_addr_subnet!("0.0.0.0/0"),
-                interfaces::testutil::PPP_INTERFACE_ID,
-                Ok(()))
-        }; "new_v4_unspecified_address_zero_prefix_ok_ack")]
-    #[test_case(
-        TestAddrCase {
-            expected_request_args: None,
-            ..valid_new_addr_request(
-                false,
-                net_addr_subnet!("0.0.0.0/24"),
-                interfaces::testutil::PPP_INTERFACE_ID,
-                Ok(()))
-        }; "new_v4_unspecified_address_non_zero_prefix_ok_no_ack")]
-    #[test_case(
-        invalid_new_addr_request(
+        new_del_addr_request_from_subnet(
+            AddressRequestKind::New { add_subnet_route: true },
             true,
-            net_addr_subnet!("::/0"),
-            interfaces::testutil::ETH_INTERFACE_ID,
-            Errno::EADDRNOTAVAIL); "new_v6_unspecified_address_zero_prefix_ack")]
+            net_subnet_v4!("0.0.0.0/0").into(),
+            interfaces::testutil::PPP_INTERFACE_ID,
+        ); "new_v4_unspecified_address_zero_prefix_ok_ack")]
     #[test_case(
-        invalid_new_addr_request(
+        new_del_addr_request_from_subnet(
+            AddressRequestKind::New { add_subnet_route: true },
             false,
-            net_addr_subnet!("::/64"),
-            interfaces::testutil::ETH_INTERFACE_ID,
-            Errno::EADDRNOTAVAIL); "new_v6_unspecified_address_non_zero_prefix_no_ack")]
+            net_subnet_v4!("0.0.0.0/24").into(),
+            interfaces::testutil::PPP_INTERFACE_ID,
+        ); "new_v4_unspecified_address_non_zero_prefix_ok_no_ack")]
+    #[test_case(
+        TestAddrCase {
+            expected_response: Some(ExpectedResponse::Error(Errno::EADDRNOTAVAIL)),
+            ..new_del_addr_request_from_subnet(
+                AddressRequestKind::New { add_subnet_route: true },
+                true,
+                net_subnet_v6!("::/0").into(),
+                interfaces::testutil::ETH_INTERFACE_ID,
+            )
+        }; "new_v6_unspecified_address_zero_prefix_ack")]
+    #[test_case(
+        TestAddrCase {
+            expected_response: Some(ExpectedResponse::Error(Errno::EADDRNOTAVAIL)),
+            ..new_del_addr_request_from_subnet(
+                AddressRequestKind::New { add_subnet_route: true },
+                false,
+                net_subnet_v6!("::/64").into(),
+                interfaces::testutil::ETH_INTERFACE_ID,
+            )
+        }; "new_v6_unspecified_address_non_zero_prefix_no_ack")]
     #[test_case(
         valid_new_addr_request(
             true,

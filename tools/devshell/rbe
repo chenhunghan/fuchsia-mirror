@@ -166,6 +166,8 @@ EOF
 }
 
 readonly BAZEL_TEST_DIR="$FUCHSIA_DIR/out/_bazel_rbe_test"
+readonly BAZEL_CRED_HELPER="/google/src/head/depot/google3/devtools/blaze/bazel/credhelper/credhelper"
+
 function setup_bazel_workspace() {
   rm -rf "$BAZEL_TEST_DIR"
   "$python" -S "$FUCHSIA_DIR/build/bazel/scripts/minimal_workspace.py" \
@@ -175,7 +177,23 @@ function setup_bazel_workspace() {
 }
 
 function get_loas_cert_type_for_bazel() {
-  get_loas_cert_type
+  local -r loas_cert_type="$(get_loas_cert_type)"
+  if [[ "$loas_cert_type" == "unrestricted" ]]; then
+    # In corporate environments, an unrestricted LOAS type implies we can use
+    # Bazel's gcert credential helper. However, if that helper is not executable or
+    # accessible (e.g. on new systems, cloudtops with unmounted SrcFS, or due to
+    # specific subdirectory permission/ACL restrictions), any attempt to run Bazel
+    # with --config=gcertauth will fail immediately with permission denied.
+    # In these circumstances, we gracefully downgrade to "restricted" mode to fall
+    # back to local gcloud Application Default Credentials (ADC).
+    if [[ ! -x "$BAZEL_CRED_HELPER" ]]; then
+      style::echo --warning "Bazel credential helper on SrcFS is not accessible: $BAZEL_CRED_HELPER"
+      style::echo --warning "Gracefully falling back to restricted (local gcloud/ADC) mode."
+      echo "restricted"
+      return 0
+    fi
+  fi
+  echo "$loas_cert_type"
 }
 
 function ensure_adc_file_exists() {
@@ -207,7 +225,7 @@ function test_bazel_rbe() {
           --config=resultstore \
           "${auth_config_args[@]}" \
           --build_event_upload_max_retries=1 \
-          --bes_timeout=3s \
+          --bes_timeout=10s \
           --bes_upload_mode=wait_for_upload_complete \
           :all
   )
@@ -221,18 +239,17 @@ function check_credential_helper_latency() {
     # The credshelper is not used with restricted LOAS.
     return 0
   fi
-  local -r cred_helper="/google/src/head/depot/google3/devtools/blaze/bazel/credhelper/credhelper"
-  if [[ -x "$cred_helper" ]]; then
+  if [[ -x "$BAZEL_CRED_HELPER" ]]; then
     local -r start_time=$SECONDS
     # Run the helper (which prints 'invalid arguments' and exits with 1)
-    "$cred_helper" >/dev/null 2>&1 || :
+    "$BAZEL_CRED_HELPER" >/dev/null 2>&1 || :
     local -r duration=$((SECONDS - start_time))
 
     if [[ $duration -ge 2 ]]; then
       style::echo --warning "Access to the Bazel credential helper on SrcFS is extremely slow ($duration seconds startup latency)."
       style::echo --warning "This is likely causing Bazel's Capabilities check or credential retrieval to timeout."
       style::echo --warning "We recommend checking SrcFS/Citc mount health or warming the cache by running:"
-      style::echo --warning "  ls -l $cred_helper"
+      style::echo --warning "  ls -l $BAZEL_CRED_HELPER"
     fi
   fi
 }
@@ -301,7 +318,7 @@ function auth_subcommand() {
 # Returns 0 (success) if LOAS credentials are unrestricted.
 # Returns non-zero if credentials are restricted or some other error occurred.
 function check_loas_restrictions() {
-  local -r check_loas_script="${FUCHSIA_DIR}/build/rbe/check_loas_restrictions.sh"
+  local -r check_loas_script="${FUCHSIA_DIR}/build/auth/check_loas_restrictions.sh"
   [[ -r "$check_loas_script" ]] || {
     fx-error "Script not found: $check_loas_script"
     return 1

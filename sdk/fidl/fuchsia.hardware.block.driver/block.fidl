@@ -109,7 +109,7 @@ type BlockReadWrite = resource struct {
 
     /// The data unit number (DUN) used as tweak for encrypting/decrypting the request.
     /// Only used if `INLINE_ENCRYPTION_ENABLED` is set in command flags.
-    dun uint32;
+    dun uint64;
 };
 
 /// `TRIM`

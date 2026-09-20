@@ -4,15 +4,12 @@
 
 #include <endian.h>
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
-#include <fuchsia/hardware/block/driver/c/banjo.h>
-#include <lib/ddk/binding_driver.h>
 #include <lib/driver/component/cpp/node_offers.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/scsi/block-device.h>
 #include <netinet/in.h>
 #include <zircon/process.h>
 
-#include <bind/fuchsia/cpp/bind.h>
 #include <fbl/alloc_checker.h>
 
 #include "src/devices/block/lib/common/include/common.h"
@@ -244,9 +241,6 @@ zx_status_t BlockDevice::AddDevice(uint32_t max_transfer_bytes) {
   {
     const std::string path_from_parent = std::string(controller_->driver_name()) + "/";
     compat::DeviceServer::BanjoConfig banjo_config;
-    if (!controller_->UseNewInterface()) {
-      banjo_config.callbacks[ZX_PROTOCOL_BLOCK_IMPL] = block_impl_server_.callback();
-    }
 
     zx::result<> result = compat_server_.Initialize(
         controller_->driver_incoming(), controller_->driver_outgoing(),
@@ -257,50 +251,48 @@ zx_status_t BlockDevice::AddDevice(uint32_t max_transfer_bytes) {
     }
   }
 
-  if (controller_->UseNewInterface()) {
-    fbl::String partition_name = LunName();
-    const block_server::PartitionInfo info = {
-        .device_flags =
-            (write_protected_
-                 ? static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kReadonly)
-                 : 0u) |
-            (removable_ ? static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kRemovable)
-                        : 0u) |
-            (dpo_fua_available_
-                 ? static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kFuaSupport)
-                 : 0u),
-        .start_block = 0,
-        .block_count = block_count_,
-        .block_size = block_size_bytes_,
-        .type_guid = {},
-        .instance_guid = {},
-        .name = partition_name.c_str(),
-        .flags = 0,
-        .max_transfer_size = max_transfer_bytes_,
-    };
-    block_server_.emplace(info, this);
+  fbl::String partition_name = LunName();
+  const block_server::PartitionInfo info = {
+      .device_flags =
+          (write_protected_
+               ? static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kReadonly)
+               : 0u) |
+          (removable_ ? static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kRemovable)
+                      : 0u) |
+          (dpo_fua_available_
+               ? static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kFuaSupport)
+               : 0u),
+      .start_block = 0,
+      .block_count = block_count_,
+      .block_size = block_size_bytes_,
+      .type_guid = {},
+      .instance_guid = {},
+      .name = partition_name.c_str(),
+      .flags = 0,
+      .max_transfer_size = max_transfer_bytes_,
+  };
+  block_server_.emplace(info, this);
 
-    auto handlers = fuchsia_hardware_block_volume::Service::InstanceHandler({
-        .volume =
-            [this](fidl::ServerEnd<fuchsia_storage_block::Block> server_end) {
-              if (block_server_) {
-                block_server_->Serve(std::move(server_end));
-              }
-            },
-        .token =
-            [this](fidl::ServerEnd<fuchsia_driver_token::NodeToken> server_end) {
-              fidl::BindServer(fdf::Dispatcher::GetCurrent()->async_dispatcher(),
-                               std::move(server_end), this);
-            },
-    });
+  auto handlers = fuchsia_hardware_block_volume::Service::InstanceHandler({
+      .volume =
+          [this](fidl::ServerEnd<fuchsia_storage_block::Block> server_end) {
+            if (block_server_) {
+              block_server_->Serve(std::move(server_end));
+            }
+          },
+      .token =
+          [this](fidl::ServerEnd<fuchsia_driver_token::NodeToken> server_end) {
+            fidl::BindServer(fdf::Dispatcher::GetCurrent()->async_dispatcher(),
+                             std::move(server_end), this);
+          },
+  });
 
-    auto add_svc_result =
-        controller_->driver_outgoing()->AddService<fuchsia_hardware_block_volume::Service>(
-            std::move(handlers), DeviceName().c_str());
-    if (add_svc_result.is_error()) {
-      logger().log(fdf::ERROR, "Failed to add volume service: {}", add_svc_result.status_string());
-      return add_svc_result.status_value();
-    }
+  auto add_svc_result =
+      controller_->driver_outgoing()->AddService<fuchsia_hardware_block_volume::Service>(
+          std::move(handlers), DeviceName().c_str());
+  if (add_svc_result.is_error()) {
+    logger().log(fdf::ERROR, "Failed to add volume service: {}", add_svc_result.status_string());
+    return add_svc_result.status_value();
   }
 
   auto [controller_client_end, controller_server_end] =
@@ -312,14 +304,8 @@ zx_status_t BlockDevice::AddDevice(uint32_t max_transfer_bytes) {
   std::vector<fuchsia_driver_framework::wire::Offer> offers = compat_server_.CreateOffers2(arena);
 
   fidl::VectorView<fuchsia_driver_framework::wire::NodeProperty2> properties;
-  if (!controller_->UseNewInterface()) {
-    properties = fidl::VectorView<fuchsia_driver_framework::wire::NodeProperty2>(arena, 1);
-    properties[0] = fdf::MakeProperty2(arena, bind_fuchsia::PROTOCOL,
-                                       static_cast<uint32_t>(ZX_PROTOCOL_BLOCK_IMPL));
-  } else {
-    offers.push_back(
-        fdf::MakeOffer2<fuchsia_hardware_block_volume::Service>(arena, DeviceName().c_str()));
-  }
+  offers.push_back(
+      fdf::MakeOffer2<fuchsia_hardware_block_volume::Service>(arena, DeviceName().c_str()));
 
   const auto args = fuchsia_driver_framework::wire::NodeAddArgs::Builder(arena)
                         .name(arena, DeviceName())
@@ -342,7 +328,6 @@ zx_status_t BlockDevice::AddDevice(uint32_t max_transfer_bytes) {
 }
 
 void BlockDevice::OnRequests(std::span<block_server::Request> requests) {
-  ZX_ASSERT(controller_->UseNewInterface());
   scsi::ScsiRequest translated[64];
   size_t count = 0;
 
@@ -482,133 +467,6 @@ void BlockDevice::Get(GetCompleter::Sync& completer) {
     completer.Reply(zx::ok(std::move(token)));
   } else {
     completer.Reply(zx::error(ZX_ERR_NOT_FOUND));
-  }
-}
-
-void BlockDevice::BlockImplQuery(block_info_t* info_out, size_t* block_op_size_out) {
-  info_out->block_size = block_size_bytes_;
-  info_out->block_count = block_count_;
-  info_out->max_transfer_size = max_transfer_bytes_;
-  info_out->flags = (write_protected_ ? DEVICE_FLAG_READONLY : 0) |
-                    (removable_ ? DEVICE_FLAG_REMOVABLE : 0) |
-                    (dpo_fua_available_ ? DEVICE_FLAG_FUA_SUPPORT : 0);
-  *block_op_size_out = controller_->BlockOpSize();
-}
-
-void BlockDevice::BlockImplQueue(block_op_t* op, block_impl_queue_callback completion_cb,
-                                 void* cookie) {
-  DeviceOp* device_op = containerof(op, DeviceOp, op);
-  device_op->completion_cb = completion_cb;
-  device_op->cookie = cookie;
-
-  switch (op->command.opcode) {
-    case BLOCK_OPCODE_READ:
-    case BLOCK_OPCODE_WRITE: {
-      if (zx_status_t status = block::CheckIoRange(op->rw.offset_dev, op->rw.length, block_count_,
-                                                   max_transfer_blocks_, logger());
-          status != ZX_OK) {
-        completion_cb(cookie, status, op);
-        return;
-      }
-      const bool is_write = op->command.opcode == BLOCK_OPCODE_WRITE;
-      const bool is_fua = op->command.flags & BLOCK_IO_FLAG_FORCE_ACCESS;
-      if (!dpo_fua_available_ && is_fua) {
-        completion_cb(cookie, ZX_ERR_NOT_SUPPORTED, op);
-        return;
-      }
-
-      uint8_t cdb_buffer[16] = {};
-      uint8_t cdb_length;
-      if (block_count_ > UINT32_MAX) {
-        auto cdb = reinterpret_cast<Read16CDB*>(cdb_buffer);  // Struct-wise equiv. to Write16CDB.
-        cdb_length = 16;
-        cdb->opcode = is_write ? Opcode::WRITE_16 : Opcode::READ_16;
-        cdb->logical_block_address = htobe64(op->rw.offset_dev);
-        cdb->transfer_length = htobe32(op->rw.length);
-        cdb->set_force_unit_access(is_fua);
-      } else if (device_options_.use_read_write_12) {
-        auto cdb = reinterpret_cast<Read12CDB*>(cdb_buffer);  // Struct-wise equiv. to Write12CDB.
-        cdb_length = 12;
-        cdb->opcode = is_write ? Opcode::WRITE_12 : Opcode::READ_12;
-        cdb->logical_block_address = htobe32(static_cast<uint32_t>(op->rw.offset_dev));
-        cdb->transfer_length = htobe32(op->rw.length);
-        cdb->set_force_unit_access(is_fua);
-      } else {
-        auto cdb = reinterpret_cast<Read10CDB*>(cdb_buffer);  // Struct-wise equiv. to Write10CDB.
-        cdb_length = 10;
-        cdb->opcode = is_write ? Opcode::WRITE_10 : Opcode::READ_10;
-        cdb->logical_block_address = htobe32(static_cast<uint32_t>(op->rw.offset_dev));
-        cdb->transfer_length = htobe16(static_cast<uint16_t>(op->rw.length));
-        cdb->set_force_unit_access(is_fua);
-      }
-      ZX_ASSERT(cdb_length <= sizeof(cdb_buffer));
-      controller_->ExecuteCommandAsync(target_, lun_, {cdb_buffer, cdb_length}, is_write,
-                                       block_size_bytes_, device_op, {nullptr, 0});
-      return;
-    }
-    case BLOCK_OPCODE_FLUSH: {
-      if (zx_status_t status = block::CheckFlushValid(op->rw, logger()); status != ZX_OK) {
-        completion_cb(cookie, status, op);
-        return;
-      }
-      if (!write_cache_enabled_) {
-        completion_cb(cookie, ZX_OK, op);
-        return;
-      }
-      SynchronizeCache10CDB cdb = {};
-      cdb.opcode = Opcode::SYNCHRONIZE_CACHE_10;
-      // Prefer writing to storage medium (instead of nv cache) and return only
-      // after completion of operation.
-      cdb.reserved_and_immed = 0;
-      // Ideally this would flush specific blocks, but several platforms don't
-      // support this functionality, so just synchronize the whole block device.
-      cdb.logical_block_address = 0;
-      cdb.number_of_logical_blocks = 0;
-      controller_->ExecuteCommandAsync(target_, lun_, {&cdb, sizeof(cdb)},
-                                       /*is_write=*/false, block_size_bytes_, device_op,
-                                       {nullptr, 0});
-      return;
-    }
-    case BLOCK_OPCODE_TRIM: {
-      if (!unmap_command_supported_) {
-        completion_cb(cookie, ZX_ERR_NOT_SUPPORTED, op);
-        return;
-      }
-      if (zx_status_t status = block::CheckIoRange(op->trim.offset_dev, op->trim.length,
-                                                   block_count_, max_transfer_blocks_, logger());
-          status != ZX_OK) {
-        completion_cb(cookie, status, op);
-        return;
-      }
-      UnmapCDB cdb = {};
-      cdb.opcode = Opcode::UNMAP;
-
-      // block_trim can only pass a single block slice.
-      constexpr uint32_t block_descriptor_count = 1;
-      // The SCSI UNMAP command requires separate data to be sent for the UNMAP parameter list.
-      uint8_t data[sizeof(UnmapParameterListHeader) +
-                   (sizeof(UnmapBlockDescriptor) * block_descriptor_count)] = {};
-      cdb.parameter_list_length = htobe16(sizeof(data));
-
-      UnmapParameterListHeader* patameter_list_header =
-          reinterpret_cast<UnmapParameterListHeader*>(data);
-      patameter_list_header->data_length =
-          htobe16(sizeof(UnmapParameterListHeader) - sizeof(patameter_list_header->data_length) +
-                  sizeof(UnmapBlockDescriptor));
-      patameter_list_header->block_descriptor_data_length = htobe16(sizeof(UnmapBlockDescriptor));
-
-      UnmapBlockDescriptor* block_descriptor =
-          reinterpret_cast<UnmapBlockDescriptor*>(data + sizeof(UnmapParameterListHeader));
-      block_descriptor->logical_block_address = htobe64(op->trim.offset_dev);
-      block_descriptor->blocks = htobe32(op->trim.length);
-
-      controller_->ExecuteCommandAsync(target_, lun_, {&cdb, sizeof(cdb)}, /*is_write=*/true,
-                                       block_size_bytes_, device_op, {&data, sizeof(data)});
-      return;
-    }
-    default:
-      completion_cb(cookie, ZX_ERR_NOT_SUPPORTED, op);
-      return;
   }
 }
 

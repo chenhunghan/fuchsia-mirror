@@ -3,15 +3,17 @@
 // found in the LICENSE file.
 
 use crate::model::actions::ShutdownType;
-use crate::model::component::manager::ComponentManagerInstance;
 use crate::model::component::ComponentInstance;
-use anyhow::{format_err, Context as _, Error};
+use crate::model::component::manager::ComponentManagerInstance;
+use anyhow::{Context as _, Error, format_err};
 use fidl_fuchsia_sys2::*;
 use fuchsia_async::{self as fasync};
 
 use futures::prelude::*;
+use futures::select;
 use log::*;
 use std::collections::VecDeque;
+use std::pin::pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -44,11 +46,6 @@ impl SystemController {
                 // exit. main.rs waits on the model to observe the root disappear.
                 SystemControllerRequest::Shutdown { responder } => {
                     let timeout = zx::MonotonicDuration::from(self.request_timeout);
-                    fasync::Task::spawn(async move {
-                        fasync::Timer::new(fasync::MonotonicInstant::after(timeout)).await;
-                        panic!("Component manager did not complete shutdown in allowed time.");
-                    })
-                    .detach();
                     info!("Component manager is shutting down the system");
                     let root = self
                         .top_instance
@@ -58,11 +55,19 @@ impl SystemController {
                         .clone();
 
                     // Kick off a background task to log when shutdown is taking too long.
-                    fuchsia_async::Task::spawn(shutdown_watchdog(root.clone())).detach();
+                    let _watchdog = fuchsia_async::Task::spawn(shutdown_watchdog(root.clone()));
 
-                    root.shutdown(ShutdownType::System)
-                        .await
-                        .context("got error waiting for shutdown action to complete")?;
+                    let mut shutdown_fut = pin!(root.shutdown(ShutdownType::System).fuse());
+                    let mut timer =
+                        pin!(fasync::Timer::new(fasync::MonotonicInstant::after(timeout)).fuse());
+                    select! {
+                        res = shutdown_fut => {
+                            res.context("got error waiting for shutdown action to complete")?;
+                        }
+                        () = timer => {
+                            panic!("Component manager did not complete shutdown in allowed time.");
+                        }
+                    }
                     match responder.send() {
                         Ok(()) => {}
                         Err(e) => {
@@ -110,15 +115,16 @@ async fn num_still_running(root: &Arc<ComponentInstance>) -> usize {
 mod tests {
     use super::*;
     use crate::model::testing::test_helpers::{
-        component_decl_with_test_runner, ActionsTest, ComponentInfo,
+        ActionsTest, ComponentInfo, component_decl_with_test_runner,
     };
     use async_trait::async_trait;
     use cm_rust_testing::*;
     use errors::ModelError;
     use fidl::endpoints::create_proxy_and_stream;
+    use fidl_fuchsia_sys2 as fsys;
+    use fuchsia_async as fasync;
     use hooks::{Event, EventType, Hook, HooksRegistration};
     use moniker::Moniker;
-    use {fidl_fuchsia_sys2 as fsys, fuchsia_async as fasync};
 
     /// Use SystemController to shut down a system whose root has the child `a`
     /// and `a` has descendents as shown in the diagram below.
@@ -278,5 +284,47 @@ mod tests {
         exec.wake_expired_timers();
 
         assert_eq!(std::task::Poll::Pending, exec.run_until_stalled(&mut test_logic));
+    }
+
+    #[fuchsia::test]
+    fn test_no_panic_after_successful_shutdown_when_time_advances() {
+        const TIMEOUT_SECONDS: i64 = 5;
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        let mut test_logic = Box::pin(async {
+            let components = vec![("root", ComponentDeclBuilder::new().build())];
+            let test = ActionsTest::new("root", components, None).await;
+            test.start(Moniker::root()).await;
+
+            let sys_controller = SystemController::new(
+                Arc::downgrade(test.model.top_instance()),
+                Duration::from_secs(u64::try_from(TIMEOUT_SECONDS).unwrap()),
+            );
+            let (controller_proxy, stream) =
+                create_proxy_and_stream::<fsys::SystemControllerMarker>();
+            let _task = fasync::Task::spawn(async move {
+                sys_controller.serve(stream).await.expect("error serving system controller");
+            });
+
+            let builtin_environment = test.builtin_environment.lock().await;
+            let completion = builtin_environment.wait_for_root_stop();
+            controller_proxy.shutdown().await.expect("shutdown request failed");
+            completion.await;
+        });
+
+        // Run until shutdown finishes.
+        assert_eq!(std::task::Poll::Ready(()), exec.run_until_stalled(&mut test_logic));
+
+        // Advance fake time past the timeout. If the timeout timer leaked / was not cancelled,
+        // it would panic here when expired timers are woken.
+        let new_time = fasync::MonotonicInstant::from_nanos(
+            exec.now().into_nanos()
+                + zx::MonotonicDuration::from_seconds(TIMEOUT_SECONDS + 5).into_nanos(),
+        );
+        exec.set_fake_time(new_time);
+        exec.wake_expired_timers();
+
+        // The executor runs cleanly without panicking.
+        let mut placeholder = Box::pin(async {});
+        assert_eq!(std::task::Poll::Ready(()), exec.run_until_stalled(&mut placeholder));
     }
 }

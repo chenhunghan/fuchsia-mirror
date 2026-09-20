@@ -6,9 +6,14 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("retriever-dml") {
+  dml = "meta/retriever.dml"
+  driver_name = "retriever"
+}
+
 driver_bind_rules("bind") {
   testonly = true
-  rules = "meta/retriever.bind"
+  dml_label = ":retriever-dml"
   bind_output = "retriever.bindbc"
   deps =
       [ "//examples/drivers/metadata:fuchsia_examples_metadata_bind_library" ]
@@ -30,7 +35,7 @@ fuchsia_cc_driver("driver") {
 fuchsia_driver_component("component") {
   testonly = true
   component_name = "retriever"
-  manifest = "meta/retriever.cml"
+  dml_label = ":retriever-dml"
   deps = [
     ":bind",
     ":driver",

@@ -168,7 +168,7 @@ impl RootVolume {
         // Tombstone the deleted objects.
         let root_store = self.filesystem.root_store();
         for object_id in &objects_to_delete {
-            root_store.tombstone_object(*object_id, Options::default()).await?;
+            root_store.tombstone_object(*object_id, Options::default(), None).await?;
         }
         Ok(())
     }

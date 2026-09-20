@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import itertools
 import logging
 import os
 import time
@@ -121,43 +120,39 @@ class WlanRebootTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def pre_run(self) -> None:
         test_params: list[tuple[TestParams]] = []
-        securities: list[Security] = [
-            SecurityOpen(),
-            SecurityWpa2(),
-            SecurityWpa3(),
-        ]
-        for (
-            device_type,
-            reboot_type,
-            band,
-            security,
-            ip_version,
-        ) in itertools.product(
-            # DeviceType,
-            # RebootType,
-            # BandType,
-            # SecurityMode,
-            # IpVersionType,
-            #
-            # TODO(https://github.com/python/mypy/issues/14688): Replace the code below
-            # with the commented code above once the bug affecting StrEnum resolves.
-            [e for e in DeviceType],
-            [e for e in RebootType],
-            [Band.BAND_2G, Band.BAND_5G],
-            securities,
-            [e for e in IpVersionType],
-        ):
+
+        # AP reboot wipes all AP state; the DUT's recovery flow is the same for
+        # every security mode, so one representative is enough.
+        for reboot_type in (RebootType.SOFT, RebootType.HARD):
             test_params.append(
                 (
                     TestParams(
-                        device_type,
+                        DeviceType.AP,
                         reboot_type,
-                        band,
-                        security,
-                        ip_version,
+                        Band.BAND_2G,
+                        SecurityWpa2(),
+                        IpVersionType.DUAL_IPV4_IPV6,
                     ),
                 )
             )
+
+        # DUT reboot checks that wlancfg reloads credentials from disk (PSK and
+        # SAE) and reassociates with an AP that may hold stale PMF state.
+        dut_securities: list[Security] = [SecurityWpa2(), SecurityWpa3()]
+        for reboot_type in (RebootType.SOFT, RebootType.HARD):
+            for security in dut_securities:
+                for ip_version in IpVersionType.all():
+                    test_params.append(
+                        (
+                            TestParams(
+                                DeviceType.DUT,
+                                reboot_type,
+                                Band.BAND_2G,
+                                security,
+                                ip_version,
+                            ),
+                        )
+                    )
 
         def generate_test_name(params: TestParams) -> str:
             # Map OpenWrt security to hostapd security string to match legacy test name format

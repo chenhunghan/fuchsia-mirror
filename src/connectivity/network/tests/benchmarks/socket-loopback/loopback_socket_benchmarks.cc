@@ -44,7 +44,6 @@ namespace {
 
 constexpr char kFakeNetstackEnvVar[] = "FAKE_NETSTACK";
 constexpr char kNetstack3EnvVar[] = "NETSTACK3";
-constexpr char kNetstack2EnvVar[] = "NETSTACK2";
 constexpr char kStarnixEnvVar[] = "STARNIX";
 #if defined(__Fuchsia__)
 constexpr char kSocketBenchmarksTracingCategory[] = "socket_benchmarks";
@@ -105,13 +104,6 @@ class Ipv4 {
 enum class BufferSizeType { kTcpSend, kUdpRecv };
 
 int ExpectedGetBufferSizeFuchsia(int set_size, BufferSizeType buffer_type) {
-  if (std::getenv(kNetstack2EnvVar)) {
-    set_size *= 2;
-    // NB: Netstack 2 clamps the value on set within a certain range, and
-    // there are benchmark cases that set buffer sizes both above and below
-    // this range (when doubled) so the logic needs to be replicated here.
-    return std::clamp(set_size, 4096, 4 << 20);
-  }
   if (std::getenv(kNetstack3EnvVar)) {
     switch (buffer_type) {
       case BufferSizeType::kTcpSend:
@@ -124,10 +116,9 @@ int ExpectedGetBufferSizeFuchsia(int set_size, BufferSizeType buffer_type) {
 }
 
 int ExpectedGetBufferSize(int set_size, BufferSizeType buffer_type) {
-  // The desired return value for getting SO_SNDBUF and SO_RCVBUF on Linux
-  // and Netstack2 is double the amount of payload bytes due to the fact
-  // that the value is doubled on set to account for overhead according
-  // to the [man page].
+  // The desired return value for getting SO_SNDBUF and SO_RCVBUF on Linux is
+  // double the amount of payload bytes due to the fact that the value is
+  // doubled on set to account for overhead according to the [man page].
   //
   // [man page]: https://man7.org/linux/man-pages/man7/socket.7.html
 #ifdef __linux__
@@ -496,9 +487,7 @@ int main(int argc, char** argv) {
     test_suite += ".starnix";
   }
 
-  if (std::getenv("FAST_UDP")) {
-    test_suite += ".fastudp";
-  } else if (std::getenv(kFakeNetstackEnvVar)) {
+  if (std::getenv(kFakeNetstackEnvVar)) {
     test_suite += ".fake_netstack";
   } else if (std::getenv(kNetstack3EnvVar)) {
     test_suite += ".netstack3";

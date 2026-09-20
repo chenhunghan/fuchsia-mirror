@@ -89,6 +89,7 @@ rustc_library("ffx_assembly") {
     "//third_party/rust_crates:async-trait",
     "//third_party/rust_crates:camino",
     "//third_party/rust_crates:log",
+    "//third_party/rust_crates:schemars",
     "//third_party/rust_crates:serde",
     "//third_party/rust_crates:serde_json",
     "//third_party/rust_crates:textwrap",

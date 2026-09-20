@@ -11,7 +11,7 @@ use fidl_fuchsia_net_routes_ext::rules::{FidlRuleAdminIpExt, RuleIndex};
 use fidl_fuchsia_net_routes_ext::{self as fnet_routes_ext, FidlRouteIpExt};
 use net_types::SpecifiedAddr;
 use net_types::ip::Ip;
-use netstack_testing_common::realms::{Netstack, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 
 /// Common test setup that can be shared by all routes tests.
 pub struct TestSetup<'a, I: Ip + FidlRouteIpExt + FidlRouteAdminIpExt> {
@@ -25,12 +25,9 @@ pub struct TestSetup<'a, I: Ip + FidlRouteIpExt + FidlRouteAdminIpExt> {
 
 impl<'a, I: Ip + FidlRouteIpExt + FidlRouteAdminIpExt> TestSetup<'a, I> {
     /// Creates a new test setup.
-    pub async fn new<N: Netstack>(
-        sandbox: &'a netemul::TestSandbox,
-        name: &str,
-    ) -> TestSetup<'a, I> {
+    pub async fn new(sandbox: &'a netemul::TestSandbox, name: &str) -> TestSetup<'a, I> {
         let realm = sandbox
-            .create_netstack_realm::<N, _>(format!("routes-admin-{name}"))
+            .create_netstack_realm::<Netstack3, _>(format!("routes-admin-{name}"))
             .expect("create realm");
         let network =
             sandbox.create_network(format!("routes-admin-{name}")).await.expect("create network");

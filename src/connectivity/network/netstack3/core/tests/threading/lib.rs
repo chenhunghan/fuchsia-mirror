@@ -238,6 +238,7 @@ fn neighbor_resolution_and_send_queued_packets_atomic<I: TestIpExt>() {
                 Some(ZonedAddr::Unzoned(SpecifiedAddr::new(I::NEIGHBOR_ADDR).unwrap()).into()),
                 REMOTE_PORT.into(),
                 Buf::new([1], ..),
+                Default::default(),
             )
             .unwrap();
 
@@ -275,6 +276,7 @@ fn neighbor_resolution_and_send_queued_packets_atomic<I: TestIpExt>() {
                     Some(ZonedAddr::Unzoned(SpecifiedAddr::new(I::NEIGHBOR_ADDR).unwrap()).into()),
                     REMOTE_PORT.into(),
                     Buf::new([2], ..),
+                    Default::default(),
                 )
                 .unwrap();
         });
@@ -373,6 +375,7 @@ fn new_incomplete_neighbor_schedule_timer_atomic<I: TestIpExt>() {
                     Some(ZonedAddr::Unzoned(SpecifiedAddr::new(I::NEIGHBOR_ADDR).unwrap()).into()),
                     REMOTE_PORT.into(),
                     Buf::new([1], ..),
+                    Default::default(),
                 )
                 .unwrap()
         });

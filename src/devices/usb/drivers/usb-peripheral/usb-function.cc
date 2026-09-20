@@ -754,4 +754,49 @@ void UsbFunction::ClearDescriptors() {
   inspect_.SetDescriptors({});
 }
 
+std::optional<std::vector<uint8_t>> UsbFunction::GetEndpointsForInterface(
+    uint8_t interface_num, uint8_t alt_setting) const {
+  if (descriptors_.size() < sizeof(usb_descriptor_header_t)) {
+    return std::nullopt;
+  }
+  std::vector<uint8_t> endpoints;
+
+  const auto* header = reinterpret_cast<const usb_descriptor_header_t*>(descriptors_.data());
+  const auto* end =
+      reinterpret_cast<const usb_descriptor_header_t*>(descriptors_.data() + descriptors_.size());
+
+  std::optional<uint8_t> cur_interface;
+  std::optional<uint8_t> cur_alt;
+
+  while (reinterpret_cast<const uint8_t*>(header) + sizeof(usb_descriptor_header_t) <=
+         reinterpret_cast<const uint8_t*>(end)) {
+    if (header->b_length < sizeof(usb_descriptor_header_t) ||
+        reinterpret_cast<const uint8_t*>(header) + header->b_length >
+            reinterpret_cast<const uint8_t*>(end)) {
+      break;
+    }
+    if (header->b_descriptor_type == USB_DT_INTERFACE) {
+      if (header->b_length >= sizeof(usb_interface_descriptor_t)) {
+        const auto* desc = reinterpret_cast<const usb_interface_descriptor_t*>(header);
+        cur_interface = desc->b_interface_number;
+        cur_alt = desc->b_alternate_setting;
+      } else {
+        cur_interface.reset();
+        cur_alt.reset();
+      }
+    } else if (header->b_descriptor_type == USB_DT_ENDPOINT) {
+      if (cur_interface == interface_num && cur_alt == alt_setting) {
+        if (header->b_length >= sizeof(usb_endpoint_descriptor_t)) {
+          const auto* desc = reinterpret_cast<const usb_endpoint_descriptor_t*>(header);
+          endpoints.push_back(desc->b_endpoint_address);
+        }
+      }
+    }
+    header = reinterpret_cast<const usb_descriptor_header_t*>(
+        reinterpret_cast<const uint8_t*>(header) + header->b_length);
+  }
+
+  return endpoints;
+}
+
 }  // namespace usb_peripheral

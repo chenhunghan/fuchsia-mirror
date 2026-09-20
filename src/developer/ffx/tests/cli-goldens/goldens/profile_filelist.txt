@@ -22,6 +22,7 @@ ffx/profile/power.golden
 ffx/profile/power/logger.golden
 ffx/profile/power/logger/start.golden
 ffx/profile/power/logger/stop.golden
+ffx/profile/stacktrack.golden
 ffx/profile/temperature.golden
 ffx/profile/temperature/logger.golden
 ffx/profile/temperature/logger/start.golden

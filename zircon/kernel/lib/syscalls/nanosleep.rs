@@ -5,25 +5,19 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
-use crate::object::ProcessDispatcher;
-use crate::platform_rs::timer::current_mono_time;
+use crate::kernel::deadline::Deadline;
+use crate::kernel::thread::{Interruptible, sleep_etc};
+use crate::object::{AutoBlocked, Blocked, ProcessDispatcher};
+use crate::platform_rs::timer::{InstantUnknown, current_mono_time};
 use debug::ltracef;
 use syscalls_macro::syscall;
 use zx_status::Status;
-use zx_types::{zx_duration_mono_t, zx_instant_mono_t};
+use zx_types::zx_instant_mono_t;
 
 const LOCAL_TRACE: u32 = 0;
 
 define_kcounter!(SYSCALLS_ZX_NANOSLEEP, "syscalls.zx_nanosleep", Sum);
 define_kcounter!(SYSCALLS_ZX_NANOSLEEP_ZERO_DURATION, "syscalls.zx_nanosleep_zero_duration", Sum);
-
-unsafe extern "C" {
-    fn cpp_thread_current_sleep_nanosleep(
-        deadline: zx_instant_mono_t,
-        now: zx_instant_mono_t,
-        slack_amount: zx_duration_mono_t,
-    ) -> zx_types::zx_status_t;
-}
 
 #[syscall]
 pub fn sys_nanosleep(deadline: zx_instant_mono_t) -> Result<(), Status> {
@@ -36,13 +30,12 @@ pub fn sys_nanosleep(deadline: zx_instant_mono_t) -> Result<(), Status> {
     }
 
     let now = current_mono_time();
-    let slack_policy = ProcessDispatcher::with_current(|up| up.get_timer_slack_policy_amount());
+    let slack = ProcessDispatcher::with_current(|up| up.get_timer_slack_policy());
+    let slack_deadline = Deadline::new(InstantUnknown(deadline), slack);
+
+    let _by = AutoBlocked::new(Blocked::SLEEPING);
 
     // This syscall is declared as "blocking", so a higher layer will automatically
     // retry if we return ZX_ERR_INTERNAL_INTR_RETRY.
-    //
-    // SAFETY: Calling C++ thread sleep helper from kernel thread context is safe.
-    let status = unsafe { cpp_thread_current_sleep_nanosleep(deadline, now.0, slack_policy) };
-    Status::ok(status)?;
-    Ok(())
+    sleep_etc(&slack_deadline, Interruptible::YES, now.0)
 }

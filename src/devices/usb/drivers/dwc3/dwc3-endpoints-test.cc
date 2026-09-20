@@ -514,8 +514,8 @@ TEST_P(Dwc3EndpointsTest, CancelAllRequests) {
   // Verify completions returned with cancellation error.
   std::vector<CompletionResult> completions = event_handler_.WaitForCompletions(2);
   ASSERT_EQ(completions.size(), 2UL);
-  EXPECT_EQ(completions[0].status, ZX_ERR_IO_NOT_PRESENT);
-  EXPECT_EQ(completions[1].status, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_EQ(completions[0].status, ZX_ERR_CANCELED);
+  EXPECT_EQ(completions[1].status, ZX_ERR_CANCELED);
 }
 
 TEST_P(Dwc3EndpointsTest, CancelAllRequestsOnControllerStop) {
@@ -1228,10 +1228,10 @@ TEST_P(Dwc3EndpointTransferSweepTest, DISABLED_CancelAllDuringActiveTransfer) {
       << "CancelAll failed: " << cancel_result.error_value().FormatDescription();
 
   // Wait for request completion (EpServer::CancelAll completes cancelled requests with
-  // ZX_ERR_IO_NOT_PRESENT).
+  // ZX_ERR_CANCELED).
   ASSERT_TRUE(sync_client.HandleOneEvent(event_handler).ok());
   EXPECT_TRUE(completed);
-  EXPECT_EQ(completion_status, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_EQ(completion_status, ZX_ERR_CANCELED);
 
   sync_client = {};
 }
@@ -1583,7 +1583,7 @@ TEST_P(Dwc3EndpointsTest, DISABLED_DeferredCancelDisableAccountingLeak) {
   // Flush completion events to event handler so we are 100% in sync
   ASSERT_TRUE(sync_client.HandleOneEvent(event_handler).ok());
   EXPECT_TRUE(completed);
-  EXPECT_EQ(completion_status, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_EQ(completion_status, ZX_ERR_CANCELED);
 
   // 4. Fire a mock trailing edge hardware event interrupt (DEPEVT_XFER_COMPLETE) against
   // Endpoint 7.
@@ -2146,7 +2146,7 @@ TEST_P(Dwc3EndpointsTest, Interrupt_ReconfigureAltSettingTeardown) {
 }
 
 // Verifies that calling CancelAll on a stalled/halted endpoint drains in-flight requests with
-// ZX_ERR_IO_NOT_PRESENT once the hardware EndTransfer sequence completes.
+// ZX_ERR_CANCELED once the hardware EndTransfer sequence completes.
 TEST_P(Dwc3EndpointsTest, CancelAllStrandedWhenHalted) {
   const bool enqueue_many = GetParam();
   TriggerConnection();
@@ -2202,11 +2202,11 @@ TEST_P(Dwc3EndpointsTest, CancelAllStrandedWhenHalted) {
 
   std::vector<CompletionResult> completions = event_handler_.WaitForCompletions(1);
   ASSERT_EQ(completions.size(), 1UL);
-  EXPECT_EQ(completions[0].status, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_EQ(completions[0].status, ZX_ERR_CANCELED);
 }
 
 // Verifies that calling CancelAll on a stalled endpoint while in idle state immediately drains
-// queued requests with ZX_ERR_IO_NOT_PRESENT without waiting for hardware EndTransfer.
+// queued requests with ZX_ERR_CANCELED without waiting for hardware EndTransfer.
 TEST_F(Dwc3EndpointsTestBase, CancelAllStalledWhileIdle) {
   TriggerConnection();
 
@@ -2249,7 +2249,7 @@ TEST_F(Dwc3EndpointsTestBase, CancelAllStalledWhileIdle) {
 
   std::vector<CompletionResult> completions = event_handler_.WaitForCompletions(1);
   ASSERT_EQ(completions.size(), 1UL);
-  EXPECT_EQ(completions[0].status, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_EQ(completions[0].status, ZX_ERR_CANCELED);
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
     auto& uep = GetUserEndpoint(drv, ep_num);

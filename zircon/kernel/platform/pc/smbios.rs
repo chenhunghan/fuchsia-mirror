@@ -12,6 +12,7 @@ use crate::vm::arch_vm_aspace::{ARCH_MMU_FLAG_CACHED, ARCH_MMU_FLAG_PERM_READ};
 use crate::vm::vm_aspace::VmAspace;
 use core::ptr::NonNull;
 use handoff::PhysHandoff;
+use lazy_init::LazyInit;
 use smbios::{
     BiosInformationStruct2_0, BiosInformationStruct2_4, EntryPoint, EntryPoint2_1,
     EntryPointVersion, Header, SMBIOS2_ANCHOR, SMBIOS3_ANCHOR, SpecVersion, StringTable,
@@ -45,8 +46,7 @@ struct SmbiosState {
     struct_len: usize,
 }
 
-static mut SMBIOS_STATE: SmbiosState =
-    SmbiosState { version: None, ep2_1: None, struct_base: 0, struct_len: 0 };
+static SMBIOS_STATE: LazyInit<SmbiosState> = LazyInit::uninit();
 
 /// Maximum entry point size to map when searching for the anchor.
 const MAX_EP_SIZE: usize = 31;
@@ -110,6 +110,14 @@ fn find_entry_point() -> Result<(NonNull<u8>, EntryPointVersion), Status> {
 /// Initializes the SMBIOS subsystem.
 #[unsafe(no_mangle)]
 pub extern "C" fn pc_init_smbios() {
+    // SAFETY: Initialization is serialized with respect to any other access.
+    unsafe {
+        SMBIOS_STATE.init(probe_smbios());
+    }
+}
+
+fn probe_smbios() -> SmbiosState {
+    let mut state = SmbiosState::default();
     let (ep_ptr, version) = match find_entry_point() {
         Ok(res) => res,
         Err(_) => {
@@ -117,7 +125,7 @@ pub extern "C" fn pc_init_smbios() {
             unsafe {
                 printf(c"smbios: Failed to locate entry point\n".as_ptr());
             }
-            return;
+            return state;
         }
     };
 
@@ -125,16 +133,13 @@ pub extern "C" fn pc_init_smbios() {
         EntryPointVersion::V2_1 => {
             // SAFETY: `ep_ptr` points to at least `MAX_EP_SIZE` (31) valid mapped bytes.
             let ep_bytes = unsafe { core::slice::from_raw_parts(ep_ptr.as_ptr(), MAX_EP_SIZE) };
-            let ep = match EntryPoint2_1::ref_from_prefix(ep_bytes) {
-                Ok((ep, _)) => ep,
-                Err(_) => {
-                    // SAFETY: Free the entry point mapping on parse error.
-                    unsafe {
-                        let _ = VmAspace::kernel_aspace()
-                            .free_region(page::round_down(ep_ptr.as_ptr() as usize));
-                    }
-                    return;
+            let Ok((ep, _)) = EntryPoint2_1::ref_from_prefix(ep_bytes) else {
+                // SAFETY: Free the entry point mapping on parse error.
+                unsafe {
+                    let _ = VmAspace::kernel_aspace()
+                        .free_region(page::round_down(ep_ptr.as_ptr() as usize));
                 }
+                return state;
             };
 
             if !ep.is_valid() {
@@ -143,7 +148,7 @@ pub extern "C" fn pc_init_smbios() {
                     let _ = VmAspace::kernel_aspace()
                         .free_region(page::round_down(ep_ptr.as_ptr() as usize));
                 }
-                return;
+                return state;
             }
 
             let ep_copy = *ep;
@@ -156,29 +161,19 @@ pub extern "C" fn pc_init_smbios() {
                     .free_region(page::round_down(ep_ptr.as_ptr() as usize));
             }
 
-            let (struct_virt_ptr, _struct_mapping_base) =
-                match map_range(struct_table_phys, struct_table_length) {
-                    Ok(res) => res,
-                    Err(status) => {
-                        // SAFETY: `printf` format string is a valid null-terminated C string.
-                        unsafe {
-                            printf(
-                                c"smbios: failed to map structs: %d\n".as_ptr(),
-                                status.into_raw(),
-                            );
-                        }
-                        return;
+            match map_range(struct_table_phys, struct_table_length) {
+                Ok((struct_virt_ptr, _struct_mapping_base)) => {
+                    state.version = Some(EntryPointVersion::V2_1);
+                    state.ep2_1 = Some(ep_copy);
+                    state.struct_base = struct_virt_ptr.as_ptr() as usize;
+                    state.struct_len = struct_table_length;
+                }
+                Err(status) => {
+                    // SAFETY: `printf` format string is a valid null-terminated C string.
+                    unsafe {
+                        printf(c"smbios: failed to map structs: %d\n".as_ptr(), status.into_raw());
                     }
-                };
-
-            // SAFETY: Single-threaded boot context.
-            unsafe {
-                #[allow(static_mut_refs)]
-                let state = &mut *core::ptr::addr_of_mut!(SMBIOS_STATE);
-                state.version = Some(EntryPointVersion::V2_1);
-                state.ep2_1 = Some(ep_copy);
-                state.struct_base = struct_virt_ptr.as_ptr() as usize;
-                state.struct_len = struct_table_length;
+                }
             }
         }
         EntryPointVersion::V3_0 => {
@@ -197,6 +192,8 @@ pub extern "C" fn pc_init_smbios() {
             }
         }
     }
+
+    state
 }
 
 /// Walks the known SMBIOS structures. `cb` will be called once for each structure found.
@@ -204,10 +201,7 @@ pub fn walk_structs<F>(cb: F) -> Result<(), Status>
 where
     F: FnMut(SpecVersion, &Header, &StringTable<'_>) -> Result<(), Status>,
 {
-    // SAFETY: `SMBIOS_STATE` is initialized during boot before multi-threading starts and is
-    // read-only during structure walks.
-    #[allow(static_mut_refs)]
-    let state = unsafe { &*core::ptr::addr_of!(SMBIOS_STATE) };
+    let state = SMBIOS_STATE.get();
 
     match state.version {
         Some(EntryPointVersion::V2_1) => {

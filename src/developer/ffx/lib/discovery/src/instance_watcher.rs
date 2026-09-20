@@ -44,12 +44,27 @@ pub trait InstanceSource: Send + Sync + 'static {
         false
     }
 
-    /// Read all currently existing targets from `instance_root`.
-    fn get_all_targets(&self, root: &Path) -> Vec<TargetHandle>;
+    /// Read all currently existing targets from `instance_root`, returning each target's
+    /// unique instance identifier and its target handle.
+    fn get_all_targets(&self, root: &Path) -> Vec<(String, TargetHandle)> {
+        let mut targets = Vec::new();
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return targets;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(id) = self.instance_id_from_path(root, &path) {
+                if let Some(handle) = self.read_target_handle(root, &path) {
+                    targets.push((id, handle));
+                }
+            }
+        }
+        targets
+    }
 
-    /// Extract the instance name from a path modified or deleted within `instance_root`.
+    /// Extract the unique instance identifier from a path modified or deleted within `instance_root`.
     /// Returns `None` if the path should be ignored.
-    fn instance_name_from_path(&self, root: &Path, path: &Path) -> Option<String>;
+    fn instance_id_from_path(&self, root: &Path, path: &Path) -> Option<String>;
 
     /// Read the target handle for the given instance path.
     /// Returns `Some(handle)` if the instance exists and is running.
@@ -76,10 +91,8 @@ impl InstanceWatcher {
         let known: Arc<Mutex<HashMap<String, TargetHandle>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let existing = source.get_all_targets(&instance_root);
-        for handle in existing {
-            if let Some(ref name) = handle.node_name {
-                known.lock().unwrap().insert(name.clone(), handle.clone());
-            }
+        for (id, handle) in existing {
+            known.lock().unwrap().insert(id, handle.clone());
             let _ = sender.unbounded_send(TargetEvent::Added(handle));
         }
 
@@ -115,17 +128,17 @@ impl InstanceWatcher {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         for path in event.paths {
-                            if let Some(name) = source.instance_name_from_path(&root_clone, &path) {
+                            if let Some(id) = source.instance_id_from_path(&root_clone, &path) {
                                 if let Some(handle) = source.read_target_handle(&root_clone, &path)
                                 {
                                     let mut known = known_clone.lock().unwrap();
-                                    let prev = known.insert(name, handle.clone());
+                                    let prev = known.insert(id, handle.clone());
                                     if prev.as_ref() != Some(&handle) {
                                         let _ = sender.unbounded_send(TargetEvent::Added(handle));
                                     }
                                 } else {
                                     let mut known = known_clone.lock().unwrap();
-                                    if let Some(handle) = known.remove(&name) {
+                                    if let Some(handle) = known.remove(&id) {
                                         let _ = sender.unbounded_send(TargetEvent::Removed(handle));
                                     }
                                 }
@@ -134,9 +147,9 @@ impl InstanceWatcher {
                     }
                     EventKind::Remove(_) => {
                         for path in event.paths {
-                            if let Some(name) = source.instance_name_from_path(&root_clone, &path) {
+                            if let Some(id) = source.instance_id_from_path(&root_clone, &path) {
                                 let mut known = known_clone.lock().unwrap();
-                                if let Some(handle) = known.remove(&name) {
+                                if let Some(handle) = known.remove(&id) {
                                     let _ = sender.unbounded_send(TargetEvent::Removed(handle));
                                 }
                             }

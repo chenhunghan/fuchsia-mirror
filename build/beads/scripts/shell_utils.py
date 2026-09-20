@@ -55,7 +55,7 @@ def _split_by_separators(
 class ShellCommand:
     """Represents a shell command."""
 
-    def __init__(self, command: T.Union[str, list[str]]):
+    def __init__(self, command: str | list[str]):
         if isinstance(command, list):
             self._str = shlex.join(command)
         else:
@@ -119,7 +119,7 @@ class ShellCommand:
         tokens = shlex.split(self._str)
 
         env_vars: dict[str, str] = {}
-        tool: T.Optional[str] = None
+        tool: str | None = None
         args: list[str] = []
         for i, token in enumerate(tokens):
             varname, sep, value = token.partition("=")
@@ -164,7 +164,7 @@ def find_command_with_tool(
         The first command that uses the given tool, or None if not found.
     """
     for command in commands:
-        current_command: T.Optional[ShellCommand] = command
+        current_command: ShellCommand | None = command
         while current_command:
             if os.path.basename(current_command.parse().tool) == tool:
                 return current_command

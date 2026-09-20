@@ -28,7 +28,7 @@ use starnix_modules_input_event_conversion::button_fuchsia_to_linux::{
     new_touch_buttons_bitvec, parse_fidl_media_button_event, parse_fidl_touch_button_event,
 };
 use starnix_modules_input_event_conversion::key_fuchsia_to_linux::parse_fidl_keyboard_event_to_linux_input_event;
-use starnix_modules_input_event_conversion::mouse_fuchsia_to_linux::parse_fidl_mouse_events;
+use starnix_modules_input_event_conversion::mouse_fuchsia_to_linux::FuchsiaMouseEventToLinuxMouseEventConverter;
 use starnix_modules_input_event_conversion::touch_fuchsia_to_linux::FuchsiaTouchEventToLinuxTouchEventConverter;
 use starnix_sync::{InputEventRelayOpenedFilesLock, LockDepMutex};
 use starnix_uapi::uapi;
@@ -53,7 +53,7 @@ pub type OpenedFiles = Arc<LockDepMutex<Vec<Weak<InputFile>>, InputEventRelayOpe
 pub enum InputDeviceType {
     Touch(FuchsiaTouchEventToLinuxTouchEventConverter),
     Keyboard,
-    Mouse,
+    Mouse(FuchsiaMouseEventToLinuxMouseEventConverter),
 }
 
 impl std::fmt::Display for InputDeviceType {
@@ -61,7 +61,7 @@ impl std::fmt::Display for InputDeviceType {
         match self {
             InputDeviceType::Touch(_) => write!(f, "touch"),
             InputDeviceType::Keyboard => write!(f, "keyboard"),
-            InputDeviceType::Mouse => write!(f, "mouse"),
+            InputDeviceType::Mouse(_) => write!(f, "mouse"),
         }
     }
 }
@@ -152,6 +152,27 @@ impl InputEventsRelayHandle {
         let _ = block_on(receiver);
     }
 
+    pub fn add_mouse_device(
+        &self,
+        device_id: DeviceId,
+        open_files: OpenedFiles,
+        inspect_status: Option<Arc<InputDeviceStatus>>,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        let _ = self.sender.unbounded_send(DeviceStateChange::Add(
+            device_id,
+            DeviceState {
+                device_type: InputDeviceType::Mouse(
+                    FuchsiaMouseEventToLinuxMouseEventConverter::create(),
+                ),
+                open_files,
+                inspect_status,
+            },
+            sender,
+        ));
+        let _ = block_on(receiver);
+    }
+
     pub fn remove_device(&self, device_id: DeviceId) {
         let (sender, receiver) = oneshot::channel();
         let _ = self.sender.unbounded_send(DeviceStateChange::Remove(device_id, sender));
@@ -209,12 +230,17 @@ impl InputEventsRelay {
             let mut mouse_future = mouse_waking_stream.next();
 
             // keyboard
-            let (mut default_keyboard_device, mut keyboard_event_stream) = setup_keyboard_relay(
-                keyboard,
-                view_ref,
-                default_keyboard_device_opened_files.clone(),
-                default_keyboard_device_inspect.clone(),
-            );
+            // `_keyboard_proxy` is load-bearing despite being unused: it holds the channel to
+            // text_manager open for the lifetime of the relay loop below. Dropping it closes
+            // the channel, which deregisters our `KeyboardListener` and silently stops all
+            // key delivery. Do not remove it as an unused binding.
+            let (mut default_keyboard_device, mut keyboard_event_stream, _keyboard_proxy) =
+                setup_keyboard_relay(
+                    keyboard,
+                    view_ref,
+                    default_keyboard_device_opened_files.clone(),
+                    default_keyboard_device_inspect.clone(),
+                );
 
             // button
             let (
@@ -501,11 +527,52 @@ impl InputEventsRelay {
                     None => default_keyboard_device,
                 };
 
+                // These counters are denominated in FIDL events, not uapi events: the
+                // documented invariant is received = ignored + unexpected + converted (see
+                // `InputDeviceStatus`). One FIDL key event converts to several uapi events
+                // (the key itself plus a SYN), so only the *generated* counters take
+                // `new_events.len()`.
+                let (converted_events, ignored_events, generated_events) = match new_events.len() {
+                    0 => (0u64, 1u64, 0u64),
+                    len => (1u64, 0u64, len as u64),
+                };
+                let last_time = event.timestamp.unwrap_or(0);
+
+                if let Some(dev_inspect_status) = &dev.inspect_status {
+                    dev_inspect_status.count_total_received_events(1);
+                    dev_inspect_status.count_total_ignored_events(ignored_events);
+                    dev_inspect_status.count_total_converted_events(converted_events);
+                    // Guarded because `count_total_generated_events` *stores* the timestamp:
+                    // calling it with a count of 0 would move
+                    // `last_generated_uapi_event_timestamp_ns` on an event that generated
+                    // nothing.
+                    if generated_events > 0 {
+                        dev_inspect_status
+                            .count_total_generated_events(generated_events, last_time);
+                    }
+                } else {
+                    log_warn!("unable to record inspect for keyboard device");
+                }
+
                 dev.open_files.lock().retain(|f| {
                     let Some(file) = f.upgrade() else {
                         log_warn!("Dropping input file for keyboard that failed to upgrade");
                         return false;
                     };
+                    match &file.inspect_status {
+                        Some(file_inspect_status) => {
+                            file_inspect_status.count_received_events(1);
+                            file_inspect_status.count_ignored_events(ignored_events);
+                            file_inspect_status.count_converted_events(converted_events);
+                            if generated_events > 0 {
+                                file_inspect_status
+                                    .count_generated_events(generated_events, last_time);
+                            }
+                        }
+                        None => {
+                            log_warn!("unable to record inspect within the input file")
+                        }
+                    }
                     if !new_events.is_empty() {
                         file.add_events(new_events.clone().into_iter().collect());
                     }
@@ -739,65 +806,107 @@ impl InputEventsRelay {
     }
 
     fn process_mouse_event(
-        self: &Self,
+        self: &mut Self,
         default_mouse_device: &mut DeviceState,
-        mut mouse_events: Vec<FidlMouseEvent>,
+        mouse_events: Vec<FidlMouseEvent>,
     ) {
+        fuchsia_trace::duration!("input", "starnix_process_mouse_event");
+        for e in &mouse_events {
+            if let Some(trace_flow_id) = e.trace_flow_id {
+                fuchsia_trace::flow_end!("input", "dispatch_event_to_client", trace_flow_id.into());
+            }
+        }
+        // TODO(https://fxbug.dev/563345995): `num_received_events` counts the whole
+        // batch and `num_ignored_events` accumulates across devices, yet both are
+        // recorded against every device in the loop below. With more than one mouse
+        // device in use simultaneously these counters over-report and violate the
+        // inspect invariants. Scope them per device before multi-mouse is supported.
         let num_received_events: u64 = mouse_events.len().try_into().unwrap();
-        #[allow(clippy::collection_is_never_read)]
-        let mut tracked_leases = vec![];
-        for event in &mut mouse_events {
-            if let Some(lease) = event.wake_lease.take() {
-                if let Some(status) = &default_mouse_device.inspect_status {
-                    tracked_leases.push(TrackedWakeLease::new(lease, status.clone()));
+        let mut num_ignored_events: u64 = 0;
+
+        let (events_by_device, ignored_events) = group_mouse_events_by_device_id(mouse_events);
+        num_ignored_events += ignored_events;
+
+        for (device_id, mut events) in events_by_device {
+            fuchsia_trace::duration_begin!("input", "starnix_process_per_device_mouse_event");
+
+            let dev = self.devices.get_mut(&device_id).unwrap_or(default_mouse_device);
+
+            let mut num_converted_events: u64 = 0;
+            let mut num_unexpected_events: u64 = 0;
+            let mut new_events: VecDeque<uapi::input_event> = VecDeque::new();
+
+            #[allow(clippy::collection_is_never_read)]
+            let mut tracked_leases = vec![];
+            for event in &mut events {
+                if let Some(lease) = event.wake_lease.take() {
+                    if let Some(status) = &dev.inspect_status {
+                        tracked_leases.push(TrackedWakeLease::new(lease, status.clone()));
+                    }
                 }
             }
-        }
 
-        let batch = parse_fidl_mouse_events(mouse_events);
-
-        if let Some(dev_inspect_status) = &default_mouse_device.inspect_status {
-            dev_inspect_status.count_total_received_events(num_received_events);
-            dev_inspect_status.count_total_ignored_events(batch.count_ignored_events);
-            dev_inspect_status.count_total_unexpected_events(batch.count_unexpected_events);
-            dev_inspect_status.count_total_converted_events(batch.count_converted_events);
-            if !batch.events.is_empty() {
-                dev_inspect_status.count_total_generated_events(
-                    batch.events.len().try_into().unwrap(),
-                    batch.last_event_time_ns.try_into().unwrap(),
+            let last_event_time_ns: i64;
+            if let InputDeviceType::Mouse(ref mut converter) = dev.device_type {
+                let mut batch = converter.handle(events);
+                new_events.append(&mut batch.events);
+                num_converted_events += batch.count_converted_events;
+                num_ignored_events += batch.count_ignored_events;
+                num_unexpected_events += batch.count_unexpected_events;
+                last_event_time_ns = batch.last_event_time_ns;
+            } else {
+                fuchsia_trace::duration_end!("input", "starnix_process_per_device_mouse_event");
+                log_warn!(
+                    "Non mouse device received mouse events: device_id = {}, device_type = {}",
+                    device_id,
+                    dev.device_type
                 );
+                continue;
             }
-        } else {
-            log_warn!("unable to record inspect for mouse device");
-        }
 
-        default_mouse_device.open_files.lock().retain(|f| {
-            let Some(file) = f.upgrade() else {
-                log_warn!("Dropping input file for mouse that failed to upgrade");
-                return false;
-            };
-            match &file.inspect_status {
-                Some(file_inspect_status) => {
-                    file_inspect_status.count_received_events(num_received_events);
-                    file_inspect_status.count_ignored_events(batch.count_ignored_events);
-                    file_inspect_status.count_unexpected_events(batch.count_unexpected_events);
-                    file_inspect_status.count_converted_events(batch.count_converted_events);
-                }
-                None => {
-                    log_warn!("unable to record inspect within the input file")
-                }
-            }
-            if !batch.events.is_empty() {
-                if let Some(file_inspect_status) = &file.inspect_status {
-                    file_inspect_status.count_generated_events(
-                        batch.events.len().try_into().unwrap(),
-                        batch.last_event_time_ns.try_into().unwrap(),
+            if let Some(dev_inspect_status) = &dev.inspect_status {
+                dev_inspect_status.count_total_received_events(num_received_events);
+                dev_inspect_status.count_total_ignored_events(num_ignored_events);
+                dev_inspect_status.count_total_unexpected_events(num_unexpected_events);
+                dev_inspect_status.count_total_converted_events(num_converted_events);
+                if !new_events.is_empty() {
+                    dev_inspect_status.count_total_generated_events(
+                        new_events.len().try_into().unwrap(),
+                        last_event_time_ns,
                     );
                 }
-                file.add_events(batch.events.clone().into_iter().collect());
+            } else {
+                log_warn!(
+                    "unable to record inspect for device_id: {}, device_type: {}",
+                    device_id,
+                    dev.device_type
+                );
             }
-            true
-        });
+
+            fuchsia_trace::duration_end!("input", "starnix_process_per_device_mouse_event");
+            dev.open_files.lock().retain(|f| {
+                let Some(file) = f.upgrade() else {
+                    log_warn!("Dropping input file for mouse that failed to upgrade");
+                    return false;
+                };
+                if let Some(file_inspect_status) = &file.inspect_status {
+                    file_inspect_status.count_received_events(num_received_events);
+                    file_inspect_status.count_ignored_events(num_ignored_events);
+                    file_inspect_status.count_unexpected_events(num_unexpected_events);
+                    file_inspect_status.count_converted_events(num_converted_events);
+                }
+                if !new_events.is_empty() {
+                    if let Some(file_inspect_status) = &file.inspect_status {
+                        file_inspect_status.count_generated_events(
+                            new_events.len().try_into().unwrap(),
+                            last_event_time_ns,
+                        );
+                    }
+                    file.add_events(new_events.clone().into_iter().collect());
+                }
+                true
+            });
+        }
     }
 }
 
@@ -847,7 +956,7 @@ fn setup_keyboard_relay(
     view_ref: fuiviews::ViewRef,
     default_keyboard_device_opened_files: OpenedFiles,
     device_inspect_status: Option<Arc<InputDeviceStatus>>,
-) -> (DeviceState, KeyboardListenerRequestStream) {
+) -> (DeviceState, KeyboardListenerRequestStream, KeyboardSynchronousProxy) {
     let default_keyboard_device = DeviceState {
         device_type: InputDeviceType::Keyboard,
         open_files: default_keyboard_device_opened_files,
@@ -855,11 +964,13 @@ fn setup_keyboard_relay(
     };
     let (keyboard_listener, event_stream) =
         fidl::endpoints::create_request_stream::<KeyboardListenerMarker>();
-    if keyboard.add_listener(view_ref, keyboard_listener, zx::MonotonicInstant::INFINITE).is_err() {
-        log_warn!("Could not register keyboard listener");
+    if let Err(e) =
+        keyboard.add_listener(view_ref, keyboard_listener, zx::MonotonicInstant::INFINITE)
+    {
+        log_warn!("Could not register keyboard listener: {:?}", e);
     }
 
-    (default_keyboard_device, event_stream)
+    (default_keyboard_device, event_stream, keyboard)
 }
 
 fn setup_button_relay(
@@ -968,7 +1079,7 @@ fn setup_mouse_relay(
 ) {
     let mouse_counter_name = "mouse";
     let default_mouse_device = DeviceState {
-        device_type: InputDeviceType::Mouse,
+        device_type: InputDeviceType::Mouse(FuchsiaMouseEventToLinuxMouseEventConverter::create()),
         open_files: default_mouse_device_opened_files,
         inspect_status: device_inspect_status,
     };
@@ -996,6 +1107,30 @@ fn setup_mouse_relay(
     );
 
     (default_mouse_device, mouse_source_proxy, waking_stream)
+}
+
+fn group_mouse_events_by_device_id(
+    events: Vec<FidlMouseEvent>,
+) -> (SortedVecMap<DeviceId, Vec<FidlMouseEvent>>, u64) {
+    let mut events_by_device: SortedVecMap<u32, Vec<FidlMouseEvent>> = SortedVecMap::new();
+    let mut ignored_events: u64 = 0;
+    for e in events {
+        match e {
+            FidlMouseEvent { pointer_sample: Some(ref sample), .. } => {
+                let id = sample.device_id.unwrap_or(DEFAULT_MOUSE_DEVICE_ID);
+                if let Some(vec) = events_by_device.get_mut(&id) {
+                    vec.push(e);
+                } else {
+                    events_by_device.insert(id, vec![e]);
+                }
+            }
+            _ => {
+                ignored_events += 1;
+            }
+        }
+    }
+
+    (events_by_device, ignored_events)
 }
 
 fn group_touch_events_by_device_id(

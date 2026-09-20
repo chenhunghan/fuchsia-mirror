@@ -4,6 +4,7 @@
 
 use fidl_fuchsia_net_policy_properties as fnp_properties;
 use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
+use fidl_fuchsia_net_reachability as freachability;
 use fuchsia_component::server::ServiceFs;
 use futures::stream::StreamExt as _;
 use log::{debug, error};
@@ -11,6 +12,7 @@ use log::{debug, error};
 enum IncomingServices {
     NetworkRegistry(fnp_socketproxy::NetworkRegistryRequestStream),
     Networks(fnp_properties::NetworksRequestStream),
+    Reachability(freachability::MonitorRequestStream),
 }
 
 impl std::fmt::Debug for IncomingServices {
@@ -18,6 +20,7 @@ impl std::fmt::Debug for IncomingServices {
         match self {
             Self::NetworkRegistry(_) => f.debug_tuple("NetworkRegistry").finish(),
             Self::Networks(_) => f.debug_tuple("Networks").finish(),
+            Self::Reachability(_) => f.debug_tuple("Reachability").finish(),
         }
     }
 }
@@ -29,7 +32,8 @@ async fn main() {
     let _ = fs
         .dir("svc")
         .add_fidl_service(IncomingServices::NetworkRegistry)
-        .add_fidl_service(IncomingServices::Networks);
+        .add_fidl_service(IncomingServices::Networks)
+        .add_fidl_service(IncomingServices::Reachability);
     let _ = fs.take_and_serve_directory_handle().expect("must serve ServiceFs");
     let mut fs = fs.fuse();
 
@@ -42,6 +46,7 @@ async fn main() {
                 match req_stream {
                     IncomingServices::NetworkRegistry(rs) => networks_service.add_stream(rs),
                     IncomingServices::Networks(rs) => networks_service.add_stream(rs),
+                    IncomingServices::Reachability(rs) => networks_service.add_stream(rs),
                 }
             }
             netcfg_event = networks_service.select_next_some() => {

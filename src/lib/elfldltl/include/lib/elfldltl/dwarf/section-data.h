@@ -98,14 +98,14 @@ class SectionData {
   // Read an offset in this data unit's format from the byte buffer.
   // Returns std::nullopt if the buffer is too small.  The Elf template
   // parameter indicates the byte order used in the data unit.
-  template <class Elf = Elf<>>
+  template <ElfApi Elf = Elf<>>
   constexpr std::optional<uint64_t> read_offset(size_t pos = 0) {
     return ReadOffset<Elf>(format_, contents_.subspan(pos));
   }
 
   // Read an offset in the indicated DWARF format from the byte buffer.
   // A 32-bit offset is zero-extended to uint64_t.
-  template <class Elf = Elf<>>
+  template <ElfApi Elf = Elf<>>
   static constexpr std::optional<uint64_t> ReadOffset(  //
       Format format, std::span<const std::byte> bytes) {
     switch (format) {
@@ -124,7 +124,7 @@ class SectionData {
   // indicates how much of the byte stream was consumed by this unit, and
   // contents() holds the data unit bytes after the initial length: where
   // the header for the particular kind of data starts.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   static constexpr std::optional<SectionData> Read(  //
       Diagnostics& diag, std::span<const std::byte> bytes, ErrorArgs&&... error_args);
 
@@ -137,7 +137,7 @@ class SectionData {
   // }
   // ```
   // On failure (when `data == std::nullopt`), `bytes` is returned unchanged.
-  template <class Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
+  template <ElfApi Elf = Elf<>, class Diagnostics, typename... ErrorArgs>
   static constexpr std::pair<std::optional<SectionData>, std::span<const std::byte>> Consume(
       Diagnostics& diag, std::span<const std::byte> bytes, ErrorArgs&&... error_args) {
     auto read = Read<Elf>(diag, bytes, std::forward<ErrorArgs>(error_args)...);
@@ -159,11 +159,11 @@ class SectionData {
   Format format_ = Format::kDwarf32;
 };
 
-template <class Elf, class Diagnostics, typename... ErrorArgs>
+template <ElfApi Elf, class Diagnostics, typename... ErrorArgs>
 constexpr std::optional<SectionData> SectionData::Read(  //
     Diagnostics& diag, std::span<const std::byte> bytes, ErrorArgs&&... error_args) {
-  using Word = typename Elf::Word;
-  using Xword = typename Elf::Xword;
+  using Word = Elf::Word;
+  using Xword = Elf::Xword;
 
   const size_t input_size = bytes.size_bytes();
   auto consume = [&](auto& value) -> bool {

@@ -71,7 +71,6 @@ class UsbMassStorageDevice : public fdf::DriverBase2, public scsi::Controller {
   std::shared_ptr<fdf::OutgoingDirectory>& driver_outgoing() override { return outgoing(); }
   const std::optional<std::string>& driver_node_name() const override { return node_name_; }
   fdf::Logger& driver_logger() override { return logger(); }
-  bool UseNewInterface() const override { return true; }
   zx_status_t ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
                                  iovec data) override;
   void ExecuteCommandsAsync(uint8_t target, uint16_t lun,

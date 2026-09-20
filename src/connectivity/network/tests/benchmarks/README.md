@@ -41,8 +41,7 @@ fx set terminal.x64 --with //src/tests/end_to_end/perf:test
 ### Loopback socket benchmarks {#loopback-socket-benchmarks}
 
 These focus on measuring the duration of specific socket related system calls
-from the benchmarking binary for TCP, UDP, and ICMP sockets over loopback. They
-run against Netstack2, Netstack3, and Netstack2 with Fast UDP enabled.
+from the benchmarking binary for TCP, UDP, and ICMP sockets over loopback.
 
 #### Fake netstack
 
@@ -57,8 +56,7 @@ These benchmarks measure the same operations as the
 [loopback socket benchmarks](#loopback-socket-benchmarks), except there are two
 netstacks involved connected via a network-tun [device-pair]. This means that
 the latency numbers also include time spent in the netstack's device layer,
-which is absent from the loopback benchmarks. They run against Netstack2 and
-Netstack3.
+which is absent from the loopback benchmarks.
 
 ### UDP serde benchmarks
 

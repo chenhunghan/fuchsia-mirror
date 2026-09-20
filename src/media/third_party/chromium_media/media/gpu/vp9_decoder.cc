@@ -265,6 +265,18 @@ VP9Decoder::DecodeResult VP9Decoder::Decode() {
                               curr_frame_hdr_->render_height);
     const gfx::Rect frame_size(curr_frame_hdr_->frame_width,
                                curr_frame_hdr_->frame_height);
+    if (!new_render_rect.IsValid()) {
+      FX_LOGS(DEBUG) << "Invalid render rect: " << new_render_rect.ToString();
+      SetError();
+      return kDecodeError;
+    }
+    if (!frame_size.IsValid()) {
+      FX_LOGS(DEBUG) << "Invalid frame size: " << frame_size.ToString();
+      SetError();
+      return kDecodeError;
+    }
+    ZX_ASSERT(frame_size.IsValid());
+    ZX_ASSERT(new_render_rect.IsValid());
     if (!frame_size.Contains(new_render_rect)) {
       // For safety, check the validity of render size or leave it as the actual
       // per-frame decoded size. In the k-SVC path |curr_frame_size_| is the

@@ -566,12 +566,8 @@ mod test {
     ) -> (Arc<Mutex<FakeRecorder>>, DoctorRecorderParameters) {
         let mut fe_log = root.clone();
         fe_log.push("ffx.log");
-        let mut daemon_log = root.clone();
-        daemon_log.push("ffx.daemon.log");
         fs::write(&fe_log, "ffx.log contents").expect("writing test ffx.log");
-        fs::write(&daemon_log, "ffx.daemon.log contents").expect("writing test ffx.daemon.log");
-        let recorder =
-            Arc::new(Mutex::new(FakeRecorder::new(vec![fe_log, daemon_log], root.clone())));
+        let recorder = Arc::new(Mutex::new(FakeRecorder::new(vec![fe_log], root.clone())));
         (
             recorder.clone(),
             DoctorRecorderParameters {

@@ -68,9 +68,6 @@ so we're only marking it as safe-to-run for now. If we need to bump it up to
 safe-to-deploy we'll take another look at it and do so very closely.
 """
 
-[policy.libm]
-audit-as-crates-io = false
-
 [policy.memchr]
 audit-as-crates-io = false
 
@@ -1067,6 +1064,11 @@ notes = "Needs re-audit"
 
 [[exemptions.libc]]
 version = "0.2.138"
+criteria = ["safe-to-deploy", "ub-risk-2"]
+notes = "Needs re-audit"
+
+[[exemptions.libm]]
+version = "0.2.16"
 criteria = ["safe-to-deploy", "ub-risk-2"]
 notes = "Needs re-audit"
 

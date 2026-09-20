@@ -5,6 +5,10 @@
 import("//src/diagnostics/build/sampler/merge_configs.gni")
 
 merged_sampler_config("default-config") {
+  cobalt_registry =
+      "$root_gen_dir/src/cobalt/bin/app/global_metrics_registry.pb"
+  deps = [ "//src/cobalt/bin/app:global_metrics_registry_gen" ]
+
   fire_project_templates = [
     "//src/diagnostics/config/sampler/fire/projects/cpu.json5",
     "//src/diagnostics/config/sampler/fire/projects/crashes.json5",

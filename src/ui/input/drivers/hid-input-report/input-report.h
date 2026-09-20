@@ -34,7 +34,6 @@ class InputReport : public fidl::WireServer<fuchsia_input_report::InputDevice>,
   zx_status_t Start();
 
   // InputReportBase functions.
-  void RemoveReaderFromList(InputReportsReader* reader) override;
   void RemoveReaderFromList(InputReportsReaderV2* reader) override;
 
   // Max unacknowledged report count allowed for 1/2 second.
@@ -81,7 +80,6 @@ class InputReport : public fidl::WireServer<fuchsia_input_report::InputDevice>,
 
   // If we have a consumer control device, get a report and send it to the reader,
   // since the reader needs the device's state.
-  void SendInitialConsumerControlReport(InputReportsReader* reader);
   void SendInitialConsumerControlReport(InputReportsReaderV2* reader);
 
   std::string GetDeviceTypesString() const;
@@ -97,10 +95,7 @@ class InputReport : public fidl::WireServer<fuchsia_input_report::InputDevice>,
 
   std::vector<std::unique_ptr<hid_input_report::Device>> devices_;
 
-  void RegisterReader(std::unique_ptr<InputReportsReader> reader);
-
   uint32_t next_reader_id_ = 0;
-  std::list<std::unique_ptr<InputReportsReader>> readers_list_;
   std::list<std::unique_ptr<InputReportsReaderV2>> readers_v2_list_;
   sync_completion_t next_reader_wait_;
 

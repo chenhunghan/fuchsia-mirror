@@ -5,10 +5,14 @@
 package validate
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var commentCleaner = strings.NewReplacer(
@@ -63,4 +67,67 @@ func CheckCopyrightText(text []byte) bool {
 	}
 	cleaned := commentCleaner.Replace(string(text))
 	return copyrightRegex.MatchString(cleaned)
+}
+
+// CommentPrefixes maps file extensions to their respective single-line comment prefixes.
+var CommentPrefixes = map[string]string{
+	// C-style comments
+	".c": "//", ".cc": "//", ".cpp": "//", ".h": "//", ".hh": "//", ".hpp": "//",
+	".inc": "//", ".go": "//", ".rs": "//", ".dart": "//", ".java": "//", ".js": "//",
+	".kt": "//", ".m": "//", ".cml": "//", ".fidl": "//", ".d": "//", ".dat": "//",
+	".ts": "//", ".tsx": "//", ".css": "//", ".proto": "//", ".S": "//",
+	// Script/Config-style comments
+	".py": "#", ".sh": "#", ".bash": "#", ".zsh": "#", ".pl": "#", ".rb": "#",
+	".gn": "#", ".gni": "#", ".gyp": "#", ".gypi": "#",
+	".merkle": "#", ".ac": "#", ".am": "#", ".yaml": "#", ".yml": "#", ".toml": "#",
+	".bzl": "#", ".bazel": "#", ".mk": "#",
+	// Assembly
+	".asm": ";",
+	// Windows Batch
+	".bat": "rem", ".cmd": "rem",
+}
+
+// AddCopyright analyzes a file and returns its content with a Fuchsia copyright header prepended.
+func AddCopyright(filePath string) ([]byte, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return AddCopyrightToBytes(filePath, content)
+}
+
+// AddCopyrightToBytes prepends a Fuchsia copyright header to the provided file bytes.
+func AddCopyrightToBytes(filePath string, content []byte) ([]byte, error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+
+	commentPrefix, ok := CommentPrefixes[ext]
+	if !ok {
+		return nil, fmt.Errorf("unsupported file extension %q for automatic copyright injection", ext)
+	}
+
+	lineEnding := "\n"
+	if bytes.Contains(content, []byte("\r\n")) {
+		lineEnding = "\r\n"
+	}
+
+	year := time.Now().Year()
+	header := fmt.Sprintf("%s Copyright %d The Fuchsia Authors. All rights reserved.%s%s Use of this source code is governed by a BSD-style license that can be%s%s found in the LICENSE file.%s%s",
+		commentPrefix, year, lineEnding, commentPrefix, lineEnding, commentPrefix, lineEnding, lineEnding)
+
+	var newContent bytes.Buffer
+	if bytes.HasPrefix(content, []byte("#!")) {
+		lines := bytes.SplitN(content, []byte("\n"), 2)
+		shebang := bytes.TrimSuffix(lines[0], []byte("\r"))
+		newContent.Write(shebang)
+		newContent.WriteString(lineEnding)
+		newContent.WriteString(header)
+		if len(lines) > 1 {
+			newContent.Write(lines[1])
+		}
+	} else {
+		newContent.WriteString(header)
+		newContent.Write(content)
+	}
+
+	return newContent.Bytes(), nil
 }

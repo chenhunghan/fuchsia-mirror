@@ -11,9 +11,23 @@ use zx_status::Status;
 
 /// A wrapper around a const pointer to user memory.
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct UserInPtr<T> {
     ptr: *const T,
+}
+
+impl<T> Copy for UserInPtr<T> {}
+
+impl<T> Clone for UserInPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Default for UserInPtr<T> {
+    fn default() -> Self {
+        Self { ptr: core::ptr::null() }
+    }
 }
 
 impl<T> UserInPtr<T> {
@@ -139,9 +153,23 @@ impl UserInPtr<u8> {
 
 /// A wrapper around a mutable pointer to user memory (write-only).
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct UserOutPtr<T> {
     ptr: *mut T,
+}
+
+impl<T> Copy for UserOutPtr<T> {}
+
+impl<T> Clone for UserOutPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Default for UserOutPtr<T> {
+    fn default() -> Self {
+        Self { ptr: core::ptr::null_mut() }
+    }
 }
 
 impl<T> UserOutPtr<T> {
@@ -225,9 +253,23 @@ impl<T> UserOutPtr<T> {
 
 /// A wrapper around a mutable pointer to user memory (read-write).
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct UserInOutPtr<T> {
     ptr: *mut T,
+}
+
+impl<T> Copy for UserInOutPtr<T> {}
+
+impl<T> Clone for UserInOutPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Default for UserInOutPtr<T> {
+    fn default() -> Self {
+        Self { ptr: core::ptr::null_mut() }
+    }
 }
 
 impl<T> UserInOutPtr<T> {

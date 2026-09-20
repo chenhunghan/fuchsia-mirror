@@ -1032,6 +1032,7 @@ def _generate_cc_prebuilt_library_build_rules(
         files.append(meta["ifs"])
     process_context.files_to_copy[meta_sdk_root].extend(files)
 
+    prebuilt_variants = []
     prebuilt_select = {}
     dist_select = {}
 
@@ -1046,60 +1047,23 @@ def _generate_cc_prebuilt_library_build_rules(
     if "binaries" in meta:
         # add all supported architectures to the select, even if they are not available in the current SDK,
         # so that SDKs for different architectures can be composed by a simple directory merge.
-        arch_list = process_context.constants.target_cpus
-        for arch in arch_list:
-            constraint = "@fuchsia_sdk//constraints:is_%s_api_HEAD" % (arch)
-            dist_select[constraint] = ["//%s/%s-HEAD:dist" % (relative_dir, arch)]
-            prebuilt_select[constraint] = [
-                "//%s/%s-HEAD:prebuilts" % (relative_dir, arch),
-            ]
-
-        for arch in arch_list:
-            head_dirname = "%s-HEAD" % (arch)
-            per_arch_build_file = build_file.dirname.get_child(
-                head_dirname,
-            ).get_child("BUILD.bazel")
-            ctx.file(per_arch_build_file, content = _header(), executable = False)
-
-            linklib = meta["binaries"][arch]["link"]
-            _merge_template(
-                ctx,
-                per_arch_build_file,
-                _sdk_template_path(runtime, "cc_prebuilt_library_linklib"),
-                {
-                    "{{link_lib}}": _final_bazel_path(linklib),
-                    "{{library_type}}": meta["format"],
-                },
+        for arch in process_context.constants.target_cpus:
+            prebuilt_variants.append(
+                runtime.make_struct(
+                    name = "%s-HEAD" % (arch),
+                    link_lib = meta["binaries"][arch]["link"],
+                    constraint = "@fuchsia_sdk//constraints:is_%s_api_HEAD" % (arch),
+                    arch = arch,
+                    api_level = "HEAD",
+                    has_debug = "debug" in meta["binaries"][arch],
+                    debug = meta["binaries"][arch].get("debug", None),
+                    has_dist_lib = "dist" in meta["binaries"][arch],
+                    dist_lib = meta["binaries"][arch].get("dist", None),
+                    dist_lib_dest = meta["binaries"][arch].get("dist_path", None),
+                ),
             )
-            process_context.files_to_copy[meta_sdk_root].append(linklib)
-
-            if "dist" in meta["binaries"][arch]:
-                has_distlibs = True
-                dist_lib = meta["binaries"][arch]["dist"]
-                process_context.files_to_copy[meta_sdk_root].append(
-                    dist_lib,
-                )
-
-                debug_lib = meta["binaries"][arch].get("debug", dist_lib)
-                _merge_template(
-                    ctx,
-                    per_arch_build_file,
-                    _sdk_template_path(
-                        runtime,
-                        "cc_prebuilt_library_distlib",
-                    ),
-                    {
-                        "{{stripped_file}}": _final_bazel_path(dist_lib),
-                        "{{unstripped_file}}": _final_bazel_path(debug_lib),
-                        "{{dist_path}}": meta["binaries"][arch]["dist_path"],
-                    },
-                )
-                if debug_lib != dist_lib:
-                    process_context.files_to_copy[meta_sdk_root].append(debug_lib)
 
     # Process "variants".
-
-    prebuilt_variants = []
     if "variants" in meta:
         for variant in meta["variants"]:
             arch = variant["constraints"]["arch"]
@@ -1112,14 +1076,13 @@ def _generate_cc_prebuilt_library_build_rules(
                     link_lib = values["link_lib"],
                     constraint = "@fuchsia_sdk//constraints:is_%s_api_%s" %
                                  (arch, api_level),
-                    os = "@platforms//os:fuchsia",
                     arch = arch,
                     api_level = api_level,
                     has_debug = "debug" in values,
-                    debug = values["debug"] if "debug" in values else None,
+                    debug = values.get("debug", None),
                     has_dist_lib = "dist_lib" in values,
-                    dist_lib = values["dist_lib"] if "dist_lib" in values else None,
-                    dist_lib_dest = values["dist_lib_dest"] if "dist_lib_dest" in values else None,
+                    dist_lib = values.get("dist_lib", None),
+                    dist_lib_dest = values.get("dist_lib_dest", None),
                 ),
             )
 
@@ -1154,6 +1117,7 @@ def _generate_cc_prebuilt_library_build_rules(
         )
 
         if variant.has_dist_lib:
+            has_distlibs = True
             dist_lib = variant.dist_lib
             process_context.files_to_copy[meta_sdk_root].append(
                 dist_lib,

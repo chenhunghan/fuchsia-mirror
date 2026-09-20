@@ -129,6 +129,18 @@ def generate_mac_pair() -> tuple[MacAddress, MacAddress]:
 
 
 @dataclass
+class StationTelemetry:
+    """Represents RF and PHY telemetry of a station connected to an AP."""
+
+    rssi: int | None = None
+    tx_rate_mbps: float | None = None
+    rx_rate_mbps: float | None = None
+    snr: int | None = None
+    phy_mode: str | None = None
+    nss: int | None = None
+
+
+@dataclass
 class StationStatus:
     """Represents the connection status of a station on OpenWrt."""
 
@@ -138,12 +150,15 @@ class StationStatus:
     rssi: int | None = None
     tx_rate_mbps: float | None = None
     rx_rate_mbps: float | None = None
+    snr: int | None = None
+    phy_mode: str | None = None
+    nss: int | None = None
 
 
 def parse_iwinfo_ubus_assoclist(
     output: object, mac: MacAddress
-) -> tuple[int, float, float]:
-    """Parses RSSI (dBm), TX rate (Mbps), and RX rate (Mbps) from `ubus call iwinfo assoclist` output."""
+) -> StationTelemetry:
+    """Parses station telemetry from `ubus call iwinfo assoclist` output."""
     if hasattr(output, "stdout"):
         output = output.stdout
     if isinstance(output, bytes):
@@ -233,7 +248,70 @@ def parse_iwinfo_ubus_assoclist(
         raise ValueError(f"No valid RX rate for station {mac} in {sta_entry}")
     rx_rate_mbps = round(rx_val / 1000.0, 2)
 
-    return rssi, tx_rate_mbps, rx_rate_mbps
+    snr: int | None = None
+    if "snr" in sta_entry and isinstance(sta_entry["snr"], (int, float)):
+        snr = int(sta_entry["snr"])
+    else:
+        noise = sta_entry.get("noise")
+        if noise is not None and isinstance(noise, (int, float, str)):
+            try:
+                noise_val = int(noise)
+                if noise_val > 0x7FFFFFFF:
+                    noise_val -= 0x100000000
+                elif noise_val > 128:
+                    noise_val -= 256
+                if noise_val < 0:
+                    snr = rssi - noise_val
+            except ValueError:
+                pass
+
+    phy_mode: str | None = None
+    for info in [tx_info, rx_info, sta_entry]:
+        if isinstance(info, dict):
+            if info.get("eht"):
+                phy_mode = "eht"
+                break
+            elif info.get("he"):
+                phy_mode = "he"
+                break
+            elif info.get("vht"):
+                phy_mode = "vht"
+                break
+            elif info.get("ht"):
+                phy_mode = "ht"
+                break
+
+    nss: int | None = None
+    for info in [tx_info, rx_info]:
+        if isinstance(info, dict):
+            raw_nss = info.get("nss")
+            if isinstance(raw_nss, (int, float, str)):
+                try:
+                    nss = int(raw_nss)
+                    break
+                except (ValueError, TypeError):
+                    pass
+    if nss is None and phy_mode == "ht":
+        for info in [tx_info, rx_info]:
+            if isinstance(info, dict):
+                raw_mcs = info.get("mcs")
+                if isinstance(raw_mcs, (int, float, str)):
+                    try:
+                        mcs = int(raw_mcs)
+                        if mcs >= 0:
+                            nss = (mcs // 8) + 1
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
+    return StationTelemetry(
+        rssi=rssi,
+        tx_rate_mbps=tx_rate_mbps,
+        rx_rate_mbps=rx_rate_mbps,
+        snr=snr,
+        phy_mode=phy_mode,
+        nss=nss,
+    )
 
 
 class OpenWrtAP:
@@ -630,25 +708,26 @@ class OpenWrtAP:
             clients = clients_data.get("clients", {})
             for client_mac, status in clients.items():
                 if client_mac.lower() == str(mac).lower():
-                    rssi = tx_rate_mbps = rx_rate_mbps = None
+                    telemetry = StationTelemetry()
                     try:
                         ubus_res = self.ssh.run(
                             f'ubus call iwinfo assoclist \'{{"device": "{iface}", "mac": "{mac}"}}\''
                         )
-                        (
-                            rssi,
-                            tx_rate_mbps,
-                            rx_rate_mbps,
-                        ) = parse_iwinfo_ubus_assoclist(ubus_res.stdout, mac)
+                        telemetry = parse_iwinfo_ubus_assoclist(
+                            ubus_res.stdout, mac
+                        )
                     except (ValueError, json.JSONDecodeError):
                         pass
                     result[iface] = StationStatus(
                         auth=status.get("auth", False),
                         assoc=status.get("assoc", False),
                         authorized=status.get("authorized", False),
-                        rssi=rssi,
-                        tx_rate_mbps=tx_rate_mbps,
-                        rx_rate_mbps=rx_rate_mbps,
+                        rssi=telemetry.rssi,
+                        tx_rate_mbps=telemetry.tx_rate_mbps,
+                        rx_rate_mbps=telemetry.rx_rate_mbps,
+                        snr=telemetry.snr,
+                        phy_mode=telemetry.phy_mode,
+                        nss=telemetry.nss,
                     )
         if len(result) == 0:
             raise RuntimeError(

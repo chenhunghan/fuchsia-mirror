@@ -805,7 +805,7 @@ async fn test_missing_object_tree_layer_file() {
         fs.root_store().add_to_graveyard(&mut transaction, id);
         transaction.commit().await.expect("commit failed");
         fs.root_store()
-            .tombstone_object(id, transaction::Options::default())
+            .tombstone_object(id, transaction::Options::default(), None)
             .await
             .expect("tombstone failed");
     }
@@ -845,7 +845,7 @@ async fn test_missing_object_store_handle() {
         transaction.commit().await.unwrap();
 
         fs.root_store()
-            .tombstone_object(store_id, transaction::Options::default())
+            .tombstone_object(store_id, transaction::Options::default(), None)
             .await
             .expect("tombstone failed");
     }

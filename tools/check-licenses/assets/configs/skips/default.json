@@ -97,12 +97,6 @@
         },
         {
             "paths": [
-                "zircon/prebuilt"
-            ],
-            "description": "Zircon prebuilt dir is empty, but it can cause licensing issues on developer workstations. fxr/735867"
-        },
-        {
-            "paths": [
                 "src/connectivity/telephony/lib/qmi-protocol/tests",
                 "third_party/android/platform/system/tools/hidl/test",
                 "sdk/ctf/tests/pkg/fdio/test_bins/echo_arguments.sh",

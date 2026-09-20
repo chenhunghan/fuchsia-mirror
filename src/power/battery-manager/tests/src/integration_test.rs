@@ -9,8 +9,8 @@ use fidl_fuchsia_driver_test as fdt;
 use fidl_fuchsia_hardware_power_battery as fbattery;
 use fidl_test_hardwarepowercontrol as ftest_battery;
 
-use fidl_fuchsia_hardware_power_source as fsource;
 use fidl_fuchsia_power_battery as fpower;
+
 use fidl_fuchsia_power_battery_test as spower;
 use fidl_fuchsia_power_system as fsystem;
 use fidl_fuchsia_testing as ftesting;
@@ -601,14 +601,6 @@ async fn test_charging_wake_lease() -> Result<()> {
         .set_battery_status(&fbattery::Status {
             level_percent: Some(50.0),
             charge_status: Some(fbattery::ChargeStatus::Charging),
-            source_status: Some(fsource::Status {
-                present: Some(true),
-                current_role: Some(fsource::Role::Sink(fsource::SinkRole {
-                    type_: Some(fsource::SourceType::Ac),
-                    ..Default::default()
-                })),
-                ..Default::default()
-            }),
             ..Default::default()
         })
         .await?;
@@ -641,14 +633,6 @@ async fn test_charging_wake_lease() -> Result<()> {
         .set_battery_status(&fbattery::Status {
             level_percent: Some(50.0),
             charge_status: Some(fbattery::ChargeStatus::Discharging),
-            source_status: Some(fsource::Status {
-                present: Some(true),
-                current_role: Some(fsource::Role::Sink(fsource::SinkRole {
-                    type_: Some(fsource::SourceType::Battery),
-                    ..Default::default()
-                })),
-                ..Default::default()
-            }),
             ..Default::default()
         })
         .await?;

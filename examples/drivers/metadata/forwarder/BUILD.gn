@@ -6,9 +6,14 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("forwarder-dml") {
+  dml = "meta/forwarder.dml"
+  driver_name = "forwarder"
+}
+
 driver_bind_rules("bind") {
   testonly = true
-  rules = "meta/forwarder.bind"
+  dml_label = ":forwarder-dml"
   bind_output = "forwarder.bindbc"
   deps =
       [ "//examples/drivers/metadata:fuchsia_examples_metadata_bind_library" ]
@@ -31,7 +36,7 @@ fuchsia_cc_driver("driver") {
 fuchsia_driver_component("component") {
   testonly = true
   component_name = "forwarder"
-  manifest = "meta/forwarder.cml"
+  dml_label = ":forwarder-dml"
   deps = [
     ":bind",
     ":driver",

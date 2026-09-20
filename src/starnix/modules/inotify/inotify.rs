@@ -148,7 +148,7 @@ impl InotifyFileObject {
     fn notify(
         &self,
         watch_id: WdNumber,
-        event_mask: InotifyMask,
+        event_mask: Option<InotifyMask>,
         cookie: u32,
         name: &FsStr,
         remove_watcher_after_notify: bool,
@@ -158,7 +158,14 @@ impl InotifyFileObject {
         let _dir_entry: Option<DirEntryHandle>;
         {
             let mut state = self.state.lock();
-            state.events.enqueue(InotifyEvent::new(watch_id, event_mask, cookie, name.to_owned()));
+            if let Some(event_mask) = event_mask {
+                state.events.enqueue(InotifyEvent::new(
+                    watch_id,
+                    event_mask,
+                    cookie,
+                    name.to_owned(),
+                ));
+            }
             if remove_watcher_after_notify {
                 _dir_entry = state.watches.remove(&watch_id);
                 state.events.enqueue(InotifyEvent::new(
@@ -403,21 +410,25 @@ impl starnix_core::vfs::inotify_hook::NotifyHook for InotifyImpl {
         struct InotifyWatch {
             watch_id: WdNumber,
             file: FileHandle,
+            should_send_event: bool,
             should_remove: bool,
         }
         let mut watches: Vec<InotifyWatch> = vec![];
         {
             let mut watchers = watchers.watchers.lock();
             watchers.retain(|inotify, watcher| {
-                let mut should_remove = event_mask == InotifyMask::DELETE_SELF;
-                if watcher.mask.contains(event_mask)
-                    && !(is_dead && watcher.mask.contains(InotifyMask::EXCL_UNLINK))
-                {
+                let mut should_remove = event_mask.contains(InotifyMask::DELETE_SELF);
+                let should_send_event = watcher.mask.contains(event_mask)
+                    && !(is_dead && watcher.mask.contains(InotifyMask::EXCL_UNLINK));
+                if should_send_event {
                     should_remove = should_remove || watcher.mask.contains(InotifyMask::ONESHOT);
+                }
+                if should_send_event || should_remove {
                     if let Some(file) = inotify.0.upgrade() {
                         watches.push(InotifyWatch {
                             watch_id: watcher.watch_id,
                             file,
+                            should_send_event,
                             should_remove,
                         });
                     } else {
@@ -440,7 +451,8 @@ impl starnix_core::vfs::inotify_hook::NotifyHook for InotifyImpl {
                 .file
                 .downcast_file::<InotifyFileObject>()
                 .expect("failed to downcast to inotify");
-            inotify.notify(watch.watch_id, event_mask, cookie, name, watch.should_remove);
+            let mask = watch.should_send_event.then_some(event_mask);
+            inotify.notify(watch.watch_id, mask, cookie, name, watch.should_remove);
         }
     }
 
@@ -681,6 +693,49 @@ mod tests {
 
                 assert_eq!(state.events.queue.get(0).unwrap().mask, InotifyMask::DELETE_SELF);
                 assert_eq!(state.events.queue.get(1).unwrap().mask, InotifyMask::IGNORED);
+            }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn notify_deletion_without_delete_self_mask() {
+        spawn_kernel_and_run_with_pkgfs(async |current_task| {
+            inotify_init(current_task.kernel());
+            let file = InotifyFileObject::new_file(&current_task, true);
+            let inotify =
+                file.downcast_file::<InotifyFileObject>().expect("failed to downcast to inotify");
+
+            let root = current_task.fs().root().entry;
+            // Watch for CREATE/DELETE/MODIFY without DELETE_SELF (like Java LinuxWatchService).
+            assert!(
+                inotify
+                    .add_watch(
+                        root.clone(),
+                        InotifyMask::CREATE | InotifyMask::DELETE | InotifyMask::MODIFY,
+                        &file
+                    )
+                    .is_ok()
+            );
+
+            root.node.notify(
+                InotifyMask::DELETE_SELF,
+                0,
+                Default::default(),
+                FileMode::IFDIR,
+                false,
+            );
+
+            {
+                let watchers = root.node.ensure_watchers().watchers.lock();
+                assert_eq!(watchers.len(), 0);
+            }
+
+            {
+                let state = inotify.state.lock();
+                assert_eq!(state.watches.len(), 0);
+                assert_eq!(state.events.queue.len(), 1);
+                assert_eq!(state.events.queue.get(0).unwrap().mask, InotifyMask::IGNORED);
             }
         })
         .await;

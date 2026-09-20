@@ -8,7 +8,6 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Optional
 
 import hardware_profiler
 
@@ -60,7 +59,7 @@ class HardwareProfileTest(ProcMockTestCase):
             f.write(content)
 
     def write_mock_net_interface(
-        self, name: str, operstate: str, speed: Optional[int]
+        self, name: str, operstate: str, speed: int | None
     ) -> None:
         iface_dir = self.sys_dir / "class" / "net" / name
         iface_dir.mkdir(parents=True)

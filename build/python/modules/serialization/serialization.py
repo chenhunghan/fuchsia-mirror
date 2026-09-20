@@ -96,7 +96,7 @@ import json
 import types
 import typing
 from collections.abc import Callable
-from typing import Any, Optional, TypeVar, Union, get_type_hints
+from typing import Any, TypeVar, Union, get_type_hints
 
 __all__ = [
     "instance_from_dict",
@@ -230,7 +230,7 @@ def _has_default_value(cls: type[Any], field: str) -> Any:
     """Returns if the given field of a class has a default value (requires a
     @dataclass-based class, others will silently return 'False')
     """
-    dataclass_fields: Optional[dict[str, Any]] = getattr(
+    dataclass_fields: dict[str, Any] | None = getattr(
         cls, "__dataclass_fields__", None
     )
     if dataclass_fields:
@@ -404,10 +404,10 @@ def instance_to_dict(instance: Any) -> dict[str, Any]:
         if value is not None:
             # If a serializer fn was added via metadata, use that. Otherwise use
             # the "default" handler
-            metadata: Optional[dict[str, Any]] = getattr(
+            metadata: dict[str, Any] | None = getattr(
                 instance.__class__, "__SERIALIZE_AS__", None
             )
-            serializer: Optional[Callable[[Any], Any]] = None
+            serializer: Callable[[Any], Any] | None = None
             if metadata:
                 serializer = metadata.get(name)
             if serializer:
@@ -670,7 +670,7 @@ def serialize_fields_as(**kwargs: Any) -> Callable[[type[C]], type[C]]:
 #
 
 
-def _bind_class_fn(cls: type[C], fn: Any, name: Optional[str] = None) -> None:
+def _bind_class_fn(cls: type[C], fn: Any, name: str | None = None) -> None:
     """Creates a class-fn for a class by binding the passed-in class as the first
     param of the passed-in function, and then adding it as a callable attribute
     to the class.
@@ -680,9 +680,7 @@ def _bind_class_fn(cls: type[C], fn: Any, name: Optional[str] = None) -> None:
     setattr(cls, name, functools.partial(fn, cls))
 
 
-def _bind_instance_fn(
-    cls: type[C], fn: Any, name: Optional[str] = None
-) -> None:
+def _bind_instance_fn(cls: type[C], fn: Any, name: str | None = None) -> None:
     """Creates an instance-fn for a class by adding it as a callable attribute
     of the class.
     """

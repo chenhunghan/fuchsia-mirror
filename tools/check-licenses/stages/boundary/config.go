@@ -14,6 +14,9 @@ type Config struct {
 	// BarrierPaths are repository paths where project boundaries must stop.
 	BarrierPaths map[string]bool
 
+	// BarrierExceptions are repository paths under a barrier that should not be treated as project boundaries.
+	BarrierExceptions map[string]bool
+
 	// OutOfTreeReadmes maps logical repository paths to out-of-tree physical README.fuchsia files.
 	OutOfTreeReadmes map[string]string
 
@@ -31,6 +34,7 @@ type Config struct {
 func NewConfig() Config {
 	return Config{
 		BarrierPaths:            make(map[string]bool),
+		BarrierExceptions:       make(map[string]bool),
 		OutOfTreeReadmes:        make(map[string]string),
 		ManifestProjectNames:    make(map[string]string),
 		ManifestPrivateProjects: make(map[string]bool),

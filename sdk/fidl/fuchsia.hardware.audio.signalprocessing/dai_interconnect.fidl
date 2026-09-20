@@ -45,8 +45,8 @@ type DaiInterconnectElementState = table {
     /// Required.
     1: plug_state PlugState;
 
-    /// The driver's best estimate of the external delay beyond this DAI endpoint, as the pipeline
-    /// is currently configured.
+    /// The driver's best estimate of the external delay beyond this DAI interconnect, as the
+    /// pipeline is currently configured.
     ///
     /// `external_delay` must be taken into account by the client when determining the requirements
     /// for minimum lead time (during playback) and minimum capture delay (during capture).

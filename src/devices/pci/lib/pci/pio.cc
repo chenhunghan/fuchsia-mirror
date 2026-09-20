@@ -1,8 +1,6 @@
 // Copyright 2018 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-#include <assert.h>
-#include <lib/ddk/hw/inout.h>
 #include <lib/pci/pio.h>
 #include <zircon/types.h>
 
@@ -10,6 +8,20 @@
 #include <hwreg/bitfields.h>
 
 #ifdef __x86_64__
+
+namespace {
+
+inline uint32_t inpd(uint16_t port) {
+  uint32_t rv;
+  __asm__ __volatile__("inl %1, %0" : "=a"(rv) : "d"(port));
+  return rv;
+}
+
+inline void outpd(uint16_t port, uint32_t data) {
+  __asm__ __volatile__("outl %1, %0" : : "d"(port), "a"(data));
+}
+
+}  // namespace
 
 fbl::Mutex pio_port_lock;
 

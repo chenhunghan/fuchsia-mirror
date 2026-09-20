@@ -156,7 +156,10 @@ import("//build/rust/rustc_test.gni")
 #   See //build/tools/bazel2gn/README.md for details.
 #
 #      proc_macro_deps (optional)
-#        For proc_macro dependencies, has the same semantics as deps in GN.
+#        For proc_macro dependencies, has the same semantics as deps in GN,
+#        except that these are always built in `$host_toolchain`, since
+#        procedural macros run as compiler plugins on the build machine.
+#        Entries must not specify a toolchain.
 #
 #
 # Example of usage:
@@ -208,9 +211,6 @@ template("rustc_library") {
   deps = []
   if (defined(invoker.deps)) {
     deps = invoker.deps
-  }
-  if (defined(invoker.proc_macro_deps)) {
-    deps += invoker.proc_macro_deps
   }
 
   # if "with_unit_tests" is set to true, generate an additional rust test target
@@ -277,10 +277,12 @@ template("rustc_library") {
                              "enforce_source_listing",
                              "features",
                              "inputs",
+                             "lint_config",
                              "output_dir",
                              "output_name",
                              "output_prefix_override",
                              "pool",
+                             "proc_macro_deps",
                              "public_configs",
                              "public_deps",
                              "quiet_clippy",

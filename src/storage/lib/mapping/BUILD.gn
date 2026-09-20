@@ -24,6 +24,7 @@ rustc_library("mapping") {
   deps = [
     "//sdk/rust/zx",
     "//src/lib/fuchsia-sync",
+    "//src/storage/fxfs/crypto",
     "//src/storage/lib/blob_metadata",
     "//src/storage/lib/delivery_blob",
     "//src/storage/lib/ptr_slice",

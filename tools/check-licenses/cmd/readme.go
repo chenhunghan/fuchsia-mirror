@@ -15,9 +15,9 @@ import (
 
 	"github.com/google/subcommands"
 
-	v2config "go.fuchsia.dev/fuchsia/tools/check-licenses/config"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/config"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/readme"
-	v2discover "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover"
 )
 
 type ReadmeCommand struct {
@@ -105,7 +105,7 @@ func (c *ReadmeFormatCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ..
 	formattedText := readme.Format(readmes)
 	formattedBytes := []byte(formattedText)
 
-	builder := v2config.NewBuilder(fuchsiaDir)
+	builder := config.NewBuilder(fuchsiaDir)
 	if err := builder.Assemble(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to assemble config: %v\n", err)
 		return subcommands.ExitFailure
@@ -193,7 +193,7 @@ func (c *ReadmeCheckCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...
 		return subcommands.ExitSuccess
 	}
 
-	builder := v2config.NewBuilder(fuchsiaDir)
+	builder := config.NewBuilder(fuchsiaDir)
 	if err := builder.Assemble(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to assemble config: %v\n", err)
 		return subcommands.ExitFailure
@@ -236,23 +236,23 @@ func (c *ReadmeListCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...i
 		return subcommands.ExitFailure
 	}
 
-	builder := v2config.NewBuilder(fuchsiaDir)
+	builder := config.NewBuilder(fuchsiaDir)
 	if err := builder.Assemble(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to assemble configuration: %v\n", err)
 		return subcommands.ExitFailure
 	}
-	config := builder.Config
+	cfg := builder.Config
 
 	var allReadmes []string
 
-	for _, physPath := range config.Boundary.OutOfTreeReadmes {
+	for _, physPath := range cfg.Boundary.OutOfTreeReadmes {
 		rel, err := filepath.Rel(fuchsiaDir, physPath)
 		if err == nil {
 			allReadmes = append(allReadmes, rel)
 		}
 	}
 
-	discoverer := v2discover.NewCrawler(fuchsiaDir, config.Discover)
+	discoverer := discover.NewCrawler(fuchsiaDir, cfg.Discover)
 	rawPaths, err := discoverer.Run(ctx, []string{fuchsiaDir})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to crawl repository: %v\n", err)

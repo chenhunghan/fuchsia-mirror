@@ -9,16 +9,12 @@
 // TODO(https://fxbug.dev/539292628): Allow dead code during the initial Rust
 // conversion process.
 #![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_attributes)]
-#![allow(unused_crate_dependencies)]
-#![allow(unused_features)]
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::new_without_default)]
-#![allow(clippy::result_unit_err)]
 #![feature(cfg_sanitize)]
 
+#[allow(unused_imports)]
 #[macro_use]
 extern crate ktrace_macro;
 
@@ -54,6 +50,12 @@ pub mod debuglog_rs;
 #[path = "lib/ktrace/src/mod.rs"]
 pub mod ktrace_rs;
 
+#[path = "lib/mmu_rcu/src/mod.rs"]
+pub mod mmu_rcu;
+
+#[path = "lib/page_cache/page_cache.rs"]
+pub mod page_cache;
+
 #[path = "lib/persistent-debuglog/persistent_debuglog.rs"]
 pub mod persistent_debuglog_rs;
 
@@ -62,6 +64,9 @@ pub mod root_resource_filter;
 
 #[path = "lib/syscalls/mod.rs"]
 pub mod syscalls_rs;
+
+#[path = "lib/topology/src/mod.rs"]
+pub mod topology;
 
 #[path = "lib/user_copy/src/mod.rs"]
 pub mod user_copy;
@@ -127,6 +132,10 @@ pub mod console_tests_rust;
 #[cfg(ktest)]
 #[path = "lib/pow2_range_allocator/tests/kernel.rs"]
 pub mod pow2_range_allocator_tests;
+
+#[cfg(all(console_enabled, ktest))]
+#[path = "lib/unittest/console.rs"]
+pub mod unittest_console;
 
 #[cfg(ktest)]
 #[path = "lib/unittest/user_memory.rs"]

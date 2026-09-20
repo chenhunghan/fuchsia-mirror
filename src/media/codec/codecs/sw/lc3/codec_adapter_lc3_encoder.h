@@ -27,6 +27,8 @@ struct Lc3EncoderParams {
   const int nbytes;
   // Number of bits per audio sample enc.
   const lc3_pcm_format fmt;
+  // Scratch buffer used when input_data is not aligned to int16_t/int32_t.
+  std::vector<int32_t> aligned_input_scratch;
 };
 
 class CodecAdapterLc3Encoder : public CodecAdapterSWImpl<Lc3EncoderParams> {

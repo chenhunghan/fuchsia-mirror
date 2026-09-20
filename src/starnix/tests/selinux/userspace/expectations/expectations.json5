@@ -53,6 +53,10 @@
                 // regarding perf_event_open with invalid tracepoint ID.
                 "PerfEventTest.InvalidTracepointIdAndNoPermission",
 
+                // TODO: https://fxbug.dev/561468765 - Return EPERM when ptrace access check
+                // fails in sys_pidfd_getfd.
+                "PidFdTest/PidFdGetFdTest.PidFdGetFd/DeniedWithoutPtrace",
+
                 // TODO: https://fxbug.dev/297440106 - Fix zombies to remain in "/proc/<pid>" with correct labels.
                 "ProcAttrTest.ZombieProcPid",
                 "ProcAttrTest.ZombieCurrentAttr",

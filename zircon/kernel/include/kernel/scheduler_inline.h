@@ -98,6 +98,9 @@ inline bool Scheduler::UpdateProcessingRate(zx_instant_boot_ticks_t boot_ticks) 
   if (power_level_control_.is_processing_rate_update_pending()) {
     const SchedProcessingRate processing_rate = power_level_control_.UpdateProcessingRate();
     exported_processing_rate_ = processing_rate;
+    if (!power_level_control_.domain()) {
+      exported_max_processing_rate_ = power_level_control_.clamped_max_processing_rate();
+    }
     KTRACE_CPU_COUNTER_TIMESTAMP("kernel:power", "Rate", boot_ticks, this_cpu(),
                                  ("CPU", ffl::Round<uint64_t>(processing_rate * 1000)));
     return true;

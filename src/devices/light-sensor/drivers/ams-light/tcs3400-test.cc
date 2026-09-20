@@ -10,6 +10,7 @@
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/fake-i2c/fake-i2c.h>
+#include <lib/fit/function.h>
 #include <lib/inspect/cpp/reader.h>
 #include <lib/inspect/testing/cpp/inspect.h>
 #include <lib/zx/clock.h>
@@ -24,6 +25,30 @@
 #include "tcs3400-regs.h"
 
 namespace tcs {
+
+class SyncReaderV2EventHandler
+    : public fidl::WireSyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+ public:
+  using Callback = fit::function<void(
+      fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>;
+
+  explicit SyncReaderV2EventHandler(Callback callback = nullptr) : callback_(std::move(callback)) {}
+
+  void OnInputReports(
+      fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) override {
+    last_report_stamp = event->last_report_stamp;
+    if (callback_) {
+      callback_(event);
+    }
+  }
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+  uint64_t last_report_stamp = 0;
+
+ private:
+  Callback callback_;
+};
 
 class FakeLightSensor : public fake_i2c::FakeI2c {
  public:
@@ -253,6 +278,19 @@ class Tcs3400Test : public Tcs3400TestBase, public ::testing::Test {
     sync_completion_reset(next_reader_wait().get());
   }
 
+  zx_status_t ReadAndAcknowledgeOneEvent(
+      fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader,
+      fit::function<
+          void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+          callback) {
+    SyncReaderV2EventHandler handler(std::move(callback));
+    fidl::Status result = reader.HandleOneEvent(handler);
+    if (!result.ok()) {
+      return result.status();
+    }
+    return reader->AcknowledgeReports(handler.last_report_stamp).status();
+  }
+
   auto SetFeatureReport(const Tcs3400FeatureReport& report) {
     fidl::Arena<512> allocator;
     fidl::VectorView<int64_t> sensitivity(allocator, 1);
@@ -329,10 +367,13 @@ TEST_F(Tcs3400Test, GetInputReports) {
     EXPECT_FALSE(response->is_error());
   }
 
-  auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-  fidl::WireSyncClient reader(std::move(endpoints.client));
-  auto result = input_device()->GetInputReportsReader(std::move(endpoints.server));
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+      input_device()->GetInputReportsReaderV2(std::move(endpoints.server), 10);
   ASSERT_OK(result.status());
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(endpoints.client));
   WaitForNextReader();
 
   SetLightDataRegisters(0x00f8, 0xe79d, 0xa5e4, 0xfb1b);
@@ -343,23 +384,22 @@ TEST_F(Tcs3400Test, GetInputReports) {
   // and it is safe to trigger again.
   WaitForLightDataRead();
 
-  {
-    const auto response = reader->ReadInputReports();
-    ASSERT_TRUE(response.ok());
-    ASSERT_TRUE(response->is_ok());
+  zx_status_t status1 = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    const auto& reports = response->value()->reports;
+        ASSERT_EQ(reports.size(), 1u);
+        ASSERT_TRUE(reports[0].has_sensor());
+        ASSERT_TRUE(reports[0].sensor().has_values());
+        ASSERT_EQ(reports[0].sensor().values().size(), 4u);
 
-    ASSERT_EQ(reports.size(), 1u);
-    ASSERT_TRUE(reports[0].has_sensor());
-    ASSERT_TRUE(reports[0].sensor().has_values());
-    ASSERT_EQ(reports[0].sensor().values().size(), 4u);
-
-    EXPECT_EQ(reports[0].sensor().values()[0], 0x00f8);
-    EXPECT_EQ(reports[0].sensor().values()[1], 0xe79d);
-    EXPECT_EQ(reports[0].sensor().values()[2], 0xa5e4);
-    EXPECT_EQ(reports[0].sensor().values()[3], 0xfb1b);
-  }
+        EXPECT_EQ(reports[0].sensor().values()[0], 0x00f8);
+        EXPECT_EQ(reports[0].sensor().values()[1], 0xe79d);
+        EXPECT_EQ(reports[0].sensor().values()[2], 0xa5e4);
+        EXPECT_EQ(reports[0].sensor().values()[3], 0xfb1b);
+      });
+  ASSERT_OK(status1);
 
   SetLightDataRegisters(0x67f3, 0xbe39, 0x21e9, 0x319a);
   EXPECT_OK(gpio_interrupt().trigger(0, zx::clock::get_boot()));
@@ -371,23 +411,22 @@ TEST_F(Tcs3400Test, GetInputReports) {
 
   // The previous illuminance value did not cross a threshold, so there should only be one report to
   // read out.
-  {
-    const auto response = reader->ReadInputReports();
-    ASSERT_TRUE(response.ok());
-    ASSERT_TRUE(response->is_ok());
+  zx_status_t status2 = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
 
-    const auto& reports = response->value()->reports;
+        ASSERT_EQ(reports.size(), 1u);
+        ASSERT_TRUE(reports[0].has_sensor());
+        ASSERT_TRUE(reports[0].sensor().has_values());
+        ASSERT_EQ(reports[0].sensor().values().size(), 4u);
 
-    ASSERT_EQ(reports.size(), 1u);
-    ASSERT_TRUE(reports[0].has_sensor());
-    ASSERT_TRUE(reports[0].sensor().has_values());
-    ASSERT_EQ(reports[0].sensor().values().size(), 4u);
-
-    EXPECT_EQ(reports[0].sensor().values()[0], 0xa5df);
-    EXPECT_EQ(reports[0].sensor().values()[1], 0x0101);
-    EXPECT_EQ(reports[0].sensor().values()[2], 0xc776);
-    EXPECT_EQ(reports[0].sensor().values()[3], 0xc531);
-  }
+        EXPECT_EQ(reports[0].sensor().values()[0], 0xa5df);
+        EXPECT_EQ(reports[0].sensor().values()[1], 0x0101);
+        EXPECT_EQ(reports[0].sensor().values()[2], 0xc776);
+        EXPECT_EQ(reports[0].sensor().values()[3], 0xc531);
+      });
+  ASSERT_OK(status2);
 
   SetLightDataRegisters(0x1772, 0x95fa, 0xb263, 0x2f32);
 
@@ -407,21 +446,22 @@ TEST_F(Tcs3400Test, GetInputReports) {
   }
 
   for (uint32_t report_count = 0; report_count < 10;) {
-    const auto response = reader->ReadInputReports();
-    ASSERT_TRUE(response.ok());
-    ASSERT_TRUE(response->is_ok());
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          for (const fuchsia_input_report::wire::InputReport& report : event->reports) {
+            ASSERT_TRUE(report.has_sensor());
+            ASSERT_TRUE(report.sensor().has_values());
+            ASSERT_EQ(report.sensor().values().size(), 4u);
 
-    for (const auto& report : response->value()->reports) {
-      ASSERT_TRUE(report.has_sensor());
-      ASSERT_TRUE(report.sensor().has_values());
-      ASSERT_EQ(report.sensor().values().size(), 4u);
-
-      EXPECT_EQ(report.sensor().values()[0], 0x1772);
-      EXPECT_EQ(report.sensor().values()[1], 0x95fa);
-      EXPECT_EQ(report.sensor().values()[2], 0xb263);
-      EXPECT_EQ(report.sensor().values()[3], 0x2f32);
-      report_count++;
-    }
+            EXPECT_EQ(report.sensor().values()[0], 0x1772);
+            EXPECT_EQ(report.sensor().values()[1], 0x95fa);
+            EXPECT_EQ(report.sensor().values()[2], 0xb263);
+            EXPECT_EQ(report.sensor().values()[3], 0x2f32);
+            report_count++;
+          }
+        });
+    ASSERT_OK(status);
   }
 }
 
@@ -441,10 +481,13 @@ TEST_F(Tcs3400Test, GetMultipleInputReports) {
 
   WaitForConfiguration();
 
-  auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-  fidl::WireSyncClient reader(std::move(endpoints.client));
-  auto result = input_device()->GetInputReportsReader(std::move(endpoints.server));
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+      input_device()->GetInputReportsReaderV2(std::move(endpoints.server), 10);
   ASSERT_OK(result.status());
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(endpoints.client));
   WaitForNextReader();
 
   constexpr uint16_t kExpectedLightValues[][4] = {
@@ -460,21 +503,22 @@ TEST_F(Tcs3400Test, GetMultipleInputReports) {
   }
 
   for (size_t i = 0; i < std::size(kExpectedLightValues);) {
-    const auto response = reader->ReadInputReports();
-    ASSERT_TRUE(response.ok());
-    ASSERT_TRUE(response->is_ok());
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          for (const fuchsia_input_report::wire::InputReport& report : event->reports) {
+            ASSERT_TRUE(report.has_sensor());
+            ASSERT_TRUE(report.sensor().has_values());
+            ASSERT_EQ(report.sensor().values().size(), 4u);
 
-    for (const auto& report : response->value()->reports) {
-      ASSERT_TRUE(report.has_sensor());
-      ASSERT_TRUE(report.sensor().has_values());
-      ASSERT_EQ(report.sensor().values().size(), 4u);
-
-      EXPECT_EQ(report.sensor().values()[0], kExpectedLightValues[i][0]);
-      EXPECT_EQ(report.sensor().values()[1], kExpectedLightValues[i][1]);
-      EXPECT_EQ(report.sensor().values()[2], kExpectedLightValues[i][2]);
-      EXPECT_EQ(report.sensor().values()[3], kExpectedLightValues[i][3]);
-      i++;
-    }
+            EXPECT_EQ(report.sensor().values()[0], kExpectedLightValues[i][0]);
+            EXPECT_EQ(report.sensor().values()[1], kExpectedLightValues[i][1]);
+            EXPECT_EQ(report.sensor().values()[2], kExpectedLightValues[i][2]);
+            EXPECT_EQ(report.sensor().values()[3], kExpectedLightValues[i][3]);
+            i++;
+          }
+        });
+    ASSERT_OK(status);
   }
 }
 
@@ -494,11 +538,13 @@ TEST_F(Tcs3400Test, GetInputReportsMultipleReaders) {
 
   constexpr size_t kReaderCount = 5;
 
-  fidl::WireSyncClient<fuchsia_input_report::InputReportsReader> readers[kReaderCount];
-  for (auto& reader : readers) {
-    auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> readers[kReaderCount];
+  for (fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader : readers) {
+    fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+        fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
     reader.Bind(std::move(endpoints.client));
-    auto result = input_device()->GetInputReportsReader(std::move(endpoints.server));
+    fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+        input_device()->GetInputReportsReaderV2(std::move(endpoints.server), 10);
     ASSERT_OK(result.status());
     WaitForNextReader();
   }
@@ -507,22 +553,25 @@ TEST_F(Tcs3400Test, GetInputReportsMultipleReaders) {
 
   EXPECT_OK(gpio_interrupt().trigger(0, zx::clock::get_boot()));
 
-  for (auto& reader : readers) {
-    const auto response = reader->ReadInputReports();
-    ASSERT_TRUE(response.ok());
-    ASSERT_TRUE(response->is_ok());
+  for (fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2>& reader : readers) {
+    bool got_report = false;
+    zx_status_t status = ReadAndAcknowledgeOneEvent(
+        reader,
+        [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+          const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+          ASSERT_EQ(reports.size(), 1u);
+          ASSERT_TRUE(reports[0].has_sensor());
+          ASSERT_TRUE(reports[0].sensor().has_values());
+          ASSERT_EQ(reports[0].sensor().values().size(), 4u);
 
-    const auto& reports = response->value()->reports;
-
-    ASSERT_EQ(reports.size(), 1u);
-    ASSERT_TRUE(reports[0].has_sensor());
-    ASSERT_TRUE(reports[0].sensor().has_values());
-    ASSERT_EQ(reports[0].sensor().values().size(), 4u);
-
-    EXPECT_EQ(reports[0].sensor().values()[0], 0x00f8);
-    EXPECT_EQ(reports[0].sensor().values()[1], 0xe79d);
-    EXPECT_EQ(reports[0].sensor().values()[2], 0xa5e4);
-    EXPECT_EQ(reports[0].sensor().values()[3], 0xfb1b);
+          EXPECT_EQ(reports[0].sensor().values()[0], 0x00f8);
+          EXPECT_EQ(reports[0].sensor().values()[1], 0xe79d);
+          EXPECT_EQ(reports[0].sensor().values()[2], 0xa5e4);
+          EXPECT_EQ(reports[0].sensor().values()[3], 0xfb1b);
+          got_report = true;
+        });
+    ASSERT_OK(status);
+    EXPECT_TRUE(got_report);
   }
 }
 
@@ -542,9 +591,12 @@ TEST_F(Tcs3400Test, InputReportSaturatedSensor) {
     EXPECT_FALSE(response->is_error());
   }
 
-  auto endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-  fidl::WireSyncClient reader(std::move(endpoints.client));
-  auto result = input_device()->GetInputReportsReader(std::move(endpoints.server));
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  fidl::WireSyncClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(endpoints.client));
+  fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+      input_device()->GetInputReportsReaderV2(std::move(endpoints.server), 10);
   ASSERT_OK(result.status());
   WaitForNextReader();
 
@@ -557,21 +609,24 @@ TEST_F(Tcs3400Test, InputReportSaturatedSensor) {
 
   WaitForLightDataRead();
 
-  const auto response = reader->ReadInputReports();
-  ASSERT_TRUE(response.ok());
-  ASSERT_TRUE(response->is_ok());
+  bool got_report = false;
+  zx_status_t status = ReadAndAcknowledgeOneEvent(
+      reader,
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+        ASSERT_EQ(reports.size(), 1u);
+        ASSERT_TRUE(reports[0].has_sensor());
+        ASSERT_TRUE(reports[0].sensor().has_values());
+        ASSERT_EQ(reports[0].sensor().values().size(), 4u);
 
-  const auto& reports = response->value()->reports;
-
-  ASSERT_EQ(reports.size(), 1u);
-  ASSERT_TRUE(reports[0].has_sensor());
-  ASSERT_TRUE(reports[0].sensor().has_values());
-  ASSERT_EQ(reports[0].sensor().values().size(), 4u);
-
-  EXPECT_EQ(reports[0].sensor().values()[0], 65085);
-  EXPECT_EQ(reports[0].sensor().values()[1], 21067);
-  EXPECT_EQ(reports[0].sensor().values()[2], 20395);
-  EXPECT_EQ(reports[0].sensor().values()[3], 20939);
+        EXPECT_EQ(reports[0].sensor().values()[0], 65085);
+        EXPECT_EQ(reports[0].sensor().values()[1], 21067);
+        EXPECT_EQ(reports[0].sensor().values()[2], 20395);
+        EXPECT_EQ(reports[0].sensor().values()[3], 20939);
+        got_report = true;
+      });
+  ASSERT_OK(status);
+  EXPECT_TRUE(got_report);
 
   driver_test().RunInEnvironmentTypeContext(
       [](auto& env) { EXPECT_EQ(env.i2c().GetRegisterLastWrite(TCS_I2C_CICLEAR), 0x00); });

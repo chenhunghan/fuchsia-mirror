@@ -9,6 +9,7 @@
 #include <lib/async/cpp/task.h>
 #include <lib/stdcompat/inplace_vector.h>
 #include <lib/trace/event.h>
+#include <zircon/assert.h>
 #include <zircon/compiler.h>
 
 #include <array>
@@ -73,7 +74,6 @@ template <class Report, size_t kMaxUnreadReports = 0, size_t kMaxBatchSize = 1,
 class InputReportReaderManager final {
  private:
   class InputReportReader;
-  class InputReportReaderV2;
 
  public:
   InputReportReaderManager() = default;
@@ -88,22 +88,10 @@ class InputReportReaderManager final {
   zx_status_t CreateReader(async_dispatcher_t* dispatcher,
                            fidl::ServerEnd<fuchsia_input_report::InputReportsReader> server,
                            std::optional<Report> initial_report = std::nullopt) {
-    ZX_ASSERT(dispatcher);
-    std::scoped_lock lock(lock_);
-    auto reader =
-        std::make_unique<InputReportReader>(this, next_reader_id_, dispatcher, std::move(server));
-    if (!reader) {
-      return ZX_ERR_INTERNAL;
-    }
-    next_reader_id_++;
-    if (initial_report.has_value()) {
-      reader->ReceiveReport(std::move(*initial_report));
-    }
-    readers_list_.push_back(std::move(reader));
-    return ZX_OK;
+    ZX_PANIC("GetInputReportsReader is no longer supported; use GetInputReportsReaderV2");
   }
 
-  // Create a new InputReportReaderV2 that is managed by this InputReportReaderManager. If
+  // Create a new InputReportReader that is managed by this InputReportReaderManager. If
   // initial_report exists, InputReportReaderManager will send initial_report to the new reader.
   //
   // `dispatcher` must be non-null.
@@ -116,7 +104,7 @@ class InputReportReaderManager final {
     ZX_ASSERT(max_unacknowledged_reports >= 1);
     std::scoped_lock lock(lock_);
     fbl::AllocChecker ac;
-    auto reader = std::unique_ptr<InputReportReaderV2>(new (&ac) InputReportReaderV2(
+    std::unique_ptr<InputReportReader> reader(new (&ac) InputReportReader(
         this, next_reader_id_, dispatcher, std::move(server), max_unacknowledged_reports));
     if (!ac.check()) {
       return ZX_ERR_NO_MEMORY;
@@ -125,7 +113,7 @@ class InputReportReaderManager final {
     if (initial_report.has_value()) {
       reader->ReceiveReport(std::move(*initial_report));
     }
-    readers_v2_list_.push_back(std::move(reader));
+    readers_list_.push_back(std::move(reader));
     return ZX_OK;
   }
 
@@ -137,9 +125,6 @@ class InputReportReaderManager final {
     for (auto& reader : readers_list_) {
       dropped_reports += reader->ReceiveReport(report);
     }
-    for (auto& reader : readers_v2_list_) {
-      dropped_reports += reader->ReceiveReport(report);
-    }
     return dropped_reports;
   }
 
@@ -148,13 +133,6 @@ class InputReportReaderManager final {
   void RemoveReaderFromList(InputReportReader* reader) {
     std::scoped_lock lock(lock_);
     std::erase_if(readers_list_, [reader](const std::unique_ptr<InputReportReader>& item) {
-      return item.get() == reader;
-    });
-  }
-
-  void RemoveReaderFromList(InputReportReaderV2* reader) {
-    std::scoped_lock lock(lock_);
-    std::erase_if(readers_v2_list_, [reader](const std::unique_ptr<InputReportReaderV2>& item) {
       return item.get() == reader;
     });
   }
@@ -191,7 +169,6 @@ class InputReportReaderManager final {
   std::mutex lock_;
   size_t next_reader_id_ __TA_GUARDED(lock_) = 1;
   std::list<std::unique_ptr<InputReportReader>> readers_list_ __TA_GUARDED(lock_);
-  std::list<std::unique_ptr<InputReportReaderV2>> readers_v2_list_ __TA_GUARDED(lock_);
 };
 
 // This class represents an InputReportReader that sends InputReports out to a specific client.
@@ -203,67 +180,19 @@ template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
           zx_duration_t kMaxBatchDelayNs>
 class InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
                                kMaxBatchDelayNs>::InputReportReader final
-    : public fidl::WireServer<fuchsia_input_report::InputReportsReader> {
- public:
-  // This is only public to make std::unique_ptr work.
-  explicit InputReportReader(
-      InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, kMaxBatchDelayNs>* manager,
-      size_t reader_id, async_dispatcher_t* dispatcher,
-      fidl::ServerEnd<fuchsia_input_report::InputReportsReader> server)
-      : dispatcher_(dispatcher),
-        manager_(manager),
-        binding_(dispatcher, std::move(server), this, std::mem_fn(&InputReportReader::OnUnbound)),
-        reader_id_(reader_id) {}
-
-  size_t ReceiveReport(const Report& report) __TA_EXCLUDES(&report_lock_);
-
-  void ReadInputReports(ReadInputReportsCompleter::Sync& completer)
-      __TA_EXCLUDES(&report_lock_) override;
-
- private:
-  static constexpr size_t kInputReportBufferSize = 4096 * 4;
-
-  void DelayedReply() __TA_EXCLUDES(&report_lock_);
-  void ReplyWithReports(bool is_delayed = false) __TA_REQUIRES(&report_lock_);
-  void OnUnbound(fidl::UnbindInfo info) {
-    ZX_DEBUG_ASSERT_MSG(manager_, "InputReportReaderManager must outlive InputReportReaders!");
-    manager_->RemoveReaderFromList(this);
-  }
-
-  async_dispatcher_t* const dispatcher_;
-  InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, kMaxBatchDelayNs>* const
-      manager_;
-  fidl::ServerBinding<fuchsia_input_report::InputReportsReader> binding_;
-
-  std::mutex report_lock_;
-  std::optional<ReadInputReportsCompleter::Async> completer_ __TA_GUARDED(&report_lock_);
-  fidl::Arena<kInputReportBufferSize> report_allocator_ __TA_GUARDED(report_lock_);
-  std::deque<Report> reports_data_ __TA_GUARDED(report_lock_);
-  async::TaskClosureMethod<InputReportReader, &InputReportReader::DelayedReply> batch_task_
-      __TA_GUARDED(report_lock_){this};
-
-  const size_t reader_id_;
-};
-
-// Represents an InputReportReaderV2 that pushes InputReports out to a specific client.
-// Thread safe.
-template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
-          zx_duration_t kMaxBatchDelayNs>
-class InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
-                               kMaxBatchDelayNs>::InputReportReaderV2 final
     : public fidl::WireServer<fuchsia_input_report::InputReportsReaderV2> {
  public:
   // `manager` and `dispatcher` must be non-null and must outlive this reader.
   // `server` must be valid.
   // `max_unacknowledged_reports` must be > 0.
-  explicit InputReportReaderV2(
+  explicit InputReportReader(
       InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, kMaxBatchDelayNs>* manager,
       size_t reader_id, async_dispatcher_t* dispatcher,
       fidl::ServerEnd<fuchsia_input_report::InputReportsReaderV2> server,
       uint16_t max_unacknowledged_on_input_reports_events)
       : dispatcher_(dispatcher),
         manager_(manager),
-        binding_(dispatcher, std::move(server), this, std::mem_fn(&InputReportReaderV2::OnUnbound)),
+        binding_(dispatcher, std::move(server), this, std::mem_fn(&InputReportReader::OnUnbound)),
         reader_id_(reader_id),
         max_unacknowledged_on_input_reports_events_(max_unacknowledged_on_input_reports_events) {
     ZX_DEBUG_ASSERT(manager_ != nullptr);
@@ -307,7 +236,7 @@ class InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
   // Stores the report stamps of sent OnInputReports batch events awaiting client acknowledgment.
   std::deque<ReportStamp> unacknowledged_report_stamps_ __TA_GUARDED(report_lock_);
   ReportStamp next_report_stamp_ __TA_GUARDED(report_lock_){1};
-  async::TaskClosureMethod<InputReportReaderV2, &InputReportReaderV2::DelayedSend> batch_task_
+  async::TaskClosureMethod<InputReportReader, &InputReportReader::DelayedSend> batch_task_
       __TA_GUARDED(report_lock_){this};
 
   const size_t reader_id_;
@@ -321,103 +250,6 @@ template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
 inline size_t
 InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
                          kMaxBatchDelayNs>::InputReportReader::ReceiveReport(const Report& report) {
-  std::scoped_lock lock(report_lock_);
-
-  size_t dropped_reports = 0;
-  if constexpr (kMaxUnreadReports > 0) {
-    // Drop old reports if the client isn't reading them out fast enough.
-    while (reports_data_.size() >= kMaxUnreadReports) {
-      TRACE_INSTANT("input", "InputReportDrop", TRACE_SCOPE_PROCESS);
-      reports_data_.pop_front();
-      dropped_reports++;
-    }
-  }
-
-  reports_data_.push_back(report);
-  ReplyWithReports();
-  return dropped_reports;
-}
-
-template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
-          zx_duration_t kMaxBatchDelayNs>
-inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, kMaxBatchDelayNs>::
-    InputReportReader::ReadInputReports(ReadInputReportsCompleter::Sync& completer) {
-  std::scoped_lock lock(report_lock_);
-  if (completer_) {
-    completer.ReplyError(ZX_ERR_ALREADY_BOUND);
-    return;
-  }
-  completer_.emplace(completer.ToAsync());
-  if (!reports_data_.empty()) {
-    ReplyWithReports();
-  }
-}
-
-template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
-          zx_duration_t kMaxBatchDelayNs>
-inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
-                                     kMaxBatchDelayNs>::InputReportReader::DelayedReply() {
-  std::scoped_lock lock(report_lock_);
-  ReplyWithReports(/*is_delayed=*/true);
-}
-
-template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
-          zx_duration_t kMaxBatchDelayNs>
-inline void
-InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
-                         kMaxBatchDelayNs>::InputReportReader::ReplyWithReports(bool is_delayed) {
-  if (!completer_) {
-    return;
-  }
-
-  if constexpr (kMaxBatchSize > 1) {
-    if (!is_delayed) {
-      if (reports_data_.size() < kMaxBatchSize) {
-        batch_task_.PostDelayed(dispatcher_, zx::duration(kMaxBatchDelayNs));
-        return;
-      }
-      if (reports_data_.size() >= kMaxBatchSize) {
-        batch_task_.Cancel();
-      }
-    }
-  }
-
-  std::array<fuchsia_input_report::wire::InputReport,
-             fuchsia_input_report::wire::kMaxDeviceReportCount>
-      reports;
-
-  TRACE_DURATION("input", "InputReportInstance GetReports", "instance_id", reader_id_);
-  size_t num_reports = 0;
-  for (; !reports_data_.empty() && num_reports < reports.size(); num_reports++) {
-    // Build the report.
-    auto input_report = fuchsia_input_report::wire::InputReport::Builder(report_allocator_);
-
-    // Add some common fields. Will be overwritten if set.
-    input_report.trace_id(TRACE_NONCE());
-    input_report.event_time(zx_clock_get_monotonic());
-
-    reports_data_.front().ToFidlInputReport(input_report, report_allocator_);
-
-    reports[num_reports] = input_report.Build();
-
-    TRACE_FLOW_BEGIN("input", "input_report", reports[num_reports].trace_id());
-    reports_data_.pop_front();
-  }
-
-  completer_->ReplySuccess(
-      fidl::VectorView(fidl::VectorView<fuchsia_input_report::wire::InputReport>::FromExternal(
-          reports.data(), num_reports)));
-  completer_.reset();
-
-  if (reports_data_.empty()) {
-    report_allocator_.Reset();
-  }
-}
-
-template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
-          zx_duration_t kMaxBatchDelayNs>
-inline size_t InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, kMaxBatchDelayNs>::
-    InputReportReaderV2::ReceiveReport(const Report& report) {
   std::scoped_lock lock(report_lock_);
 
   size_t dropped_reports = 0;
@@ -438,7 +270,7 @@ inline size_t InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
 template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
           zx_duration_t kMaxBatchDelayNs>
 inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, kMaxBatchDelayNs>::
-    InputReportReaderV2::AcknowledgeReports(
+    InputReportReader::AcknowledgeReports(
         fidl::WireServer<fuchsia_input_report::InputReportsReaderV2>::AcknowledgeReportsRequestView
             request,
         AcknowledgeReportsCompleter::Sync& completer) {
@@ -458,7 +290,7 @@ inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, k
 template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
           zx_duration_t kMaxBatchDelayNs>
 inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
-                                     kMaxBatchDelayNs>::InputReportReaderV2::DelayedSend() {
+                                     kMaxBatchDelayNs>::InputReportReader::DelayedSend() {
   std::scoped_lock lock(report_lock_);
   SendReports(/*is_delayed=*/true);
 }
@@ -466,7 +298,7 @@ inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize,
 template <class Report, size_t kMaxUnreadReports, size_t kMaxBatchSize,
           zx_duration_t kMaxBatchDelayNs>
 inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, kMaxBatchDelayNs>::
-    InputReportReaderV2::SendReports(const bool is_running_in_delayed_task) {
+    InputReportReader::SendReports(const bool is_running_in_delayed_task) {
   if constexpr (kMaxBatchSize > 1) {
     if (!is_running_in_delayed_task) {
       if (stamped_reports_.size() < kMaxBatchSize) {
@@ -487,7 +319,7 @@ inline void InputReportReaderManager<Report, kMaxUnreadReports, kMaxBatchSize, k
                           fuchsia_input_report::wire::kMaxDeviceReportCount>
         reports;
 
-    TRACE_DURATION("input", "InputReportReaderV2 SendReports", "instance_id", reader_id_);
+    TRACE_DURATION("input", "InputReportReader SendReports", "instance_id", reader_id_);
     for (; !stamped_reports_.empty() && reports.size() < reports.capacity();) {
       // Build the report.
       auto input_report = fuchsia_input_report::wire::InputReport::Builder(report_allocator_);

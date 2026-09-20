@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"go.fuchsia.dev/fuchsia/tools/build"
 	fintpb "go.fuchsia.dev/fuchsia/tools/integration/fint/proto"
@@ -81,7 +82,9 @@ func affectedImpl(
 		tests = append(tests, t.Test)
 	}
 
+	startLegacy := time.Now()
 	legacyResult, err := affectedTestsNoWork(ctx, r, contextSpec, tests, ninjaTargets)
+	legacyDuration := time.Since(startLegacy)
 	if err != nil {
 		return artifacts, err
 	}
@@ -90,6 +93,7 @@ func affectedImpl(
 	var newAffectedTests []string
 	var newBuildNotAffected bool
 	var newToolErr error
+	var newDuration time.Duration
 
 	filesListPath, cleanup, err := writeChangedFilesList(ctx, contextSpec.ArtifactDir, contextSpec.ChangedFiles)
 	if err != nil {
@@ -97,7 +101,9 @@ func affectedImpl(
 	} else {
 		defer cleanup()
 		if client != nil {
+			startNew := time.Now()
 			outputLines, err := client.AffectedTests(ctx, filesListPath)
+			newDuration = time.Since(startNew)
 			if err != nil {
 				newToolErr = err
 			} else {
@@ -150,6 +156,8 @@ func affectedImpl(
 		"legacy_build_not_affected": legacyResult.noWork,
 		"new_build_not_affected":    newBuildNotAffected,
 		"matches":                   len(onlyInLegacy) == 0 && len(onlyInNew) == 0 && (legacyResult.noWork == newBuildNotAffected),
+		"legacy_duration_seconds":   legacyDuration.Seconds(),
+		"new_duration_seconds":      newDuration.Seconds(),
 	}
 	if newToolErr != nil {
 		comparisonReport["new_tool_error"] = newToolErr.Error()
@@ -157,11 +165,13 @@ func affectedImpl(
 
 	logger.Infof(
 		ctx,
-		"Affected tests comparison: legacy_count=%d, new_count=%d, only_in_legacy=%d, only_in_new=%d",
+		"Affected tests comparison: legacy_count=%d, new_count=%d, only_in_legacy=%d, only_in_new=%d, legacy_duration=%.2fs, new_duration=%.2fs",
 		len(legacyResult.affectedTests),
 		len(newAffectedTests),
 		len(onlyInLegacy),
 		len(onlyInNew),
+		legacyDuration.Seconds(),
+		newDuration.Seconds(),
 	)
 
 	if comparisonBytes, err := json.MarshalIndent(comparisonReport, "", "  "); err == nil {

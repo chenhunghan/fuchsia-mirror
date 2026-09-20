@@ -14,7 +14,6 @@ import argparse
 import json
 import os
 import sys
-import typing as T
 from pathlib import Path
 
 # Import //build/api/debug_symbols.py. Assume this script is under //build/packages.
@@ -65,7 +64,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    implicit_inputs: T.Set[str] = set()
+    implicit_inputs: set[str] = set()
 
     if args.verbose > 0:
 

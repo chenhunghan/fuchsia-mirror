@@ -9,13 +9,12 @@ import argparse
 import filecmp
 import os
 import sys
-import typing as T
 from pathlib import Path
 
 
-def get_file_tree_set(root_dir: Path) -> T.Set[Path]:
+def get_file_tree_set(root_dir: Path) -> set[Path]:
     """Get a set of all the files reachable from |root_dir|. Does not resolve symlinks."""
-    result: T.Set[Path] = set()
+    result: set[Path] = set()
     for dirpath, dirnames, filenames in os.walk(root_dir):
         for filename in filenames:
             file = Path(os.path.join(dirpath, filename))

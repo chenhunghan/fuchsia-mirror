@@ -18,7 +18,7 @@ readonly SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 readonly FUCHSIA_DIR="$(readlink -f "$SCRIPT_DIR/../..")"
 source "${FUCHSIA_DIR}/tools/devshell/lib/platform.sh"
 
-readonly check_loas_script="${FUCHSIA_DIR}/build/rbe/check_loas_restrictions.sh"
+readonly check_loas_script="${FUCHSIA_DIR}/build/auth/check_loas_restrictions.sh"
 
 # rsclient install path is set in manifests/prebuilts
 readonly PREBUILT_RSCLIENT_DIR="${FUCHSIA_DIR}/prebuilt/rsclient/$HOST_PLATFORM"
@@ -71,6 +71,16 @@ environment variables:
       Set to 1 to enable ResultStore, 0 to disable.
       This is usually set by build/scripts/main_build.py.
       Default is disabled if unset.
+
+  RS_rs_instance, RS_cas_instance:
+      Configure the ResultStore and CAS target database instance names.
+      Critical for bypassing static configs in sandboxed GCE builds.
+      These variables directly drive rsproxy.
+
+  RS_rs_service, RS_cas_service:
+      Override the gRPC service endpoints for ResultStore and CAS.
+      Supports unix:// socket paths for proxy routing.
+      These variables directly drive rsproxy.
 EOF
 }
 
@@ -144,7 +154,9 @@ if [[ "$enable_resultstore" == 0 ]]; then
 fi
 # LINT.ThenChange(//build/scripts/main_build.py:resultstore_ninja_env_vars)
 
-rsproxy_options=()
+rsproxy_options=(
+  --project_id=fuchsia
+)
 
 # rsproxy configuration:
 #
@@ -197,15 +209,18 @@ esac
 # Infra builds do not use .cfg files from the source tree;
 # they set various RS_* environment variables to override
 # the corresponding flags, e.g.:
-#   * RS_rs_service
+# LINT.IfChange(rs_instance_env_vars)
 #   * RS_rs_instance
-#   * RS_cas_service
 #   * RS_cas_instance
+# LINT.ThenChange(//build/scripts/main_build.py:rs_instance_env_vars)
+#   * RS_rs_service
+#   * RS_cas_service
 
 # When rs_service points to a unix socket, TLS assumes a server name of
 # "localhost", for which certs are invalid.  Fix this by using the
 # real name of the service.  Same for cas_service.
 # TODO: pass these from recipes as RS_* environment variables.
+# LINT.IfChange(rs_service_env_vars)
 case "${RS_rs_service:-NOT_SET}" in
   unix://*)
     rsproxy_options+=( --rs_tls_server_name="resultstore.googleapis.com")
@@ -216,6 +231,7 @@ case "${RS_cas_service:-NOT_SET}" in
     rsproxy_options+=( --cas_tls_server_name="remotebuildexecution.googleapis.com")
     ;;
 esac
+# LINT.ThenChange(//build/scripts/main_build.py:rs_service_env_vars)
 
 # Scan wrapped command arguments for a build directory override (-C) to
 # organize log directories for nested sub-builds.

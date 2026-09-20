@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from enum import Enum
 from functools import cached_property, reduce, total_ordering
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class TaskExecutionException(Exception):
@@ -108,7 +108,7 @@ class ArgumentScope(tuple, Enum):
 
 class ScopedArgumentParser:
     @classmethod
-    def get_arguments(cls, scope: ArgumentScope) -> List[str]:
+    def get_arguments(cls, scope: ArgumentScope) -> list[str]:
         return [
             arg
             for i, arg in list(enumerate(sys.argv))[1:]
@@ -119,7 +119,7 @@ class ScopedArgumentParser:
             )
         ]
 
-    def get_default_arguments(self) -> List[str]:
+    def get_default_arguments(self) -> list[str]:
         return self.get_arguments(self.default_argument_scope)
 
     @cached_property
@@ -205,7 +205,7 @@ class ScopedArgumentParser:
 
 class FuchsiaTask:
     @classmethod
-    def read_workflow_state(cls, file: Optional[Path] = None) -> Dict[str, Any]:
+    def read_workflow_state(cls, file: Path | None = None) -> dict[str, Any]:
         workflow_state = {
             "environment_variables": {},
             "workflow": {
@@ -220,7 +220,7 @@ class FuchsiaTask:
         *,
         task_name: str,
         is_final_task: bool,
-        workflow_state: Dict[str, Any],
+        workflow_state: dict[str, Any],
     ) -> None:
         self._task_name = task_name
         self._is_final_task = is_final_task
@@ -252,10 +252,10 @@ class FuchsiaTask:
         return self._is_final_task
 
     @property
-    def workflow_state(self) -> Dict[str, Any]:
+    def workflow_state(self) -> dict[str, Any]:
         return self._workflow_state
 
-    def get_task_arguments(self, scope: ArgumentScope) -> List[str]:
+    def get_task_arguments(self, scope: ArgumentScope) -> list[str]:
         return ScopedArgumentParser.get_arguments(scope)
 
     @classmethod

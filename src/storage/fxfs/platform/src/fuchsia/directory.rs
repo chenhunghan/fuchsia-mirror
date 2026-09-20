@@ -17,7 +17,7 @@ use fidl_fuchsia_storage_block::BlockMarker;
 use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
 use fxfs::errors::FxfsError;
-use fxfs::filesystem::SyncOptions;
+use fxfs::filesystem::{SyncOptions, TruncateGuard};
 use fxfs::log::*;
 use fxfs::object_store::directory::{self, ReplacedChild};
 use fxfs::object_store::transaction::{LockKey, Options, Transaction, lock_keys};
@@ -38,6 +38,15 @@ use vfs::directory::watchers::event_producers::SingleNameEventProducer;
 use vfs::execution_scope::ExecutionScope;
 use vfs::path::Path;
 use vfs::{ObjectRequest, ObjectRequestRef, ProtocolsExt, ToObjectRequest, attributes, symlink};
+
+struct ReplaceWithPurgeResult<'a> {
+    transaction: Transaction<'a>,
+    truncate_guard: Option<TruncateGuard<'static>>,
+    replace_result: ReplacedChild,
+    moved_node: Option<Arc<dyn FxNode>>,
+    actual_src_name: String,
+    actual_dst_name: String,
+}
 
 #[derive(ToWeakNode)]
 pub struct FxDirectory {
@@ -331,14 +340,18 @@ impl FxDirectory {
             .await
     }
 
-    /// Called to indicate a file or directory was removed from this directory.
-    pub(crate) fn did_remove(&self, name: &str) {
+    fn remove_from_dirent_cache(&self, name: &str) {
         let is_casefold = self.directory.dir_type().is_casefold();
         self.directory.owner().dirent_cache().remove(&(
             self.directory.object_id(),
             name,
             is_casefold,
         ));
+    }
+
+    /// Called to indicate a file or directory was removed from this directory.
+    pub(crate) fn did_remove(&self, name: &str) {
+        self.remove_from_dirent_cache(name);
         self.watchers.lock().send_event(&mut SingleNameEventProducer::removed(name));
     }
 
@@ -482,6 +495,155 @@ impl FxDirectory {
         }
     }
 
+    /// Acquires the transaction and executes `directory::replace_child_with_purge`.
+    ///
+    /// Returns `Ok(None)` if this is a trivial no-op rename (`src_dir == self` and `src == dst`).
+    ///
+    /// To avoid holding a directory `WriteLock` across extent-trimming disk I/O (which would
+    /// block concurrent lookups), this method optimistically attempts a single-transaction purge
+    /// while holding normal transaction locks, and retries once falling back to the graveyard if
+    /// a concurrent lookup opens the target file during the I/O window.
+    async fn replace_child_with_purge<'a>(
+        self: &'a Arc<Self>,
+        src: Option<(&'a Arc<FxDirectory>, &'a str)>,
+        dst: &'a str,
+        must_be_directory: bool,
+    ) -> Result<Option<ReplaceWithPurgeResult<'a>>, zx::Status> {
+        let mut allow_purge = true;
+        loop {
+            let borrow_metadata_space = src.is_none();
+            // Acquire the transaction that locks |src_dir|, |src_name|, |self|, and |dst_name| if
+            // they exist, and also the ID and type of dst and src.
+            let replace_context = self
+                .directory
+                .acquire_context_for_replace(
+                    src.map(|(dir, name)| (dir.directory(), name)),
+                    dst,
+                    borrow_metadata_space,
+                )
+                .await
+                .map_err(map_to_status)?;
+            let mut transaction = replace_context.transaction;
+
+            let (moved_node, actual_src_name) = if let Some((src_dir, src_name)) = src {
+                if self.is_deleted() {
+                    return Err(zx::Status::NOT_FOUND);
+                }
+
+                let (moved_id, moved_descriptor) =
+                    replace_context.src_id_and_descriptor.clone().ok_or(zx::Status::NOT_FOUND)?;
+
+                // Make sure the dst path is compatible with the moved node.
+                if let ObjectDescriptor::File = moved_descriptor {
+                    if must_be_directory {
+                        return Err(zx::Status::NOT_DIR);
+                    }
+                }
+
+                // Now that we've ensured that the dst path is compatible with the moved node, we
+                // can check for the trivial case.
+                if src_dir.object_id() == self.object_id() && src_name == dst {
+                    return Ok(None);
+                }
+
+                if let Some((_, dst_descriptor)) = replace_context.dst_id_and_descriptor.as_ref() {
+                    // dst is being overwritten; make sure it's a file iff src is.
+                    match (&moved_descriptor, dst_descriptor) {
+                        (ObjectDescriptor::Directory, ObjectDescriptor::Directory) => {}
+                        (
+                            ObjectDescriptor::File | ObjectDescriptor::Symlink,
+                            ObjectDescriptor::File | ObjectDescriptor::Symlink,
+                        ) => {}
+                        (ObjectDescriptor::Directory, _) => return Err(zx::Status::NOT_DIR),
+                        (ObjectDescriptor::File | ObjectDescriptor::Symlink, _) => {
+                            return Err(zx::Status::NOT_FILE);
+                        }
+                        _ => return Err(zx::Status::IO_DATA_INTEGRITY),
+                    }
+                }
+
+                let moved_node = src_dir
+                    .volume()
+                    .get_or_load_node(moved_id, moved_descriptor.clone(), Some(src_dir.clone()))
+                    .await
+                    .map_err(map_to_status)?;
+
+                if let ObjectDescriptor::Directory = moved_descriptor {
+                    // Lastly, ensure that self isn't a (transitive) child of the moved node.
+                    let mut node_opt = Some(self.clone());
+                    while let Some(node) = node_opt {
+                        if node.object_id() == moved_node.object_id() {
+                            return Err(zx::Status::INVALID_ARGS);
+                        }
+                        node_opt = node.parent();
+                    }
+                }
+
+                // Use name from the replace_context if available (which preserves case-folding
+                // info). `src_name` comes from user supplied name which may have different case.
+                let actual_src_name =
+                    replace_context.src_name.as_deref().unwrap_or(src_name).to_owned();
+                (Some(moved_node), actual_src_name)
+            } else {
+                let (_child_id, object_descriptor) =
+                    replace_context.dst_id_and_descriptor.clone().ok_or(zx::Status::NOT_FOUND)?;
+                if let ObjectDescriptor::Directory = object_descriptor {
+                } else if must_be_directory {
+                    return Err(zx::Status::NOT_DIR);
+                }
+                (None, String::new())
+            };
+
+            // Use name from the replace_context if available (which preserves case-folding info).
+            // `dst` is user supplied name and may have different case.
+            let actual_dst_name = replace_context.dst_name.as_deref().unwrap_or(dst).to_owned();
+
+            // Closed files are flushed on close (`SyncMode::PreClose`), so `dirent_cache`
+            // typically holds the last strong `Arc<dyn FxNode>`. Evicting it here synchronously
+            // removes the node from `NodeCache`.
+            if allow_purge && replace_context.dst_id_and_descriptor.is_some() {
+                self.remove_from_dirent_cache(&actual_dst_name);
+            }
+            let can_purge = allow_purge
+                && match replace_context.dst_id_and_descriptor.as_ref() {
+                    Some((dst_id, ObjectDescriptor::File | ObjectDescriptor::Symlink)) => {
+                        !self.volume().cache().contains_key(*dst_id)
+                    }
+                    _ => false,
+                };
+
+            let replace_result = directory::replace_child_with_purge(
+                &mut transaction,
+                src.map(|(dir, name)| (dir.directory(), name)),
+                (self.directory(), dst),
+                can_purge,
+            )
+            .await
+            .map_err(map_to_status)?;
+
+            if let ReplacedChild::Purged(id) = replace_result {
+                // Now that extent-trimming disk I/O is complete, upgrade locks to `WriteLock` and
+                // wait for active readers to drain so no new lookups can start. If a concurrent
+                // lookup loaded the node into `NodeCache` (or repopulated `dirent_cache`) during
+                // the I/O window, drop the uncommitted transaction and retry once via the
+                // graveyard.
+                transaction.commit_prepare().await;
+                if self.volume().cache().contains_key(id) {
+                    allow_purge = false;
+                    continue;
+                }
+            }
+            return Ok(Some(ReplaceWithPurgeResult {
+                transaction,
+                truncate_guard: replace_context.truncate_guard,
+                replace_result,
+                moved_node,
+                actual_src_name,
+                actual_dst_name,
+            }));
+        }
+    }
+
     async fn rename_impl(
         self: Arc<Self>,
         src_dir: Arc<dyn MutableDirectory>,
@@ -495,90 +657,36 @@ impl FxDirectory {
         let src_dir =
             src_dir.into_any().downcast::<FxDirectory>().map_err(|_| zx::Status::NOT_DIR)?;
 
-        // Acquire the transaction that locks |src_dir|, |src_name|, |self|, and |dst_name| if they
-        // exist, and also the ID and type of dst and src.
-        let replace_context = self
-            .directory
-            .acquire_context_for_replace(Some((src_dir.directory(), src)), dst, false)
-            .await
-            .map_err(map_to_status)?;
-        let mut transaction = replace_context.transaction;
-
-        if self.is_deleted() {
-            return Err(zx::Status::NOT_FOUND);
-        }
-
-        let (moved_id, moved_descriptor) =
-            replace_context.src_id_and_descriptor.clone().ok_or(zx::Status::NOT_FOUND)?;
-
-        // Make sure the dst path is compatible with the moved node.
-        if let ObjectDescriptor::File = moved_descriptor {
-            if src_name.is_dir() || dst_name.is_dir() {
-                return Err(zx::Status::NOT_DIR);
-            }
-        }
-
-        // Now that we've ensured that the dst path is compatible with the moved node, we can check
-        // for the trivial case.
-        if src_dir.object_id() == self.object_id() && src == dst {
+        let Some(ReplaceWithPurgeResult {
+            transaction,
+            truncate_guard,
+            replace_result,
+            moved_node,
+            actual_src_name,
+            actual_dst_name,
+        }) = self
+            .replace_child_with_purge(
+                Some((&src_dir, src)),
+                dst,
+                src_name.is_dir() || dst_name.is_dir(),
+            )
+            .await?
+        else {
             return Ok(());
-        }
-
-        if let Some((_, dst_descriptor)) = replace_context.dst_id_and_descriptor.as_ref() {
-            // dst is being overwritten; make sure it's a file iff src is.
-            match (&moved_descriptor, dst_descriptor) {
-                (ObjectDescriptor::Directory, ObjectDescriptor::Directory) => {}
-                (
-                    ObjectDescriptor::File | ObjectDescriptor::Symlink,
-                    ObjectDescriptor::File | ObjectDescriptor::Symlink,
-                ) => {}
-                (ObjectDescriptor::Directory, _) => return Err(zx::Status::NOT_DIR),
-                (ObjectDescriptor::File | ObjectDescriptor::Symlink, _) => {
-                    return Err(zx::Status::NOT_FILE);
-                }
-                _ => return Err(zx::Status::IO_DATA_INTEGRITY),
-            }
-        }
-
-        let moved_node = src_dir
-            .volume()
-            .get_or_load_node(moved_id, moved_descriptor.clone(), Some(src_dir.clone()))
-            .await
-            .map_err(map_to_status)?;
-
-        if let ObjectDescriptor::Directory = moved_descriptor {
-            // Lastly, ensure that self isn't a (transitive) child of the moved node.
-            let mut node_opt = Some(self.clone());
-            while let Some(node) = node_opt {
-                if node.object_id() == moved_node.object_id() {
-                    return Err(zx::Status::INVALID_ARGS);
-                }
-                node_opt = node.parent();
-            }
-        }
-
-        let replace_result = directory::replace_child(
-            &mut transaction,
-            Some((src_dir.directory(), src)),
-            (self.directory(), dst),
-        )
-        .await
-        .map_err(map_to_status)?;
-
-        // Use name from the replace_context if available (which preserves case-folding info).
-        // `src` comes from user supplied name which may have different case.
-        let actual_src_name = replace_context.src_name.as_deref().unwrap_or(src);
-        let actual_dst_name = replace_context.dst_name.as_deref().unwrap_or(dst);
+        };
+        let moved_node = moved_node.unwrap();
 
         transaction
             .commit_with_callback(|_| {
                 moved_node.set_parent(self.clone());
-                src_dir.did_remove(actual_src_name);
+                src_dir.did_remove(&actual_src_name);
 
                 match replace_result {
                     ReplacedChild::None => {}
-                    ReplacedChild::ObjectWithRemainingLinks(..) | ReplacedChild::Object(_) => {
-                        self.did_remove(actual_dst_name);
+                    ReplacedChild::ObjectWithRemainingLinks(..)
+                    | ReplacedChild::Object(_)
+                    | ReplacedChild::Purged(_) => {
+                        self.did_remove(&actual_dst_name);
                     }
                     ReplacedChild::Directory(id) => {
                         let store = self.store();
@@ -586,7 +694,7 @@ impl FxDirectory {
                             .filesystem()
                             .graveyard()
                             .queue_tombstone_object(store.store_object_id(), id);
-                        self.did_remove(actual_dst_name);
+                        self.did_remove(&actual_dst_name);
                         self.volume().mark_directory_deleted(id);
                     }
                 }
@@ -596,7 +704,10 @@ impl FxDirectory {
             .map_err(map_to_status)?;
 
         if let ReplacedChild::Object(id) = replace_result {
-            self.volume().maybe_purge_file(id).await.map_err(map_to_status)?;
+            self.volume()
+                .maybe_purge_file(id, truncate_guard.as_ref())
+                .await
+                .map_err(map_to_status)?;
         }
         Ok(())
     }
@@ -685,40 +796,34 @@ impl MutableDirectory for FxDirectory {
         name: &str,
         must_be_directory: bool,
     ) -> Result<(), zx::Status> {
-        let replace_context = self
-            .directory
-            .acquire_context_for_replace(None, name, true)
-            .await
-            .map_err(map_to_status)?;
-        // Use name from the replace_context if available (which preserves case-folding info).
-        // `name` is user supplied name and may have different case.
-        let actual_dst_name = replace_context.dst_name.as_deref().unwrap_or(name);
-        let mut transaction = replace_context.transaction;
-        let (_, object_descriptor) =
-            replace_context.dst_id_and_descriptor.ok_or(zx::Status::NOT_FOUND)?;
-        if let ObjectDescriptor::Directory = object_descriptor {
-        } else if must_be_directory {
-            return Err(zx::Status::NOT_DIR);
-        }
-        match directory::replace_child(&mut transaction, None, (self.directory(), name))
-            .await
-            .map_err(map_to_status)?
-        {
+        let ReplaceWithPurgeResult {
+            transaction,
+            truncate_guard,
+            replace_result,
+            actual_dst_name,
+            ..
+        } = self
+            .replace_child_with_purge(None, name, must_be_directory)
+            .await?
+            .expect("unlink cannot be a trivial rename");
+
+        match replace_result {
             ReplacedChild::None => return Err(zx::Status::NOT_FOUND),
-            ReplacedChild::ObjectWithRemainingLinks(..) => {
+            ReplacedChild::ObjectWithRemainingLinks(..) | ReplacedChild::Purged(..) => {
                 transaction
-                    .commit_with_callback(|_| self.did_remove(actual_dst_name))
+                    .commit_with_callback(|_| self.did_remove(&actual_dst_name))
                     .await
                     .map_err(map_to_status)?;
             }
             ReplacedChild::Object(id) => {
                 transaction
-                    .commit_with_callback(|_| self.did_remove(actual_dst_name))
+                    .commit_with_callback(|_| self.did_remove(&actual_dst_name))
                     .await
                     .map_err(map_to_status)?;
+
                 // If purging fails, we should still return success, since the file will appear
                 // unlinked at this point anyways.  The file should be cleaned up on a later mount.
-                if let Err(e) = self.volume().maybe_purge_file(id).await {
+                if let Err(e) = self.volume().maybe_purge_file(id, truncate_guard.as_ref()).await {
                     warn!(error:? = e; "Failed to purge file");
                 }
             }
@@ -730,7 +835,7 @@ impl MutableDirectory for FxDirectory {
                             .filesystem()
                             .graveyard()
                             .queue_tombstone_object(store.store_object_id(), id);
-                        self.did_remove(actual_dst_name);
+                        self.did_remove(&actual_dst_name);
                         self.volume().mark_directory_deleted(id);
                     })
                     .await
@@ -5714,6 +5819,117 @@ mod tests {
         assert_watch_event(&mut watcher, WatchEvent::REMOVE_FILE, "Foo").await;
         assert_watch_event(&mut watcher, WatchEvent::ADD_FILE, "FOO").await;
 
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_unlink_purges_in_single_transaction_when_closed() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+        let volume = fixture.volume().volume();
+        let store = volume.store();
+        let root_dir = fixture
+            .volume()
+            .root()
+            .clone()
+            .into_any()
+            .downcast::<FxDirectory>()
+            .expect("Not a directory");
+
+        // 1. Verify that calling `remove_from_dirent_cache` on a closed file drops the last
+        // strong reference and synchronously removes it from `NodeCache`.
+        let file = open_file_checked(
+            root,
+            "cached_file",
+            fio::Flags::FLAG_MAYBE_CREATE | fio::PERM_READABLE | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let (_mutable, immutable) = file
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("transport error on get_attributes")
+            .expect("get_attributes failed");
+        let cached_id = immutable.id.unwrap();
+        file::write(&file, b"hello").await.expect("write failed");
+        close_file_checked(file).await;
+
+        // While the file is closed, `dirent_cache` still holds a strong `Arc<dyn FxNode>`, so
+        // `NodeCache` contains the entry.
+        assert!(volume.cache().contains_key(cached_id));
+        root_dir.remove_from_dirent_cache("cached_file");
+        assert!(!volume.cache().contains_key(cached_id));
+
+        // 2. Create another file, write to it, and close it without manually removing from
+        // `dirent_cache`. Verify that `unlink` evicts it from `dirent_cache`, sees that it is no
+        // longer in `NodeCache`, and purges it in a single transaction (never touching the
+        // graveyard).
+        let closed_file = open_file_checked(
+            root,
+            "closed_file",
+            fio::Flags::FLAG_MAYBE_CREATE | fio::PERM_READABLE | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let (_mutable, immutable) = closed_file
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("transport error on get_attributes")
+            .expect("get_attributes failed");
+        let closed_id = immutable.id.unwrap();
+        file::write(&closed_file, b"hello").await.expect("write failed");
+        close_file_checked(closed_file).await;
+
+        assert!(volume.cache().contains_key(closed_id));
+        root.unlink("closed_file", &fio::UnlinkOptions::default())
+            .await
+            .expect("FIDL call failed")
+            .expect("unlink failed");
+        assert!(!volume.cache().contains_key(closed_id));
+        // Because it was purged in a single transaction, no graveyard entry was ever inserted.
+        assert!(
+            store
+                .tree()
+                .find(&ObjectKey::graveyard_entry(store.graveyard_directory_object_id(), closed_id))
+                .await
+                .expect("find failed")
+                .is_none()
+        );
+
+        // 3. Contrast with unlinking an open file: since an open connection holds a strong
+        // reference, `contains_key` remains true after `remove_from_dirent_cache`, so `unlink`
+        // falls back to adding the file to the graveyard.
+        let open_file = open_file_checked(
+            root,
+            "open_file",
+            fio::Flags::FLAG_MAYBE_CREATE | fio::PERM_READABLE | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let (_mutable, immutable) = open_file
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("transport error on get_attributes")
+            .expect("get_attributes failed");
+        let open_id = immutable.id.unwrap();
+        file::write(&open_file, b"hello").await.expect("write failed");
+
+        root.unlink("open_file", &fio::UnlinkOptions::default())
+            .await
+            .expect("FIDL call failed")
+            .expect("unlink failed");
+        assert!(volume.cache().contains_key(open_id));
+        assert!(
+            store
+                .tree()
+                .find(&ObjectKey::graveyard_entry(store.graveyard_directory_object_id(), open_id))
+                .await
+                .expect("find failed")
+                .is_some()
+        );
+        close_file_checked(open_file).await;
+
+        drop(root_dir);
         fixture.close().await;
     }
 }

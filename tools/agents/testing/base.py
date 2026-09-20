@@ -33,6 +33,15 @@ class BaseTestCase(unittest.TestCase):
         self.mock_stderr = self._stderr_patch.start()
         self.addCleanup(self._stderr_patch.stop)
 
+        # Ensure tests run in a hermetic human baseline by stripping ambient agent env vars.
+        self.enterContext(mock.patch.dict(os.environ))
+        for var in (
+            "ANTIGRAVITY_AGENT",
+            "GEMINI_CLI",
+            "ANTIGRAVITY_EDITOR_APP_ROOT",
+        ):
+            os.environ.pop(var, None)
+
     @property
     def stdout(self) -> str:
         """Returns captured standard output as a string."""

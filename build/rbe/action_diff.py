@@ -12,8 +12,9 @@ import argparse
 import dataclasses
 import itertools
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import AbstractSet, Dict, Iterable, Optional, Sequence
+from typing import AbstractSet
 
 import cl_utils
 import remotetool
@@ -88,7 +89,7 @@ class ActionDiffer(object):
         self,
         left: reproxy_logs.ReproxyLog,
         right: reproxy_logs.ReproxyLog,
-        reproxy_cfg: Dict[str, str],
+        reproxy_cfg: dict[str, str],
     ):
         self._left = left
         self._right = right
@@ -103,7 +104,7 @@ class ActionDiffer(object):
         return self._right
 
     @property
-    def reproxy_cfg(self) -> Dict[str, str]:
+    def reproxy_cfg(self) -> dict[str, str]:
         return self._remote_tool.config
 
     def trace_artifact(self, filepath: Path) -> Iterable[RootCause]:
@@ -243,7 +244,7 @@ class ActionDiffer(object):
         right_action_digest: str,
         visited: AbstractSet[Path],
         level: int,
-        remote_working_dir: Optional[Path] = None,
+        remote_working_dir: Path | None = None,
     ) -> Iterable[RootCause]:
         indent = "  " * level
 

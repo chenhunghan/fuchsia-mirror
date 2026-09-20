@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from typing import Any, Dict, List, Set, Tuple, Union
+from typing import Any
 
 try:
     # Bazel build uses fully-qualified package names.
@@ -36,11 +36,9 @@ class SpdxLicenseExpression:
 
     # A formatted string template. Will contain {0}, {1}, ... as placeholder for the various licenses.
     expression_template: str
-    license_ids: Tuple[str]
+    license_ids: tuple[str]
 
-    def create(
-        expression_str: str, location_for_error: Union[str, None] = None
-    ):
+    def create(expression_str: str, location_for_error: str | None = None):
         assert expression_str != None
 
         expression_template = []
@@ -109,10 +107,10 @@ class SpdxPackage:
 
     spdx_id: str
     name: str
-    copyright_text: Union[str, None] = None
-    license_concluded: Union[SpdxLicenseExpression, None] = None
-    homepage: Union[str, None] = None
-    debug_hint: Union[List[str], None] = None
+    copyright_text: str | None = None
+    license_concluded: SpdxLicenseExpression | None = None
+    homepage: str | None = None
+    debug_hint: list[str] | None = None
 
     def to_json_dict(self):
         output = {"SPDXID": self.spdx_id, "name": self.name}
@@ -179,9 +177,9 @@ class SpdxExtractedLicensingInfo:
     license_id: str
     name: str
     extracted_text: str
-    cross_refs: List[str] = dataclasses.field(default_factory=list)
-    see_also: List[str] = dataclasses.field(default_factory=list)
-    debug_hint: Union[List[str], None] = None
+    cross_refs: list[str] = dataclasses.field(default_factory=list)
+    see_also: list[str] = dataclasses.field(default_factory=list)
+    debug_hint: list[str] | None = None
 
     def to_json_dict(self):
         output = {
@@ -319,11 +317,11 @@ class SpdxDocument:
     file_path: str
     name: str
     namespace: str
-    creators: List[str]
-    describes: List[str]
-    packages: List[SpdxPackage]
-    relationships: List[SpdxRelationship]
-    extracted_licenses: List[SpdxExtractedLicensingInfo]
+    creators: list[str]
+    describes: list[str]
+    packages: list[SpdxPackage]
+    relationships: list[SpdxRelationship]
+    extracted_licenses: list[SpdxExtractedLicensingInfo]
     spdx_id: str = _spdx_document_ref
 
     def refactor_ids(
@@ -342,7 +340,7 @@ class SpdxDocument:
         package_id_replacer = SpdxIdReplacer(doc_location=self.file_path)
         license_id_replacer = SpdxIdReplacer(doc_location=self.file_path)
 
-        new_extracted_licenses_by_id: Dict[str, SpdxExtractedLicensingInfo] = {}
+        new_extracted_licenses_by_id: dict[str, SpdxExtractedLicensingInfo] = {}
         for el in self.extracted_licenses:
             new_id = SpdxExtractedLicensingInfo.content_based_license_id(
                 el.name, el.extracted_text
@@ -354,7 +352,7 @@ class SpdxDocument:
                 el = el.merge_with(duplicate_el)
             new_extracted_licenses_by_id[new_id] = el
 
-        new_packages: List[SpdxPackage] = []
+        new_packages: list[SpdxPackage] = []
         for p in self.packages:
             package_id_replacer.replace_id(
                 p.spdx_id, package_id_factory.new_id()
@@ -424,7 +422,7 @@ class SpdxDocument:
             )
 
     def from_json_dict(
-        spdx_json_file_path: str, json_dict: Dict[str, Any]
+        spdx_json_file_path: str, json_dict: dict[str, Any]
     ) -> "SpdxDocument":
         reader = DictReader(json_dict, f"{spdx_json_file_path}")
         return SpdxDocument.from_json_dict_reader(spdx_json_file_path, reader)
@@ -490,11 +488,11 @@ class SpdxIndex:
     def __init__(
         self,
         spdx_doc_file_path: str,
-        license_by_id: Dict[str, SpdxExtractedLicensingInfo],
-        package_by_id: Dict[str, SpdxPackage],
-        packages_by_license_id: Dict[str, Set[str]],
-        child_packages_by_parent_id: Dict[str, Set[str]],
-        parent_packages_by_child_id: Dict[str, Set[str]],
+        license_by_id: dict[str, SpdxExtractedLicensingInfo],
+        package_by_id: dict[str, SpdxPackage],
+        packages_by_license_id: dict[str, set[str]],
+        child_packages_by_parent_id: dict[str, set[str]],
+        parent_packages_by_child_id: dict[str, set[str]],
     ):
         self._spdx_doc_file_path = spdx_doc_file_path
         self._license_by_id = license_by_id
@@ -536,7 +534,7 @@ class SpdxIndex:
                 f"No package with id '{id}", self._spdx_doc_file_path
             )
 
-    def get_packages_by_ids(self, ids: List[str]):
+    def get_packages_by_ids(self, ids: list[str]):
         return [self.get_package_by_id(id) for id in ids]
 
     def get_parent_packages(self, package: SpdxPackage):
@@ -559,7 +557,7 @@ class SpdxIndex:
 
     def dependency_chains_for_license(
         self, license: SpdxExtractedLicensingInfo
-    ) -> List[List[SpdxPackage]]:
+    ) -> list[list[SpdxPackage]]:
         """ "
         Computes all the dependencies of a given license.
 
@@ -568,7 +566,7 @@ class SpdxIndex:
         """
 
         def path_recursion(
-            current_path: List[SpdxPackage], current_package: SpdxPackage
+            current_path: list[SpdxPackage], current_package: SpdxPackage
         ):
             parents = self.get_parent_packages(current_package)
             if not parents:
@@ -669,16 +667,16 @@ class SpdxDocumentBuilder:
     """A builder for SpdxDocument"""
 
     root_package_name: str
-    creators: List[str]
+    creators: list[str]
     root_package: SpdxPackage = None
-    _describes: List["str"] = dataclasses.field(default_factory=list)
-    _packages_by_id: Dict[str, SpdxPackage] = dataclasses.field(
+    _describes: list["str"] = dataclasses.field(default_factory=list)
+    _packages_by_id: dict[str, SpdxPackage] = dataclasses.field(
         default_factory=dict
     )
-    _relationships: List[SpdxRelationship] = dataclasses.field(
+    _relationships: list[SpdxRelationship] = dataclasses.field(
         default_factory=list
     )
-    _extracted_licenses_by_id: Dict[
+    _extracted_licenses_by_id: dict[
         str, SpdxExtractedLicensingInfo
     ] = dataclasses.field(default_factory=dict)
     _package_id_factory: SpdxPackageIdFactory = dataclasses.field(
@@ -688,8 +686,8 @@ class SpdxDocumentBuilder:
     @staticmethod
     def create(
         root_package_name: str,
-        creators: List[str],
-        root_package_homepage: Union[str, None] = None,
+        creators: list[str],
+        root_package_homepage: str | None = None,
     ) -> "SpdxDocumentBuilder":
         builder = SpdxDocumentBuilder(
             root_package_name=root_package_name,
@@ -704,9 +702,7 @@ class SpdxDocumentBuilder:
     def next_package_id(self) -> str:
         return self._package_id_factory.new_id()
 
-    def has_package(
-        self, package_or_package_id: Union[str, SpdxPackage]
-    ) -> bool:
+    def has_package(self, package_or_package_id: str | SpdxPackage) -> bool:
         package_id = (
             package_or_package_id
             if isinstance(package_or_package_id, str)
@@ -723,7 +719,7 @@ class SpdxDocumentBuilder:
         self._packages_by_id[package.spdx_id] = package
         self._describes.append(package.spdx_id)
 
-    def _add_root_package(self, name: str, homepage: Union[str, None]):
+    def _add_root_package(self, name: str, homepage: str | None):
         assert not self.root_package
         self.root_package = SpdxPackage(
             spdx_id=self._package_id_factory.new_id(),
@@ -806,7 +802,7 @@ class SpdxDocumentBuilder:
 class SpdxIdReplacer:
     """Helper for replacing Spdx Ids"""
 
-    _replaced_ids: Dict[str, str]
+    _replaced_ids: dict[str, str]
     _doc_location: str
 
     def __init__(self, doc_location: str = None):
@@ -837,7 +833,7 @@ class SpdxIdReplacer:
         return self._replaced_ids[old_id]
 
 
-def _maybe_set(output_dict: Dict[str, Any], key: str, value: Any):
+def _maybe_set(output_dict: dict[str, Any], key: str, value: Any):
     if value:
         output_dict[key] = value
 

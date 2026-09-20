@@ -1,8 +1,5 @@
 # Device Driver Model
 
-Caution: The pages in this section may contain information that is specific to the
-legacy version of the driver framework (DFv1).
-
 - [Introduction](introduction.md)
 - [Device model](device-model.md)
 - [Driver binding](driver-binding.md)

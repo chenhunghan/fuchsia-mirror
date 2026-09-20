@@ -28,5 +28,8 @@ py_test(
     # b/319458863: py_test() does not support our custom Python
     # toolchain with remote builds!
     tags = ["no-remote"],
-    deps = ["@rules_fuchsia//fuchsia/tools/licenses:classification_types"],
+    deps = [
+        "@rules_fuchsia//fuchsia/tools/licenses:classification_types",
+        "@rules_fuchsia//fuchsia/tools/licenses:generate_licenses_classification_lib",
+    ],
 )

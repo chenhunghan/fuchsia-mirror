@@ -48,7 +48,7 @@
 ##             to filter what files are affected. For example, to format all
 ##             rust source files use `fx format-code --all -- "*.rs"`
 ##
-## Supported Languages: C, C++, cml, Dart, FIDL, GN, Go, Python, Rust, JSON
+## Supported Languages: C, C++, cml, dml, Dart, FIDL, GN, Go, Python, Rust, JSON
 
 set -e
 
@@ -276,7 +276,7 @@ readonly FIX_HEADER_GUARDS_CMD="${PY_TOOL} ${FUCHSIA_DIR}/scripts/style/check-he
 # tables), so instead use an array of specially-formatted strings, with keys and
 # values separated by an equals sign and repeated values separated by spaces.
 compiled_formatter_extensions=(
-  "cmc=.cml"
+  "cmc=.cml .dml"
   "doc-checker=.md"
   "fidl-format=.fidl"
   "formatjson5=.json5 .persist .triage"

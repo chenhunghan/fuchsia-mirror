@@ -70,8 +70,13 @@ define_common_lib("uart16550_lib_for_testing") {
   testonly = true
 }
 
+fuchsia_driver_dml("uart16550-dml") {
+  dml = "meta/uart16550.dml"
+  driver_name = "uart16550"
+}
+
 driver_bind_rules("uart16550_bind") {
-  rules = "meta/uart16550.bind"
+  dml_label = ":uart16550-dml"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -93,7 +98,7 @@ fuchsia_driver_component("uart16550") {
   info = "meta/uart16550-info.json"
   component_name = "uart16550"
   deps = [ ":uart16550-driver" ]
-  manifest = "meta/uart16550.cml"
+  dml_label = ":uart16550-dml"
 }
 
 fuchsia_driver_package("package") {

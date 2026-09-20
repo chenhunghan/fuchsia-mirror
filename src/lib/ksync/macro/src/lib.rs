@@ -116,7 +116,8 @@ fn parse_field_attributes(
             } else if !matches!(attr.meta, syn::Meta::Path(_)) {
                 errors.push(syn::Error::new(
                     attr.meta.span(),
-                    "#[mutex] attribute must be either #[mutex], #[mutex(LockClass)], #[mutex(flags = ...)], or #[mutex(LockClass, flags = ...)].",
+                    "#[mutex] attribute must be either #[mutex], #[mutex(LockClass)], \
+                     #[mutex(flags = ...)], or #[mutex(LockClass, flags = ...)].",
                 ));
             }
             false
@@ -133,7 +134,8 @@ fn parse_field_attributes(
             } else if !matches!(attr.meta, syn::Meta::Path(_)) {
                 errors.push(syn::Error::new(
                     attr.meta.span(),
-                    "#[brwlock] attribute must be either #[brwlock], #[brwlock(LockClass)], #[brwlock(flags = ...)], or #[brwlock(LockClass, flags = ...)].",
+                    "#[brwlock] attribute must be either #[brwlock], #[brwlock(LockClass)], \
+                     #[brwlock(flags = ...)], or #[brwlock(LockClass, flags = ...)].",
                 ));
             }
             false
@@ -179,7 +181,8 @@ fn check_unique_name(
         errors.push(syn::Error::new(
             span,
             format!(
-                "The lock field '{field_ident}' generates the duplicate {kind} name '{name}'. Please use distinct field names."
+                "The lock field '{field_ident}' generates the duplicate {kind} name '{name}'. \
+                 Please use distinct field names."
             ),
         ));
     }
@@ -1126,11 +1129,72 @@ pub fn guarded(_args: TokenStream, input: TokenStream) -> TokenStream {
                 #struct_vis fn #lock_method_ident<'a, M: ::ksync::RawLock>(
                     &'a self,
                     real_mutex: &'a ::ksync::KMutex<#class_type, M>,
-                ) -> impl pin_init::PinInit<#guard_ident #guard_ty_generics, ::core::convert::Infallible> {
+                ) -> impl pin_init::PinInit<#guard_ident #guard_ty_generics, ::core::convert::Infallible>
+                where
+                    <M as ::ksync::RawLock>::DefaultPolicy: ::ksync::LockPolicy<M, AcquireArgs = ()>,
+                {
                     pin_init::pin_init!(#guard_ident {
                         parent: self,
                         inner <- ::ksync::KMutexGuard::new(real_mutex),
                     })
+                }
+            }
+        } else if is_monitored_spinlock_type(mutex_type) {
+            let return_ty_generics = quote! { <'_, #(#ty_params),*> };
+            let mut policy_args = ty_params.clone();
+            policy_args.push(quote! { P });
+            let policy_return_ty_generics = quote! { <'_, #(#policy_args),*> };
+            quote! {
+                #[inline]
+                #struct_vis fn #lock_method_ident(
+                    &self,
+                    tag: ::ksync::SourceTag,
+                ) -> impl pin_init::PinInit<#guard_ident #return_ty_generics, ::core::convert::Infallible> {
+                    pin_init::pin_init!(#guard_ident {
+                        parent: self,
+                        inner <- ::ksync::KMutexGuard::new_with_args(&self.#mu_ident, tag),
+                    })
+                }
+                #[inline]
+                #struct_vis fn #lock_policy_method_ident<P: ::ksync::LockPolicy<#mutex_type>>(
+                    &self,
+                    args: P::AcquireArgs,
+                ) -> impl pin_init::PinInit<#guard_ident #policy_return_ty_generics, ::core::convert::Infallible> {
+                    pin_init::pin_init!(#guard_ident {
+                        parent: self,
+                        inner <- ::ksync::KMutexGuard::new_with_args(&self.#mu_ident, args),
+                    })
+                }
+                #[inline]
+                #struct_vis fn #lock_aliased_method_ident<
+                    'a,
+                    AliasClass: ::ksync::LockClass,
+                    M2: ::ksync::RawLock,
+                >(
+                    &'a self,
+                    alias: &'a ::ksync::KMutex<AliasClass, M2>,
+                    tag: ::ksync::SourceTag,
+                ) -> impl pin_init::PinInit<
+                    ::ksync::KMutexAliasedGuard<'a, #class_type, AliasClass, #mutex_type, M2>,
+                    ::core::convert::Infallible,
+                > {
+                    ::ksync::KMutexAliasedGuard::new_with_args(&self.#mu_ident, alias, tag)
+                }
+                #[inline]
+                #struct_vis fn #lock_aliased_policy_method_ident<
+                    'a,
+                    AliasClass: ::ksync::LockClass,
+                    M2: ::ksync::RawLock,
+                    P: ::ksync::LockPolicy<#mutex_type>,
+                >(
+                    &'a self,
+                    alias: &'a ::ksync::KMutex<AliasClass, M2>,
+                    args: P::AcquireArgs,
+                ) -> impl pin_init::PinInit<
+                    ::ksync::KMutexAliasedGuard<'a, #class_type, AliasClass, #mutex_type, M2, P>,
+                    ::core::convert::Infallible,
+                > {
+                    ::ksync::KMutexAliasedGuard::new_with_args(&self.#mu_ident, alias, args)
                 }
             }
         } else {
@@ -1147,7 +1211,7 @@ pub fn guarded(_args: TokenStream, input: TokenStream) -> TokenStream {
                     })
                 }
                 #[inline]
-                #struct_vis fn #lock_policy_method_ident<P: ::ksync::LockPolicy<#mutex_type>>(&self)
+                #struct_vis fn #lock_policy_method_ident<P: ::ksync::LockPolicy<#mutex_type, AcquireArgs = ()>>(&self)
                     -> impl pin_init::PinInit<#guard_ident #policy_return_ty_generics, ::core::convert::Infallible> {
                     pin_init::pin_init!(#guard_ident {
                         parent: self,
@@ -1173,7 +1237,7 @@ pub fn guarded(_args: TokenStream, input: TokenStream) -> TokenStream {
                     'a,
                     AliasClass: ::ksync::LockClass,
                     M2: ::ksync::RawLock,
-                    P: ::ksync::LockPolicy<#mutex_type>,
+                    P: ::ksync::LockPolicy<#mutex_type, AcquireArgs = ()>,
                 >(
                     &'a self,
                     alias: &'a ::ksync::KMutex<AliasClass, M2>,
@@ -1605,6 +1669,16 @@ fn is_wavltree_type(ty: &Type) -> bool {
 
 fn is_kmutex_type(ty: &Type) -> bool {
     is_type_named(ty, "KMutex")
+        || is_type_named(ty, "KSpinlock")
+        || is_type_named(ty, "KMonitoredSpinlock")
+}
+
+fn is_monitored_spinlock_type(tokens: &proc_macro2::TokenStream) -> bool {
+    if let Ok(ty) = syn::parse2::<Type>(tokens.clone()) {
+        is_type_named(&ty, "RawMonitoredSpinlock") || is_type_named(&ty, "KMonitoredSpinlock")
+    } else {
+        false
+    }
 }
 
 fn is_brwlock_type(ty: &Type) -> bool {
@@ -1637,6 +1711,12 @@ fn is_phantom_mutex_type(ty: &Type) -> bool {
 fn extract_lock_type(ty: &Type) -> Result<Option<proc_macro2::TokenStream>, syn::Error> {
     let Type::Path(type_path) = ty else { return Ok(None) };
     let Some(last_segment) = type_path.path.segments.last() else { return Ok(None) };
+    if last_segment.ident == "KSpinlock" {
+        return Ok(Some(quote! { ::ksync::RawSpinlock }));
+    }
+    if last_segment.ident == "KMonitoredSpinlock" {
+        return Ok(Some(quote! { ::ksync::RawMonitoredSpinlock }));
+    }
     if last_segment.ident != "KMutex" {
         return Ok(None);
     }
@@ -1700,6 +1780,54 @@ pub fn declare_singleton_lock(input: TokenStream) -> TokenStream {
     let string_reg_ident = format_ident!("{}_STRING_REG", name_upper);
     let reg_ident = format_ident!("{}_REGISTRATION", name_upper);
 
+    let lock_methods = if is_monitored_spinlock_type(&quote! { #raw_lock }) {
+        quote! {
+            /// Acquires the singleton monitored spinlock using the default policy and the given source tag.
+            #[inline]
+            pub fn lock(
+                tag: ::ksync::SourceTag,
+            ) -> impl ::ksync::pin_init::PinInit<
+                ::ksync::KMutexGuard<'static, #name, #raw_lock>,
+                ::core::convert::Infallible,
+            > {
+                Self::get().lock_with(tag)
+            }
+
+            /// Acquires the singleton monitored spinlock using the specified lock policy and arguments.
+            #[inline]
+            pub fn lock_policy<P: ::ksync::LockPolicy<#raw_lock>>(
+                args: P::AcquireArgs,
+            ) -> impl ::ksync::pin_init::PinInit<
+                ::ksync::KMutexGuard<'static, #name, #raw_lock, P>,
+                ::core::convert::Infallible,
+            > {
+                Self::get().lock_policy_with::<P>(args)
+            }
+        }
+    } else {
+        quote! {
+            /// Acquires the singleton mutex using the default policy.
+            #[inline]
+            pub fn lock() -> impl ::ksync::pin_init::PinInit<
+                ::ksync::KMutexGuard<'static, #name, #raw_lock>,
+                ::core::convert::Infallible,
+            > {
+                Self::get().lock()
+            }
+
+            /// Acquires the singleton mutex using the specified lock policy.
+            #[inline]
+            pub fn lock_policy<
+                P: ::ksync::LockPolicy<#raw_lock, AcquireArgs = ()>,
+            >() -> impl ::ksync::pin_init::PinInit<
+                ::ksync::KMutexGuard<'static, #name, #raw_lock, P>,
+                ::core::convert::Infallible,
+            > {
+                Self::get().lock_policy::<P>()
+            }
+        }
+    };
+
     quote! {
         #(#attrs)*
         #[derive(Debug, Copy, Clone)]
@@ -1736,23 +1864,7 @@ pub fn declare_singleton_lock(input: TokenStream) -> TokenStream {
                 &SINGLETON
             }
 
-            /// Acquires the singleton mutex using the default policy.
-            #[inline]
-            pub fn lock() -> impl ::ksync::pin_init::PinInit<
-                ::ksync::KMutexGuard<'static, #name, #raw_lock>,
-                ::core::convert::Infallible,
-            > {
-                Self::get().lock()
-            }
-
-            /// Acquires the singleton mutex using the specified lock policy.
-            #[inline]
-            pub fn lock_policy<P: ::ksync::LockPolicy<#raw_lock>>() -> impl ::ksync::pin_init::PinInit<
-                ::ksync::KMutexGuard<'static, #name, #raw_lock, P>,
-                ::core::convert::Infallible,
-            > {
-                Self::get().lock_policy::<P>()
-            }
+            #lock_methods
         }
     }
     .into()

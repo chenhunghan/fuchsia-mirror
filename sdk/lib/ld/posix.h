@@ -16,7 +16,7 @@
 
 namespace ld {
 
-using StartupModule = StartupLoadModule<elfldltl::MmapLoader>;
+using StartupModule = StartupLoadModule<elfldltl::MmapLoader<>>;
 
 // The auxiliary vector on the stack is a sequence of tag, value pairs.
 using Auxv = std::array<uintptr_t, 2>;

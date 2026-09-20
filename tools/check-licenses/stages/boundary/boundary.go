@@ -6,6 +6,7 @@ package boundary
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -66,40 +67,10 @@ func (g *Grouper) Run(ctx context.Context, in <-chan pipeline.RawPath) (<-chan p
 				physicalReadmes[dir] = append(physicalReadmes[dir], cleanPath)
 			} else if base == "go.mod" || base == "Cargo.toml" || base == "pubspec.yaml" {
 				// Only treat package manifests as project boundaries if they reside in third_party or vendor,
-				// are not nested inside a prebuilt toolchain directory, and are not example/benchmark/test sub-packages.
-				relPath, err := filepath.Rel(g.FuchsiaDir, cleanPath)
-				if err == nil {
-					slashRel := filepath.ToSlash(relPath)
-					isThirdParty := strings.HasPrefix(slashRel, "third_party/") ||
-						strings.HasPrefix(slashRel, "vendor/") ||
-						strings.Contains(slashRel, "/third_party/") ||
-						strings.Contains(slashRel, "/vendor/")
-					isPrebuilt := strings.HasPrefix(slashRel, "prebuilt/") ||
-						strings.Contains(slashRel, "/prebuilt/")
-
-					dir := filepath.Dir(slashRel)
-					parts := strings.Split(dir, "/")
-					isSubPackage := strings.HasPrefix(slashRel, "third_party/go/src/")
-					for i, part := range parts {
-						if i > 1 {
-							switch part {
-							case "example", "examples", "benchmark", "benchmarks", "test", "tests",
-								"interop", "debug_extension", "doc", "docs", "tools", "misc":
-								isSubPackage = true
-							}
-						}
-					}
-
-					if strings.HasPrefix(slashRel, "third_party/rust_crates/mirrors/") {
-						if len(parts) > 4 { // third_party / rust_crates / mirrors / <repo> (4 parts)
-							isSubPackage = true
-						}
-					}
-
-					if isThirdParty && !isPrebuilt && !isSubPackage {
-						absDir := filepath.Dir(cleanPath)
-						physicalReadmes[absDir] = append(physicalReadmes[absDir], cleanPath)
-					}
+				// are not nested inside a prebuilt directory, and are not sub-packages.
+				if !readme.IsManifestSubpackage(cleanPath, g.FuchsiaDir) {
+					absDir := filepath.Dir(cleanPath)
+					physicalReadmes[absDir] = append(physicalReadmes[absDir], cleanPath)
 				}
 			}
 		}
@@ -155,7 +126,7 @@ func (g *Grouper) Run(ctx context.Context, in <-chan pipeline.RawPath) (<-chan p
 					if parent == g.FuchsiaDir {
 						continue
 					}
-					if g.isBarrier(parent) {
+					if g.IsBarrier(parent) {
 						break
 					}
 					if readmeDirs[parent] {
@@ -168,18 +139,22 @@ func (g *Grouper) Run(ctx context.Context, in <-chan pipeline.RawPath) (<-chan p
 				}
 			}
 
+			isException := g.IsBarrierException(dir)
+
 			for _, readmePath := range readmePaths {
 				rootReadmes, subReadmes, err := readme.ParseAnyMetadata(readmePath)
 
 				if err != nil || (len(rootReadmes) == 0 && len(subReadmes) == 0) {
-					// Even if parsing fails, the file exists, so it is a boundary
-					if _, exists := projectRoots[dir]; !exists {
-						projectRoots[dir] = nil
+					// Even if parsing fails, the file exists, so it is a boundary (unless dir is a barrier exception container)
+					if !isException {
+						if _, exists := projectRoots[dir]; !exists {
+							projectRoots[dir] = nil
+						}
 					}
 					continue
 				}
 
-				if len(rootReadmes) > 0 {
+				if len(rootReadmes) > 0 && !isException {
 					projectRoots[dir] = append(projectRoots[dir], rootReadmes...)
 				}
 
@@ -349,7 +324,7 @@ func (g *Grouper) findProjectRoot(filePath string, projectRoots map[string][]*re
 		}
 
 		parent := filepath.Dir(dir)
-		if g.isBarrier(parent) && barrierChild == "" {
+		if g.IsBarrierChild(dir, parent) && barrierChild == "" {
 			barrierChild = dir
 		}
 
@@ -367,44 +342,183 @@ func (g *Grouper) findProjectRoot(filePath string, projectRoots map[string][]*re
 	return g.FuchsiaDir
 }
 
-// isBarrier checks if the given absolute directory matches a top-level defined barrier path (e.g. //third_party).
-func (g *Grouper) isBarrier(absDir string) bool {
-	relPath, err := filepath.Rel(g.FuchsiaDir, absDir)
+func (g *Grouper) relPath(dir string) (string, bool) {
+	if strings.HasPrefix(dir, "//") {
+		dir = filepath.Join(g.FuchsiaDir, strings.TrimPrefix(dir, "//"))
+	} else if !filepath.IsAbs(dir) {
+		dir = filepath.Join(g.FuchsiaDir, dir)
+	}
+	rel, err := filepath.Rel(g.FuchsiaDir, dir)
 	if err != nil {
-		return false
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+// IsBarrier checks if the given directory matches a top-level defined barrier path (e.g. //third_party).
+func (g *Grouper) IsBarrier(dir string) bool {
+	rel, ok := g.relPath(dir)
+	return ok && g.Config.BarrierPaths[rel]
+}
+
+// IsBarrierException checks if the given directory is exempted from barrier boundaries.
+func (g *Grouper) IsBarrierException(dir string) bool {
+	rel, ok := g.relPath(dir)
+	return ok && g.Config.BarrierExceptions[rel]
+}
+
+// IsBarrierChild returns true if parent is a barrier and dir is not an exempted barrier child.
+func (g *Grouper) IsBarrierChild(dir, parent string) bool {
+	return g.IsBarrier(parent) && !g.IsBarrierException(dir)
+}
+
+// FindProjectReadme walks up the directory tree from targetPath to find the closest
+// physical README.fuchsia or virtual out-of-tree README, stopping at defined barriers.
+func (g *Grouper) FindProjectReadme(targetPath string) (*readme.Readme, string, error) {
+	absTarget := targetPath
+	if strings.HasPrefix(absTarget, "//") {
+		absTarget = filepath.Join(g.FuchsiaDir, strings.TrimPrefix(absTarget, "//"))
+	} else if !filepath.IsAbs(absTarget) {
+		absTarget = filepath.Join(g.FuchsiaDir, absTarget)
+	}
+	absTarget = filepath.Clean(absTarget)
+
+	var dir string
+	if stat, err := os.Stat(absTarget); err == nil && stat.IsDir() {
+		dir = absTarget
+	} else {
+		dir = filepath.Dir(absTarget)
 	}
 
-	slashRel := filepath.ToSlash(relPath)
-	return g.Config.BarrierPaths[slashRel]
+	var barrierChild string
+
+	for {
+		isBoundary, bestPath, allReadmes, _ := readme.IsProjectBoundary(dir, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
+		if isBoundary {
+			r := readme.MatchReadme(allReadmes, bestPath, absTarget, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
+			if r != nil {
+				resolved := readme.ResolveProjectRoot(r, bestPath, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
+				if barrierChild == "" || strings.HasPrefix(resolved, barrierChild+"/") || resolved == barrierChild {
+					return r, bestPath, nil
+				}
+			}
+			if barrierChild != "" {
+				// Crossed a barrier earlier (e.g. third_party), so an ancestor boundary
+				// (such as the root virtual README at FuchsiaDir) cannot be inherited.
+				return nil, "", nil
+			}
+			if !g.IsBarrierException(dir) {
+				return nil, "", fmt.Errorf("boundary metadata failed to parse")
+			}
+		}
+
+		parent := filepath.Dir(dir)
+		if g.IsBarrierChild(dir, parent) && barrierChild == "" {
+			barrierChild = dir
+		}
+
+		if dir == g.FuchsiaDir || parent == dir || parent == "." || parent == "/" {
+			break
+		}
+		dir = parent
+	}
+
+	return nil, "", nil
+}
+
+// ResolveProjectRoot resolves the governing logical project root directory for a given target path.
+// It respects registered project boundaries (README.fuchsia or package manifests) and barriers.
+func (g *Grouper) ResolveProjectRoot(targetPath string) string {
+	absTarget := targetPath
+	if strings.HasPrefix(absTarget, "//") {
+		absTarget = filepath.Join(g.FuchsiaDir, strings.TrimPrefix(absTarget, "//"))
+	} else if !filepath.IsAbs(absTarget) {
+		absTarget = filepath.Join(g.FuchsiaDir, absTarget)
+	}
+	absTarget = filepath.Clean(absTarget)
+
+	var dir string
+	if stat, err := os.Stat(absTarget); err == nil && stat.IsDir() {
+		dir = absTarget
+	} else {
+		dir = filepath.Dir(absTarget)
+	}
+
+	var barrierChild string
+
+	for {
+		isBoundary, bestPath, allReadmes, _ := readme.IsProjectBoundary(dir, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
+		if isBoundary {
+			if len(allReadmes) > 0 {
+				r := readme.MatchReadme(allReadmes, bestPath, absTarget, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
+				if r != nil {
+					resolved := readme.ResolveProjectRoot(r, bestPath, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
+					if barrierChild == "" || strings.HasPrefix(resolved, barrierChild+"/") || resolved == barrierChild {
+						return resolved
+					}
+				}
+			}
+			if barrierChild != "" {
+				return barrierChild
+			}
+			if !g.IsBarrierException(dir) {
+				return dir
+			}
+		}
+
+		parent := filepath.Dir(dir)
+		if g.IsBarrierChild(dir, parent) && barrierChild == "" {
+			barrierChild = dir
+		}
+
+		if dir == g.FuchsiaDir || parent == dir || parent == "." || parent == "/" {
+			break
+		}
+		dir = parent
+	}
+
+	if barrierChild != "" {
+		return barrierChild
+	}
+
+	for p := absTarget; p != g.FuchsiaDir && p != filepath.Dir(p); p = filepath.Dir(p) {
+		if g.IsBarrierException(p) {
+			return g.FuchsiaDir
+		}
+	}
+
+	if stat, err := os.Stat(absTarget); err == nil && stat.IsDir() {
+		return absTarget
+	}
+	return filepath.Dir(absTarget)
 }
 
 // BelongsToProject returns true if targetPath belongs to projectRoot rather than a nested subproject.
 func (g *Grouper) BelongsToProject(targetPath, projectRoot string) bool {
-	if g == nil {
+	resolvedRoot := g.ResolveProjectRoot(targetPath)
+	absProjRoot := projectRoot
+	if strings.HasPrefix(absProjRoot, "//") {
+		absProjRoot = filepath.Join(g.FuchsiaDir, strings.TrimPrefix(absProjRoot, "//"))
+	} else if !filepath.IsAbs(absProjRoot) {
+		absProjRoot = filepath.Join(g.FuchsiaDir, absProjRoot)
+	}
+	absProjRoot = filepath.Clean(absProjRoot)
+	resolvedRoot = filepath.Clean(resolvedRoot)
+
+	if resolvedRoot == absProjRoot {
 		return true
 	}
 
-	cleanTarget := strings.TrimPrefix(targetPath, "//")
-	cleanProjRoot := strings.TrimPrefix(projectRoot, "//")
-
-	if cleanTarget != cleanProjRoot && cleanProjRoot != "" && cleanProjRoot != "." {
-		if !strings.HasPrefix(cleanTarget, cleanProjRoot+"/") {
-			return false
+	relResolved, err1 := filepath.Rel(g.FuchsiaDir, resolvedRoot)
+	relProjRoot, err2 := filepath.Rel(g.FuchsiaDir, absProjRoot)
+	if err1 == nil && err2 == nil {
+		if relResolved == "." {
+			relResolved = ""
 		}
+		if relProjRoot == "." {
+			relProjRoot = ""
+		}
+		return filepath.ToSlash(relResolved) == filepath.ToSlash(relProjRoot)
 	}
-
-	absTarget := targetPath
-	if !filepath.IsAbs(absTarget) {
-		absTarget = filepath.Join(g.FuchsiaDir, cleanTarget)
-	}
-	r, readmePath, err := readme.FindProjectReadme(absTarget, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
-	if err != nil || r == nil {
-		return true
-	}
-	pLogicalRoot := readme.ResolveProjectRoot(r, readmePath, g.FuchsiaDir, g.Config.OutOfTreeReadmes)
-	pRelRoot, _ := filepath.Rel(g.FuchsiaDir, pLogicalRoot)
-	if pRelRoot == "." {
-		pRelRoot = ""
-	}
-	return pRelRoot == cleanProjRoot
+	return false
 }

@@ -5,14 +5,13 @@
 use anyhow::{Context, Error, anyhow};
 use argh::FromArgs;
 use fidl_fuchsia_hardware_power_battery as fbattery;
-use fidl_fuchsia_hardware_power_source as fsource;
 use fidl_fuchsia_io as fio;
 use fidl_test_hardwarepowercontrol as fcontrol;
 use fuchsia_component::{SVC_DIR, client as fclient};
 
 /// Command line tool to interact with the fake-battery driver.
-/// This tool allows developers to inspect and inject fake battery metrics and
-/// power source states directly into the driver under `ffx component explore`.
+/// This tool allows developers to inspect and inject fake battery metrics
+/// directly into the driver under `ffx component explore`.
 #[derive(FromArgs, PartialEq, Debug)]
 struct TopLevel {
     #[argh(subcommand)]
@@ -26,10 +25,14 @@ enum Command {
     Get(GetOptions),
 }
 
-/// Set fake battery telemetry and power source state.
+/// Set fake battery telemetry state.
 #[derive(FromArgs, PartialEq, Debug, Default)]
 #[argh(subcommand, name = "set")]
 struct SetOptions {
+    /// whether battery is present (true/false)
+    #[argh(option, short = 'p')]
+    present: Option<bool>,
+
     /// battery charge level in percent (0.0 to 100.0)
     #[argh(option, short = 'l')]
     level: Option<f32>,
@@ -37,10 +40,6 @@ struct SetOptions {
     /// battery charging status: "charging", "discharging", "not_charging", "full"
     #[argh(option, short = 'c')]
     status: Option<String>,
-
-    /// power source type: "ac", "usb", "battery", "none", "disconnected"
-    #[argh(option, short = 's')]
-    source: Option<String>,
 
     /// battery/source voltage in millivolts (e.g. 4200 for 4.2V)
     #[argh(option, short = 'v')]
@@ -50,9 +49,9 @@ struct SetOptions {
     #[argh(option, short = 'i')]
     current_ua: Option<i32>,
 
-    /// temperature in milli-Celsius (e.g. 25000 for 25.0°C)
+    /// temperature in degrees Celsius (e.g. 25.0 for 25.0°C)
     #[argh(option, short = 't')]
-    temp_mc: Option<i32>,
+    temp_celsius: Option<f32>,
 
     /// battery health: "good", "cold", "cool", "warm", "hot", "dead", "over_voltage", "unspecified_failure"
     #[argh(option)]
@@ -112,37 +111,12 @@ fn parse_health_status(s: &str) -> Result<fbattery::HealthStatus, Error> {
     }
 }
 
-fn parse_source_role(s: &str) -> Result<(bool, fsource::Role), Error> {
-    match s.to_ascii_lowercase().as_str() {
-        "ac" => Ok((
-            true,
-            fsource::Role::Sink(fsource::SinkRole {
-                name: Some("Fake AC Charger".to_string()),
-                type_: Some(fsource::SourceType::Ac),
-                ..Default::default()
-            }),
-        )),
-        "usb" => Ok((
-            true,
-            fsource::Role::Sink(fsource::SinkRole {
-                name: Some("Fake USB Charger".to_string()),
-                type_: Some(fsource::SourceType::Usb),
-                ..Default::default()
-            }),
-        )),
-        "battery" => Ok((true, fsource::Role::Source(fsource::SourceRole::default()))),
-        "none" | "disconnected" => {
-            Ok((false, fsource::Role::Disconnected(fsource::Disconnected::default())))
-        }
-        _ => Err(anyhow!(
-            "Invalid power source '{}'. Expected: ac, usb, battery, none, disconnected",
-            s
-        )),
-    }
-}
-
 fn build_battery_status(opts: &SetOptions) -> Result<fbattery::Status, Error> {
     let mut status = fbattery::Status::default();
+
+    if let Some(present) = opts.present {
+        status.present = Some(present);
+    }
 
     if let Some(level) = opts.level {
         if !(0.0..=100.0).contains(&level) {
@@ -159,8 +133,16 @@ fn build_battery_status(opts: &SetOptions) -> Result<fbattery::Status, Error> {
         status.health = Some(parse_health_status(h)?);
     }
 
-    if let Some(temp) = opts.temp_mc {
-        status.temperature_mc = Some(temp);
+    if let Some(temp) = opts.temp_celsius {
+        status.temp_celsius = Some(temp);
+    }
+
+    if let Some(v_mv) = opts.voltage_mv {
+        status.voltage_uv = Some(v_mv * 1000);
+    }
+
+    if let Some(curr) = opts.current_ua {
+        status.current_ua = Some(curr);
     }
 
     if let Some(rem_uah) = opts.remaining_uah {
@@ -179,38 +161,33 @@ fn build_battery_status(opts: &SetOptions) -> Result<fbattery::Status, Error> {
         status.cycle_count = Some(cycles);
     }
 
-    if opts.source.is_some() || opts.voltage_mv.is_some() || opts.current_ua.is_some() {
-        let mut source_status = fsource::Status::default();
-        if let Some(ref src) = opts.source {
-            let (present, role) = parse_source_role(src)?;
-            source_status.present = Some(present);
-            source_status.current_role = Some(role);
-        }
-        if let Some(v_mv) = opts.voltage_mv {
-            source_status.voltage_uv = Some(v_mv * 1000);
-        }
-        if let Some(curr) = opts.current_ua {
-            source_status.current_ua = Some(curr);
-        }
-        status.source_status = Some(source_status);
-    }
-
     Ok(status)
 }
 
 fn print_battery_status(status: &fbattery::Status) {
     println!("=== Fake Battery Status ===");
+    if let Some(present) = status.present {
+        println!("  Present:              {}", present);
+    }
+
     if let Some(level) = status.level_percent {
         println!("  Level:                {:.1}%", level);
     }
+
     if let Some(ref cs) = status.charge_status {
         println!("  Charge Status:        {:?}", cs);
     }
     if let Some(ref h) = status.health {
         println!("  Health:               {:?}", h);
     }
-    if let Some(temp) = status.temperature_mc {
-        println!("  Temperature:          {} mC ({:.1}°C)", temp, temp as f32 / 1000.0);
+    if let Some(temp) = status.temp_celsius {
+        println!("  Temperature:          {:.1}°C", temp);
+    }
+    if let Some(uv) = status.voltage_uv {
+        println!("  Voltage:              {} µV ({:.3} V)", uv, uv as f32 / 1_000_000.0);
+    }
+    if let Some(ua) = status.current_ua {
+        println!("  Current:              {} µA ({:.3} mA)", ua, ua as f32 / 1_000.0);
     }
     if let Some(rem_uah) = status.remaining_capacity_uah {
         println!("  Remaining Capacity:   {} µAh", rem_uah);
@@ -223,45 +200,6 @@ fn print_battery_status(status: &fbattery::Status) {
     }
     if let Some(cycles) = status.cycle_count {
         println!("  Cycle Count:          {}", cycles);
-    }
-    if let Some(ref source) = status.source_status {
-        println!("--- Power Source Status ---");
-        if let Some(present) = source.present {
-            println!("  Present:              {}", present);
-        }
-        if let Some(uv) = source.voltage_uv {
-            println!("  Voltage:              {} µV ({:.3} V)", uv, uv as f32 / 1_000_000.0);
-        }
-        if let Some(ua) = source.current_ua {
-            println!("  Current:              {} µA ({:.3} mA)", ua, ua as f32 / 1_000.0);
-        }
-        if let Some(ref role) = source.current_role {
-            match role {
-                fsource::Role::Sink(sink) => {
-                    let type_str = sink
-                        .type_
-                        .map(|t| format!("{:?}", t))
-                        .unwrap_or_else(|| "<unspecified>".to_string());
-                    println!(
-                        "  Role:                 Sink (type: {}, name: {})",
-                        type_str,
-                        sink.name.as_deref().unwrap_or("<unnamed>")
-                    );
-                }
-                fsource::Role::Source(_) => {
-                    println!("  Role:                 Source (supplying power)");
-                }
-                fsource::Role::Disconnected(_) => {
-                    println!("  Role:                 Disconnected");
-                }
-                fsource::Role::Auto(_) => {
-                    println!("  Role:                 Auto");
-                }
-                _ => {
-                    println!("  Role:                 {:?}", role);
-                }
-            }
-        }
     }
 }
 
@@ -331,9 +269,6 @@ mod tests {
                     fcontrol::ControlRequest::SetBatteryStatus { responder, .. } => {
                         let _ = responder.send();
                     }
-                    fcontrol::ControlRequest::SetSourceStatus { responder, .. } => {
-                        let _ = responder.send();
-                    }
                 }
             }
         });
@@ -344,12 +279,12 @@ mod tests {
     async fn test_set_battery_status() {
         let (proxy, _task) = fake_control_server();
         let options = SetOptions {
+            present: Some(true),
             level: Some(75.5),
             status: Some("charging".to_string()),
-            source: Some("ac".to_string()),
             voltage_mv: Some(4200),
             current_ua: Some(250000),
-            temp_mc: Some(28000),
+            temp_celsius: Some(28.0),
             health: Some("good".to_string()),
             remaining_uah: Some(300000),
             full_capacity_uah: Some(400000),
@@ -357,19 +292,17 @@ mod tests {
             cycle_count: Some(15),
         };
         let status = build_battery_status(&options).expect("build status failed");
+        assert_eq!(status.present, Some(true));
         assert_eq!(status.level_percent, Some(75.5));
         assert_eq!(status.charge_status, Some(fbattery::ChargeStatus::Charging));
         assert_eq!(status.health, Some(fbattery::HealthStatus::Good));
-        assert_eq!(status.temperature_mc, Some(28000));
+        assert_eq!(status.temp_celsius, Some(28.0));
+        assert_eq!(status.voltage_uv, Some(4200 * 1000));
+        assert_eq!(status.current_ua, Some(250000));
         assert_eq!(status.remaining_capacity_uah, Some(300000));
         assert_eq!(status.full_charge_capacity_uah, Some(400000));
         assert_eq!(status.time_remaining, Some(3600 * 1_000_000_000));
         assert_eq!(status.cycle_count, Some(15));
-        assert!(status.source_status.is_some());
-        let src = status.source_status.as_ref().unwrap();
-        assert_eq!(src.present, Some(true));
-        assert_eq!(src.voltage_uv, Some(4200 * 1000));
-        assert_eq!(src.current_ua, Some(250000));
 
         let res = proxy.set_battery_status(&status).await;
         assert!(res.is_ok());
@@ -407,44 +340,6 @@ mod tests {
             fbattery::HealthStatus::OverVoltage
         );
         assert!(parse_health_status("invalid").is_err());
-    }
-
-    #[test]
-    fn test_parse_source_role() {
-        let (present, role) = parse_source_role("ac").unwrap();
-        assert!(present);
-        match role {
-            fsource::Role::Sink(s) => assert_eq!(s.type_, Some(fsource::SourceType::Ac)),
-            _ => panic!("Expected sink role"),
-        }
-
-        let (present, role) = parse_source_role("usb").unwrap();
-        assert!(present);
-        match role {
-            fsource::Role::Sink(s) => assert_eq!(s.type_, Some(fsource::SourceType::Usb)),
-            _ => panic!("Expected sink role"),
-        }
-
-        let (present, role) = parse_source_role("battery").unwrap();
-        assert!(present);
-        match role {
-            fsource::Role::Source(_) => {}
-            _ => panic!("Expected source role"),
-        }
-
-        let (present, role) = parse_source_role("none").unwrap();
-        assert!(!present);
-        match role {
-            fsource::Role::Disconnected(_) => {}
-            _ => panic!("Expected disconnected role"),
-        }
-
-        let (present, role) = parse_source_role("disconnected").unwrap();
-        assert!(!present);
-        match role {
-            fsource::Role::Disconnected(_) => {}
-            _ => panic!("Expected disconnected role"),
-        }
     }
 
     #[test]

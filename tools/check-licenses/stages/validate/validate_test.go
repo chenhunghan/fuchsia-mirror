@@ -7,6 +7,7 @@ package validate
 import (
 	"context"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +189,11 @@ func TestValidator_Run(t *testing.T) {
 				hasMissingCopyrightErr = true
 			} else if e.FilePath == filepath.Join(fuchsiaDir, "src", "sub", "__init__.py") {
 				hasMissingInitCopyrightErr = true
+				if len(e.Replacements) != 1 {
+					t.Errorf("Expected 1 replacement for missing copyright, got %d", len(e.Replacements))
+				} else if !strings.Contains(e.Replacements[0], "The Fuchsia Authors") || !strings.Contains(e.Replacements[0], "print('hello')") {
+					t.Errorf("Replacement content unexpected: %q", e.Replacements[0])
+				}
 			} else {
 				t.Errorf("Unexpected missing copyright error for file: %s", e.FilePath)
 			}
@@ -312,5 +318,187 @@ func TestValidator_RunFailure_MissingReadme(t *testing.T) {
 	if !strings.Contains(errors[0].Issue, "Third-party project is missing a README.fuchsia file") {
 		t.Errorf("Expected error to contain missing readme issue description, got: %v", errors[0].Issue)
 	}
+	if !strings.Contains(errors[0].Issue, "Or add a virtual README to tools/check-licenses/assets/readmes/third_party/foo/README.fuchsia") {
+		t.Errorf("Expected error to contain public virtual README path, got: %s", errors[0].Issue)
+	}
 	assertFindingStructure(t, errors[0].Issue, true)
+}
+
+func TestValidator_RunFailure_MissingReadme_PrivateAndVendor(t *testing.T) {
+	fuchsiaDir := t.TempDir()
+
+	// 1. Private vendor project without custom resolver -> should suggest vendor/google/tools/check-licenses/assets/readmes
+	validatorDefault := NewValidator(fuchsiaDir, Config{})
+	inChan := make(chan pipeline.ClassifiedFile, 1)
+	inChan <- pipeline.ClassifiedFile{
+		Path:          filepath.Join(fuchsiaDir, "vendor/google/secret/LICENSE"),
+		ProjectRoot:   filepath.Join(fuchsiaDir, "vendor/google/secret"),
+		IsLicenseFile: true,
+		HasReadme:     false,
+		Matches:       []pipeline.LicenseMatch{{SPDXID: "Apache-2.0", MatchType: "Approved"}},
+	}
+	close(inChan)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	outChan, err := validatorDefault.Run(ctx, inChan)
+	if err != nil {
+		t.Fatalf("Failed to run validator: %v", err)
+	}
+
+	var errors []pipeline.ComplianceError
+	for err := range outChan {
+		errors = append(errors, err)
+	}
+
+	if len(errors) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errors))
+	}
+	expectedPrivateMsg := "Or add a virtual README to vendor/google/tools/check-licenses/assets/readmes/vendor/google/secret/README.fuchsia"
+	if !strings.Contains(errors[0].Issue, expectedPrivateMsg) {
+		t.Errorf("Expected error to contain %q, got: %s", expectedPrivateMsg, errors[0].Issue)
+	}
+	if got := validatorDefault.virtualReadmeDir("//vendor/google/secret"); got != "vendor/google/tools/check-licenses/assets/readmes" {
+		t.Errorf("virtualReadmeDir('//vendor/google/secret') = %q, want vendor/google assets", got)
+	}
+	if got := validatorDefault.virtualReadmeDir("//third_party/foo"); got != "tools/check-licenses/assets/readmes" {
+		t.Errorf("virtualReadmeDir('//third_party/foo') = %q, want public assets", got)
+	}
+
+	// 2. Custom VirtualReadmeDir resolver (e.g. for Jiri private projects in prebuilt/ or partner vendor repos)
+	validatorCustom := NewValidator(fuchsiaDir, Config{
+		VirtualReadmeDir: func(projectPath string) string {
+			if strings.HasPrefix(projectPath, "prebuilt/internal/") {
+				return "vendor/google/tools/check-licenses/assets/readmes"
+			}
+			if strings.HasPrefix(projectPath, "vendor/partner/") {
+				return "vendor/partner/tools/check-licenses/assets/readmes"
+			}
+			return "tools/check-licenses/assets/readmes"
+		},
+	})
+
+	inChan2 := make(chan pipeline.ClassifiedFile, 2)
+	inChan2 <- pipeline.ClassifiedFile{
+		Path:          filepath.Join(fuchsiaDir, "prebuilt/internal/firmware/LICENSE"),
+		ProjectRoot:   filepath.Join(fuchsiaDir, "prebuilt/internal/firmware"),
+		IsLicenseFile: true,
+		HasReadme:     false,
+		Matches:       []pipeline.LicenseMatch{{SPDXID: "Apache-2.0", MatchType: "Approved"}},
+	}
+	inChan2 <- pipeline.ClassifiedFile{
+		Path:          filepath.Join(fuchsiaDir, "vendor/partner/pkg/LICENSE"),
+		ProjectRoot:   filepath.Join(fuchsiaDir, "vendor/partner/pkg"),
+		IsLicenseFile: true,
+		HasReadme:     false,
+		Matches:       []pipeline.LicenseMatch{{SPDXID: "Apache-2.0", MatchType: "Approved"}},
+	}
+	close(inChan2)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+
+	outChan2, err := validatorCustom.Run(ctx2, inChan2)
+	if err != nil {
+		t.Fatalf("Failed to run validator: %v", err)
+	}
+
+	var errors2 []pipeline.ComplianceError
+	for err := range outChan2 {
+		errors2 = append(errors2, err)
+	}
+
+	if len(errors2) != 2 {
+		t.Fatalf("Expected 2 errors, got %d", len(errors2))
+	}
+
+	expectedPrebuiltMsg := "Or add a virtual README to vendor/google/tools/check-licenses/assets/readmes/prebuilt/internal/firmware/README.fuchsia"
+	expectedPartnerMsg := "Or add a virtual README to vendor/partner/tools/check-licenses/assets/readmes/vendor/partner/pkg/README.fuchsia"
+
+	foundPrebuilt := false
+	foundPartner := false
+	for _, e := range errors2 {
+		if strings.Contains(e.Issue, expectedPrebuiltMsg) {
+			foundPrebuilt = true
+		}
+		if strings.Contains(e.Issue, expectedPartnerMsg) {
+			foundPartner = true
+		}
+	}
+	if !foundPrebuilt {
+		t.Errorf("Expected to find error with %q", expectedPrebuiltMsg)
+	}
+	if !foundPartner {
+		t.Errorf("Expected to find error with %q", expectedPartnerMsg)
+	}
+}
+
+func TestAddCopyrightToBytes_ShebangAndLineEndings(t *testing.T) {
+	// 1. Unix line endings with shebang
+	unixContent := []byte("#!/usr/bin/env python\nprint('hello')\n")
+	resUnix, err := AddCopyrightToBytes("foo.py", unixContent)
+	if err != nil {
+		t.Fatalf("AddCopyrightToBytes failed: %v", err)
+	}
+	expectedShebangUnix := "#!/usr/bin/env python\n# Copyright"
+	if !strings.HasPrefix(string(resUnix), expectedShebangUnix) {
+		t.Errorf("Expected Unix shebang prefix, got: %s", string(resUnix)[:50])
+	}
+	if strings.Contains(string(resUnix), "\r") {
+		t.Errorf("Expected no carriage return in Unix output")
+	}
+
+	// 2. Windows CRLF line endings with shebang
+	crlfContent := []byte("#!/usr/bin/env bash\r\necho hi\r\n")
+	resCrlf, err := AddCopyrightToBytes("script.sh", crlfContent)
+	if err != nil {
+		t.Fatalf("AddCopyrightToBytes failed: %v", err)
+	}
+	expectedShebangCrlf := "#!/usr/bin/env bash\r\n# Copyright"
+	if !strings.HasPrefix(string(resCrlf), expectedShebangCrlf) {
+		t.Errorf("Expected CRLF shebang prefix, got: %q", string(resCrlf)[:50])
+	}
+	// Check that there are no standalone \n (all newlines must be \r\n)
+	s := string(resCrlf)
+	sWithoutCrlf := strings.ReplaceAll(s, "\r\n", "")
+	if strings.Contains(sWithoutCrlf, "\n") || strings.Contains(sWithoutCrlf, "\r") {
+		t.Errorf("Expected all line breaks in CRLF content to be \\r\\n")
+	}
+}
+
+func TestIsProjectScopePolicy(t *testing.T) {
+	if !IsProjectScopePolicy(PolicyNoLicense) {
+		t.Errorf("Expected PolicyNoLicense to be project-scoped")
+	}
+	if !IsProjectScopePolicy(PolicyNoReadme) {
+		t.Errorf("Expected PolicyNoReadme to be project-scoped")
+	}
+	if IsProjectScopePolicy(PolicyUnrecognizedLicense) {
+		t.Errorf("Expected PolicyUnrecognizedLicense NOT to be project-scoped")
+	}
+	if IsProjectScopePolicy(PolicyFuchsiaCopyright) {
+		t.Errorf("Expected PolicyFuchsiaCopyright NOT to be project-scoped")
+	}
+	if IsProjectScopePolicy("UnknownPolicy") {
+		t.Errorf("Expected UnknownPolicy NOT to be project-scoped")
+	}
+}
+
+func TestIsValidPolicy(t *testing.T) {
+	for _, p := range ValidPolicies() {
+		if !IsValidPolicy(p) {
+			t.Errorf("Expected IsValidPolicy(%q) to be true", p)
+		}
+	}
+	if IsValidPolicy("NonExistentPolicy") {
+		t.Errorf("Expected IsValidPolicy('NonExistentPolicy') to be false")
+	}
+}
+
+func TestValidPolicies_Sorted(t *testing.T) {
+	policies := ValidPolicies()
+	if !sort.StringsAreSorted(policies) {
+		t.Errorf("Expected ValidPolicies() to be sorted, got: %v", policies)
+	}
 }

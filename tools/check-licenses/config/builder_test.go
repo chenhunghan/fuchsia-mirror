@@ -163,6 +163,16 @@ func TestBuilder_Assemble(t *testing.T) {
 	if config.IsSkipped(filepath.Join(fuchsiaDir, "src")) {
 		t.Errorf("Expected src directory not to be skipped")
 	}
+
+	if config.Validate.VirtualReadmeDir == nil {
+		t.Fatal("Expected config.Validate.VirtualReadmeDir to be set")
+	}
+	if got := config.Validate.VirtualReadmeDir("third_party/foo"); got != "tools/check-licenses/assets/readmes" {
+		t.Errorf("VirtualReadmeDir('third_party/foo') = %q, want 'tools/check-licenses/assets/readmes'", got)
+	}
+	if got := config.Validate.VirtualReadmeDir("vendor/google/secret_project"); got != "vendor/google/tools/check-licenses/assets/readmes" {
+		t.Errorf("VirtualReadmeDir('vendor/google/secret_project') = %q, want 'vendor/google/tools/check-licenses/assets/readmes'", got)
+	}
 }
 
 func TestBuilder_LoadManifests(t *testing.T) {
@@ -278,5 +288,70 @@ func TestMasterConfig_ResolveReadmeWritePath(t *testing.T) {
 	expectedSuffix := filepath.Join("tools", "check-licenses", "assets", "readmes", "prebuilt", "third_party", "testproj", "README.fuchsia")
 	if !strings.HasSuffix(writePath, expectedSuffix) {
 		t.Errorf("Expected writePath to have suffix %q, got %q", expectedSuffix, writePath)
+	}
+}
+
+func TestMasterConfig_AssetRootFor_MultiVendor(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := NewMasterConfig(tempDir)
+
+	// Partner vendor directory with check-licenses assets
+	partnerAssetDir := filepath.Join(tempDir, "vendor", "partner", "tools", "check-licenses", "assets")
+	if err := os.MkdirAll(partnerAssetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Google vendor directory with check-licenses assets
+	googleAssetDir := filepath.Join(tempDir, "vendor", "google", "tools", "check-licenses", "assets")
+	if err := os.MkdirAll(googleAssetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Partner vendor project -> partner asset root
+	if got := cfg.AssetRootFor("vendor/partner/somedir"); got != partnerAssetDir {
+		t.Errorf("AssetRootFor('vendor/partner/somedir') = %q, want %q", got, partnerAssetDir)
+	}
+
+	// 2. Google vendor project -> google asset root
+	if got := cfg.AssetRootFor("vendor/google/somedir"); got != googleAssetDir {
+		t.Errorf("AssetRootFor('vendor/google/somedir') = %q, want %q", got, googleAssetDir)
+	}
+
+	// 3. Other vendor without check-licenses assets -> falls back to google vendor assets (private)
+	if got := cfg.AssetRootFor("vendor/other/somedir"); got != googleAssetDir {
+		t.Errorf("AssetRootFor('vendor/other/somedir') = %q, want %q", got, googleAssetDir)
+	}
+
+	// 4. Public project -> public assets
+	publicAssetDir := filepath.Join(tempDir, "tools", "check-licenses", "assets")
+	if got := cfg.AssetRootFor("third_party/foo"); got != publicAssetDir {
+		t.Errorf("AssetRootFor('third_party/foo') = %q, want %q", got, publicAssetDir)
+	}
+
+	// 5. Absolute path to partner vendor project
+	absPartnerDir := filepath.Join(tempDir, "vendor", "partner", "somedir")
+	if got := cfg.AssetRootFor(absPartnerDir); got != partnerAssetDir {
+		t.Errorf("AssetRootFor(%q) = %q, want %q", absPartnerDir, got, partnerAssetDir)
+	}
+
+	// 6. Absolute path to google vendor project
+	absGoogleDir := filepath.Join(tempDir, "vendor", "google", "somedir")
+	if got := cfg.AssetRootFor(absGoogleDir); got != googleAssetDir {
+		t.Errorf("AssetRootFor(%q) = %q, want %q", absGoogleDir, got, googleAssetDir)
+	}
+
+	// 7. GN-style repository path (//) to partner vendor project
+	if got := cfg.AssetRootFor("//vendor/partner/somedir"); got != partnerAssetDir {
+		t.Errorf("AssetRootFor('//vendor/partner/somedir') = %q, want %q", got, partnerAssetDir)
+	}
+
+	// 8. GN-style repository path (//) to google vendor project
+	if got := cfg.AssetRootFor("//vendor/google/somedir"); got != googleAssetDir {
+		t.Errorf("AssetRootFor('//vendor/google/somedir') = %q, want %q", got, googleAssetDir)
+	}
+
+	// 9. GN-style repository path (//) to public project
+	if got := cfg.AssetRootFor("//third_party/foo"); got != publicAssetDir {
+		t.Errorf("AssetRootFor('//third_party/foo') = %q, want %q", got, publicAssetDir)
 	}
 }

@@ -72,6 +72,7 @@ fn available_to_socket_layer<I: TestIpExt + IpExt>() {
             Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)),
             UdpRemotePort::from(8080),
             buf,
+            Default::default(),
         )
         .expect("send should succeed");
 }

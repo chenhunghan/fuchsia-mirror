@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::debian_guest::DataMount;
 use anyhow::{Context as _, Error, anyhow};
 use fidl::endpoints;
 use fidl::endpoints::{Proxy, create_proxy};
@@ -10,8 +11,10 @@ use fidl_fuchsia_data as fdata;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_process as fprocess;
 use fidl_fuchsia_test::{self as ftest};
+use fidl_fuchsia_virtualization::{BlockFormat, BlockMode, BlockSpec};
 use frunner::ComponentNamespaceEntry;
 use ftest::CaseListenerProxy;
+use fuchsia_fs::{directory, file};
 use fuchsia_runtime as fruntime;
 use fuchsiaperf::FuchsiaPerfBenchmarkResult;
 use futures::StreamExt;
@@ -19,6 +22,11 @@ use gtest_runner_lib::parser::read_file;
 use log::debug;
 use namespace::Namespace;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+pub const SYSCALL_TEST_DEPS_ROMFS_PATH: &str = "data/syscall_test_deps.romfs";
+pub const MOUNT_SYSCALL_DEPS_SCRIPT_PATH: &str = "/pkg/data/mount_syscall_deps.sh";
+const GUEST_TEST_ROOT: &str = "/";
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum TestType {
@@ -439,4 +447,92 @@ pub fn start_tests(
 
 pub fn unique_test_result_filename() -> String {
     format!("test_result-{}.json", uuid::Uuid::new_v4())
+}
+
+/// Opens the syscall test dependencies ROMFS and mount script, returning a `DataMount`.
+pub async fn get_syscall_data_mount(
+    test_pkg_dir: &fio::DirectoryProxy,
+) -> Result<DataMount, Error> {
+    let romfs_file =
+        directory::open_file(test_pkg_dir, SYSCALL_TEST_DEPS_ROMFS_PATH, fio::PERM_READABLE)
+            .await
+            .with_context(|| format!("Could not open {}", SYSCALL_TEST_DEPS_ROMFS_PATH))?;
+    let client_end = romfs_file
+        .into_client_end()
+        .map_err(|s| anyhow!("Failed to convert romfs file to client end: {:?}", s))?;
+    let block_spec = BlockSpec {
+        id: "test_deps".to_string(),
+        mode: BlockMode::ReadOnly,
+        format: BlockFormat::File(client_end),
+    };
+    let mount_file = file::open_in_namespace(MOUNT_SYSCALL_DEPS_SCRIPT_PATH, fio::PERM_READABLE)
+        .with_context(|| format!("Could not open {}", MOUNT_SYSCALL_DEPS_SCRIPT_PATH))?;
+    let mount_script_file = mount_file
+        .into_client_end()
+        .map_err(|s| anyhow!("Failed to convert mount script file to client end: {:?}", s))?;
+    Ok(DataMount::new(block_spec, mount_script_file))
+}
+
+/// Gets the absolute guest filepath for test results when running syscall tests on a guest.
+pub fn get_guest_syscall_test_output_path(guest_output_filename: &str) -> PathBuf {
+    Path::new(GUEST_TEST_ROOT).join(guest_output_filename)
+}
+
+/// Gets the absolute guest filepath for the test binary when running syscall tests on a guest.
+pub fn get_guest_syscall_test_binary_path(
+    start_info: &frunner::ComponentStartInfo,
+) -> Result<PathBuf, Error> {
+    let host_binary_location = runner::get_program_binary(start_info)?;
+    let binary_name = Path::new(&host_binary_location)
+        .file_name()
+        .ok_or_else(|| anyhow!("Binary path format was unexpected."))?;
+    Ok(Path::new(GUEST_TEST_ROOT).join(binary_name))
+}
+
+/// Opens the test binary from the package directory to push to a guest for syscall testing.
+pub async fn open_guest_syscall_test_binary(
+    pkg_dir: &fio::DirectoryProxy,
+    start_info: &frunner::ComponentStartInfo,
+) -> Result<endpoints::ClientEnd<fio::FileMarker>, Error> {
+    let host_binary_location = runner::get_program_binary(start_info)?;
+    directory::open_file(pkg_dir, &host_binary_location, fio::PERM_READABLE)
+        .await?
+        .into_client_end()
+        .map_err(|_| anyhow!("Converting test bin file to client end failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[fuchsia::test]
+    async fn test_get_syscall_data_mount_missing_romfs_errs() {
+        let temp_dir_path =
+            format!("/tmp/test-get-syscall-data-mount-missing-{}", uuid::Uuid::new_v4());
+        std::fs::create_dir_all(&temp_dir_path).expect("create temp dir");
+        let pkg_dir = fuchsia_fs::directory::open_in_namespace(&temp_dir_path, fio::PERM_READABLE)
+            .expect("open temp dir");
+
+        let result = get_syscall_data_mount(&pkg_dir).await;
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir_path);
+    }
+
+    #[fuchsia::test]
+    async fn test_get_syscall_data_mount_success() {
+        let temp_dir_path =
+            format!("/tmp/test-get-syscall-data-mount-success-{}", uuid::Uuid::new_v4());
+        let data_dir = format!("{}/data", temp_dir_path);
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(format!("{}/syscall_test_deps.romfs", data_dir), b"mock romfs")
+            .expect("write romfs file");
+        let pkg_dir = fuchsia_fs::directory::open_in_namespace(&temp_dir_path, fio::PERM_READABLE)
+            .expect("open temp dir");
+
+        let result = get_syscall_data_mount(&pkg_dir).await;
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir_path);
+    }
 }

@@ -6,6 +6,7 @@ package tefmocheck
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -421,6 +422,220 @@ func TestRunChecks_TargetedSyntheticTestCase_NotFound(t *testing.T) {
 			t.Errorf("Log output %q does not contain expected warning %q", buf.String(), wantLog)
 		}
 	})
+}
+
+type mockCheck struct {
+	baseCheck
+	name                  string
+	testName              string
+	failureReason         string
+	emitSyntheticTestCase bool
+}
+
+func (c mockCheck) Name() string {
+	if c.name != "" {
+		return c.name
+	}
+	return "test_check"
+}
+
+func (c mockCheck) TestName() string            { return c.testName }
+func (c mockCheck) FailureReason() string       { return c.failureReason }
+func (c mockCheck) EmitSyntheticTestCase() bool { return c.emitSyntheticTestCase }
+
+func TestRunChecks_TargetedEnrichment(t *testing.T) {
+	outputsDir := t.TempDir()
+
+	summary := runtests.TestSummary{
+		Tests: []runtests.TestDetails{
+			{
+				Name:   "targeted_failing_test",
+				Status: runtests.TestFailure,
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{
+						{CaseName: "failed_case_1", Status: runtests.TestFailure},
+						{CaseName: "failed_case_2", Status: runtests.TestFailure},
+						{CaseName: "passed_case", Status: runtests.TestSuccess},
+					},
+				},
+			},
+			{
+				Name:       "sibling_failing_test",
+				Status:     runtests.TestFailure,
+				TestResult: runtests.TestResult{Cases: []runtests.TestCaseResult{{CaseName: "sibling_failed_case", Status: runtests.TestFailure}}},
+			},
+			{
+				Name:       "passing_test",
+				Status:     runtests.TestSuccess,
+				TestResult: runtests.TestResult{Cases: []runtests.TestCaseResult{{CaseName: "sibling_passed_case", Status: runtests.TestSuccess}}},
+			},
+		},
+	}
+	check := mockCheck{
+		name:          "targeted_check",
+		testName:      "targeted_failing_test",
+		failureReason: "fake failure reason",
+	}
+	wantErrMsg := check.FailureReason()
+
+	if _, err := RunChecks([]FailureModeCheck{check}, &TestingOutputs{TestSummary: &summary}, outputsDir); err != nil {
+		t.Fatalf("RunChecks() failed: %v", err)
+	}
+
+	// Verify targeted top-level test gets a FailureReason.
+	target := &summary.Tests[0]
+	if len(target.Cases) != 3 {
+		t.Errorf("len(target.Cases) = %d, want 3", len(target.Cases))
+	}
+	if target.FailureReason == nil || len(target.FailureReason.Errors) != 1 || target.FailureReason.Errors[0].Message != wantErrMsg {
+		t.Fatalf("target.FailureReason errors count = %v, want 1 error %q", target.FailureReason, wantErrMsg)
+	}
+
+	// Verify targeted test's failing test cases get a FailureReason.
+	for caseIdx, failedCase := range []*runtests.TestCaseResult{&target.Cases[0], &target.Cases[1]} {
+		if failedCase.FailureReason == nil || len(failedCase.FailureReason.Errors) != 1 || failedCase.FailureReason.Errors[0].Message != wantErrMsg {
+			t.Fatalf("target.Cases[%d].FailureReason = %v, want 1 error %q", caseIdx, failedCase.FailureReason, wantErrMsg)
+		}
+	}
+
+	// Passing tests/test cases, as well as non-targeted tests, should not get a FailureReason.
+	if target.Cases[2].FailureReason != nil {
+		t.Errorf("passing case FailureReason = %+v, want nil", target.Cases[2].FailureReason)
+	}
+	if summary.Tests[1].FailureReason != nil || summary.Tests[1].Cases[0].FailureReason != nil {
+		t.Errorf("sibling failing test modified unexpectedly")
+	}
+	if summary.Tests[2].FailureReason != nil || summary.Tests[2].Cases[0].FailureReason != nil {
+		t.Errorf("sibling passing test modified unexpectedly")
+	}
+
+	// Test warning when the targeted test is not found or passing (doesn't have a failure status).
+	t.Run("not_found_or_passing", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			testName string
+		}{
+			{name: "not_in_summary", testName: "non_existent_test"},
+			{name: "passing_test_in_summary", testName: "passing_test"},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				summary := runtests.TestSummary{Tests: []runtests.TestDetails{
+					{Name: "failing_test", Status: runtests.TestFailure},
+					{Name: "passing_test", Status: runtests.TestSuccess},
+				}}
+				to := TestingOutputs{TestSummary: &summary}
+				check := mockCheck{name: "warning_check", testName: tc.testName}
+				var buf bytes.Buffer
+				log.SetOutput(&buf)
+				defer log.SetOutput(os.Stderr)
+
+				if _, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir); err != nil {
+					t.Fatalf("RunChecks() failed: %v", err)
+				}
+				wantLog := fmt.Sprintf("Warning: targeted check %s attributed to test %q but test not found in summary", check.Name(), tc.testName)
+				if got := strings.Count(buf.String(), wantLog); got != 1 {
+					t.Errorf("Log output contained %d occurrences of %q, want 1. Full log: %q", got, wantLog, buf.String())
+				}
+
+				// No test should receive a FailureReason.
+				if summary.Tests[0].FailureReason != nil || summary.Tests[1].FailureReason != nil {
+					t.Errorf("expected no FailureReason to be enriched when target was not found or passing")
+				}
+			})
+		}
+	})
+}
+
+func TestRunChecks_GlobalEnrichment(t *testing.T) {
+	outputsDir := t.TempDir()
+
+	preexistingErr := &runtests.FailureReasonError{Message: "pre-existing error"}
+	summary := runtests.TestSummary{
+		Tests: []runtests.TestDetails{
+			{
+				Name:   "failing_test_mixed_cases",
+				Status: runtests.TestFailure,
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{
+						{CaseName: "failed_case", Status: runtests.TestFailure},
+						{CaseName: "exonerated_case", Status: runtests.TestExonerated},
+						{CaseName: "passed_case", Status: runtests.TestSuccess},
+						{CaseName: "skipped_case", Status: runtests.TestSkipped},
+					},
+				},
+			},
+			{
+				Name:   "failing_test_with_preexisting_error",
+				Status: runtests.TestFailure,
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{
+						{
+							CaseName: "failed_case",
+							Status:   runtests.TestFailure,
+							FailureReason: &runtests.FailureReason{
+								Errors: []*runtests.FailureReasonError{preexistingErr},
+							},
+						},
+					},
+					FailureReason: &runtests.FailureReason{Errors: []*runtests.FailureReasonError{preexistingErr}},
+				},
+			},
+			{
+				Name:       "passing_test",
+				Status:     runtests.TestSuccess,
+				TestResult: runtests.TestResult{Cases: []runtests.TestCaseResult{{CaseName: "passed_case", Status: runtests.TestSuccess}}},
+			},
+		},
+	}
+
+	check := mockCheck{name: "global_check", failureReason: "global failure reason"}
+	wantErrMsg := check.FailureReason()
+
+	if _, err := RunChecks([]FailureModeCheck{check}, &TestingOutputs{TestSummary: &summary}, outputsDir); err != nil {
+		t.Fatalf("RunChecks() failed: %v", err)
+	}
+
+	// 1. failing_test_mixed_cases: top-level test and both failing cases enriched.
+	t0 := &summary.Tests[0]
+	if len(t0.Cases) != 4 {
+		t.Errorf("len(t0.Cases) = %d, want 4", len(t0.Cases))
+	}
+	if t0.FailureReason == nil || len(t0.FailureReason.Errors) != 1 || t0.FailureReason.Errors[0].Message != wantErrMsg {
+		t.Errorf("t0.FailureReason = %+v, want 1 error %q", t0.FailureReason, wantErrMsg)
+	}
+	for i, caseIdx := range []int{0, 1} {
+		tc := &t0.Cases[caseIdx]
+		if tc.FailureReason == nil || len(tc.FailureReason.Errors) != 1 || tc.FailureReason.Errors[0].Message != wantErrMsg {
+			t.Errorf("t0.Cases[%d].FailureReason = %+v, want 1 error %q", i, tc.FailureReason, wantErrMsg)
+		}
+	}
+	// Passed_case and skipped_case are not enriched.
+	if t0.Cases[2].FailureReason != nil || t0.Cases[3].FailureReason != nil {
+		t.Errorf("t0 non-failing cases enriched unexpectedly")
+	}
+
+	// 2. failing_test_with_preexisting_error: top-level test and case preserve pre-existing error at index 0 and append check error.
+	t1 := &summary.Tests[1]
+	if len(t1.Cases) != 1 {
+		t.Errorf("len(t1.Cases) = %d, want 1", len(t1.Cases))
+	}
+	if t1.FailureReason == nil || len(t1.FailureReason.Errors) != 2 || t1.FailureReason.Errors[0] != preexistingErr || t1.FailureReason.Errors[1].Message != wantErrMsg {
+		t.Errorf("t1.FailureReason = %+v, want pre-existing error preserved at [0] and %q at [1]", t1.FailureReason, wantErrMsg)
+	}
+	if tc := &t1.Cases[0]; tc.FailureReason == nil || len(tc.FailureReason.Errors) != 2 || tc.FailureReason.Errors[0] != preexistingErr || tc.FailureReason.Errors[1].Message != wantErrMsg {
+		t.Errorf("t1.Cases[0].FailureReason = %+v, want pre-existing error preserved at [0] and %q at [1]", tc.FailureReason, wantErrMsg)
+	}
+
+	// 3. passing_test remains untouched.
+	t2 := &summary.Tests[2]
+	if t2.FailureReason != nil || t2.Cases[0].FailureReason != nil {
+		t.Errorf("summary.Tests[2] passing test enriched unexpectedly")
+	}
+	if len(t2.Cases) != 1 {
+		t.Errorf("len(summary.Tests[2].Cases) = %d, want 1", len(t2.Cases))
+	}
 }
 
 type exonerationCheck struct {

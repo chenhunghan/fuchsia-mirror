@@ -17,7 +17,7 @@ unsafe extern "C" {
 
     pub(crate) fn cpp_profile_dispatcher_validate_and_create_profile(
         info: *const zx_profile_info_t,
-        profile_out: *mut super::thread_dispatcher::SchedulerStateBaseProfile,
+        profile_out: *mut MaybeUninit<crate::kernel::scheduler_state::SchedulerStateBaseProfile>,
     ) -> zx_status_t;
 }
 

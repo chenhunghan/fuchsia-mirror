@@ -33,5 +33,5 @@ rustc_binary("crasher_exe") {
 fuchsia_test("tests") {
   package = "..:crasher_test"
   component = ":rust_crasher_test"
-  environments = []  # don't run it on any bots
+  build_only = true  # don't run it on any bots
 }

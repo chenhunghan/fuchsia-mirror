@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("tpm-dml") {
+  dml = "meta/tpm.dml"
+  driver_name = "tpm"
+}
+
 driver_bind_rules("tpm_bind") {
-  rules = "meta/tpm.bind"
+  bind_output = "tpm.bindbc"
+  dml_label = ":tpm-dml"
   tests = "meta/bind_tests.json"
   deps = [ "//src/devices/bind/fuchsia.tpm" ]
 }

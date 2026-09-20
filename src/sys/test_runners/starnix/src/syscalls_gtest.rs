@@ -6,6 +6,7 @@ use crate::debian_guest::DebianGuest;
 use crate::{gtest, helpers, results_parser};
 
 use anyhow::{self, Context};
+use cm_types::NamespacePath;
 use fidl::endpoints;
 use fidl_fuchsia_component_runner as frunner;
 use fidl_fuchsia_test::{self as ftest, CaseListenerProxy, Result_ as TestResult, Status};
@@ -46,7 +47,6 @@ pub async fn run_syscall_gtests(
                 "Linux {} specified, bootstrapping the Machina guest.",
                 CML_TARGET_KERNEL_FIELD
             );
-
             run_on_debian_guest(&tests, &mut test_start_info, run_listener_proxy, debian_guest)
                 .await
         }
@@ -85,14 +85,24 @@ async fn run_on_debian_guest(
     debian_guest: Arc<DebianGuest>,
 ) -> Result<(), anyhow::Error> {
     // We need to take() the namespace from the start_info, but will immediately clone it back.
-    let test_component_ns = Namespace::try_from(test_start_info.ns.take().unwrap())?;
+    let mut test_component_ns = Namespace::try_from(test_start_info.ns.take().unwrap())?;
     test_start_info.ns = Some(test_component_ns.clone().try_into()?);
+    let test_pkg_dir = test_component_ns
+        .remove(&NamespacePath::new("/pkg")?)
+        .ok_or_else(|| anyhow::anyhow!("Could not find /pkg in namespace!"))?
+        .into_proxy();
 
     // Initialize the environment.
     let test_runner_report =
         initialize_test_runner_reporting(tests, run_listener_proxy, test_start_info)?;
-    let guest_binary_location =
-        debian_guest.push_test_dependencies(test_component_ns, test_start_info).await?;
+
+    let data_mount = helpers::get_syscall_data_mount(&test_pkg_dir).await?;
+    debian_guest.configure_data_mount(data_mount);
+
+    let guest_binary_location = helpers::get_guest_syscall_test_binary_path(test_start_info)?;
+    let test_binary_file =
+        helpers::open_guest_syscall_test_binary(&test_pkg_dir, test_start_info).await?;
+    debian_guest.push_data_to_guest(test_binary_file, &guest_binary_location).await?;
     let (exec_command, guest_output_filename) = format_exec_command(tests, &guest_binary_location);
 
     // Execute the tests and retrieve the results. The command's overall return code is ignored, as
@@ -126,7 +136,7 @@ fn format_exec_command(
 ) -> (String, String) {
     let test_filter_arg = gtest::create_tests_filter_arg(tests, TestType::Gtest);
     let guest_output_filename = helpers::unique_test_result_filename();
-    let guest_output_path = DebianGuest::get_test_output_path(&guest_output_filename);
+    let guest_output_path = helpers::get_guest_syscall_test_output_path(&guest_output_filename);
     let output_arg = helpers::format_arg(
         TestType::Gtest,
         &format!("output={}:{}", "json", guest_output_path.display()),
@@ -146,7 +156,8 @@ async fn get_test_results(
 ) -> Result<Vec<TestSuiteOutput>, anyhow::Error> {
     // Firstly, transfer the results file from the guest back to the host.
     let host_test_output_path = Path::new(HOST_TMP_DIR).join(&guest_output_filename);
-    let guest_test_output_path = DebianGuest::get_test_output_path(&guest_output_filename);
+    let guest_test_output_path =
+        helpers::get_guest_syscall_test_output_path(&guest_output_filename);
     let host_test_output_file =
         OpenOptions::new().write(true).create_new(true).open(&host_test_output_path)?;
     let file_channel: zx::Channel = fdio::transfer_fd(host_test_output_file)?.into();

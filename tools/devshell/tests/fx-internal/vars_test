@@ -190,6 +190,8 @@ TEST_fx-getdeviceraw-and-isvaliddevice() {
       # serial and id:
       "serial:EM-C0B2F2D96" "serial:12345" "serial:my-target_device.0"
       "id:EM-C0B2F2D96" "id:12345" "id:my-target_device.0"
+      # valid uart targets:
+      "uart:/dev/ttyUSB0" "uart:/tmp/pontis/serial-0403-6001" "uart:user" "uart:1234"
   )
   for valid in "${valids[@]}"; do
     BT_EXPECT is-valid-device "${valid}"
@@ -207,6 +209,8 @@ TEST_fx-getdeviceraw-and-isvaliddevice() {
       ":122333" ":232a" ":-1"
       # invalid serial and id:
       "serial:" "id:" "serial:foo@bar" "id:foo#bar" "serial:foo/bar" "id:foo:bar"
+      # invalid uart targets:
+      "uart:" "uart:   "
     )
   for invalid in "${invalids[@]}"; do
     BT_EXPECT_FAIL is-valid-device "${invalid}"
@@ -225,6 +229,8 @@ TEST_fx-get-device-name() {
       "serial:12345" "serial:12345"
       "id:EM-C0B2F2D96" "id:EM-C0B2F2D96"
       "id:12345" "id:12345"
+      "uart:/dev/ttyUSB0" "uart:/dev/ttyUSB0"
+      "uart:1234" "uart:1234"
   )
   for ((i=0; i<${#targets[@]}; i+=2)); do
     local input="${targets[i]}"

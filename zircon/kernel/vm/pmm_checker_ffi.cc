@@ -58,4 +58,8 @@ FFI_ALWAYS_INLINE void cpp_pmm_checker_assert_pattern(const PmmChecker* checker,
   checker->AssertPattern(page);
 }
 
+FFI_ALWAYS_INLINE void cpp_pmm_checker_print_status_stdout(const PmmChecker* checker) {
+  checker->PrintStatus(stdout);
+}
+
 }  // extern "C"

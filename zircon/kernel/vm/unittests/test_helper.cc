@@ -319,4 +319,13 @@ VmObject::AttributionCounts make_private_attribution_counts(uint64_t uncompresse
   };
 }
 
+void change_vmo_high_priority_count(VmObjectPaged& vmo, int64_t delta) {
+  PriorityChanger pc = vmo.MakePriorityChanger(delta);
+  if (delta > 0) {
+    pc.PrepareMayNotAlreadyBeHighPriority();
+  }
+  Guard<CriticalMutex> guard{AliasedLock, vmo.lock(), pc.lock()};
+  pc.ChangeHighPriorityCountLocked();
+}
+
 }  // namespace vm_unittest

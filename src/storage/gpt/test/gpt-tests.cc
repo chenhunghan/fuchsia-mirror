@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include <gpt/gpt.h>
 #include <gpt/guid.h>
@@ -75,9 +76,6 @@ void UpdateHeaderCrcs(gpt_header_t* header, uint8_t* entries_array, size_t size)
 
 void destroy_gpt(block_client::BlockDevice& device, uint64_t block_size, uint64_t offset,
                  uint64_t block_count) {
-  char zero[block_size];
-  memset(zero, 0, sizeof(zero));
-
   ASSERT_GT(block_count, 0, "Block count should be greater than zero");
   ASSERT_GT(block_size, 0, "Block count should be greater than zero");
 
@@ -85,8 +83,9 @@ void destroy_gpt(block_client::BlockDevice& device, uint64_t block_size, uint64_
   uint64_t last = offset + block_count - 1;
 
   block_client::ReaderWriter writer(device);
+  std::vector<std::byte> zero(block_size);
   for (uint64_t i = first; i <= last; i++) {
-    ASSERT_OK(writer.Write(block_size * i, block_size, zero), "Failed to write");
+    ASSERT_OK(writer.Write(block_size * i, block_size, zero.data()), "Failed to write");
   }
 }
 
@@ -392,14 +391,14 @@ class LibGptTest {
     ZX_ASSERT(sizeof(*mbr) <= blk_size_);
 
     // Read the block containing the MBR.
-    char buff[blk_size_];
+    std::vector<std::byte> buff(blk_size_);
     block_client::ReaderWriter reader(gpt_->device());
-    if (reader.Read(0, blk_size_, buff) != ZX_OK) {
+    if (reader.Read(0, blk_size_, buff.data()) != ZX_OK) {
       return ZX_ERR_IO;
     }
 
     // Copy the result to "mbr".
-    memcpy(mbr, buff, sizeof(*mbr));
+    memcpy(mbr, buff.data(), sizeof(*mbr));
     return ZX_OK;
   }
 

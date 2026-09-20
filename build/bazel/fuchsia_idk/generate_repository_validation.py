@@ -37,7 +37,7 @@ def _get_files_from(top_dir: Path) -> set[str]:
 
 def compare_directories(
     left_dir: Path, right_dir: Path
-) -> T.Tuple[T.Sequence[str], T.Sequence[str], T.Sequence[str]]:
+) -> tuple[T.Sequence[str], T.Sequence[str], T.Sequence[str]]:
     """Compare the content of two directories.
 
     Args:

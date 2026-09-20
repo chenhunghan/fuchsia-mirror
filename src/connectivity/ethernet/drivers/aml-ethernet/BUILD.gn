@@ -5,8 +5,13 @@
 import("//build/bind/bind.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("aml-ethernet-dml") {
+  dml = "meta/aml-ethernet.dml"
+  driver_name = "aml-ethernet"
+}
+
 driver_bind_rules("aml_eth_bind") {
-  rules = "meta/aml-ethernet.bind"
+  dml_label = ":aml-ethernet-dml"
   tests = "meta/bind-tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -51,7 +56,7 @@ fuchsia_driver_component("aml-ethernet") {
   component_name = "aml-ethernet"
   deps = [ ":aml-ethernet-driver" ]
   info = "meta/aml-ethernet-info.json"
-  manifest = "meta/aml-ethernet.cml"
+  dml_label = ":aml-ethernet-dml"
 }
 
 fuchsia_driver_package("package") {

@@ -115,7 +115,7 @@ struct MmapLoaderTraits {
   template <class Elf, template <class> class Container>
   using Info = LoadInfo<Elf, Container>;
 
-  using Loader = elfldltl::MmapLoader;
+  using Loader = elfldltl::MmapLoader<>;
 
   static Loader MakeLoader() { return Loader{}; }
 
@@ -152,10 +152,10 @@ using LoaderTypes = ::testing::Types<
 template <class Traits = MmapLoaderTraits, class Elf = Elf<>>
 class LoadTests : public ::testing::Test {
  public:
-  using Loader = typename Traits::Loader;
-  using LoadInfo = typename Traits::template Info<Elf, StdContainer<std::vector>::Container>;
-  using Addr = typename Elf::Addr;
-  using Phdr = typename Elf::Phdr;
+  using Loader = Traits::Loader;
+  using LoadInfo = Traits::template Info<Elf, StdContainer<std::vector>::Container>;
+  using Addr = Elf::Addr;
+  using Phdr = Elf::Phdr;
   using TestLib = decltype(Traits::TestLibProvider({}));
 
   struct LoadResult {
@@ -167,7 +167,7 @@ class LoadTests : public ::testing::Test {
     std::optional<typename Elf::size_type> stack_size;
   };
 
-  static constexpr typename LoadInfo::Region kNoRelro{};
+  static constexpr LoadInfo::Region kNoRelro{};
 
   template <typename... LoaderArgs>
   void Load(const TestLib& test_lib, std::optional<LoadResult>& result,

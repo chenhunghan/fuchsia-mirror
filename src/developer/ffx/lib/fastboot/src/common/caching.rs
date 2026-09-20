@@ -10,7 +10,6 @@ use ffx_fastboot_interface::fastboot_interface::{
 };
 use ffx_fastboot_interface::stream::StreamCommand;
 use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
 use tokio::sync::mpsc::Sender;
 
 /// `CachingFastboot` is a wrapper around any [`FastbootInterface`] that caches
@@ -35,24 +34,6 @@ impl<T> CachingFastboot<T> {
     /// Clears the in-memory variable cache.
     pub fn clear_cache(&mut self) {
         self.var_cache.clear();
-    }
-
-    /// Consumes the wrapper and returns the inner interface.
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-}
-
-impl<T> Deref for CachingFastboot<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<T> DerefMut for CachingFastboot<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
     }
 }
 
@@ -79,12 +60,14 @@ impl<T: Fastboot + Send> Fastboot for CachingFastboot<T> {
         match self.inner.get_var(name).await {
             Ok(val) => {
                 if should_cache {
+                    log::trace!("Caching successful fastboot var {name}: '{val}'");
                     self.var_cache.insert(name.to_string(), Ok(val.clone()));
                 }
                 Ok(val)
             }
             Err(FastbootError::GetVariableError { ref variable, ref message }) => {
                 if should_cache {
+                    log::trace!("Caching failed fastboot var {name}: '{message}'");
                     self.var_cache.insert(variable.clone(), Err(message.clone()));
                 }
                 Err(FastbootError::GetVariableError {

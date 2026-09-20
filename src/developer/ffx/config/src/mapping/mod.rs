@@ -106,6 +106,10 @@ fn expand_string_with_source(
     s: &str,
     strict: bool,
 ) -> Result<Option<(String, Option<String>)>, MappingError> {
+    if !s.contains('$') {
+        return Ok(Some((s.to_string(), None)));
+    }
+
     static MACRO_REGEX: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\$\$|\$([A-Z][A-Z0-9_]*)").unwrap());
 

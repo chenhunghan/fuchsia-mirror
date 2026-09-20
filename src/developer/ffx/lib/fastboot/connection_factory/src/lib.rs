@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use ffx_config::EnvironmentContext;
+use ffx_fastboot::common::caching::CachingFastboot;
 use ffx_fastboot_interface::fastboot_interface::FastbootInterface;
 use ffx_fastboot_interface::fastboot_proxy::FastbootProxy;
 use ffx_fastboot_interface::interface_factory::InterfaceFactoryBase;
@@ -91,7 +92,7 @@ impl FastbootConnectionFactory for ConnectionFactory {
     ) -> Result<Box<dyn FastbootInterface>, ConnectionFactoryError> {
         match connection {
             FastbootConnectionKind::Usb(serial_number) => {
-                Ok(Box::new(usb_proxy(serial_number).await?))
+                Ok(Box::new(CachingFastboot::new(usb_proxy(serial_number).await?)))
             }
             FastbootConnectionKind::Tcp(target_name, addr) => {
                 let config = match self.retry_limit {
@@ -105,10 +106,10 @@ impl FastbootConnectionFactory for ConnectionFactory {
                 };
                 let fastboot_device_file_path: Option<PathBuf> =
                     self.context.get(ffx_config::keys::FASTBOOT_FILE_PATH).ok();
-                Ok(Box::new(
+                Ok(Box::new(CachingFastboot::new(
                     tcp_proxy(&self.context, target_name, fastboot_device_file_path, &addr, config)
                         .await?,
-                ))
+                )))
             }
             FastbootConnectionKind::Udp(target_name, addr) => {
                 let config = match self.retry_limit {
@@ -122,10 +123,10 @@ impl FastbootConnectionFactory for ConnectionFactory {
                 };
                 let fastboot_device_file_path: Option<PathBuf> =
                     self.context.get(ffx_config::keys::FASTBOOT_FILE_PATH).ok();
-                Ok(Box::new(
+                Ok(Box::new(CachingFastboot::new(
                     udp_proxy(&self.context, target_name, fastboot_device_file_path, &addr, config)
                         .await?,
-                ))
+                )))
             }
         }
     }

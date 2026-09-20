@@ -35,7 +35,6 @@ template("fxfs_platform_library") {
       "src/fuchsia/errors.rs",
       "src/fuchsia/file.rs",
       "src/fuchsia/fxblob.rs",
-      "src/fuchsia/fxblob/atomic_vec.rs",
       "src/fuchsia/fxblob/blob.rs",
       "src/fuchsia/fxblob/directory.rs",
       "src/fuchsia/fxblob/mapping_provider.rs",

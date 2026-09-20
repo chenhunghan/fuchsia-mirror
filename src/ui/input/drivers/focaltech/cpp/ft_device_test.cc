@@ -383,6 +383,30 @@ TEST_F(FocaltechTest, Firmware5726UpToDate) {
       [](FtDeviceTestEnvironment& env) { EXPECT_EQ(env.i2c().firmware_write_size(), 0u); });
 }
 
+class ReaderV2EventHandler
+    : public fidl::WireAsyncEventHandler<fuchsia_input_report::InputReportsReaderV2> {
+ public:
+  explicit ReaderV2EventHandler(
+      fit::function<
+          void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+          callback)
+      : callback_(std::move(callback)) {}
+
+  void OnInputReports(
+      fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) override {
+    if (callback_) {
+      callback_(event);
+    }
+  }
+
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_input_report::InputReportsReaderV2> metadata) override {}
+
+ private:
+  fit::function<void(fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>*)>
+      callback_;
+};
+
 TEST_F(FocaltechTest, Touch) {
   static const fuchsia_hardware_input_focaltech::Metadata kFt6336Metadata({
       .device_id = fuchsia_hardware_input_focaltech::DeviceId::kFt6336,
@@ -390,15 +414,46 @@ TEST_F(FocaltechTest, Touch) {
   });
   StartDriver(kFt6336Metadata);
 
-  auto reader_endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-  fidl::OneWayStatus status =
-      input_device()->GetInputReportsReader(std::move(reader_endpoints.server));
-  ASSERT_EQ(ZX_OK, status.status());
-  fidl::WireClient<fuchsia_input_report::InputReportsReader> reader(
-      std::move(reader_endpoints.client),
-      driver_test().runtime().GetForegroundDispatcher()->async_dispatcher());
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> reader_endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  input_device()
+      ->GetInputReportsReaderV2(std::move(reader_endpoints.server), 10)
+      .ThenExactlyOnce(
+          [](fidl::WireUnownedResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2>&
+                 result) {
+            zx_status_t status = result.status();
+            ASSERT_OK(status);
+          });
 
-  // Wait for the driver to receive the `GetInputReportsReader()` request and create an
+  bool got_report = false;
+  std::unique_ptr<ReaderV2EventHandler> event_handler = std::make_unique<ReaderV2EventHandler>(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+
+        ASSERT_EQ(size_t(1), reports.size());
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
+
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
+
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), size_t(2));
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), uint32_t(0));
+        EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x001);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x013);
+
+        EXPECT_EQ(touch_report.contacts()[1].contact_id(), uint32_t(1));
+        EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x031);
+        EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x000);
+        got_report = true;
+      });
+
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader(
+      std::move(reader_endpoints.client),
+      driver_test().runtime().GetForegroundDispatcher()->async_dispatcher(), event_handler.get());
+
+  // Wait for the driver to receive the `GetInputReportsReaderV2()` request and create an
   // input-reports reader.
   driver_test().runtime().RunUntilIdle();
 
@@ -451,32 +506,8 @@ TEST_F(FocaltechTest, Touch) {
   });
   interrupt().trigger(0, zx::clock::get_boot());
 
-  reader->ReadInputReports().ThenExactlyOnce(
-      [](fidl::WireUnownedResult<fuchsia_input_report::InputReportsReader::ReadInputReports>&
-             result) {
-        ASSERT_OK(result.status());
-        ASSERT_FALSE(result.value().is_error());
-        const fidl::VectorView<::fuchsia_input_report::wire::InputReport>& reports =
-            result.value().value()->reports;
-
-        ASSERT_EQ(size_t(1), reports.size());
-        const fuchsia_input_report::wire::InputReport& report = reports[0];
-
-        ASSERT_TRUE(report.has_event_time());
-        ASSERT_TRUE(report.has_touch());
-        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
-
-        ASSERT_TRUE(touch_report.has_contacts());
-        ASSERT_EQ(touch_report.contacts().size(), size_t(2));
-        EXPECT_EQ(touch_report.contacts()[0].contact_id(), uint32_t(0));
-        EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x001);
-        EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x013);
-
-        EXPECT_EQ(touch_report.contacts()[1].contact_id(), uint32_t(1));
-        EXPECT_EQ(touch_report.contacts()[1].position_x(), 0x031);
-        EXPECT_EQ(touch_report.contacts()[1].position_y(), 0x000);
-      });
   driver_test().runtime().RunUntilIdle();
+  EXPECT_TRUE(got_report);
 }
 
 TEST_F(FocaltechTest, TouchWithGap) {
@@ -486,13 +517,40 @@ TEST_F(FocaltechTest, TouchWithGap) {
   });
   StartDriver(kFt6336Metadata);
 
-  auto reader_endpoints = fidl::Endpoints<fuchsia_input_report::InputReportsReader>::Create();
-  fidl::OneWayStatus status =
-      input_device()->GetInputReportsReader(std::move(reader_endpoints.server));
-  ASSERT_EQ(ZX_OK, status.status());
-  fidl::WireClient<fuchsia_input_report::InputReportsReader> reader(
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> reader_endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  input_device()
+      ->GetInputReportsReaderV2(std::move(reader_endpoints.server), 10)
+      .ThenExactlyOnce(
+          [](fidl::WireUnownedResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2>&
+                 result) {
+            zx_status_t status = result.status();
+            ASSERT_OK(status);
+          });
+
+  bool got_report = false;
+  std::unique_ptr<ReaderV2EventHandler> event_handler = std::make_unique<ReaderV2EventHandler>(
+      [&](fidl::WireEvent<fuchsia_input_report::InputReportsReaderV2::OnInputReports>* event) {
+        const fidl::VectorView<fuchsia_input_report::wire::InputReport>& reports = event->reports;
+
+        ASSERT_EQ(size_t(1), reports.size());
+        const fuchsia_input_report::wire::InputReport& report = reports[0];
+
+        ASSERT_TRUE(report.has_event_time());
+        ASSERT_TRUE(report.has_touch());
+        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
+
+        ASSERT_TRUE(touch_report.has_contacts());
+        ASSERT_EQ(touch_report.contacts().size(), size_t(1));
+        EXPECT_EQ(touch_report.contacts()[0].contact_id(), uint32_t(1));
+        EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x031);
+        EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x000);
+        got_report = true;
+      });
+
+  fidl::WireClient<fuchsia_input_report::InputReportsReaderV2> reader(
       std::move(reader_endpoints.client),
-      driver_test().runtime().GetForegroundDispatcher()->async_dispatcher());
+      driver_test().runtime().GetForegroundDispatcher()->async_dispatcher(), event_handler.get());
 
   driver_test().runtime().RunUntilIdle();
 
@@ -531,28 +589,8 @@ TEST_F(FocaltechTest, TouchWithGap) {
   });
   interrupt().trigger(0, zx::clock::get_boot());
 
-  reader->ReadInputReports().ThenExactlyOnce(
-      [](fidl::WireUnownedResult<fuchsia_input_report::InputReportsReader::ReadInputReports>&
-             result) {
-        ASSERT_OK(result.status());
-        ASSERT_FALSE(result.value().is_error());
-        const fidl::VectorView<::fuchsia_input_report::wire::InputReport>& reports =
-            result.value().value()->reports;
-
-        ASSERT_EQ(size_t(1), reports.size());
-        const fuchsia_input_report::wire::InputReport& report = reports[0];
-
-        ASSERT_TRUE(report.has_event_time());
-        ASSERT_TRUE(report.has_touch());
-        const fuchsia_input_report::wire::TouchInputReport& touch_report = report.touch();
-
-        ASSERT_TRUE(touch_report.has_contacts());
-        ASSERT_EQ(touch_report.contacts().size(), size_t(1));
-        EXPECT_EQ(touch_report.contacts()[0].contact_id(), uint32_t(1));
-        EXPECT_EQ(touch_report.contacts()[0].position_x(), 0x031);
-        EXPECT_EQ(touch_report.contacts()[0].position_y(), 0x000);
-      });
   driver_test().runtime().RunUntilIdle();
+  EXPECT_TRUE(got_report);
 }
 
 TEST(TouchRecordTest, XYDecode) {

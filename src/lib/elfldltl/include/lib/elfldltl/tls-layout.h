@@ -34,9 +34,9 @@ namespace elfldltl {
 template <class Elf = Elf<>>
 class TlsLayout {
  public:
-  using Addr = typename Elf::Addr;
-  using size_type = typename Elf::size_type;
-  using Phdr = typename Elf::Phdr;
+  using Addr = Elf::Addr;
+  using size_type = Elf::size_type;
+  using Phdr = Elf::Phdr;
 
   // A default-constructed TlsLayout is trivially zero-initialized and ready to
   // be updated using the Assign() method.

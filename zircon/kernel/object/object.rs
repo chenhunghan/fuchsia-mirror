@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 mod bti;
+pub mod buffer_chain;
 mod bus_transaction_initiator_dispatcher;
 mod bus_transaction_initiator_dispatcher_ffi;
 mod counter_dispatcher;
@@ -26,9 +27,12 @@ mod iommu_dispatcher;
 mod iommu_dispatcher_ffi;
 mod job_dispatcher;
 mod job_dispatcher_ffi;
+mod job_policy;
+mod job_policy_ffi;
 mod log_dispatcher;
 mod log_dispatcher_ffi;
 mod mbuf;
+pub mod message_packet;
 mod msi_allocation;
 mod msi_dispatcher;
 mod msi_dispatcher_ffi;
@@ -64,6 +68,7 @@ mod vm_object_dispatcher_ffi;
 mod wait_signal_observer;
 
 pub use bti::{IOMMU_FLAG_PERM_EXECUTE, IOMMU_FLAG_PERM_READ, IOMMU_FLAG_PERM_WRITE};
+pub use buffer_chain::BufferChain;
 pub use bus_transaction_initiator_dispatcher::BusTransactionInitiatorDispatcher;
 pub use counter_dispatcher::CounterDispatcher;
 pub use dispatcher::{Dispatcher, DispatcherOps};
@@ -75,7 +80,9 @@ pub use io_buffer_dispatcher::IoBufferDispatcher;
 pub use io_buffer_shared_region_dispatcher::IoBufferSharedRegionDispatcher;
 pub use iommu_dispatcher::IommuDispatcher;
 pub use job_dispatcher::*;
+pub use job_policy::{JobPolicy, JobPolicyCollection, Policy};
 pub use log_dispatcher::*;
+pub use message_packet::{MessagePacket, MessagePacketPtr};
 pub use msi_allocation::MsiAllocation;
 pub use msi_dispatcher::MsiDispatcher;
 pub use msi_interrupt_dispatcher::MsiInterruptDispatcher;

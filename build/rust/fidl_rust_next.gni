@@ -18,6 +18,7 @@ fidl_rust_next_allowlist = [
   "//sdk/lib/async/*",
   "//sdk/lib/driver/*",
   "//src/bringup/lib/userboot/*",
+  "//src/connectivity/bluetooth/*",
   "//src/connectivity/overnet/*",
   "//src/connectivity/wlan/*",
   "//src/devices/*",

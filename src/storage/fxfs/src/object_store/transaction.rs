@@ -10,12 +10,11 @@ use crate::object_handle::INVALID_OBJECT_ID;
 use crate::object_store::allocator::{AllocatorItem, Reservation};
 use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::object_record::{
-    FxfsKey, FxfsKeyV40, FxfsKeyV49, ObjectItem, ObjectItemV40, ObjectItemV41, ObjectItemV43,
-    ObjectItemV46, ObjectItemV47, ObjectItemV49, ObjectItemV50, ObjectItemV55, ObjectItemV56,
-    ObjectKey, ObjectKeyData, ObjectValue, ProjectProperty,
+    FxfsKey, FxfsKeyV49, ObjectItem, ObjectItemV56, ObjectKey, ObjectKeyData, ObjectValue,
+    ProjectProperty,
 };
 use crate::object_store::{AttributeId, AttributeKey, ProjectId};
-use crate::serialized_types::{Migrate, Versioned, migrate_nodefault, migrate_to_version};
+use crate::serialized_types::{Migrate, Versioned, migrate_to_version};
 use anyhow::Error;
 use either::{Either, Left, Right};
 use fprint::TypeFingerprint;
@@ -111,132 +110,6 @@ pub enum MutationV56 {
     CreateInternalDir(u64),
 }
 
-#[derive(Migrate, Clone, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV56)]
-pub enum MutationV55 {
-    ObjectStore(ObjectStoreMutationV55),
-    EncryptedObjectStore(#[serde(with = "crate::zerocopy_serialization")] Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKey),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV55)]
-pub enum MutationV54 {
-    ObjectStore(ObjectStoreMutationV54),
-    EncryptedObjectStore(#[serde(with = "crate::zerocopy_serialization")] Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKey),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV54)]
-pub enum MutationV50 {
-    ObjectStore(ObjectStoreMutationV50),
-    EncryptedObjectStore(#[serde(with = "crate::zerocopy_serialization")] Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKeyV49),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV50)]
-pub enum MutationV49 {
-    ObjectStore(ObjectStoreMutationV49),
-    EncryptedObjectStore(Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKeyV49),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV49)]
-pub enum MutationV47 {
-    ObjectStore(ObjectStoreMutationV47),
-    EncryptedObjectStore(Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKeyV40),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV47)]
-pub enum MutationV46 {
-    ObjectStore(ObjectStoreMutationV46),
-    EncryptedObjectStore(Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKeyV40),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV46)]
-pub enum MutationV43 {
-    ObjectStore(ObjectStoreMutationV43),
-    EncryptedObjectStore(Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKeyV40),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV43)]
-pub enum MutationV41 {
-    ObjectStore(ObjectStoreMutationV41),
-    EncryptedObjectStore(Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKeyV40),
-    CreateInternalDir(u64),
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(MutationV41)]
-pub enum MutationV40 {
-    ObjectStore(ObjectStoreMutationV40),
-    EncryptedObjectStore(Box<[u8]>),
-    Allocator(AllocatorMutationV32),
-    BeginFlush,
-    EndFlush,
-    DeleteVolume,
-    UpdateBorrowed(u64),
-    UpdateMutationsKey(UpdateMutationsKeyV40),
-    CreateInternalDir(u64),
-}
-
 impl Mutation {
     pub fn insert_object(key: ObjectKey, value: ObjectValue) -> Self {
         Mutation::ObjectStore(ObjectStoreMutation {
@@ -274,78 +147,6 @@ pub type ObjectStoreMutation = ObjectStoreMutationV56;
 pub struct ObjectStoreMutationV56 {
     pub item: ObjectItemV56,
     pub op: Operation,
-}
-
-#[derive(Migrate, Clone, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(ObjectStoreMutationV56)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV55 {
-    pub item: ObjectItemV55,
-    pub op: Operation,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(ObjectStoreMutationV55)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV54 {
-    pub item: crate::object_store::object_record::ObjectItemV54,
-    pub op: Operation,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint, Versioned)]
-#[migrate_to_version(ObjectStoreMutationV54)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV50 {
-    pub item: ObjectItemV50,
-    pub op: OperationV32,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint)]
-#[migrate_to_version(ObjectStoreMutationV50)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV49 {
-    pub item: ObjectItemV49,
-    pub op: OperationV32,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint)]
-#[migrate_to_version(ObjectStoreMutationV49)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV47 {
-    pub item: ObjectItemV47,
-    pub op: OperationV32,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint)]
-#[migrate_to_version(ObjectStoreMutationV47)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV46 {
-    pub item: ObjectItemV46,
-    pub op: OperationV32,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint)]
-#[migrate_to_version(ObjectStoreMutationV46)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV43 {
-    pub item: ObjectItemV43,
-    pub op: OperationV32,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint)]
-#[migrate_to_version(ObjectStoreMutationV43)]
-#[migrate_nodefault]
-pub struct ObjectStoreMutationV41 {
-    pub item: ObjectItemV41,
-    pub op: OperationV32,
-}
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint)]
-#[migrate_nodefault]
-#[migrate_to_version(ObjectStoreMutationV41)]
-pub struct ObjectStoreMutationV40 {
-    pub item: ObjectItemV40,
-    pub op: OperationV32,
 }
 
 /// The different LSM tree operations that can be performed as part of a mutation.
@@ -466,10 +267,6 @@ pub type UpdateMutationsKey = UpdateMutationsKeyV49;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint)]
 pub struct UpdateMutationsKeyV49(pub FxfsKeyV49);
-
-#[derive(Migrate, Serialize, Deserialize, TypeFingerprint)]
-#[migrate_to_version(UpdateMutationsKeyV49)]
-pub struct UpdateMutationsKeyV40(pub FxfsKeyV40);
 
 impl From<UpdateMutationsKey> for FxfsKey {
     fn from(outer: UpdateMutationsKey) -> Self {
@@ -1153,6 +950,12 @@ impl<'a> Transaction<'a> {
         self.fs.lock_manager().downgrade_locks(&self.txn_locks);
         Ok(())
     }
+
+    /// Prepares to commit by upgrading transaction locks to write locks and waiting for active
+    /// readers to finish.
+    pub async fn commit_prepare(&self) {
+        self.fs.lock_manager().commit_prepare(self).await;
+    }
 }
 
 impl Drop for Transaction<'_> {
@@ -1531,6 +1334,13 @@ impl LockManager {
             {
                 let mut locks = self.locks.lock();
                 let entry = locks.keys.get_mut(lock).unwrap();
+                // Callers may invoke `Transaction::commit_prepare` explicitly before committing
+                // (e.g. to upgrade locks and verify invariants after disk I/O has finished).
+                // Skipping keys already in `LockState::WriteLock` makes `commit_prepare`
+                // idempotent when called again during `commit_transaction`.
+                if entry.state == LockState::WriteLock {
+                    continue;
+                }
                 assert_eq!(entry.state, LockState::Locked);
 
                 if entry.read_count == 0 {

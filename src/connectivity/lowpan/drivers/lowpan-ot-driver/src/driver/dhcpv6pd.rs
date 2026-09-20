@@ -6,12 +6,16 @@ use crate::prelude::*;
 use fidl::client::QueryResponseFut;
 use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_net_dhcpv6::{
-    AcquirePrefixConfig, PrefixControlMarker, PrefixControlProxy, PrefixEvent, PrefixProviderMarker,
+    AcquirePrefixConfig, PrefixControlEvent, PrefixControlExitReason, PrefixControlMarker,
+    PrefixControlProxy, PrefixEvent, PrefixProviderMarker,
 };
 use fuchsia_async::Task;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_sync::Mutex;
+use futures::StreamExt as _;
 use packet::NoOpSerializationContext;
+
+use super::DEFAULT_TIMEOUT;
 
 use std::net::Ipv6Addr;
 use std::pin::Pin;
@@ -151,25 +155,26 @@ impl DhcpV6PdInner {
 }
 
 impl DhcpV6Pd {
-    pub fn process_pd_state_change(&self, state: ot::BorderRoutingDhcp6PdState) -> Result {
-        let mut inner = self.inner.lock();
-        if state != inner.last_state {
-            inner.last_state = state;
-
-            // We need to re-lock the inner before calling
-            // start or stop, otherwise we will deadlock.
-            std::mem::drop(inner);
-
-            match state {
-                ot::BorderRoutingDhcp6PdState::Running => self.start()?,
-                _ => self.stop(),
+    pub async fn process_pd_state_change(&self, state: ot::BorderRoutingDhcp6PdState) -> Result {
+        {
+            let inner = self.inner.lock();
+            if state == inner.last_state {
+                return Ok(());
             }
         }
+
+        match state {
+            ot::BorderRoutingDhcp6PdState::Running => self.start().await?,
+            _ => self.stop().await,
+        }
+
+        self.inner.lock().last_state = state;
         Ok(())
     }
 
-    pub fn start(&self) -> Result<(), anyhow::Error> {
-        self.stop(); // ensure stop in case the online task is not terminated
+    pub async fn start(&self) -> Result<(), anyhow::Error> {
+        // Ensure stop in case the online task is not terminated.
+        self.stop().await;
 
         info!(tag = "dhcp_v6_pd"; "Starting attempt to lease a prefix via DHCPv6-PD...");
         let prefix_provider =
@@ -195,10 +200,9 @@ impl DhcpV6Pd {
         inner.prefix_watch = Some(watcher);
 
         // Make sure our `poll()` method gets called.
-        inner.waker.take().and_then(|waker| {
+        if let Some(waker) = inner.waker.take() {
             waker.wake();
-            Some(())
-        });
+        }
 
         let inner_clone = self.inner.clone();
         inner.refresh_task = Some(Task::spawn(async move {
@@ -219,37 +223,72 @@ impl DhcpV6Pd {
 
                 info!(tag = "dhcp_v6_pd"; "Refreshing DHCPv6-PD RA for OpenThread");
 
-                // Make sure our `poll()` method gets called by waking up the waker.
-                inner.waker.take().and_then(|waker| {
+                // Make sure our `poll()` method gets called by waking up
+                // the waker.
+                if let Some(waker) = inner.waker.take() {
                     waker.wake();
-                    Some(())
-                });
+                }
             }
         }));
 
         Ok(())
     }
 
-    pub fn stop(&self) {
-        let mut inner = self.inner.lock();
+    pub async fn stop(&self) {
+        let prefix_control = {
+            let mut inner = self.inner.lock();
+            inner.prefix_watch = None;
+            inner.refresh_task = None;
 
-        // To stop, we simply dispose of the control endpoint for the prefix.
-        // The prefix will be removed the next time `poll()` is called.
-        if let Some(_) = inner.prefix_control.take() {
-            info!(tag = "dhcp_v6_pd"; "STOPPING attempt to lease a prefix via DHCPv6-PD.");
-            // Make sure our `poll()` method gets called.
-            inner.waker.take().and_then(|waker| {
-                waker.wake();
-                Some(())
-            });
+            if let Some(prefix_control) = inner.prefix_control.take() {
+                info!(tag = "dhcp_v6_pd"; "STOPPING attempt to lease a prefix via DHCPv6-PD.");
+                // Make sure our `poll()` method gets called.
+                if let Some(waker) = inner.waker.take() {
+                    waker.wake();
+                }
+                Some(prefix_control)
+            } else {
+                None
+            }
+        };
+
+        if let Some(prefix_control) = prefix_control {
+            if let Err(e) = prefix_control.stop() {
+                warn!(tag = "dhcp_v6_pd"; "Failed to send Stop to PrefixControl: {:?}", e);
+            }
+            let mut event_stream = prefix_control.take_event_stream();
+
+            // Bound the wait. A peer that closes the channel is handled by the
+            // `None` arm below, but one that stays alive without ever sending
+            // `OnExit` would block us forever. Drop the channel to eventually
+            // stop prefix acquisition.
+            let exit = event_stream
+                .next()
+                .on_timeout(fasync::MonotonicInstant::after(DEFAULT_TIMEOUT), || {
+                    warn!(tag = "dhcp_v6_pd"; "Timed out waiting for PrefixControl to exit");
+                    None
+                })
+                .await;
+
+            match exit {
+                Some(Ok(PrefixControlEvent::OnExit {
+                    reason: PrefixControlExitReason::Stopped,
+                })) => {
+                    info!(tag = "dhcp_v6_pd"; "PrefixControl exited: Stopped");
+                }
+                Some(Ok(PrefixControlEvent::OnExit { reason })) => {
+                    warn!(
+                        tag = "dhcp_v6_pd";
+                        "PrefixControl exited with unexpected reason: {:?}",
+                        reason
+                    );
+                }
+                Some(Err(e)) => {
+                    warn!(tag = "dhcp_v6_pd"; "Error waiting for PrefixControl exit: {:?}", e);
+                }
+                None => {}
+            }
         }
-
-        // Explicitly drop the `prefix_control.watch_prefix` channel in addition to
-        // the `PrefixControl` endpoint. Dropping the `PrefixControl` endpoint alone
-        // does not trigger the `Dhcpv6PrefixControlRequest` closure on the server
-        // side, see b/491112007 for more details.
-        inner.prefix_watch = None;
-        inner.refresh_task = None;
     }
 
     /// Async entrypoint. Called from [`DhcpV6PdPollerExt::dhcp_v6_pd_poll`].
@@ -354,5 +393,126 @@ impl<T: AsRef<ot::Instance> + AsRef<DhcpV6Pd>> DhcpV6PdPollerExt for fuchsia_syn
         let ot: &ot::Instance = guard.as_ref();
         let dhcp_v6_pd: &DhcpV6Pd = guard.as_ref();
         dhcp_v6_pd.poll(ot, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_matches::assert_matches;
+    use fidl::endpoints::create_proxy_and_stream;
+    use fidl_fuchsia_net_dhcpv6::PrefixControlRequest;
+
+    #[fuchsia::test]
+    async fn test_dhcpv6_pd_stop_when_not_started() {
+        let dhcpv6_pd = DhcpV6Pd::default();
+        // Calling stop on an unstarted DhcpV6Pd should succeed immediately
+        // without error or hang.
+        dhcpv6_pd.stop().await;
+        assert!(dhcpv6_pd.inner.lock().prefix_control.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_dhcpv6_pd_stop_waits_for_on_exit() {
+        let (prefix_control, mut stream) = create_proxy_and_stream::<PrefixControlMarker>();
+        let dhcpv6_pd = DhcpV6Pd::default();
+        dhcpv6_pd.inner.lock().prefix_control = Some(prefix_control);
+
+        let mut stop_fut = std::pin::pin!(dhcpv6_pd.stop());
+
+        // `Stop` is sent on the first poll, after which `stop()` must remain
+        // pending until the server acknowledges.
+        assert!(futures::poll!(stop_fut.as_mut()).is_pending());
+
+        let control_handle = assert_matches!(
+            stream.next().await,
+            Some(Ok(PrefixControlRequest::Stop { control_handle })) => control_handle
+        );
+        assert!(futures::poll!(stop_fut.as_mut()).is_pending());
+
+        control_handle.send_on_exit(PrefixControlExitReason::Stopped).expect("send OnExit");
+        stop_fut.await;
+
+        let inner = dhcpv6_pd.inner.lock();
+        assert!(inner.prefix_control.is_none());
+        assert!(inner.prefix_watch.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_dhcpv6_pd_process_state_change_stopped_calls_stop() {
+        let (prefix_control, mut stream) = create_proxy_and_stream::<PrefixControlMarker>();
+        let dhcpv6_pd = DhcpV6Pd::default();
+        {
+            let mut inner = dhcpv6_pd.inner.lock();
+            inner.last_state = ot::BorderRoutingDhcp6PdState::Running;
+            inner.prefix_control = Some(prefix_control);
+        }
+
+        let mut state_change_fut = std::pin::pin!(
+            dhcpv6_pd.process_pd_state_change(ot::BorderRoutingDhcp6PdState::Stopped)
+        );
+        assert!(futures::poll!(state_change_fut.as_mut()).is_pending());
+
+        let control_handle = assert_matches!(
+            stream.next().await,
+            Some(Ok(PrefixControlRequest::Stop { control_handle })) => control_handle
+        );
+        control_handle.send_on_exit(PrefixControlExitReason::Stopped).expect("send OnExit");
+
+        assert_matches!(state_change_fut.await, Ok(()));
+
+        let inner = dhcpv6_pd.inner.lock();
+        assert_eq!(inner.last_state, ot::BorderRoutingDhcp6PdState::Stopped);
+        assert!(inner.prefix_control.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_dhcpv6_pd_stop_handles_unexpected_exit_reason() {
+        let (prefix_control, mut stream) = create_proxy_and_stream::<PrefixControlMarker>();
+        let dhcpv6_pd = DhcpV6Pd::default();
+        dhcpv6_pd.inner.lock().prefix_control = Some(prefix_control);
+
+        let mut stop_fut = std::pin::pin!(dhcpv6_pd.stop());
+        assert!(futures::poll!(stop_fut.as_mut()).is_pending());
+
+        let control_handle = assert_matches!(
+            stream.next().await,
+            Some(Ok(PrefixControlRequest::Stop { control_handle })) => control_handle
+        );
+
+        // An unexpected reason is logged rather than treated as an error, but
+        // it must still unblock `stop()`.
+        control_handle
+            .send_on_exit(PrefixControlExitReason::InterfaceRemoved)
+            .expect("send OnExit");
+        stop_fut.await;
+
+        let inner = dhcpv6_pd.inner.lock();
+        assert!(inner.prefix_control.is_none());
+        assert!(inner.prefix_watch.is_none());
+    }
+
+    // Uses fake time so the test does not have to wait out the timeout.
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_dhcpv6_pd_stop_times_out_when_server_never_exits() {
+        // Hold the request stream without servicing it, mimicking a peer that
+        // is alive but wedged rather than one that closes the channel.
+        let (prefix_control, _stream) = create_proxy_and_stream::<PrefixControlMarker>();
+        let dhcpv6_pd = DhcpV6Pd::default();
+        dhcpv6_pd.inner.lock().prefix_control = Some(prefix_control);
+
+        let mut stop_fut = std::pin::pin!(dhcpv6_pd.stop());
+        assert!(futures::poll!(stop_fut.as_mut()).is_pending());
+
+        fuchsia_async::TestExecutor::advance_to(fuchsia_async::MonotonicInstant::after(
+            DEFAULT_TIMEOUT,
+        ))
+        .await;
+
+        assert!(futures::poll!(stop_fut.as_mut()).is_ready());
+
+        let inner = dhcpv6_pd.inner.lock();
+        assert!(inner.prefix_control.is_none());
+        assert!(inner.prefix_watch.is_none());
     }
 }

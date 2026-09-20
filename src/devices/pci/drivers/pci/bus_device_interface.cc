@@ -61,20 +61,34 @@ zx_status_t Bus::GetBti(const pci::Device* device, uint32_t index, zx::bti* bti)
   return pciroot().GetBti(device->packed_addr(), index, bti);
 }
 
-zx_status_t Bus::AddToSharedIrqList(pci::Device* device, uint32_t vector) {
+zx_status_t Bus::AddToSharedIrqList(pci::Device* device, uint32_t vector,
+                                    zx::unowned_interrupt irq_handle) {
   ZX_DEBUG_ASSERT(vector);
   fbl::AutoLock _(&devices_lock_);
 
-  if (auto result = shared_irqs_.find(vector); result != shared_irqs_.end()) {
-    auto& list = result->second->list;
-    if (std::ranges::contains(list, device)) {
-      return ZX_ERR_ALREADY_EXISTS;
-    }
-    list.push_back(device);
-    zxlogf(TRACE, "[%s] inserted into list for vector %#x", device->config()->addr(), vector);
-    return ZX_OK;
+  auto result = shared_irqs_.find(vector);
+  if (result == shared_irqs_.end()) {
+    return ZX_ERR_BAD_STATE;
   }
-  return ZX_ERR_BAD_STATE;
+
+  auto& shared_vector = result->second;
+  auto& list = shared_vector->list;
+  if (std::any_of(list.begin(), list.end(),
+                  [device](const auto& entry) { return entry->device == device; })) {
+    return ZX_ERR_ALREADY_EXISTS;
+  }
+
+  auto shared_dev = std::make_unique<SharedDevice>();
+  shared_dev->device = device;
+  shared_dev->wait.set_object(irq_handle->get());
+  shared_dev->wait.set_trigger(ZX_VIRTUAL_INTERRUPT_UNTRIGGERED);
+  shared_dev->wait.set_handler([device](async_dispatcher_t* dispatcher, async::Wait* wait,
+                                        zx_status_t status, const zx_packet_signal_t* signal) {
+    HandleDeviceLegacyIrqUntriggered(dispatcher, wait, status, signal, device);
+  });
+  list.push_back(std::move(shared_dev));
+  zxlogf(TRACE, "[%s] inserted into list for vector %#x", device->config()->addr(), vector);
+  return ZX_OK;
 }
 
 uint16_t Bus::GetSegmentGroup() { return info_.segment_group; }
@@ -83,15 +97,20 @@ zx_status_t Bus::RemoveFromSharedIrqList(pci::Device* device, uint32_t vector) {
   ZX_DEBUG_ASSERT(vector);
   fbl::AutoLock _(&devices_lock_);
 
-  if (auto result = shared_irqs_.find(vector); result != shared_irqs_.end()) {
-    auto& list = result->second->list;
-    if (std::erase(list, device) > 0) {
-      zxlogf(TRACE, "[%s] removed from vector %#x list", device->config()->addr(), vector);
-      return ZX_OK;
-    }
+  auto result = shared_irqs_.find(vector);
+  if (result == shared_irqs_.end()) {
+    return ZX_ERR_BAD_STATE;
+  }
+
+  auto& shared_vector = result->second;
+  const auto removed_device = std::erase_if(
+      shared_vector->list, [device](const auto& entry) { return entry->device == device; });
+  if (!removed_device) {
     return ZX_ERR_NOT_FOUND;
   }
-  return ZX_ERR_BAD_STATE;
+
+  zxlogf(TRACE, "[%s] removed from vector %#x list", device->config()->addr(), vector);
+  return ZX_OK;
 }
 
 }  // namespace pci

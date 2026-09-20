@@ -19,7 +19,7 @@ from build_utils import BazelLauncher, BazelPaths
 
 def generate_tests_json(
     bazel_paths: BazelPaths,
-    command_runner: T.Optional[build_utils.CommandRunner] = None,
+    command_runner: build_utils.CommandRunner | None = None,
     quiet: bool = True,
 ) -> tuple[list[dict[str, T.Any]], set[Path]]:
     """Generate a tests.json file corresponding to all Bazel test targets

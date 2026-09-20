@@ -11,7 +11,8 @@ an empty stamp file.
 import argparse
 import os
 import sys
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 from .elfinfo import get_elf_info
 
@@ -72,7 +73,7 @@ from .elfinfo import get_elf_info
 #
 
 
-def rewrite_elf_needed(dep: str) -> Optional[str]:
+def rewrite_elf_needed(dep: str) -> str | None:
     """Rewrite a DT_NEEDED dependency name.
 
     Args:
@@ -95,8 +96,8 @@ def rewrite_elf_needed(dep: str) -> Optional[str]:
 
 
 def verify_elf_dependencies(
-    binary: str, lib_dir: str, deps: Iterable[str], elf_entries: Dict[str, Any]
-) -> Tuple[List[str], List[str]]:
+    binary: str, lib_dir: str, deps: Iterable[str], elf_entries: dict[str, Any]
+) -> tuple[list[str], list[str]]:
     """Verify the ELF dependencies of a given ELF binary.
 
     Args:
@@ -150,8 +151,8 @@ def verify_elf_dependencies(
 
 
 def find_unstripped_file(
-    filename: str, depfile_items: Set[str], toolchain_lib_dirs: List[str] = []
-) -> Optional[str]:
+    filename: str, depfile_items: set[str], toolchain_lib_dirs: list[str] = []
+) -> str | None:
     """Find the unstripped version of a given ELF binary.
 
     Args:

@@ -765,8 +765,6 @@ async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
                     .await
                     .inspect_err(|e| {
                         warn!("Failed to get power dependency token for phy {}: {}", phy_id, e);
-                        driver_started = false;
-                        result = Err(zx::sys::ZX_ERR_BAD_STATE);
                     })
                     .ok();
                 // Duplicate the dependency token (if available) so we can keep a copy.
@@ -3546,6 +3544,65 @@ mod tests {
             assert_eq!(
                 *power_manager_calls,
                 vec!["wlanix-create-iface", "wlanix-power-up", "wlanix-phy-1-dependency"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                *calls,
+                vec![
+                    ifaces::test_utils::IfaceManagerCall::CreateClientIface(1),
+                    ifaces::test_utils::IfaceManagerCall::ListPhys,
+                    ifaces::test_utils::IfaceManagerCall::GetPowerState(1),
+                    ifaces::test_utils::IfaceManagerCall::GetPowerElementDependencyToken(1),
+                ]
+            );
+        }
+
+        assert_matches!(
+            test_helper.telemetry_receiver.try_next(),
+            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+                event: wlan_telemetry::ClientConnectionsToggleEvent::Enabled
+            }))
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_wifi_start_without_power_dep_token() {
+        let (mut test_helper, mut test_fut) = setup_wifi_test_with_iface_manager(
+            TestIfaceManager::new().mock_get_power_element_dependency_token_failure(),
+        );
+
+        // One lease for create_sta_iface in setup.
+        assert_eq!(test_helper.power_manager.calls.lock().len(), 1);
+
+        let start_fut = test_helper.wifi_proxy.start();
+        let mut start_fut = pin!(start_fut);
+        assert_matches!(test_helper.exec.run_until_stalled(&mut start_fut), Poll::Pending);
+
+        // The chip is assumed to be powered on by default
+        let get_state_fut = test_helper.wifi_proxy.get_state();
+        let mut get_state_fut = pin!(get_state_fut);
+        assert_matches!(test_helper.exec.run_until_stalled(&mut get_state_fut), Poll::Pending);
+        assert_matches!(test_helper.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+        let start_response = assert_matches!(
+            test_helper.exec.run_until_stalled(&mut start_fut),
+            Poll::Ready(Ok(response)) => response
+        );
+        assert_matches!(start_response, Ok(()));
+        let response = assert_matches!(
+            test_helper.exec.run_until_stalled(&mut get_state_fut),
+            Poll::Ready(Ok(response)) => response
+        );
+        assert_eq!(response.is_started, Some(true));
+
+        {
+            let power_manager_calls = test_helper.power_manager.calls.lock();
+            let calls = test_helper.iface_manager.calls.lock();
+            // Power element leases should be skipped when the dependency token is missing.
+            assert_eq!(
+                *power_manager_calls,
+                vec!["wlanix-create-iface", "wlanix-power-up"]
                     .into_iter()
                     .map(String::from)
                     .collect::<Vec<_>>()

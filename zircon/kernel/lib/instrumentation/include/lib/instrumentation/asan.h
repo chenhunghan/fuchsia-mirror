@@ -48,11 +48,11 @@
 //
 // |value| annotates the 'type' of poison and must be one of the values in the
 // 'distinguished kasan values' section below.
-void asan_poison_shadow(uintptr_t address, size_t size, uint8_t value);
+extern "C" void asan_poison_shadow(uintptr_t address, size_t size, uint8_t value);
 
 // asan_unpoison_shadow() marks [round_down(address, kAsanGranularity), address+size) as
 // valid memory. Memory accesses to that region will not fail asan checks.
-void asan_unpoison_shadow(uintptr_t address, size_t size);
+extern "C" void asan_unpoison_shadow(uintptr_t address, size_t size);
 
 // ASAN dynamic check functions - allows callers to check if an access would be valid without
 // doing the access (aka poisoned). External accesses to a poisoned address is invalid and

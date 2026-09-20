@@ -11,7 +11,7 @@ import fuchsia_base_test
 from honeydew import errors
 from honeydew.auxiliary_devices.usb_power_hub import usb_power_hub
 from honeydew.typing import custom_types as honeydew_types
-from mobly import expects, test_runner
+from mobly import expects, signals, test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -61,11 +61,13 @@ class UsbDisconnectTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """setup_class is called once before running tests."""
         await super().setup_class()
-        self._usb_power_hub: usb_power_hub.UsbPowerHub
-        self._usb_port: int | None
-        (self._usb_power_hub, self._usb_port) = self._lookup_usb_power_hub(
-            self.dut
-        )
+        hub: usb_power_hub.UsbPowerHub | None = self.dut.usb_power_hub
+        if hub is None:
+            raise signals.TestAbortClass(
+                f"USB power hub is not configured for {self.dut.device_name}."
+            )
+        self._usb_power_hub: usb_power_hub.UsbPowerHub = hub
+        self._usb_port: int | None = self.dut.usb_power_hub_port
         self._usb_power_hub.power_on(port=self._usb_port)
 
         # Pre-cache PersistentProperty values (board, product) while the device is online
@@ -189,7 +191,6 @@ class UsbDisconnectTest(fuchsia_base_test.FuchsiaBaseTest):
                 self.dut.ffx.notify_intentional_disconnect()
                 self.dut.ffx.run(
                     cmd=["target", "reboot", "--bootloader"],
-                    include_target_name=True,
                     log_status_on_failure=False,
                     timeout=15,
                 )

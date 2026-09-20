@@ -6,20 +6,20 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/testing/cc_test_executable.gni")
 
+fuchsia_driver_dml("dw-spi-dml") {
+  dml = "meta/dw-spi.dml"
+  driver_name = "dw-spi"
+}
+
 driver_bind_rules("bind_rules") {
-  rules = "meta/dw-spi.bind"
-  bind_output = "dw-spi-bind.bindbc"
+  dml_label = ":dw-spi-dml"
+  bind_output = "dw-spi.bindbc"
   deps = [
     "//src/devices/bind/fuchsia",
     "//src/devices/bind/fuchsia.clock",
     "//src/devices/bind/fuchsia.gpio",
     "//src/devices/bind/fuchsia.platform",
   ]
-}
-
-fuchsia_component_manifest("manifest") {
-  component_name = "dw-spi"
-  manifest = "meta/dw-spi.cml"
 }
 
 fuchsia_rust_driver("dw-spi-driver") {
@@ -79,7 +79,7 @@ fuchsia_rust_driver("dw-spi-driver") {
 }
 
 fuchsia_driver_component("dw-spi") {
-  cm_label = ":manifest"
+  dml_label = ":dw-spi-dml"
   deps = [
     ":bind_rules",
     ":dw-spi-driver",

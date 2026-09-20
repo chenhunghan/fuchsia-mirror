@@ -13,8 +13,9 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any
 
 import cas
 import cl_utils
@@ -54,10 +55,10 @@ class BBError(RuntimeError):
 
 
 class BuildBucketTool(object):
-    def __init__(self, bb: Optional[Path] = None):
+    def __init__(self, bb: Path | None = None):
         self.bb = bb or _BB_TOOL
 
-    def get_json_fields(self, bbid: str) -> Dict[str, Any]:
+    def get_json_fields(self, bbid: str) -> dict[str, Any]:
         bb_result = cl_utils.subprocess_call(
             [
                 str(self.bb),
@@ -95,7 +96,7 @@ class BuildBucketTool(object):
 
     def get_rbe_build_info(
         self, bbid: str, verbose: bool = False
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any]]:
         """Returns info for the build that actually used RBE (maybe a subbuild).
 
         Args:

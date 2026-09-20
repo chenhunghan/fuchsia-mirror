@@ -139,7 +139,7 @@ unsafe extern "C" {
     /// `profile` must point to a valid `SchedulerStateBaseProfile`.
     pub(crate) fn cpp_thread_dispatcher_set_base_profile(
         thread: *mut ThreadDispatcher,
-        profile: *const super::thread_dispatcher::SchedulerStateBaseProfile,
+        profile: *const crate::kernel::scheduler_state::SchedulerStateBaseProfile,
     ) -> zx_status_t;
 
     /// Calls into C++ implementation to set the soft affinity of a thread.

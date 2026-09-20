@@ -753,7 +753,7 @@ impl UsbZeroFunctionDevice {
         while let Ok(Some(request)) = stream.try_next().await {
             match request {
                 fusb_function::UsbFunctionInterfaceRequest::Control { setup, write, responder } => {
-                    info!("Received control request: {:?}", setup);
+                    debug!("Received control request: {:?}", setup);
                     let status = self.handle_control_request(&setup, &write).await;
                     let response = status.as_deref().map_err(|s| s.into_raw());
                     let _ = responder.send(response);
@@ -894,22 +894,33 @@ fn spawn_endpoint_pump_ring(
                 fusb_endpoint::EndpointEvent::OnCompletion { completion } => {
                     let mut re_reqs = Vec::with_capacity(completion.len());
                     for c in completion {
-                        match c.status {
-                            Some(zx::sys::ZX_OK) => {}
-                            Some(s)
-                                if s == Status::CANCELED.into_raw()
-                                    || s == Status::IO_NOT_PRESENT.into_raw() =>
-                            {
-                                // Transfer canceled or endpoint disconnected; drop without re-queuing.
-                                continue;
+                        if let Some(status) = c.status {
+                            match status {
+                                zx::sys::ZX_ERR_IO_REFUSED => {
+                                    // Endpoint was halted/stalled by host or aborted by controller;
+                                    // fall through to re-queue buffer to preserve pump ring depth
+                                    // once halt is cleared.
+                                }
+                                zx::sys::ZX_ERR_IO_NOT_PRESENT => {
+                                    warn!(
+                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping bulk pump loop"
+                                    );
+                                    return;
+                                }
+                                zx::sys::ZX_ERR_CANCELED => {
+                                    // Explicitly canceled by client; drop request without re-queuing.
+                                    continue;
+                                }
+                                zx::sys::ZX_OK => {
+                                    // Transfer completed successfully; fall through to re-queue.
+                                }
+                                err => {
+                                    warn!(
+                                        "Endpoint transfer completed with non-OK status: {:?}",
+                                        Status::err_from_raw(err)
+                                    );
+                                }
                             }
-                            Some(s) => {
-                                warn!(
-                                    "Endpoint transfer completed with non-OK status: {:?}",
-                                    Status::err_from_raw(s)
-                                );
-                            }
-                            None => {}
                         }
 
                         if let Some(vmo_id) = completion_vmo_id(&c) {
@@ -1136,21 +1147,36 @@ fn spawn_loopback_pair(
                     for c in completion {
                         let vmo_id = completion_vmo_id(&c);
                         if let Some(status) = c.status {
-                            if status == Status::CANCELED.into_raw()
-                                || status == Status::IO_NOT_PRESENT.into_raw()
-                            {
-                                // Canceled transfer or endpoint disconnected; drop and do not re-queue.
-                                continue;
-                            }
-                            if status != zx::sys::ZX_OK {
-                                warn!(
-                                    "Endpoint read completed with non-OK status: {:?}",
-                                    Status::err_from_raw(status)
-                                );
-                                if let Some(id) = vmo_id {
-                                    re_reqs.push(make_bulk_request(id, 0, buffer_size));
+                            match status {
+                                zx::sys::ZX_ERR_IO_REFUSED => {
+                                    // Endpoint halted or transfer aborted; re-queue buffer to preserve ring
+                                    // depth without forwarding stale/partial data to loopback.
+                                    if let Some(id) = vmo_id {
+                                        re_reqs.push(make_bulk_request(id, 0, buffer_size));
+                                    }
+                                    continue;
                                 }
-                                continue;
+                                zx::sys::ZX_ERR_IO_NOT_PRESENT => {
+                                    warn!(
+                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping loopback read"
+                                    );
+                                    return;
+                                }
+                                zx::sys::ZX_ERR_CANCELED => {
+                                    // Explicitly canceled by client; drop buffer without re-queuing.
+                                    continue;
+                                }
+                                zx::sys::ZX_OK => {}
+                                err => {
+                                    warn!(
+                                        "Endpoint read completed with non-OK status: {:?}",
+                                        Status::err_from_raw(err)
+                                    );
+                                    if let Some(id) = vmo_id {
+                                        re_reqs.push(make_bulk_request(id, 0, buffer_size));
+                                    }
+                                    continue;
+                                }
                             }
                         }
 
@@ -1294,14 +1320,22 @@ fn spawn_loopback_pair(
                 }))) => {
                     for c in completion {
                         if let Some(status) = c.status {
-                            if status != zx::sys::ZX_OK
-                                && status != Status::CANCELED.into_raw()
-                                && status != Status::IO_NOT_PRESENT.into_raw()
-                            {
-                                warn!(
-                                    "Endpoint write completed with non-OK status: {:?}",
-                                    Status::err_from_raw(status)
-                                );
+                            match status {
+                                zx::sys::ZX_ERR_IO_NOT_PRESENT => {
+                                    warn!(
+                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping loopback write"
+                                    );
+                                    return;
+                                }
+                                zx::sys::ZX_OK
+                                | zx::sys::ZX_ERR_CANCELED
+                                | zx::sys::ZX_ERR_IO_REFUSED => {}
+                                err => {
+                                    warn!(
+                                        "Endpoint write completed with non-OK status: {:?}",
+                                        Status::err_from_raw(err)
+                                    );
+                                }
                             }
                         }
                         if let Some(vmo_id) = completion_vmo_id(&c) {

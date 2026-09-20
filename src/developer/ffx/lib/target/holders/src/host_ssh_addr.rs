@@ -59,14 +59,35 @@ impl TryFromEnv for HostAddrHolder {
         let target_env = target_interface(env);
         let behavior = target_env.init_connection_behavior(env.environment_context()).await?;
         let ConnectionBehavior::Direct(ref dc) = *behavior;
-        let conn = dc
-            .resolution()
-            .await
-            .map_err(|e| e.into_command_error())?
+        let resolution = dc.resolution().await.map_err(|e| e.into_command_error())?;
+        let conn = resolution
             .get_connection(env.environment_context())
             .await
             .map_err(|e| e.into_command_error())?;
-        let host_addr_info = conn.host_ssh_address();
+        let host_addr_info = match conn.host_ssh_address() {
+            Some(addr) => Some(addr),
+            None => {
+                if let Ok(target_addr) = resolution.addr() {
+                    let ssh_path: String = env
+                        .environment_context()
+                        .get("ssh.path")
+                        .unwrap_or_else(|_| "ssh".to_string());
+                    if let Ok(scoped) = netext::ScopedSocketAddr::from_socket_addr(target_addr) {
+                        ffx_ssh::ssh::get_ssh_host_address(
+                            &ssh_path,
+                            scoped,
+                            env.environment_context(),
+                        )
+                        .await
+                        .ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        };
         Ok(HostAddrHolder::from(host_addr_info))
     }
 }

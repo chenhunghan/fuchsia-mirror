@@ -15,8 +15,8 @@ import enum
 import os
 import re
 import sys
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Sequence
 
 import cl_utils
 import depfile
@@ -305,10 +305,10 @@ class LinkerInvocation(object):
         return self._unscanned_direct_files
 
     @property
-    def sysroot(self) -> Optional[Path]:
+    def sysroot(self) -> Path | None:
         return self._sysroot
 
-    def expand_linker_script(self, text: Optional[str]) -> Iterable[Path]:
+    def expand_linker_script(self, text: str | None) -> Iterable[Path]:
         if text is None:
             return
         directives = _parse_linker_script_directives(
@@ -416,7 +416,7 @@ class LinkerInvocation(object):
     def path_exists(self, path: Path) -> bool:
         return self.abs_path(path).exists()
 
-    def resolve_path(self, path: Path, check_sysroot: bool) -> Optional[Path]:
+    def resolve_path(self, path: Path, check_sysroot: bool) -> Path | None:
         if self.path_exists(path):
             return path
 
@@ -433,7 +433,7 @@ class LinkerInvocation(object):
 
         return None
 
-    def resolve_lib(self, lib: str) -> Optional[Path]:
+    def resolve_lib(self, lib: str) -> Path | None:
         """Resolve a linker input reference, using search paths, trying various lib extensions.
 
         Args:
@@ -557,7 +557,7 @@ class LinkerInvocation(object):
         yield from deps[0].deps_paths
 
 
-def try_linker_script_text(path: Path) -> Optional[str]:
+def try_linker_script_text(path: Path) -> str | None:
     """Returns text from linker script, or None if it is not a linker script."""
     try:
         contents = path.read_text()

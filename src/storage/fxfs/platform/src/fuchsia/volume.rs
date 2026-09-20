@@ -9,15 +9,16 @@ use crate::fuchsia::file::{FlushType, FxFile};
 use crate::fuchsia::memory_pressure::{MemoryPressureLevel, MemoryPressureMonitor};
 use crate::fuchsia::node::{FxNode, GetResult, NodeCache};
 use crate::fuchsia::pager::Pager;
-use crate::fuchsia::profile::ProfileState;
+use crate::fuchsia::profile::{FileRecordingHandle, ProfileState};
 use crate::fuchsia::symlink::FxSymlink;
 use crate::fuchsia::volumes_directory::VolumesDirectory;
 use anyhow::{Error, bail, ensure};
 use async_trait::async_trait;
 use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_fxfs::{
-    BytesAndNodes, FileBackedVolumeProviderRequest, FileBackedVolumeProviderRequestStream,
-    ProjectIdRequest, ProjectIdRequestStream, ProjectIterToken,
+    BytesAndNodes, DebugRequest, DebugRequestStream, FileBackedVolumeProviderRequest,
+    FileBackedVolumeProviderRequestStream, ProjectIdRequest, ProjectIdRequestStream,
+    ProjectIterToken,
 };
 use fidl_fuchsia_io as fio;
 use fs_inspect::{FsInspectVolume, VolumeData};
@@ -28,7 +29,7 @@ use futures::channel::oneshot;
 use futures::stream::{self, FusedStream, Stream};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use fxfs::errors::FxfsError;
-use fxfs::filesystem::{self, SyncOptions};
+use fxfs::filesystem::{self, SyncOptions, TruncateGuard};
 use fxfs::future_with_guard::FutureWithGuard;
 use fxfs::log::*;
 use fxfs::object_store::directory::Directory;
@@ -333,8 +334,7 @@ impl FxVolume {
 
         info!("Recording new profile '{name}' for volume object {}", self.store.store_object_id());
         // Begin recording first to ensure that we capture any activity from the replay.
-        let recording_handle =
-            crate::fuchsia::profile::FileRecordingHandle::new(name, self.clone()).await?;
+        let recording_handle = FileRecordingHandle::new(name, self.clone()).await?;
 
         let mut profile_state = self.profile_state.lock();
         self.pager.set_recorder(Some(state.record_new(self, Box::new(recording_handle))));
@@ -382,8 +382,7 @@ impl FxVolume {
                 "Recording new profile '{name}' for volume object {}",
                 self.store.store_object_id()
             );
-            let recording_handle =
-                crate::fuchsia::profile::FileRecordingHandle::new(name, self.clone()).await?;
+            let recording_handle = FileRecordingHandle::new(name, self.clone()).await?;
             let mut profile_state = self.profile_state.lock();
             self.pager.set_recorder(Some(state.record_new(self, Box::new(recording_handle))));
             *profile_state = Some(state);
@@ -505,18 +504,18 @@ impl FxVolume {
     ///
     /// This must be called *after committing* a transaction which deletes the last reference to
     /// |object_id|, since before that point, new connections could be established.
-    pub(super) async fn maybe_purge_file(&self, object_id: u64) -> Result<(), Error> {
+    pub(super) async fn maybe_purge_file(
+        &self,
+        object_id: u64,
+        truncate_guard: Option<&TruncateGuard<'_>>,
+    ) -> Result<(), Error> {
         if let Some(node) = self.cache.get(object_id) {
             node.clone().mark_to_be_purged();
             return Ok(());
         }
         // If this fails, the graveyard should clean it up on next mount.
-        self.store
-            .tombstone_object(
-                object_id,
-                Options { borrow_metadata_space: true, ..Default::default() },
-            )
-            .await?;
+        let txn_options = Options { borrow_metadata_space: true, ..Default::default() };
+        self.store.tombstone_object(object_id, txn_options, truncate_guard).await?;
         Ok(())
     }
 
@@ -875,6 +874,51 @@ impl FxVolume {
                             Err(map_to_raw_status(error))
                         }
                     })?
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears the directory entry cache and internal object store caches for this volume.
+    pub fn clear_caches(&self) {
+        self.dirent_cache.clear();
+        self.store.clear_caches();
+    }
+
+    pub async fn handle_debug_requests(
+        this: Weak<Self>,
+        scope: ExecutionScope,
+        mut requests: DebugRequestStream,
+    ) -> Result<(), Error> {
+        while let Some(request) = requests.try_next().await? {
+            // Try and get an active guard before upgrading.
+            let Some(_guard) = scope.try_active_guard() else { bail!("Volume shutting down") };
+            let Some(this) = this.upgrade() else { bail!("FxVolume dropped") };
+
+            match request {
+                DebugRequest::ClearCaches { responder } => {
+                    this.clear_caches();
+                    let fs = this.store.filesystem();
+                    fs.root_store().clear_caches();
+                    fs.root_parent_store().clear_caches();
+                    fs.allocator().tree().clear_cache();
+                    responder.send(Ok(()))?;
+                }
+                DebugRequest::Compact { responder } => {
+                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
+                }
+                DebugRequest::DeleteProfile { responder, .. } => {
+                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
+                }
+                DebugRequest::RecordAndReplayProfile { responder, .. } => {
+                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
+                }
+                DebugRequest::ReplayXorRecordProfile { responder, .. } => {
+                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
+                }
+                DebugRequest::StopProfileTasks { responder } => {
+                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
                 }
             }
         }

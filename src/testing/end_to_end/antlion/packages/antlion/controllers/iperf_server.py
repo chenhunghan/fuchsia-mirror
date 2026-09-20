@@ -20,16 +20,16 @@ import time
 from typing import IO
 
 from antlion import context, utils
-from antlion.controllers.utils_lib.commands import nmcli
-from antlion.controllers.utils_lib.commands.command import (
+from antlion.types import ControllerConfig, Json
+from antlion.validation import MapValidator
+from libs.commands import nmcli
+from libs.commands.command import (
     LinuxCommand,
     optional,
 )
-from antlion.controllers.utils_lib.commands.journalctl import (
+from libs.commands.journalctl import (
     LinuxJournalctlCommand,
 )
-from antlion.types import ControllerConfig, Json
-from antlion.validation import MapValidator
 from libs.proc import job
 from libs.ssh import connection, settings
 from mobly import logger, signals

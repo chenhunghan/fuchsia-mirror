@@ -7,9 +7,10 @@
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
-from typing import AbstractSet, Dict, Sequence
+from typing import AbstractSet
 
 SizeCheckMode = Enum("SizeCheckMode", ["EQUAL", "BAZEL_SMALLER"])
 
@@ -18,8 +19,8 @@ class Package:
     def __init__(self, manifest: Path, ignored_blobs: Sequence[str] = None):
         pkg = json.load(manifest)
         self.repository: str = pkg.get("repository", "")
-        self.blobs: Dict[str, str] = {}
-        self.driver_blobs: Dict[str, str] = {}
+        self.blobs: dict[str, str] = {}
+        self.driver_blobs: dict[str, str] = {}
 
         ignored_blobs = ignored_blobs or []
 

@@ -4,8 +4,8 @@
 # found in the LICENSE file.
 
 import unittest
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Iterable, Sequence
 from unittest import mock
 
 import fuchsia

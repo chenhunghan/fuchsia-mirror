@@ -5,6 +5,7 @@
 # https://opensource.org/licenses/MIT
 
 import("//zircon/kernel/kernel_executable.gni")
+import("//zircon/kernel/kernel_tests_enabled.gni")
 
 # Kernel without bells or whistles.
 kernel_executable("vmzircon") {
@@ -12,17 +13,19 @@ kernel_executable("vmzircon") {
   deps = []
 }
 
-# Kernel with tests and select debug commands compiled in.
-kernel_executable("vmzircon.with-tests") {
-  testonly = true
-  visibility = [
-    "//src/bringup/lib/userboot/*",
-    "//zircon/kernel:*",
-    "//zircon/kernel/image/*",
-    "//zircon/kernel/lib/userabi/trivial-test-userboot:*",
-  ]
-  deps = [
-    "//zircon/kernel/debugcommands",
-    "//zircon/kernel/tests:kernel-tests",
-  ]
+if (kernel_tests_enabled) {
+  # Kernel with tests and select debug commands compiled in.
+  kernel_executable("vmzircon.with-tests") {
+    testonly = true
+    visibility = [
+      "//src/bringup/lib/userboot/*",
+      "//zircon/kernel:*",
+      "//zircon/kernel/image/*",
+      "//zircon/kernel/lib/userabi/trivial-test-userboot:*",
+    ]
+    deps = [
+      "//zircon/kernel/debugcommands",
+      "//zircon/kernel/tests:kernel-tests",
+    ]
+  }
 }

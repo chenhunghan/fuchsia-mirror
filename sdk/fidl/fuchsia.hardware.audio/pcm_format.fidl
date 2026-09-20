@@ -65,7 +65,8 @@ type ChannelSet = table {
 /// `PcmSupportedFormats` table, `GetSupportedFormats` must return a vector with multiple
 /// `SupportedFormats` entries.
 ///
-/// For more detailed information see [Audio Driver Streaming Interface](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_streaming).
+/// For more detailed information see
+/// [Audio Driver Streaming Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/streaming).
 type PcmSupportedFormats = table {
     /// Vector of possible `ChannelSets` supported.
     /// A `ChannelSet` specifies a channel configuration (including a channel-count), plus a number
@@ -107,7 +108,8 @@ type PcmSupportedFormats = table {
 /// which have `valid_bits_per_sample` bits of most-significant (left-justified) data within
 /// `bytes_per_sample` bytes.
 ///
-/// For more detailed information see [Audio Driver Streaming Interface](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_streaming).
+/// For more detailed information see
+/// [Audio Driver Streaming Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/streaming).
 type PcmFormat = struct {
     /// Number of channels.
     number_of_channels uint8;

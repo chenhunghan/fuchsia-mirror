@@ -4,6 +4,8 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//zircon/kernel/kernel_tests_enabled.gni")
+
 # Defines a group of dependencies required only by kernel unit tests.
 #
 # This template conditionally forwards `public_deps` only when building in a
@@ -33,6 +35,7 @@
 #
 #   * visibility
 #     - Optional: The usual GN meaning.
+
 template("kernel_test_deps") {
   assert(defined(invoker.public_deps),
          "kernel_test_deps($target_name) must define public_deps")
@@ -43,8 +46,7 @@ template("kernel_test_deps") {
   group(target_name) {
     forward_variables_from(invoker, [ "visibility" ])
 
-    if (toolchain_variant.tags + [ "kernel-with-tests" ] -
-        [ "kernel-with-tests" ] != toolchain_variant.tags) {
+    if (kernel_tests_enabled) {
       forward_variables_from(invoker, [ "public_deps" ])
     } else {
       not_needed(invoker, [ "public_deps" ])

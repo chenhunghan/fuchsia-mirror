@@ -17,21 +17,25 @@ impl InstanceSource for EmulatorSource {
         true
     }
 
-    fn get_all_targets(&self, root: &Path) -> Vec<TargetHandle> {
+    fn get_all_targets(&self, root: &Path) -> Vec<(String, TargetHandle)> {
         let emu_instances = EmulatorInstances::new(root.to_path_buf());
         emulator_instance::get_all_targets(&emu_instances)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|t| TargetHandle::try_from(t).ok())
+            .filter_map(|t| {
+                let name = t.nodename.clone()?;
+                let handle = TargetHandle::try_from(t).ok()?;
+                Some((name, handle))
+            })
             .collect()
     }
 
-    fn instance_name_from_path(&self, root: &Path, path: &Path) -> Option<String> {
+    fn instance_id_from_path(&self, root: &Path, path: &Path) -> Option<String> {
         emulator_instance::instance_name_from_path(root, path)
     }
 
     fn read_target_handle(&self, root: &Path, path: &Path) -> Option<TargetHandle> {
-        let name = self.instance_name_from_path(root, path)?;
+        let name = self.instance_id_from_path(root, path)?;
         let emu_instances = EmulatorInstances::new(root.to_path_buf());
         let info = emulator_instance::get_target(&emu_instances, &name).ok()??;
         TargetHandle::try_from(info).ok()

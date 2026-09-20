@@ -5,7 +5,7 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any
 
 # SDK directory of blobs across all package manifests,
 # each renamed to their merkle.
@@ -35,13 +35,13 @@ PACKAGE_DIR_TO_SUBPACKAGE_MANIFESTS_DIR = "../../../subpackage_manifests"
 
 def handle_package_manifest(
     input_manifest_path: Path,
-    sdk_file_map: Dict[str, str],
-    sdk_metadata: Dict[str, Any],
-    inputs: Dict[str, str],
+    sdk_file_map: dict[str, str],
+    sdk_metadata: dict[str, Any],
+    inputs: dict[str, str],
     # Parameters only used in recursive calls.
-    visited_subpackages: Set[Path] = set(),
+    visited_subpackages: set[Path] = set(),
     is_subpackage: bool = False,
-) -> tuple[str, Dict[str, Dict[str, Any]]]:
+) -> tuple[str, dict[str, dict[str, Any]]]:
     """
     For the given `input_manifest_path`, does the following:
     * Re-writes all source paths to be relative to SDK location,
@@ -82,7 +82,7 @@ def handle_package_manifest(
     subtype = f"{arch}-api-{api_level}"
 
     with open(input_manifest_path, "r") as manifest_file:
-        input_manifest: Dict[str, Any] = json.load(manifest_file)
+        input_manifest: dict[str, Any] = json.load(manifest_file)
 
     # Re-wire will be relative to package manifest location.
     input_manifest["blob_sources_relative"] = "file"
@@ -114,7 +114,7 @@ def handle_package_manifest(
         target_files.append(f"{BLOBS_DIR}/{merkle}")
 
     # Handle subpackages.
-    subpackages_manifests_info: Dict[str, Dict[str, Any]] = {}
+    subpackages_manifests_info: dict[str, dict[str, Any]] = {}
     subpackage_list = input_manifest.get("subpackages", [])
     for subpackage in subpackage_list:
         subpackage_manifest_path, subpackage_merkle = (

@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("rust-driver-dml") {
+  dml = "meta/rust-driver.dml"
+  driver_name = "simple_rust_driver"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/rust-driver.bind"
+  dml_label = ":rust-driver-dml"
   bind_output = "rust.bindbc"
   deps = [ "//examples/drivers/bind/bindlib:gizmo.example" ]
 }
@@ -38,8 +43,7 @@ fuchsia_rust_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
-  component_name = "simple_rust_driver"
-  manifest = "meta/rust-driver.cml"
+  dml_label = ":rust-driver-dml"
   deps = [
     ":bind",
     ":driver",

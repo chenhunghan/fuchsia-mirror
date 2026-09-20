@@ -33,6 +33,8 @@ compiler_config("arm64") {
       "-Zsanitizer=shadow-call-stack",
       "-Zfixed-x18",
     ]
+  } else {
+    cflags += [ "-march=armv8-a+crc" ]
   }
 
   ldflags = cflags

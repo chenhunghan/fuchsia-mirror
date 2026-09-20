@@ -7,8 +7,14 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("goldfish_address_space-dml") {
+  dml = "meta/goldfish_address_space.dml"
+  driver_name = "goldfish_address_space"
+}
+
 driver_bind_rules("goldfish_address_space-bind") {
-  rules = "meta/goldfish_address_space.bind"
+  bind_output = "goldfish_address_space.bindbc"
+  dml_label = ":goldfish_address_space-dml"
   tests = "meta/tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -50,10 +56,10 @@ fuchsia_cc_driver("address_space_driver-driver") {
 }
 
 fuchsia_driver_component("address_space_driver") {
+  dml_label = ":goldfish_address_space-dml"
   component_name = "goldfish_address_space"
   deps = [ ":address_space_driver-driver" ]
   info = "meta/address_space_driver-info.json"
-  manifest = "meta/goldfish_address_space.cml"
 }
 
 fuchsia_driver_package("goldfish_address_space") {

@@ -147,6 +147,7 @@ test_names = [
   "open_perms",
   "overlayfs",
   "perf_event",
+  "pidfd",
   "pipe",
   "procattr",
   "ptrace",
@@ -169,11 +170,13 @@ test_names = [
 test_subprogram_names = [
   # keep-sorted start
   "fuse_memfs",
+  "has_ambient_capabilities",
   "has_blocked_signals",
   "has_ignored_signals",
   "has_pending_signals",
   "is_at_secure_set",
   "is_current_domain",
+  "is_current_domain_custom_interp",
   "is_duplicated_fd",
   "is_fd_valid",
   "is_itimer_real_reset",
@@ -214,6 +217,7 @@ policy_files = [
   "policies/prebuilt/open_perms_policy",
   "policies/prebuilt/overlayfs_policy",
   "policies/prebuilt/perf_event_policy",
+  "policies/prebuilt/pidfd_policy",
   "policies/prebuilt/pipe_policy",
   "policies/prebuilt/ptrace_policy",
   "policies/prebuilt/sched_policy",
@@ -262,11 +266,20 @@ foreach(executable_name, test_subprogram_names) {
 
     # TODO: https://fxbug.dev/297293167 - enable ASan instrumentation for Linux binaries in Starnix
     exclude_toolchain_tags = [ "instrumented" ]
-    sources = [
-      "tests/test_subprograms/${executable_name}.cc",
-      "util.cc",
-      "util.h",
-    ]
+    if (executable_name == "is_current_domain_custom_interp") {
+      sources = [
+        "tests/test_subprograms/is_current_domain.cc",
+        "util.cc",
+        "util.h",
+      ]
+      ldflags = [ "-Wl,--dynamic-linker=./test_interp" ]
+    } else {
+      sources = [
+        "tests/test_subprograms/${executable_name}.cc",
+        "util.cc",
+        "util.h",
+      ]
+    }
     deps = [
       "//sdk/lib/fit",
       "//src/lib/files",

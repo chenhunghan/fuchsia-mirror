@@ -21,6 +21,7 @@ source_set("vm") {
     "compression.cc",
     "compression_ffi.cc",
     "compressor.cc",
+    "compressor_ffi.cc",
     "debug_compressor.cc",
     "discardable_vmo_tracker.cc",
     "discardable_vmo_tracker_ffi.cc",
@@ -31,7 +32,6 @@ source_set("vm") {
     "mem_command.cc",
     "memory_stats.cc",
     "page.cc",
-    "page_ffi.cc",
     "page_queues.cc",
     "page_queues_ffi.cc",
     "page_source.cc",
@@ -47,7 +47,6 @@ source_set("vm") {
     "pmm_checker_ffi.cc",
     "pmm_ffi.cc",
     "pmm_node.cc",
-    "pmm_node_ffi.cc",
     "ppb_command.cc",
     "scanner.cc",
     "scanner_ffi.cc",
@@ -121,10 +120,12 @@ kernel_bindgen_crate("scanner-bindings") {
   function_allowlist = [
     "cpp_scanner_push_disable_count",
     "cpp_scanner_pop_disable_count",
+    "cpp_scanner_needs_accessed_scan",
+    "cpp_scanner_wait_for_accessed_scan",
   ]
 
   raw_lines = [ "#![no_std]" ]
-  expect_lints = []
+  expect_lints = [ "non_camel_case_types" ]
 }
 
 kernel_bindgen_crate("discardable-vmo-tracker-bindings") {
@@ -299,12 +300,14 @@ kernel_bindgen_crate("pmm-bindings") {
     "cpp_pmm_num_arenas",
     "cpp_pmm_get_arena_info",
     "cpp_paddr_to_vm_page",
+    "cpp_pmm_get_page_compression",
   ]
   type_allowlist = []
   type_blocklist = [
     "PmmOptDelayReuse",
     "PageQueues",
     "PmmNode",
+    "VmCompression",
     "VmPageDoublyLinkedList",
     "pmm_arena_info",
     "pmm_arena_info_t",
@@ -332,6 +335,7 @@ kernel_bindgen_crate("pmm-bindings") {
     "pub use pmm_node_bindings::PmmOptDelayReuse;",
     "pub type PmmNode = pmm_node_bindings::PmmNode;",
     "pub type VmPageDoublyLinkedList = core::ffi::c_void;",
+    "pub type VmCompression = core::ffi::c_void;",
   ]
   expect_lints = []
 }
@@ -359,6 +363,7 @@ kernel_bindgen_crate("pmm-checker-bindings") {
     "cpp_pmm_checker_fill_pattern",
     "cpp_pmm_checker_validate_pattern",
     "cpp_pmm_checker_assert_pattern",
+    "cpp_pmm_checker_print_status_stdout",
   ]
   type_allowlist = [ "PmmChecker" ]
   opaque_types = [ "PmmChecker" ]
@@ -385,33 +390,6 @@ kernel_bindgen_crate("pmm-node-bindings") {
   cpp = true
 
   notice_year = 2026
-  function_allowlist = [
-    "cpp_pmm_node_destroy",
-    "cpp_pmm_node_alloc_page",
-    "cpp_pmm_node_alloc_pages",
-    "cpp_pmm_node_free_page",
-    "cpp_pmm_node_free_list",
-    "cpp_pmm_node_count_free_pages",
-    "cpp_pmm_node_count_loaned_free_pages",
-    "cpp_pmm_node_count_loan_cancelled_pages",
-    "cpp_pmm_node_count_loaned_not_free_pages",
-    "cpp_pmm_node_count_loaned_pages",
-    "cpp_pmm_node_count_total_bytes",
-    "cpp_pmm_node_enable_free_page_filling",
-    "cpp_pmm_node_fill_free_pages_and_arm",
-    "cpp_pmm_node_set_free_memory_signal",
-    "cpp_pmm_node_wait_for_single_page_allocation",
-    "cpp_pmm_node_stop_returning_should_wait",
-    "cpp_pmm_node_has_alloc_failed_no_mem",
-    "cpp_pmm_node_get_first_alloc_failure",
-    "cpp_pmm_node_report_alloc_failure",
-    "cpp_pmm_node_begin_loan",
-    "cpp_pmm_node_cancel_loan",
-    "cpp_pmm_node_end_loan",
-    "cpp_pmm_node_alloc_loaned_page",
-    "cpp_pmm_node_begin_free_loaned_page",
-    "cpp_pmm_node_finish_free_loaned_pages",
-  ]
   type_allowlist = [
     "PmmOptDelayReuse",
     "PmmNode",
@@ -434,11 +412,11 @@ kernel_bindgen_crate("pmm-node-bindings") {
     "PmmChecker",
     "AutounsignalEvent",
     "Event",
+    "VmCompression",
     "VmCowPages",
     "VmPageDoublyLinkedList",
   ]
   opaque_types = [
-    "VmCompression",
     "fbl::RefPtr",
     "ktl::atomic",
     "std::atomic",
@@ -455,6 +433,7 @@ kernel_bindgen_crate("pmm-node-bindings") {
     "PmmNode_AllocFailure_Type",
   ]
   deps = [
+    ":compression-bindings",
     ":evictor-bindings",
     ":page-bindings",
     ":page-queues-bindings",
@@ -467,6 +446,7 @@ kernel_bindgen_crate("pmm-node-bindings") {
   edition = "2024"
   raw_lines = [
     "#![no_std]",
+    "pub use compression_bindings::VmCompression;",
     "pub use event_bindings::{AutounsignalEvent, Event};",
     "pub use evictor_bindings::Evictor;",
     "pub use page_bindings::vm_page_t;",
@@ -533,40 +513,96 @@ kernel_bindgen_crate("page-queues-bindings") {
   notice_year = 2026
   function_allowlist = [
     "cpp_page_queues_init",
-    "cpp_page_queues_destroy",
-    "cpp_page_queues_debug_page_is_wired",
-    "cpp_page_queues_debug_page_is_any_anonymous",
-    "cpp_page_queues_debug_page_is_reclaim",
-    "cpp_page_queues_debug_page_is_pager_backed_dirty",
-    "cpp_page_queues_debug_page_is_reclaim_isolate",
-    "cpp_page_queues_debug_page_is_anonymous",
+    "cpp_page_queues_stop_threads",
+    "cpp_page_queues_set_wired",
+    "cpp_page_queues_set_anonymous",
     "cpp_page_queues_set_reclaim",
+    "cpp_page_queues_set_pager_backed_dirty",
+    "cpp_page_queues_set_anonymous_zero_fork",
+    "cpp_page_queues_set_high_priority",
+    "cpp_page_queues_move_to_wired",
+    "cpp_page_queues_move_to_anonymous",
+    "cpp_page_queues_move_to_reclaim",
+    "cpp_page_queues_move_to_reclaim_dont_need",
+    "cpp_page_queues_move_to_pager_backed_dirty",
+    "cpp_page_queues_move_to_high_priority",
+    "cpp_page_queues_move_anonymous_to_anonymous_zero_fork",
+    "cpp_page_queues_compress_failed",
+    "cpp_page_queues_change_object_offset",
+    "cpp_page_queues_change_object_offset_array",
+    "cpp_page_queues_change_object_offset_locked_list",
     "cpp_page_queues_remove",
+    "cpp_page_queues_remove_array_into_list",
     "cpp_page_queues_mark_accessed",
+    "cpp_page_queues_get_lock",
+    "cpp_page_queues_string_from_age_reason",
     "cpp_page_queues_rotate_reclaim_queues",
+    "cpp_page_queues_pop_anonymous_zero_fork",
+    "cpp_page_queues_peek_isolate",
+    "cpp_page_queues_get_cow_for_loaned_page",
+    "cpp_page_queues_get_reclaim_queue_counts",
+    "cpp_page_queues_queue_counts",
+    "cpp_page_queues_get_active_inactive_counts",
+    "cpp_page_queues_dump",
+    "cpp_page_queues_get_lru_pages_compressed",
+    "cpp_page_queues_enable_anonymous_reclaim",
     "cpp_page_queues_reclaim_is_only_pager_backed",
     "cpp_page_queues_is_page_reclaimable",
-    "cpp_page_queues_move_to_reclaim_dont_need",
-    "cpp_page_queues_queue_counts",
+    "cpp_page_queues_debug_page_is_reclaim",
+    "cpp_page_queues_debug_page_is_reclaim_isolate",
+    "cpp_page_queues_debug_page_is_pager_backed_dirty",
+    "cpp_page_queues_debug_page_is_anonymous",
+    "cpp_page_queues_debug_page_is_anonymous_zero_fork",
+    "cpp_page_queues_debug_page_is_any_anonymous",
+    "cpp_page_queues_debug_page_is_wired",
+    "cpp_page_queues_debug_page_is_high_priority",
+    "cpp_page_queues_start_threads",
+    "cpp_page_queues_start_debug_compressor",
+    "cpp_page_queues_set_active_ratio_multiplier",
+    "cpp_page_queues_set_lru_action",
+    "cpp_page_queues_disable_aging",
+    "cpp_page_queues_enable_aging",
+    "cpp_page_queues_set_aging_event",
+    "cpp_page_queues_debug_get_lru_thread",
+    "cpp_page_queues_debug_get_mru_thread",
+    "cpp_debug_compressor_init",
+    "cpp_debug_compressor_destroy",
   ]
   type_allowlist = [
     "AgeReason",
     "Counts",
     "LruAction",
     "PageQueues",
+    "PageQueues_ActiveInactiveCounts",
     "PageQueues_Counts",
+    "PageQueues_ReclaimCounts",
+    "PageQueuesVmoBacklink",
+    "RelaxedAtomic",
+    "ktl::atomic",
+    "std::atomic",
   ]
   type_blocklist = [
+    "AutounsignalEvent",
+    "Event",
+    "Thread",
+    "VmPageDoublyLinkedList",
     "fbl_RefPtr",
     "vm_page_t",
+    "zx_duration_mono_t",
+    "zx_instant_mono_t",
     "zx_paddr_t",
     "zx_status_t",
     "PageQueues_VmoBacklink",
-    "PageQueues_ReclaimCounts",
-    "PageQueues_ActiveInactiveCounts",
   ]
   var_allowlist = [ "PageQueues_k.*" ]
-  opaque_types = [ "PageQueues" ]
+  opaque_types = [
+    "RelaxedAtomic",
+    "VmDebugCompressor",
+    "ktl::atomic",
+    "ktl::unique_ptr",
+    "std::atomic",
+    "std::unique_ptr",
+  ]
   rustified_enum = [
     "PageQueues_AgeReason",
     "PageQueues_LruAction",
@@ -576,13 +612,18 @@ kernel_bindgen_crate("page-queues-bindings") {
   deps = [
     ":page-bindings",
     "//sdk/rust/zx-types",
+    "//zircon/kernel/kernel:event-bindings",
   ]
   raw_lines = [
     "#![no_std]",
     "use page_bindings::vm_page_t;",
-    "pub use zx_types::zx_duration_mono_t;",
+    "pub use event_bindings::{AutounsignalEvent, Event};",
+    "pub use zx_types::{zx_duration_mono_t, zx_instant_mono_t};",
     "pub use zx_types::zx_paddr_t;",
+    "pub type Thread = core::ffi::c_void;",
     "pub type VmCowPages = *const core::ffi::c_void;",
+    "pub type VmDebugCompressor = core::ffi::c_void;",
+    "pub type VmPageDoublyLinkedList = usize;",
   ]
   expect_lints = [
     "non_camel_case_types",
@@ -606,22 +647,13 @@ kernel_bindgen_crate("page-bindings") {
     "VM_PAGE_OBJECT_MAX_PIN_COUNT",
     "VM_PAGE_OBJECT_PIN_COUNT_BITS",
   ]
-  function_allowlist = [
-    "cpp_get_count",
-    "cpp_add_to_initial_count",
-    "cpp_vm_page_dump",
-  ]
   type_allowlist = [
     "vm_page_t",
     "vm_page_state",
   ]
   opaque_types = [ "vm_page_t" ]
   rustified_enum = [ "vm_page_state" ]
-  function_blocklist = [
-    "vm_page_get_count",
-    "vm_page_add_to_initial_count",
-    "vm_page_dump",
-  ]
+  function_blocklist = [ ".*" ]
   additional_bindgen_flags = [
     "--with-derive-custom-enum=vm_page_state=Ord",
     "--with-derive-custom-enum=vm_page_state=PartialOrd",
@@ -802,6 +834,7 @@ kernel_bindgen_crate("vm-page-list-bindings") {
     "cpp_vm_page_list_btree_cursor_get",
     "cpp_vm_page_list_btree_cursor_init",
     "cpp_vm_page_list_btree_cursor_next",
+    "cpp_vm_page_list_btree_cursor_prev",
     "cpp_vm_page_list_btree_destroy",
     "cpp_vm_page_list_btree_erase_at",
     "cpp_vm_page_list_btree_find",
@@ -889,6 +922,7 @@ kernel_bindgen_crate("vm-object-bindings") {
     "cpp_vm_object_writeback_begin",
     "cpp_vm_object_writeback_end",
     "cpp_vm_object_reclamation_event_count",
+    "cpp_vm_object_detach_source",
     "cpp_vm_object_take_pages",
     "cpp_vm_object_supply_pages",
     "cpp_vm_object_read_user",
@@ -1032,18 +1066,42 @@ kernel_bindgen_crate("compression-bindings") {
     "cpp_vmcompression_destroy",
     "cpp_vmcompression_free",
     "cpp_vmcompression_get_ref_counted",
+    "cpp_vmcompression_acquire_compressor",
+    "cpp_vmcompression_compressor_guard_destroy",
+    "cpp_vmcompression_compressor_guard_get",
   ]
-  type_allowlist = [ "VmCompression" ]
-  opaque_types = [ "VmCompression" ]
+  type_allowlist = [
+    "VmCompression",
+    "VmCompression_CompressorGuard",
+  ]
+  opaque_types = [
+    "VmCompression",
+    "VmCompression_CompressorGuard",
+  ]
   function_blocklist = [ "VmCompression_.*" ]
+
+  # These are listed individually rather than as "VmCompression_.*" because a
+  # wildcard would also block VmCompression_CompressorGuard, which is
+  # allowlisted above.
   type_blocklist = [
-    "VmCompression_.*",
+    "VmCompression_CompressedRef",
+    "VmCompression_CompressResult",
+    "VmCompression_FailTag",
+    "VmCompression_PageAndMetadata",
+    "VmCompression_Stats",
+    "VmCompression_ZeroTag",
+    "VmCompressor",
     "vm_page_t",
     "zx_status_t",
   ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
 
-  raw_lines = [ "#![no_std]" ]
+  deps = [ ":compressor-bindings" ]
+
+  raw_lines = [
+    "#![no_std]",
+    "pub use compressor_bindings::VmCompressor;",
+  ]
   expect_lints = []
 }
 
@@ -1057,6 +1115,7 @@ kernel_bindgen_crate("compressor-bindings") {
   edition = "2024"
   notice_year = 2026
 
+  function_allowlist = [ "cpp_vmcompressor_arm" ]
   type_allowlist = [ "VmCompressor" ]
   opaque_types = [ "VmCompressor" ]
   function_blocklist = [ "VmCompressor_.*" ]
@@ -1067,7 +1126,12 @@ kernel_bindgen_crate("compressor-bindings") {
   ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
 
-  raw_lines = [ "#![no_std]" ]
+  deps = [ "//sdk/rust/zx-types" ]
+
+  raw_lines = [
+    "#![no_std]",
+    "use zx_types::zx_status_t;",
+  ]
   expect_lints = []
 }
 
@@ -1098,7 +1162,13 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "cpp_vm_cow_pages_deferred_ops_construct",
     "cpp_vm_cow_pages_deferred_ops_destroy",
     "cpp_vm_cow_pages_add_new_pages_locked",
+    "cpp_vm_cow_pages_zero_pages_locked",
     "cpp_vm_cow_pages_debug_get_populated_slots_count",
+    "cpp_vm_cow_pages_debug_is_parent_content",
+    "cpp_vm_cow_pages_can_borrow",
+    "cpp_vm_cow_pages_can_evict",
+    "cpp_vm_cow_pages_is_discardable",
+    "cpp_vm_cow_pages_upgrade_from_raw",
   ]
   type_allowlist = [
     "DirtyState",
@@ -1117,6 +1187,7 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
   ]
   type_blocklist = [
     "DiscardableVmoTracker",
+    "MultiPageRequest",
     "PmmOptDelayReuse",
     "VmCompressor",
     "VmCompressor_CompressedRef",
@@ -1167,6 +1238,7 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     ":compressor-bindings",
     ":discardable-vmo-tracker-bindings",
     ":page-bindings",
+    ":page-source-bindings",
     ":pmm-bindings",
     "//sdk/rust/zx-types",
   ]
@@ -1176,6 +1248,7 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "pub use compressor_bindings::VmCompressor;",
     "use discardable_vmo_tracker_bindings::DiscardableVmoTracker;",
     "use page_bindings::vm_page_t;",
+    "use page_source_bindings::MultiPageRequest;",
     "pub use pmm_bindings::{PmmOptDelayReuse, VmPageDoublyLinkedList};",
     "use zx_types::zx_status_t;",
   ]
@@ -1190,6 +1263,7 @@ kernel_rust_mod("vm-rs") {
     "compression.rs",
     "compressor.rs",
     "continuous_attribution_tracker.rs",
+    "debug_compressor.rs",
     "discardable_vmo_tracker.rs",
     "evictor.rs",
     "fault.rs",
@@ -1251,12 +1325,14 @@ kernel_rust_mod("vm-rs") {
     "//src/lib/zr",
     "//third_party/rust_crates:bitflags",
     "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/heap:heap-rs",
     "//zircon/kernel/lib/init:init_rust",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page:page-rs",
     "//zircon/system/ulib/fbl/rust:fbl",
+    "//zircon/system/ulib/pretty/rust:pretty",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
@@ -1271,6 +1347,7 @@ kernel_bindgen_crate("test-helper-bindings") {
   edition = "2024"
   notice_year = 2026
   function_allowlist = [
+    "cpp_change_vmo_high_priority_count",
     "cpp_fill_region",
     "cpp_make_committed_pager_vmo",
     "cpp_make_partially_committed_pager_vmo",
@@ -1279,7 +1356,6 @@ kernel_bindgen_crate("test-helper-bindings") {
     "cpp_test_rand",
     "cpp_test_region",
     "cpp_verify_continuous_attribution_bytes",
-    "cpp_verify_private_attribution_counts",
   ]
   type_blocklist = [
     "AttributionCounts",

@@ -50,6 +50,7 @@ pub fn sanitize(parameter: &str) -> String {
 }
 
 pub async fn add_ffx_launch_event(
+    connection_mode: Option<&str>,
     redacted_args: String,
     enhanced_args: Option<String>,
     time: u128,
@@ -66,6 +67,17 @@ pub async fn add_ffx_launch_event(
         ("call_stack", call_stack.into()),
     ]);
     let mut metrics_svc = ga4_metrics().await?;
+    if let Some(connection_mode) = connection_mode {
+        let _ = metrics_svc
+            .add_custom_event(
+                Some("ffx_connection_mode"),
+                Some(connection_mode),
+                None,
+                BTreeMap::new(),
+                Some("ffx_connection_mode"),
+            )
+            .await;
+    }
     metrics_svc
         .add_custom_event(
             None,

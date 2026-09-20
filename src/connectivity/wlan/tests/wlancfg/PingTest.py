@@ -48,7 +48,7 @@ class PingParams(NamedTuple):
     name: str
     dest_ip: str | Callable[[Addrs], str]
     packet_count: int = 3
-    interval: timedelta = timedelta(seconds=1)
+    interval: timedelta = timedelta(seconds=0.1)
     timeout: timedelta = timedelta(seconds=1)
     size: int = 25
     min_success: int | None = None

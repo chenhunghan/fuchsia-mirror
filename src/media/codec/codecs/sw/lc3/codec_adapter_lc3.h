@@ -5,11 +5,23 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_SW_LC3_CODEC_ADAPTER_LC3_H_
 #define SRC_MEDIA_CODEC_CODECS_SW_LC3_CODEC_ADAPTER_LC3_H_
 
+#include <fuchsia/media/cpp/fidl.h>
+
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <memory>
 
 // LC3 Specification v1.0 section 2.2 Encoder Interfaces.
 static constexpr uint16_t kMinExternalByteCount = 20;
 static constexpr uint16_t kMaxExternalByteCount = 400;
+// Maximum number of channels supported by the LC3 codec adapter.
+// Matches fuchsia::media::MAX_PCM_CHANNEL_COUNT (8), which is also the maximum
+// number of channels that can be mapped from the Bluetooth
+// Audio_Channel_Allocation LTV bitmask to fuchsia::media::AudioChannelId in the
+// decoder (Assigned Numbers section 6.12.1 maps to 8 of the 9 concrete speaker
+// locations in AudioChannelId, omitting CS). See also GetAudioChannelMap.
+static constexpr size_t kMaxChannelCount = fuchsia::media::MAX_PCM_CHANNEL_COUNT;
 
 static constexpr char kLc3MimeType[] = "audio/lc3";
 

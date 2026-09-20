@@ -11,11 +11,13 @@
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/fidl/cpp/wire/channel.h>
+#include <lib/fit/defer.h>
 #include <lib/pci/hw.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/clock.h>
 #include <lib/zx/result.h>
 #include <lib/zx/time.h>
+#include <threads.h>
 #include <zircon/errors.h>
 #include <zircon/limits.h>
 #include <zircon/syscalls/object.h>
@@ -173,8 +175,8 @@ class TestBus : public pci::Bus {
       : pci::Bus(parent, pciroot, info, std::move(ecam)) {}
   virtual ~TestBus() = default;
 
+  using pci::Bus::HandleDeviceLegacyIrqUntriggered;
   using pci::Bus::HandleLegacyIrq;
-
   pci::DeviceTree& Devices() { return devices(); }
 
   const fuchsia_hardware_pci::BoardConfiguration& GetBoardConfiguration() { return board_config(); }
@@ -418,8 +420,12 @@ TEST_F(PciBusTests, LegacyIrqMaskOnDeliverTest) {
   ASSERT_TRUE(result.is_ok());
   zx::interrupt dev_interrupt = std::move(result.value());
 
+  zx::port port;
+  ASSERT_OK(zx::port::create(ZX_PORT_BIND_TO_INTERRUPT, &port));
+  ASSERT_OK(dev_interrupt.bind(port, 0, 0));
+
   // Reads legacy_disabled under the device lock.
-  auto disabled = [&bus_device]() {
+  auto disabled = [bus_device]() {
     fbl::AutoLock _(bus_device->dev_lock());
     return bus_device->irqs().legacy_disabled;
   };
@@ -430,17 +436,364 @@ TEST_F(PciBusTests, LegacyIrqMaskOnDeliverTest) {
   ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
   mock_ddk::GetDriverRuntime()->RunUntilIdle();
 
-  zx::time_boot receive_time;
-  ASSERT_OK(dev_interrupt.wait(&receive_time));
+  zx_port_packet_t packet;
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
   ASSERT_TRUE(disabled());
 
-  // Acknowledging the interrupt the way a driver does (via AckInterrupt) re-arms
-  // the device by clearing the mask.
+  // AckLegacyIrq is a no-op that returns ZX_OK for backward compatibility;
+  // verify it does not unmask the device prematurely.
   {
     fbl::AutoLock _(bus_device->dev_lock());
     ASSERT_OK(bus_device->AckLegacyIrq());
   }
+  ASSERT_TRUE(disabled());
+
+  // Acknowledging the virtual interrupt handle re-arms the device automatically
+  // via the ZX_VIRTUAL_INTERRUPT_UNTRIGGERED signal handler.
+  ASSERT_OK(dev_interrupt.ack());
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
   ASSERT_FALSE(disabled());
+
+  // Trigger a second interrupt to verify consecutive delivery and re-arming.
+  ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
+  ASSERT_TRUE(disabled());
+
+  ASSERT_OK(dev_interrupt.ack());
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_FALSE(disabled());
+}
+
+TEST_F(PciBusTests, LegacyInterruptLifecycle_SyncWait) {
+  pci_bdf_t device = {0, 0, 0};
+  pciroot()
+      .ecam()
+      .get_device(device)
+      ->set_vendor_id(0x8086)
+      .set_device_id(0x8086)
+      .set_interrupt_pin(0x1)
+      .set_status(kStatusInterrupt);
+  constexpr uint8_t kVector = 0x10;
+  zx::interrupt bus_interrupt = AddLegacyIrqToBus(kVector);
+  AddRoutingEntryToBus(/*p_dev=*/std::nullopt, /*p_func=*/std::nullopt, /*dev_id=*/0,
+                       /*a=*/kVector, /*b=*/0, /*c=*/0, /*d=*/0);
+  auto owned_bus = std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(),
+                                             pciroot().ecam().mmio());
+  ASSERT_OK(owned_bus->Initialize());
+  auto* bus = owned_bus.release();
+
+  auto* bus_device = bus->GetDevice(device);
+  ASSERT_OK(bus_device->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacy, 1));
+  auto result = bus_device->MapInterrupt(0);
+  ASSERT_TRUE(result.is_ok());
+  zx::interrupt dev_interrupt = std::move(result.value());
+
+  auto disabled = [bus_device]() {
+    fbl::AutoLock _(bus_device->dev_lock());
+    return bus_device->irqs().legacy_disabled;
+  };
+  ASSERT_FALSE(disabled());
+
+  // Trigger physical IRQ vector to signal the virtual interrupt to the waiter thread.
+  ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+
+  zx::time_boot receive_time;
+  ASSERT_OK(dev_interrupt.wait(&receive_time));
+  ASSERT_TRUE(disabled());
+
+  // In synchronous mode, the consumer does not call ack(); instead, its subsequent call
+  // to wait() transitions the virtual interrupt to untriggered, unmasking the device.
+  thrd_t waiter_thrd;
+  auto waiter_entry = [](void* arg) -> int {
+    auto* irq = static_cast<zx::interrupt*>(arg);
+    zx::time_boot ts;
+    return irq->wait(&ts);
+  };
+  ASSERT_EQ(thrd_create(&waiter_thrd, waiter_entry, &dev_interrupt), thrd_success);
+  int thrd_res = 0;
+  auto cleanup = fit::defer([&]() {
+    dev_interrupt.destroy();
+    thrd_join(waiter_thrd, &thrd_res);
+  });
+
+  // Wait for the waiter thread to enter wait() and assert ZX_VIRTUAL_INTERRUPT_UNTRIGGERED.
+  zx_signals_t observed;
+  ASSERT_OK(
+      dev_interrupt.wait_one(ZX_VIRTUAL_INTERRUPT_UNTRIGGERED, zx::time::infinite(), &observed));
+
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_FALSE(disabled());
+
+  cleanup.call();
+  EXPECT_EQ(thrd_res, ZX_ERR_CANCELED);
+}
+
+TEST_F(PciBusTests, LegacyInterruptAckLegacyIrqModes) {
+  pci_bdf_t device = {0, 0, 0};
+  pciroot()
+      .ecam()
+      .get_device(device)
+      ->set_vendor_id(0x8086)
+      .set_device_id(0x8086)
+      .set_interrupt_pin(0x1);
+  constexpr uint8_t kVector = 0x10;
+  AddLegacyIrqToBus(kVector);
+  AddRoutingEntryToBus(/*p_dev=*/std::nullopt, /*p_func=*/std::nullopt, /*dev_id=*/0,
+                       /*a=*/kVector, /*b=*/0, /*c=*/0, /*d=*/0);
+  auto owned_bus = std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(),
+                                             pciroot().ecam().mmio());
+  ASSERT_OK(owned_bus->Initialize());
+  auto* bus = owned_bus.release();
+  auto* bus_device = bus->GetDevice(device);
+
+  // In kLegacy mode, AckLegacyIrq is a no-op returning ZX_OK.
+  ASSERT_OK(bus_device->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacy, 1));
+  {
+    fbl::AutoLock _(bus_device->dev_lock());
+    ASSERT_OK(bus_device->AckLegacyIrq());
+  }
+
+  // Setting LegacyNoack returns ZX_ERR_INVALID_ARGS.
+  ASSERT_STATUS(ZX_ERR_INVALID_ARGS,
+                bus_device->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacyNoack, 1));
+
+  ASSERT_OK(bus_device->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kDisabled, 0));
+  {
+    fbl::AutoLock _(bus_device->dev_lock());
+    ASSERT_STATUS(ZX_ERR_BAD_STATE, bus_device->AckLegacyIrq());
+  }
+}
+
+TEST_F(PciBusTests, LegacyInterruptWaitCancellation) {
+  pci_bdf_t device = {0, 0, 0};
+  pciroot()
+      .ecam()
+      .get_device(device)
+      ->set_vendor_id(0x8086)
+      .set_device_id(0x8086)
+      .set_interrupt_pin(0x1)
+      .set_status(kStatusInterrupt);
+  constexpr uint8_t kVector = 0x10;
+  zx::interrupt bus_interrupt = AddLegacyIrqToBus(kVector);
+  AddRoutingEntryToBus(/*p_dev=*/std::nullopt, /*p_func=*/std::nullopt, /*dev_id=*/0,
+                       /*a=*/kVector, /*b=*/0, /*c=*/0, /*d=*/0);
+  auto owned_bus = std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(),
+                                             pciroot().ecam().mmio());
+  ASSERT_OK(owned_bus->Initialize());
+  auto* bus = owned_bus.release();
+  auto* bus_device = bus->GetDevice(device);
+  ASSERT_OK(bus_device->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacy, 1));
+  auto result = bus_device->MapInterrupt(0);
+  ASSERT_TRUE(result.is_ok());
+  zx::interrupt dev_interrupt = std::move(result.value());
+  zx::port port;
+  ASSERT_OK(zx::port::create(ZX_PORT_BIND_TO_INTERRUPT, &port));
+  ASSERT_OK(dev_interrupt.bind(port, 0, 0));
+
+  auto disabled = [bus_device]() {
+    fbl::AutoLock _(bus_device->dev_lock());
+    return bus_device->irqs().legacy_disabled;
+  };
+  ASSERT_FALSE(disabled());
+
+  // Fire interrupt to start untriggered wait.
+  ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  zx_port_packet_t packet;
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
+  ASSERT_TRUE(disabled());
+
+  // Disabling interrupts cancels the pending wait cleanly.
+  ASSERT_OK(bus_device->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kDisabled, 0));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+
+  // Acknowledging the handle after disable must not unmask the device.
+  ASSERT_OK(dev_interrupt.ack());
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  {
+    fbl::AutoLock _(bus_device->dev_lock());
+    EXPECT_EQ(bus_device->irqs().mode, fuchsia_hardware_pci::InterruptMode::kDisabled);
+    EXPECT_TRUE(bus_device->irqs().legacy_disabled);
+  }
+}
+
+TEST_F(PciBusTests, LegacyInterruptSharedVector_ConcurrentAssert) {
+  pci_bdf_t device_a = {0, 0, 0};
+  pci_bdf_t device_b = {0, 1, 0};
+  pciroot()
+      .ecam()
+      .get_device(device_a)
+      ->set_vendor_id(0x8086)
+      .set_device_id(0x8086)
+      .set_interrupt_pin(0x1)
+      .set_status(kStatusInterrupt);
+  pciroot()
+      .ecam()
+      .get_device(device_b)
+      ->set_vendor_id(0x8086)
+      .set_device_id(0x8086)
+      .set_interrupt_pin(0x1);
+  constexpr uint8_t kVector = 0x10;
+  zx::interrupt bus_interrupt = AddLegacyIrqToBus(kVector);
+  AddRoutingEntryToBus(/*p_dev=*/std::nullopt, /*p_func=*/std::nullopt, /*dev_id=*/0,
+                       /*a=*/kVector, /*b=*/0, /*c=*/0, /*d=*/0);
+  AddRoutingEntryToBus(/*p_dev=*/std::nullopt, /*p_func=*/std::nullopt, /*dev_id=*/1,
+                       /*a=*/kVector, /*b=*/0, /*c=*/0, /*d=*/0);
+  auto owned_bus = std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(),
+                                             pciroot().ecam().mmio());
+  ASSERT_OK(owned_bus->Initialize());
+  auto* bus = owned_bus.release();
+
+  auto* bus_dev_a = bus->GetDevice(device_a);
+  auto* bus_dev_b = bus->GetDevice(device_b);
+  ASSERT_OK(bus_dev_a->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacy, 1));
+  ASSERT_OK(bus_dev_b->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacy, 1));
+  auto res_a = bus_dev_a->MapInterrupt(0);
+  auto res_b = bus_dev_b->MapInterrupt(0);
+  ASSERT_TRUE(res_a.is_ok());
+  ASSERT_TRUE(res_b.is_ok());
+  zx::interrupt dev_a_irq = std::move(res_a.value());
+  zx::interrupt dev_b_irq = std::move(res_b.value());
+
+  zx::port port;
+  ASSERT_OK(zx::port::create(ZX_PORT_BIND_TO_INTERRUPT, &port));
+  ASSERT_OK(dev_a_irq.bind(port, 1, 0));
+  ASSERT_OK(dev_b_irq.bind(port, 2, 0));
+
+  auto disabled_a = [bus_dev_a]() {
+    fbl::AutoLock _(bus_dev_a->dev_lock());
+    return bus_dev_a->irqs().legacy_disabled;
+  };
+  auto disabled_b = [bus_dev_b]() {
+    fbl::AutoLock _(bus_dev_b->dev_lock());
+    return bus_dev_b->irqs().legacy_disabled;
+  };
+
+  // Assert vector: Device A asserts while Device B is idle.
+  ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+
+  zx_port_packet_t packet;
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
+  EXPECT_EQ(packet.key, 1u);
+  ASSERT_TRUE(disabled_a());
+  ASSERT_FALSE(disabled_b());
+
+  // Vector triggers again while Device A ack is pending; Device B asserts.
+  pciroot().ecam().get_device(device_b)->set_status(kStatusInterrupt);
+  ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+
+  // Device B is signaled and masked; Device A was skipped without error.
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
+  EXPECT_EQ(packet.key, 2u);
+  ASSERT_TRUE(disabled_b());
+  ASSERT_TRUE(disabled_a());
+
+  // Acknowledging Device A unmasks it while Device B remains masked.
+  ASSERT_OK(dev_a_irq.ack());
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_FALSE(disabled_a());
+  ASSERT_TRUE(disabled_b());
+
+  // Acknowledging Device B unmasks the remaining device.
+  ASSERT_OK(dev_b_irq.ack());
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_FALSE(disabled_b());
+}
+
+TEST_F(PciBusTests, LegacyInterruptWorkaround_PendingSkip) {
+  pci_bdf_t device_a = {0, 0, 0};
+  pci_bdf_t device_b = {0, 1, 0};
+  pciroot()
+      .ecam()
+      .get_device(device_a)
+      ->set_vendor_id(0x8086)
+      .set_device_id(0x8086)
+      .set_interrupt_pin(0x1);
+  pciroot()
+      .ecam()
+      .get_device(device_b)
+      ->set_vendor_id(0x8086)
+      .set_device_id(0x8086)
+      .set_interrupt_pin(0x1);
+  constexpr uint8_t kVector = 0x10;
+  zx::interrupt bus_interrupt = AddLegacyIrqToBus(kVector);
+  AddRoutingEntryToBus(/*p_dev=*/std::nullopt, /*p_func=*/std::nullopt, /*dev_id=*/0,
+                       /*a=*/kVector, /*b=*/0, /*c=*/0, /*d=*/0);
+  AddRoutingEntryToBus(/*p_dev=*/std::nullopt, /*p_func=*/std::nullopt, /*dev_id=*/1,
+                       /*a=*/kVector, /*b=*/0, /*c=*/0, /*d=*/0);
+
+  // Set use_intx_workaround board config.
+  fuchsia_hardware_pci::BoardConfiguration board_config;
+  board_config.use_intx_workaround(true);
+  SetBoardConfiguration(std::move(board_config));
+
+  auto owned_bus = std::make_unique<TestBus>(parent(), pciroot().proto(), pciroot().info(),
+                                             pciroot().ecam().mmio());
+  ASSERT_OK(owned_bus->Initialize());
+  auto* bus = owned_bus.release();
+
+  auto* bus_dev_a = bus->GetDevice(device_a);
+  auto* bus_dev_b = bus->GetDevice(device_b);
+  ASSERT_OK(bus_dev_a->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacy, 1));
+  ASSERT_OK(bus_dev_b->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kLegacy, 1));
+  auto res_a = bus_dev_a->MapInterrupt(0);
+  auto res_b = bus_dev_b->MapInterrupt(0);
+  ASSERT_TRUE(res_a.is_ok());
+  ASSERT_TRUE(res_b.is_ok());
+  zx::interrupt dev_a_irq = std::move(res_a.value());
+  zx::interrupt dev_b_irq = std::move(res_b.value());
+
+  zx::port port;
+  ASSERT_OK(zx::port::create(ZX_PORT_BIND_TO_INTERRUPT, &port));
+  ASSERT_OK(dev_a_irq.bind(port, 1, 0));
+  ASSERT_OK(dev_b_irq.bind(port, 2, 0));
+
+  auto disabled_a = [bus_dev_a]() {
+    fbl::AutoLock _(bus_dev_a->dev_lock());
+    return bus_dev_a->irqs().legacy_disabled;
+  };
+  auto disabled_b = [bus_dev_b]() {
+    fbl::AutoLock _(bus_dev_b->dev_lock());
+    return bus_dev_b->irqs().legacy_disabled;
+  };
+
+  // Under workaround, both devices are signaled and masked on vector trigger.
+  ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  zx_port_packet_t packet;
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
+  EXPECT_TRUE(packet.key == 1u || packet.key == 2u);
+  uint64_t first_key = packet.key;
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
+  EXPECT_TRUE(packet.key == 1u || packet.key == 2u);
+  EXPECT_NE(packet.key, first_key);
+  ASSERT_TRUE(disabled_a());
+  ASSERT_TRUE(disabled_b());
+
+  // Acknowledge Device A only -> Device A unmasks.
+  ASSERT_OK(dev_a_irq.ack());
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_FALSE(disabled_a());
+  ASSERT_TRUE(disabled_b());
+
+  // Trigger vector again -> Device A is signaled and masked; Device B (pending) is skipped.
+  ASSERT_OK(bus_interrupt.trigger(0, zx::clock::get_boot()));
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_OK(port.wait(zx::time::infinite(), &packet));
+  EXPECT_EQ(packet.key, 1u);
+  ASSERT_TRUE(disabled_a());
+  ASSERT_TRUE(disabled_b());
+
+  // Acknowledge both devices to return them to unmasked state.
+  ASSERT_OK(dev_a_irq.ack());
+  ASSERT_OK(dev_b_irq.ack());
+  mock_ddk::GetDriverRuntime()->RunUntilIdle();
+  ASSERT_FALSE(disabled_a());
+  ASSERT_FALSE(disabled_b());
 }
 
 TEST_F(PciBusTests, LegacyIrqHandlerErrorAndEdgeCases) {
@@ -477,7 +830,15 @@ TEST_F(PciBusTests, LegacyIrqHandlerErrorAndEdgeCases) {
   zx_packet_interrupt_t packet = {};
   bus->HandleLegacyIrq(nullptr, nullptr, ZX_OK, &packet, 0x99);
 
+  // HandleDeviceLegacyIrqUntriggered with ZX_ERR_CANCELED returns early.
+  bus->HandleDeviceLegacyIrqUntriggered(nullptr, nullptr, ZX_ERR_CANCELED, nullptr, bus_device);
+
+  // HandleDeviceLegacyIrqUntriggered with non-OK status logs error and returns early.
+  bus->HandleDeviceLegacyIrqUntriggered(nullptr, nullptr, ZX_ERR_INTERNAL, nullptr, bus_device);
+
   // Invalidate the device's virtual interrupt handle so SignalLegacyIrq fails.
+  // Device remains masked to prevent interrupt storms, and ack failure on
+  // the untriggered bus_interrupt is safely handled.
   {
     fbl::AutoLock _(bus_device->dev_lock());
     bus_device->irqs().legacy.reset();
@@ -487,6 +848,15 @@ TEST_F(PciBusTests, LegacyIrqHandlerErrorAndEdgeCases) {
   {
     fbl::AutoLock _(bus_device->dev_lock());
     EXPECT_TRUE(bus_device->irqs().legacy_disabled);
+  }
+
+  // HandleDeviceLegacyIrqUntriggered returns early if mode is not kLegacy.
+  ASSERT_OK(bus_device->SetIrqMode(fuchsia_hardware_pci::InterruptMode::kDisabled, 0));
+  bus->HandleDeviceLegacyIrqUntriggered(nullptr, nullptr, ZX_OK, nullptr, bus_device);
+  {
+    fbl::AutoLock _(bus_device->dev_lock());
+    EXPECT_TRUE(bus_device->irqs().legacy_disabled);
+    EXPECT_EQ(bus_device->irqs().mode, fuchsia_hardware_pci::InterruptMode::kDisabled);
   }
 }
 

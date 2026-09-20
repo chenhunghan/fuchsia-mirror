@@ -7,8 +7,8 @@
 import shutil
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
 
 import system_profiler
 
@@ -378,7 +378,7 @@ class SystemProfilerCoordinatorTest(unittest.TestCase):
         # Mock a fake pluggable sampler
         class FakeSampler(system_profiler.MetricSampler):
             def sample(
-                self, ts_us: int, elapsed: Optional[float]
+                self, ts_us: int, elapsed: float | None
             ) -> Iterator[system_profiler.TraceEvent]:
                 yield system_profiler.make_counter_event(
                     "fake.metric",

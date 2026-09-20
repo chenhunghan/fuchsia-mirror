@@ -54,5 +54,8 @@ source_set("concurrent_vdso") {
 
 group("tests") {
   testonly = true
-  deps = [ "tests" ]
+  deps = [
+    "rust:tests",
+    "tests",
+  ]
 }

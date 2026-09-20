@@ -80,14 +80,14 @@ class CrateSpec(T.TypedDict, total=False):
     root_module: str
     is_workspace_member: bool
     deps: list[str]  # list of crate_ids
-    proc_macro_dylib_path: T.Optional[str]
-    source: T.Optional[CrateSpecSource]
+    proc_macro_dylib_path: str | None
+    source: CrateSpecSource | None
     cfg: list[str]
     env: dict[str, str]
     target: str
     crate_type: str  # bin, rlib, lib, dylib, cdylib, staticlib, proc-macro
     is_test: bool
-    build: T.Optional[CrateSpecBuild]
+    build: CrateSpecBuild | None
 
 
 def consolidate_crate_specs(
@@ -190,18 +190,18 @@ class Crate(T.TypedDict, total=False):
     """Represents a crate in the rust-project.json format."""
 
     crate_id: int
-    display_name: T.Optional[str]
+    display_name: str | None
     root_module: str
     edition: str
     deps: list[Dependency]  # This will be empty in this function
-    is_workspace_member: T.Optional[bool]
-    source: T.Optional[Source]
+    is_workspace_member: bool | None
+    source: Source | None
     cfg: list[str]
-    target: T.Optional[str]
-    env: T.Optional[T.Dict[str, str]]
+    target: str | None
+    env: dict[str, str] | None
     is_proc_macro: bool
-    proc_macro_dylib_path: T.Optional[str]
-    build: T.Optional[Build]
+    proc_macro_dylib_path: str | None
+    build: Build | None
 
 
 def convert_crate_specs_to_rust_project_crates(
@@ -252,7 +252,7 @@ def convert_crate_specs_to_rust_project_crates(
         if crate_type == "bin":
             target_kind = "test" if is_test else "bin"
 
-        source: T.Optional[Source] = None
+        source: Source | None = None
         spec_source = crate_spec.get("source")
         if spec_source:
             include_dirs = spec_source.get("include_dirs", [])
@@ -266,7 +266,7 @@ def convert_crate_specs_to_rust_project_crates(
                     "exclude_dirs": exclude_dirs,
                 }
 
-        build: T.Optional[Build] = None
+        build: Build | None = None
         spec_build = crate_spec.get("build")
         if spec_build:
             build = {

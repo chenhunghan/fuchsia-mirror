@@ -21,8 +21,8 @@ use fxfs::log::*;
 use fxfs::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle, WriteObjectHandle};
 use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
 use fxfs::object_store::{
-    DataObjectHandle, HandleOptions, ObjectDescriptor, ObjectStore, Timestamp, VOLUME_DATA_KEY_ID,
-    directory,
+    AttributeId, AttributeKey, DataObjectHandle, HandleOptions, Mutation, ObjectDescriptor,
+    ObjectKey, ObjectStore, ObjectValue, Timestamp, VOLUME_DATA_KEY_ID, directory,
 };
 use linked_hash_map::LinkedHashMap;
 use scopeguard::ScopeGuard;
@@ -63,6 +63,11 @@ pub trait RecordingHandle: Send + Sync {
     /// When the recording fails or is stopped prematurely this will be called to clean up the
     /// resources, delete the backing data.
     fn abort_cleanup(self: Box<Self>);
+
+    /// Returns true if events should be filtered based on whether the file was opened during the
+    /// recording and encryption settings. For now this is true for FileRecordingHandle and false
+    /// for AssociatedRecordingHandle.
+    fn filter_events(&self) -> bool;
 }
 
 /// For placing the recording in the volume's internal profile directory.
@@ -156,12 +161,117 @@ impl RecordingHandle for FileRecordingHandle {
     }
 
     fn abort_cleanup(self: Box<Self>) {
-        let this = *self;
-        this.volume
+        self.volume
             .store()
             .filesystem()
             .graveyard()
-            .queue_tombstone_object(this.volume.store().store_object_id(), this.handle.object_id());
+            .queue_tombstone_object(self.volume.store().store_object_id(), self.handle.object_id());
+    }
+
+    fn filter_events(&self) -> bool {
+        true
+    }
+}
+
+/// A handle for storing the profile as an attribute to associate it with an object and tie it to
+/// that object's lifetime.
+pub struct AttributeRecordingHandle {
+    volume: Arc<FxVolume>,
+    handle: DataObjectHandle<FxVolume>,
+}
+
+impl AttributeRecordingHandle {
+    /// Create the profile handle to be stored as an attribute on the object to keep thehe profile
+    /// associated with the object and tie the profile lifetime to the object as well.
+    pub async fn new(object_id: u64, volume: Arc<FxVolume>) -> Result<Self, Error> {
+        let store = volume.store();
+
+        let mut transaction = store.new_transaction(lock_keys![], Options::default()).await?;
+        transaction.add(
+            store.store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::attribute(
+                    object_id,
+                    AttributeId::PROFILE_RECORDING,
+                    AttributeKey::Attribute,
+                ),
+                ObjectValue::attribute(0, false),
+            ),
+        );
+        transaction.add(
+            store.store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::graveyard_attribute_entry(
+                    store.graveyard_directory_object_id(),
+                    object_id,
+                    AttributeId::PROFILE_RECORDING,
+                ),
+                ObjectValue::Some,
+            ),
+        );
+        transaction.commit().await?;
+
+        let handle = DataObjectHandle::new(
+            volume.clone(),
+            object_id,
+            false,
+            AttributeId::PROFILE_RECORDING,
+            0,
+            HandleOptions::default(),
+            false,
+            &[],
+        );
+
+        Ok(Self { volume, handle })
+    }
+
+    pub async fn commit_impl(&self) -> Result<(), Error> {
+        let store = self.volume.store();
+        let mut transaction = store.new_transaction(lock_keys![], Options::default()).await?;
+
+        store.remove_attribute_from_graveyard(
+            &mut transaction,
+            self.handle.object_id(),
+            AttributeId::PROFILE_RECORDING,
+        );
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RecordingHandle for AttributeRecordingHandle {
+    async fn append<'a>(
+        &'a self,
+        buf: storage_device::buffer::BufferRef<'a>,
+    ) -> Result<u64, Error> {
+        self.handle.write_or_append(None, buf).await.map_err(Into::into)
+    }
+
+    fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
+        self.handle.allocate_buffer(size)
+    }
+
+    fn block_size(&self) -> usize {
+        self.handle.block_size().get() as usize
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), Error> {
+        self.commit_impl().await.inspect_err(|_| {
+            self.abort_cleanup();
+        })
+    }
+
+    fn abort_cleanup(self: Box<Self>) {
+        self.volume.store().filesystem().graveyard().queue_tombstone_attribute(
+            self.volume.store().store_object_id(),
+            self.handle.object_id(),
+            AttributeId::PROFILE_RECORDING,
+        );
+    }
+
+    fn filter_events(&self) -> bool {
+        false
     }
 }
 
@@ -263,12 +373,15 @@ trait RecordedVolume: Send + Sync + Sized + Unpin {
         async move {
             let mut recorded_offsets = LinkedHashMap::<Self::MessageType, ()>::new();
             let mut recorded_opens = BTreeMap::<Self::IdType, bool>::new();
+            let filter = recording_handle.filter_events();
             while let Ok(buffer) = receiver.recv().await {
                 for message in buffer {
                     if message.is_open_marker() {
-                        if let Entry::Vacant(entry) = recorded_opens.entry(message.id()) {
-                            let usable = self.file_is_replayable(entry.key()).await;
-                            entry.insert(usable);
+                        if filter {
+                            if let Entry::Vacant(entry) = recorded_opens.entry(message.id()) {
+                                let usable = self.file_is_replayable(entry.key()).await;
+                                entry.insert(usable);
+                            }
                         }
                     } else {
                         recorded_offsets.insert(message, ());
@@ -282,7 +395,7 @@ trait RecordedVolume: Send + Sync + Sized + Unpin {
             let mut next_block = block_size;
             while let Some((message, _)) = recorded_offsets.pop_front() {
                 // If a file opening was never recorded, or it is not usable drop the message.
-                if !recorded_opens.get(&message.id()).copied().unwrap_or(false) {
+                if filter && !recorded_opens.get(&message.id()).copied().unwrap_or(false) {
                     continue;
                 }
 
@@ -794,8 +907,9 @@ impl<T: RecordedVolume> ProfileState for ProfileStateImpl<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlobMessage, BlobVolume, FileMessage, FileRecordingHandle, FileVolume, IO_SIZE, Message,
-        MutPtrByteSlice, PtrByteSlice, RecordedVolume, Request, new_profile_state,
+        AttributeRecordingHandle, BlobMessage, BlobVolume, FileMessage, FileRecordingHandle,
+        FileVolume, IO_SIZE, Message, MutPtrByteSlice, PtrByteSlice, RecordedVolume, Request,
+        new_profile_state,
     };
     use crate::fuchsia::file::FxFile;
     use crate::fuchsia::fxblob::blob::FxBlob;
@@ -814,8 +928,12 @@ mod tests {
     use fuchsia_hash::Hash;
     use fuchsia_sync::Mutex;
     use fxfs::object_handle::{ObjectHandle, ReadObjectHandle, WriteObjectHandle};
+    use fxfs::object_store::object_record::ObjectItem;
     use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
-    use fxfs::object_store::{DataObjectHandle, HandleOptions, ObjectDescriptor, ObjectStore};
+    use fxfs::object_store::{
+        AttributeId, AttributeKey, DataObjectHandle, HandleOptions, ObjectDescriptor, ObjectKey,
+        ObjectStore, ObjectValue,
+    };
     use std::collections::BTreeMap;
     use std::mem::size_of;
     use std::sync::Arc;
@@ -1064,6 +1182,45 @@ mod tests {
             state.wait_for_recording_to_finish().await;
 
             assert_eq!(get_test_profile_contents(volume).await.len(), 0);
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_associated_recording_not_filtered_without_open() {
+        let fixture = new_blob_fixture().await;
+        {
+            let hash = fixture.write_blob(&[88u8], CompressionMode::Never).await;
+            let blob = fixture.get_blob((*hash).into()).await.expect("Opening blob");
+
+            let mut state = new_profile_state(true);
+            let volume = fixture.volume().volume();
+
+            {
+                // Drop recorder when finished writing to flush data.
+                let handle =
+                    AttributeRecordingHandle::new(blob.object_id(), volume.clone()).await.unwrap();
+                let mut recorder = state.record_new(volume, Box::new(handle));
+                recorder.record(blob.clone(), 0).unwrap();
+            }
+            state.wait_for_recording_to_finish().await;
+
+            // The profile is stored as an attribute on the blob itself.
+            // Let's get the attribute contents to see if it recorded the page.
+            let key = ObjectKey::attribute(
+                blob.object_id(),
+                AttributeId::PROFILE_RECORDING,
+                AttributeKey::Attribute,
+            );
+            let store = volume.store();
+            let ObjectItem { value, .. } =
+                store.tree().find(&key).await.unwrap().expect("profile attribute not found");
+            let size = match value {
+                ObjectValue::Attribute { size, .. } => size,
+                _ => panic!("Expected Attribute value"),
+            };
+
+            assert_eq!(size, BLOCK_SIZE as u64);
         }
         fixture.close().await;
     }

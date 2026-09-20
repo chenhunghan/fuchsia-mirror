@@ -23,6 +23,9 @@ facilities.
 | Ring buffer          | Abstracts management of the shared memory area (in   |
 :                      : main memory) used for data transfer; this shared     :
 :                      : memory area is provided by a VMO object.             :
+| Packet stream        | Abstracts packet-based audio streaming (e.g. for     |
+:                      : encoded audio formats such as AAC and SBC) via       :
+:                      : discrete packet transfers.                           :
 
 # Audio interfaces
 
@@ -31,7 +34,8 @@ The API to be used by applications/clients users of audio drivers is the
 access audio hardware functionality exposed by drivers. It allows drivers to
 expose the functionality of various types of hardware including hardware codecs
 with one or more DAIs, controllers with
-[Ring Buffers](/sdk/fidl/fuchsia.hardware.audio/ring_buffer.fidl) and DAIs, and
+[Ring Buffers](/sdk/fidl/fuchsia.hardware.audio/ring_buffer.fidl),
+[Packet Streams](/sdk/fidl/fuchsia.hardware.audio/packet_stream.fidl), and DAIs, along with
 any combination of processing elements allowed by the
 [Audio Signal Processing](signal-processing.md) APIs.
 

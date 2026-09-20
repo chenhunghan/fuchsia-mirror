@@ -11,6 +11,7 @@ use super::{feature, interrupts, pv};
 use crate::arch_rs::InterruptDisableGuard;
 #[cfg(console_enabled)]
 use crate::console_rust::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::kernel::types::{CPU_MASK_ALL, highest_cpu_set, lowest_cpu_set, mask_all_but_one};
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE,
 };
@@ -133,23 +134,6 @@ pub const LVT_TIMER_MODE_PERIODIC: u32 = 1 << 17;
 pub const LVT_TIMER_MODE_TSC_DEADLINE: u32 = 2 << 17;
 pub const LVT_TIMER_MODE_RESERVED: u32 = 3 << 17;
 pub const LVT_MASKED: u32 = 1 << 16;
-
-const CPU_MASK_ALL: u32 = !0;
-
-#[inline(always)]
-fn mask_all_but_one(num: u32) -> u32 {
-    CPU_MASK_ALL ^ (1u32 << num)
-}
-
-#[inline(always)]
-fn highest_cpu_set(mask: u32) -> u32 {
-    if mask == 0 { 0 } else { 31 - mask.leading_zeros() }
-}
-
-#[inline(always)]
-fn lowest_cpu_set(mask: u32) -> u32 {
-    if mask == 0 { 0 } else { mask.trailing_zeros() }
-}
 
 unsafe extern "C" {
     fn root_resource_filter_add_deny_region(paddr: usize, len: usize, kind: u32);

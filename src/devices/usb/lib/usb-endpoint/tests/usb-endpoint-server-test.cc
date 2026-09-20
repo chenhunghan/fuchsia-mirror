@@ -8,6 +8,7 @@
 #include <lib/fake-bti/bti.h>
 
 #include <atomic>
+#include <memory>
 #include <thread>
 
 #include <zxtest/zxtest.h>
@@ -32,6 +33,10 @@ class FakeEndpoint : public usb::EndpointServer {
                      QueueRequestsCompleter::Sync& completer) override {}
   void CancelAll(CancelAllCompleter::Sync& completer) override {
     completer.Reply(fit::as_error(ZX_ERR_NOT_SUPPORTED));
+  }
+
+  void TriggerUnbound(fidl::ServerEnd<fuchsia_hardware_usb_endpoint::Endpoint> server_end) {
+    OnUnbound(fidl::UnbindInfo::Close(ZX_OK), std::move(server_end));
   }
 
   sync_completion_t unbound_;
@@ -469,6 +474,59 @@ TEST_F(UsbEndpointServerTest, RequestCompleteDeferredFidlTest) {
   EXPECT_EQ(event_handler_.completion_count_.load(), 2);
   EXPECT_EQ(event_handler_.request_count_.load(), 5);
   sync_completion_reset(&event_handler_.received_on_completion_);
+}
+
+TEST_F(UsbEndpointServerTest, RequestCompleteBatchSplittingTest) {
+  // Queue 70 deferred completions.
+  for (size_t i = 0; i < 70; ++i) {
+    ep_->RequestComplete(ZX_OK, 1,
+                         usb::FidlRequest(std::move(
+                             fuchsia_hardware_usb_request::Request().defer_completion(true))));
+  }
+
+  // Queue 1 non-deferred completion to trigger the flush of all 71 accumulated completions.
+  ep_->RequestComplete(
+      ZX_OK, 1,
+      usb::FidlRequest(std::move(fuchsia_hardware_usb_request::Request().defer_completion(false))));
+
+  // Wait until all 71 completions are received by the client.
+  while (event_handler_.request_count_.load() < 71) {
+    ASSERT_OK(sync_completion_wait(&event_handler_.received_on_completion_, zx::sec(60).get()));
+    sync_completion_reset(&event_handler_.received_on_completion_);
+  }
+
+  EXPECT_EQ(event_handler_.request_count_.load(), 71);
+  // With kMaxBatchSize = 64 (fendpoint::kMaxCompletionsPerEvent), 71 completions must be split
+  // across 2 events (64, 7).
+  EXPECT_EQ(event_handler_.completion_count_.load(), 2);
+}
+
+TEST_F(UsbEndpointServerTest, OnUnboundBatchSplittingTest) {
+  // Queue 71 deferred completions.
+  for (size_t i = 0; i < 71; ++i) {
+    ep_->RequestComplete(ZX_OK, 1,
+                         usb::FidlRequest(std::move(
+                             fuchsia_hardware_usb_request::Request().defer_completion(true))));
+  }
+
+  auto endpoints = fidl::Endpoints<fuchsia_hardware_usb_endpoint::Endpoint>::Create();
+  // OnUnbound() consumes the server end, so the client observes PEER_CLOSED and tears down
+  // asynchronously on client_loop_. Co-own the handler with the client so that it outlives the
+  // teardown callback, which runs after this test body returns.
+  auto unbound_handler = std::make_shared<EventHandler>();
+  fidl::SharedClient<fuchsia_hardware_usb_endpoint::Endpoint> unbound_client(
+      std::move(endpoints.client), client_loop_.dispatcher(), unbound_handler.get(),
+      fidl::ShareUntilTeardown(unbound_handler));
+
+  ep_->TriggerUnbound(std::move(endpoints.server));
+
+  while (unbound_handler->request_count_.load() < 71) {
+    ASSERT_OK(sync_completion_wait(&unbound_handler->received_on_completion_, zx::sec(60).get()));
+    sync_completion_reset(&unbound_handler->received_on_completion_);
+  }
+
+  EXPECT_EQ(unbound_handler->request_count_.load(), 71);
+  EXPECT_EQ(unbound_handler->completion_count_.load(), 2);
 }
 
 TEST_F(UsbEndpointServerTest, RequestCompleteBanjoTest) {

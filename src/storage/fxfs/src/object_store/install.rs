@@ -284,17 +284,17 @@ impl ObjectStore {
             let object_id = layer.handle().map(|h| h.object_id());
             layer.close_layer().await;
             if let Some(object_id) = object_id {
-                parent_store.tombstone_object(object_id, txn_options).await?;
+                parent_store.tombstone_object(object_id, txn_options, None).await?;
             }
         }
         // Delete objects from the destination volume we replaced, if any.
         if let Some(replaced_objects) = replaced_objects {
             for object_id in replaced_objects {
-                fs.root_store().tombstone_object(object_id, Options::default()).await?;
+                fs.root_store().tombstone_object(object_id, Options::default(), None).await?;
             }
         }
         // Delete the metadata ownership file.
-        self.tombstone_object(metadata_object_id, txn_options).await?;
+        self.tombstone_object(metadata_object_id, txn_options, None).await?;
 
         Ok(())
     }

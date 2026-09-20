@@ -9,10 +9,11 @@ use crate::vm::vm_aspace::VmAspace;
 use crate::vm::vm_mapping::VmMapping;
 use crate::vm::vm_object_physical::VmObjectPhysical;
 use acpi_lite::{AcpiParser, PhysMemReader};
-use core::mem::MaybeUninit;
+use core::pin::Pin;
 use core::ptr::NonNull;
 use fbl::{RefPtr, SinglyLinkedList, SinglyLinkedListContainable, SinglyLinkedListNode, UniquePtr};
 use ksync::{KMutex, guarded, lock};
+use lazy_init::LazyInit;
 use pin_init::pin_init;
 use zx_status::Status;
 
@@ -22,6 +23,9 @@ pub struct Mapping {
     #[sll_node]
     node: SinglyLinkedListNode<Mapping>,
 }
+
+// SAFETY: `Mapping` is managed under `ZirconPhysmemReader`'s mutex.
+unsafe impl Sync for Mapping {}
 
 impl Mapping {
     pub fn new(mapping: RefPtr<VmMapping>) -> Result<UniquePtr<Self>, kalloc::AllocError> {
@@ -37,6 +41,9 @@ pub struct ZirconPhysmemReader {
     #[guarded_by(mutex)]
     mappings: SinglyLinkedList<UniquePtr<Mapping>>,
 }
+
+// SAFETY: `ZirconPhysmemReader` synchronizes all mutations to its mappings itself.
+unsafe impl Sync for ZirconPhysmemReader {}
 
 impl ZirconPhysmemReader {
     pub fn init() -> impl pin_init::PinInit<Self, core::convert::Infallible> {
@@ -121,7 +128,7 @@ impl PhysMemReader for ZirconPhysmemReader {
     }
 }
 
-static mut READER: MaybeUninit<ZirconPhysmemReader> = MaybeUninit::uninit();
+static READER: LazyInit<ZirconPhysmemReader> = LazyInit::uninit();
 
 /// Initialize the global `READER` instance and return an `AcpiParser` using it. May only be called
 /// once (even on error).
@@ -129,13 +136,12 @@ static mut READER: MaybeUninit<ZirconPhysmemReader> = MaybeUninit::uninit();
 /// # Safety
 ///
 /// This caller guarantees that this method has not already been called.
-#[allow(static_mut_refs)]
 pub unsafe fn acpi_parser_init(rsdp_pa: PAddr) -> Result<AcpiParser<'static>, Status> {
-    // As this method may only be called once we know that both that READER is not yet initialized,
+    // As this method may only be called once we know that READER is not yet initialized,
     // and that there are no other references (mutable or otherwise) to it.
     unsafe {
-        let _ = pin_init::PinInit::__pinned_init(ZirconPhysmemReader::init(), READER.as_mut_ptr());
-        AcpiParser::init(READER.assume_init_mut(), rsdp_pa.0)
+        let _ = Pin::static_ref(&READER).init_pin(ZirconPhysmemReader::init());
+        AcpiParser::init(&*READER, rsdp_pa.0)
     }
 }
 
@@ -185,8 +191,7 @@ mod acpi_lite_zircon_tests {
     // for example), but we just try and exercise the code.
     #[test]
     fn test_parse_system() {
-        #[allow(static_mut_refs)]
-        let res = unsafe { AcpiParser::init(READER.assume_init_mut(), 0) };
+        let res = AcpiParser::init(&*READER, 0);
         if let Ok(_parser) = res {
             kprint::kprintln!("Successfully parsed the current system's tables.");
         } else {

@@ -1,6 +1,6 @@
 Name: zucchini
 URL: https://chromium.googlesource.com/chromium/src/components/zucchini/
-Revision: 3e9c102bdc301fdc84b7464e58b953ab5c6f75a1
+Revision: 1c3cccd020a2f22250e31ec76773c6a8eb13b4e4
 Security Critical: yes
 
 License File: src/LICENSE

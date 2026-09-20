@@ -20,12 +20,11 @@ llvm_libc_source_set("printf_core") {
   # Each implementation pieces has its own tests.
   test_sources = [
     "converter_test.cpp",
-    "writer_test.cpp",
-
     # TODO(https://fxbug.dev/42141211): This test code requires the fancier
     # test machinery that we don't yet support since zxtest doesn't have the
     # features.
     #"parser_test.cpp",
+    #"writer_test.cpp",
   ]
 }
 

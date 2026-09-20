@@ -75,12 +75,15 @@ pub struct H264DecoderValidator {
     num_frames: usize,
     input_stream: Rc<VideoFrameStream>,
     normalized_sad_threshold: f64,
+    require_sw: bool,
 }
 
 #[async_trait(?Send)]
 impl OutputValidator for H264DecoderValidator {
     async fn validate(&self, output: &[Output]) -> Result<()> {
-        let decoder_factory = Rc::new(DecoderFactory);
+        let decoder_factory = Rc::new(DecoderFactoryWithParams {
+            require_sw: if self.require_sw { Some(true) } else { None },
+        });
         let packets: Vec<&OutputPacket> = output_packets(output).collect();
         let mut stream = H264Stream::from(Vec::new());
         for p in packets {
@@ -172,6 +175,7 @@ impl H264EncoderTestCase {
                 normalized_sad_threshold: self
                     .normalized_sad_threshold
                     .unwrap_or(MAX_NORMALIZED_SAD),
+                require_sw: true,
             }));
         }
 

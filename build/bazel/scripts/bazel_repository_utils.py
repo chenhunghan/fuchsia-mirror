@@ -25,7 +25,7 @@ class BazelRootRepoMapping:
         mapping: dict[str, str],
     ) -> None:
         self._mapping = mapping
-        self._reverse_mapping: T.Optional[dict[str, str]] = None
+        self._reverse_mapping: dict[str, str] | None = None
 
     @classmethod
     def new_from_bazel(
@@ -154,11 +154,11 @@ class BazelRootRepoMapping:
         """
         return dict(self._mapping)
 
-    def get_canonical_name(self, apparent_name: str) -> T.Optional[str]:
+    def get_canonical_name(self, apparent_name: str) -> str | None:
         """Look up the canonical repository name for a given apparent name."""
         return self._mapping.get(apparent_name)
 
-    def get_apparent_name(self, canonical_name: str) -> T.Optional[str]:
+    def get_apparent_name(self, canonical_name: str) -> str | None:
         """Look up the apparent repository name for a given canonical name."""
         if self._reverse_mapping is None:
             self._reverse_mapping = {v: k for k, v in self._mapping.items()}

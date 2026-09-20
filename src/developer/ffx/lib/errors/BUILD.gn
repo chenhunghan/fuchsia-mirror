@@ -4,17 +4,8 @@
 
 # This is a cross toolchain library - used by //src/developer/ffx/command/error
 
-group("tests") {
-  testonly = true
-  deps = [ ":lib_test" ]
-}
-
 group("errors") {
-  testonly = true
-  deps = [
-    ":lib",
-    ":tests",
-  ]
+  deps = [ ":lib" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##

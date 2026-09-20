@@ -163,7 +163,7 @@ struct EncodedPtr {
   // address size.  After normalization, an encoding can be used directly
   // without keeping track of the address size that's indicated by, or implicit
   // in, the context it came from.
-  template <class Elf = Elf<>>
+  template <ElfApi Elf = Elf<>>
   static constexpr uint8_t Normalize(uint8_t encoding,
                                      uint8_t address_size = sizeof(typename Elf::Addr)) {
     if ((encoding & 0x7) == 0) {
@@ -186,11 +186,11 @@ struct EncodedPtr {
   // in the single call.  Returns std::nullopt if the Memory object fails.
   // Otherwise the value is extended to 64 bits.  In the case of a signed
   // encoding, bit_cast<int64_t> should be used on the value.
-  template <class Elf = Elf<>>
+  template <ElfApi Elf = Elf<>>
   static constexpr std::optional<uint64_t> FromMemory(
       uint8_t encoding,
       MemoryReader<typename Elf::size_type, std::byte, typename Elf::Addr> auto& memory,
-      typename Elf::size_type vaddr, uint8_t address_size = sizeof(typename Elf::Addr)) {
+      Elf::size_type vaddr, uint8_t address_size = sizeof(typename Elf::Addr)) {
     uint8_t size = EncodedSize(encoding, address_size);
     if (size == 0) {
       return 0;
@@ -231,7 +231,7 @@ struct EncodedPtr {
   // Read an encoded value from the byte buffer.  This returns an
   // EncodedPtr object rather than the resolved value.  The caller is
   // responsible for applying modifiers and indirection to the value.
-  template <class Elf = Elf<>>
+  template <ElfApi Elf = Elf<>>
   static constexpr std::optional<EncodedPtr> Read(
       uint8_t encoding, std::span<const std::byte> bytes,
       uint8_t address_size = sizeof(typename Elf::Addr)) {

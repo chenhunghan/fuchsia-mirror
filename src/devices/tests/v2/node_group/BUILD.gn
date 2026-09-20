@@ -15,7 +15,7 @@ group("tests") {
 group("ctf-tests") {
   testonly = true
   # TODO(https://fxbug.dev/42073139): Re-enable after CTF tests only use stable APIs.
-  #deps = [ ":nodegroup_test_archive" ]
+  #deps = [ ":nodegroup_test_archive" ,]
 }
 
 fidl("fuchsia.nodegroup.test") {
@@ -28,9 +28,17 @@ bind_library("fuchsia.nodegroupbind.test") {
   source = "nodegroup.test.bind"
 }
 
+fuchsia_driver_dml("root-dml") {
+  dml = "meta/root.dml"
+  driver_name = "root"
+}
+
 driver_bind_rules("root_bind") {
-  rules = "meta/root.bind"
-  deps = [ "//src/devices/bind/fuchsia.test" ]
+  dml_label = ":root-dml"
+  deps = [
+    "//src/devices/bind/fuchsia.platform",
+    "//src/devices/bind/fuchsia.test",
+  ]
   bind_output = "root.bindbc"
 }
 
@@ -50,8 +58,8 @@ fuchsia_cc_driver("root_driver") {
 }
 
 fuchsia_driver_component("root") {
+  dml_label = ":root-dml"
   testonly = true
-  manifest = "meta/root.cml"
   deps = [ ":root_driver" ]
   info = "meta/root-info.json"
 }

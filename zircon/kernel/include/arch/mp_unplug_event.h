@@ -34,6 +34,11 @@ class MpUnplugEvent : protected Event {
     Event::Signal();
   }
 
+  zx_status_t Unsignal() {
+    Guard<SpinLock, IrqSave> guard{&lock_};
+    return Event::Unsignal();
+  }
+
   zx_status_t WaitDeadline(zx_instant_mono_t deadline, Interruptible interruptible) {
     const zx_status_t ret = Event::WaitDeadline(deadline, interruptible);
 

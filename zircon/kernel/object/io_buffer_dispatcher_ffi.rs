@@ -53,8 +53,8 @@ pub unsafe extern "C" fn rust_io_buffer_dispatcher_set_name(
     name: *const c_char,
     len: usize,
 ) -> zx_status_t {
-    let name_bytes =
-        if len == 0 { &[] } else { unsafe { core::slice::from_raw_parts(name.cast(), len) } };
+    // SAFETY: The caller guarantees `name` points to `len` initialized bytes whenever `len > 0`.
+    let name_bytes = unsafe { zr::slice_from_raw_parts(name.cast(), len) };
     Status::result_into_raw(disp.set_name(name_bytes))
 }
 

@@ -21,6 +21,7 @@ source_set("vmo") {
   ]
   deps = [
     ":helpers",
+    "../pager:userpager",
     "//sdk/lib/fit",
     "//src/zircon/testing/maybe-standalone-test",
     "//zircon/kernel/lib/arch",
@@ -30,35 +31,26 @@ source_set("vmo") {
     "//zircon/system/ulib/fzl",
     "//zircon/system/ulib/zx",
     "//zircon/system/ulib/zxtest",
-    "//zircon/system/utest/core/pager:userpager",
   ]
   include_dirs = [ "//zircon/kernel/arch/$zircon_cpu/include" ]
 
-  defines = []
-  if (is_asan) {
-    # Due to how the kernel manages the PMM under ASAN memory can become more
-    # fragmented resulting in less chance of succeeding large contiguous
-    # allocation requests.
-    defines += [ "LIMIT_CONTIGUOUS_ALLOCATIONS=1" ]
-  } else {
-    defines += [ "LIMIT_CONTIGUOUS_ALLOCATIONS=0" ]
-  }
-}
-
-library_headers("helpers_headers") {
-  include_dir = "."
-  headers = [ "helpers.h" ]
+  # Due to how the kernel manages the PMM under ASAN memory can become more
+  # fragmented resulting in less chance of succeeding large contiguous
+  # allocation requests.
+  defines = [ "LIMIT_CONTIGUOUS_ALLOCATIONS=$is_asan" ]
 }
 
 source_set("helpers") {
   testonly = true
-  sources = [ "helpers.cc" ]
-  public_deps = [ ":helpers_headers" ]
-  deps = [
+  public = [ "helpers.h" ]
+  public_deps = [
     "//sdk/lib/fit",
-    "//src/zircon/testing/maybe-standalone-test",
-    "//zircon/kernel/lib/boot-options",
     "//zircon/system/ulib/zx",
     "//zircon/system/ulib/zxtest",
+  ]
+  sources = [ "helpers.cc" ]
+  deps = [
+    "//src/zircon/testing/maybe-standalone-test",
+    "//zircon/kernel/lib/boot-options",
   ]
 }

@@ -95,7 +95,7 @@ fuchsia_test_package("optee_test") {
   test_specs = {
     # TODO(https://fxbug.dev/42175122) add astro_env, sherlock_env and nelson_env once
     # the bug will be fixed
-    environments = []
+    build_only = true
   }
 }
 

@@ -15,6 +15,7 @@ rustc_library(
     ],
     edition = "2024",
     rustc_flags = ["-Dunused_results"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
     test_deps = [
         "//src/lib/fuchsia-async",
         "//third_party/rust_crates/vendor:assert_matches",

@@ -105,7 +105,8 @@ type Element = table {
     ///
     /// Required for `ElementType`s DAI_INTERCONNECT, DYNAMICS, EQUALIZER, GAIN, VENDOR_SPECIFIC.
     /// Invalid if specified for elements of type AUTOMATIC_GAIN_CONTROL, AUTOMATIC_GAIN_LIMITER,
-    ///         CONNECTION_POINT, DELAY, MUTE, RING_BUFFER or SAMPLE_RATE_CONVERSION.
+    ///         CONNECTION_POINT, DELAY, MUTE, PACKET_STREAM, RING_BUFFER or
+    ///         SAMPLE_RATE_CONVERSION.
     3: type_specific TypeSpecificElement;
 
     /// If included, a textual description of the processing element.
@@ -121,8 +122,8 @@ type Element = table {
 
     /// If true, the processing element can be bypassed via `SetElementState`.
     /// If not included or false, the processing element cannot be bypassed.
-    /// By definition, elements of type DAI_INTERCONNECT or RING_BUFFER cannot be bypassed and
-    /// must never set this field to true.
+    /// By definition, elements of type DAI_INTERCONNECT, RING_BUFFER, or PACKET_STREAM cannot
+    /// be bypassed and must never set this field to true.
     ///
     /// Optional.
     7: can_bypass bool;
@@ -160,7 +161,8 @@ type ElementState = table {
     ///
     /// Required for DAI_INTERCONNECT, DYNAMICS, EQUALIZER, GAIN and VENDOR_SPECIFIC elements.
     /// Invalid if specified for elements of type AUTOMATIC_GAIN_CONTROL, AUTOMATIC_GAIN_LIMITER,
-    ///         CONNECTION_POINT, DELAY, MUTE, RING_BUFFER or SAMPLE_RATE_CONVERSION.
+    ///         CONNECTION_POINT, DELAY, MUTE, PACKET_STREAM, RING_BUFFER or
+    ///         SAMPLE_RATE_CONVERSION.
     1: type_specific TypeSpecificElementState;
 
     /// If included, an opaque object of octets for conveying vendor-specific information from the
@@ -263,7 +265,8 @@ type SettableElementState = table {
     ///
     /// Optional for DYNAMICS, EQUALIZER, GAIN and VENDOR_SPECIFIC types.
     /// Invalid if specified for AUTOMATIC_GAIN_CONTROL, AUTOMATIC_GAIN_LIMITER, CONNECTION_POINT,
-    ///         DAI_INTERCONNECT, DELAY, MUTE, RING_BUFFER or SAMPLE_RATE_CONVERSION elements.
+    ///         DAI_INTERCONNECT, DELAY, MUTE, PACKET_STREAM, RING_BUFFER or
+    ///         SAMPLE_RATE_CONVERSION elements.
     1: type_specific SettableTypeSpecificElementState;
 
     /// If included, an opaque object of octets for conveying vendor-specific information from
@@ -326,14 +329,14 @@ type Topology = table {
     /// Topology.
     ///
     /// Within each Topology, every sequence of connected elements must begin with an element
-    /// of type DAI_INTERCONNECT or RING_BUFFER, and must end with an element of type
-    /// DAI_INTERCONNECT or RING_BUFFER.
+    /// of type DAI_INTERCONNECT, RING_BUFFER, or PACKET_STREAM, and must end with an element
+    /// of type DAI_INTERCONNECT, RING_BUFFER, or PACKET_STREAM.
     ///
-    /// An DAI_INTERCONNECT element is _permitted_ to be the endpoint for an element sequence, but a
-    /// RING_BUFFER is _required_ to be one. If a certain RING_BUFFER element is listed in an
-    /// EdgeList entry as a `processing_element_id_from`, then within that Topology this same
-    /// element must NOT be listed in another EdgeList entry as a `processing_element_id_to` (and
-    /// vice versa).
+    /// A DAI_INTERCONNECT element is _permitted_ to start or end an element sequence, but a
+    /// RING_BUFFER or PACKET_STREAM is _required_ to start or end one.
+    /// If a certain RING_BUFFER or PACKET_STREAM element is listed in an EdgePair as a
+    /// `processing_element_id_from`, then within that Topology this same element must NOT be
+    /// listed in another EdgePair as a `processing_element_id_to` (and vice versa).
     ///
     /// As a special case, a DAI_INTERCONNECT element can refer to itself; i.e. an EdgePair may
     /// contain `processing_element_id_from` and `processing_element_id_to` values that are equal.
@@ -348,7 +351,7 @@ type Topology = table {
 /// types (Codec, Dai, StreamConfig).
 ///
 /// For an overview see
-/// [[Signal Processing Interface]](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_signal_processing).
+/// [Signal Processing Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/signal-processing).
 open protocol SignalProcessing {
     /// Exposes read-only signal processing properties.
     compose Reader;
@@ -374,8 +377,8 @@ open protocol SignalProcessing {
     /// Controls the processing element specified by `processing_element_id`, a unique ElementId
     /// returned by `GetElements`.
     /// The `state` specified in calls to `SetElementState` is a `SettableElementState`. This is a
-    /// subset of `ElementState` because some fields returned by `WatchElementState` (e.g. `latency`
-    /// or `plug_state`) can only be observed (not set) by the client.
+    /// subset of `ElementState` because some fields returned by `WatchElementState` (e.g.
+    /// `processing_delay` or `plug_state`) can only be observed (not set) by the client.
     ///
     /// Returns `ZX_ERR_INVALID_ARGS` if `processing_element_id` does not match a known ElementId
     /// returned by `GetElements`, or if `state` is not valid for the element. This entails any
@@ -419,7 +422,7 @@ open protocol SignalProcessing {
 /// types (Codec, Dai, StreamConfig).
 ///
 /// For an overview see
-/// [[Signal Processing Interface]](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_signal_processing).
+/// [Signal Processing Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/signal-processing).
 open protocol Reader {
     /// Returns a vector of supported processing elements.
     /// This vector must include one or more processing elements.

@@ -7,8 +7,8 @@ import argparse
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from enum import Enum
-from typing import Iterable
 
 from fuchsia.tools.fuchsia_task_lib import *
 

@@ -9,7 +9,7 @@ use crate::security::selinux_hooks::{
     has_file_permissions, is_internal_operation, permissions_from_flags, task_consistent_attrs,
 };
 use crate::security::{Arc, Auditable, ProcAttr, SecurityId, SecurityServer};
-use crate::task::loader::ResolvedElf;
+use crate::task::loader::ResolvedProgram;
 use crate::task::{CurrentTask, Task};
 use crate::vfs::{FsNode, FsStr, NamespaceNode};
 use selinux::{
@@ -38,10 +38,10 @@ use starnix_uapi::{
 pub(in crate::security) fn bprm_committing_creds(
     security_server: &Arc<SecurityServer>,
     current_task: &CurrentTask,
-    elf_state: &ResolvedElf,
+    resolved_program: &ResolvedProgram,
 ) {
-    let new_sid = elf_state.creds.security_state.current_sid;
-    let previous_sid = elf_state.creds.security_state.previous_sid;
+    let new_sid = resolved_program.creds.security_state.current_sid;
+    let previous_sid = resolved_program.creds.security_state.previous_sid;
     debug_assert!(previous_sid == current_task.current_creds().security_state.current_sid);
     if new_sid == previous_sid {
         return;
@@ -301,20 +301,19 @@ fn check_nnp_nosuid_transition(
     Ok(())
 }
 
-/// Checks the SELinux permissions required for exec. Returns the SELinux state of a resolved
-/// elf if all required permissions are allowed, as well as a kernel-readable field stating
-/// whether SELinux requires the executable to run in secure mode.
+/// Checks SELinux permissions required for `execve`, updating [`ResolvedProgram`] with the
+/// post-exec security context and [`ResolvedProgram::secure_exec`] state if allowed.
 ///
 /// Corresponds to the `bprm_creds_for_exec()` LSM hook.
 pub(in crate::security) fn bprm_creds_for_exec(
     security_server: &Arc<SecurityServer>,
     current_task: &CurrentTask,
-    executable: &NamespaceNode,
-    elf_state: &mut ResolvedElf,
+    resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
     let permission_check = build_permission_check(&current_task, security_server);
     let TaskAttrs { current_sid, exec_sid, .. } = *task_consistent_attrs(current_task);
 
+    let executable: &NamespaceNode = resolved_program.file.name();
     let executable_sid = fs_node_effective_sid_and_class(&executable.entry.node).sid;
 
     let new_sid = if let Some(exec_sid) = exec_sid {
@@ -410,9 +409,8 @@ pub(in crate::security) fn bprm_creds_for_exec(
         )
         .is_err();
 
-    // Update the `elf_state`'s `Credentials` with the SELinux task attributes.
-    elf_state.creds.security_state = TaskAttrs::for_transition(new_sid, current_sid);
-    elf_state.secure_exec |= secure_exec;
+    resolved_program.creds.security_state = TaskAttrs::for_transition(new_sid, current_sid);
+    resolved_program.secure_exec |= secure_exec;
 
     Ok(())
 }
@@ -1115,18 +1113,13 @@ mod tests {
             });
 
             let file = open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
             assert_eq!(
-                bprm_creds_for_exec(
-                    &security_server,
-                    &current_task,
-                    &executable,
-                    &mut resolved_elf
-                ),
+                bprm_creds_for_exec(&security_server, &current_task, &mut resolved_program),
                 Ok(())
             );
-            assert_eq!(resolved_elf.creds.security_state.current_sid, exec_sid);
-            assert_eq!(resolved_elf.secure_exec, true);
+            assert_eq!(resolved_program.creds.security_state.current_sid, exec_sid);
+            assert_eq!(resolved_program.secure_exec, true);
         })
         .await;
     }
@@ -1155,18 +1148,13 @@ mod tests {
             });
 
             let file = open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
             assert_eq!(
-                bprm_creds_for_exec(
-                    &security_server,
-                    &current_task,
-                    &executable,
-                    &mut resolved_elf
-                ),
+                bprm_creds_for_exec(&security_server, &current_task, &mut resolved_program),
                 Ok(())
             );
-            assert_eq!(resolved_elf.creds.security_state.current_sid, exec_sid);
-            assert_eq!(resolved_elf.secure_exec, false);
+            assert_eq!(resolved_program.creds.security_state.current_sid, exec_sid);
+            assert_eq!(resolved_program.secure_exec, false);
         })
         .await;
     }
@@ -1193,14 +1181,9 @@ mod tests {
             });
 
             let file = open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
             assert_eq!(
-                bprm_creds_for_exec(
-                    &security_server,
-                    &current_task,
-                    &executable,
-                    &mut resolved_elf
-                ),
+                bprm_creds_for_exec(&security_server, &current_task, &mut resolved_program),
                 error!(EACCES)
             );
         })
@@ -1232,14 +1215,9 @@ mod tests {
             });
 
             let file = open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
             assert_eq!(
-                bprm_creds_for_exec(
-                    &security_server,
-                    &current_task,
-                    &executable,
-                    &mut resolved_elf
-                ),
+                bprm_creds_for_exec(&security_server, &current_task, &mut resolved_program),
                 error!(EACCES)
             );
         })
@@ -1266,18 +1244,13 @@ mod tests {
             // Since the security domain is not changing, the `noatsecure` permission is not
             // checked and secure-mode exec is not required.
             let file = open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
             assert_eq!(
-                bprm_creds_for_exec(
-                    &security_server,
-                    &current_task,
-                    &executable,
-                    &mut resolved_elf
-                ),
+                bprm_creds_for_exec(&security_server, &current_task, &mut resolved_program),
                 Ok(())
             );
-            assert_eq!(resolved_elf.creds.security_state.current_sid, current_sid);
-            assert_eq!(resolved_elf.secure_exec, false);
+            assert_eq!(resolved_program.creds.security_state.current_sid, current_sid);
+            assert_eq!(resolved_program.secure_exec, false);
         })
         .await;
     }
@@ -1304,14 +1277,9 @@ mod tests {
             // There is no `execute_no_trans` allow statement from `current_sid` to `executable_sid`,
             // expect access denied.
             let file = open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
             assert_eq!(
-                bprm_creds_for_exec(
-                    &security_server,
-                    &current_task,
-                    &executable,
-                    &mut resolved_elf
-                ),
+                bprm_creds_for_exec(&security_server, &current_task, &mut resolved_program),
                 error!(EACCES)
             );
         })
@@ -1354,13 +1322,13 @@ mod tests {
             });
 
             let file = open_test_file(current_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(current_task, file);
+            let mut resolved_program = testing::make_resolved_program(current_task, file);
 
-            bprm_creds_for_exec(&security_server, &current_task, &executable, &mut resolved_elf)
+            bprm_creds_for_exec(&security_server, &current_task, &mut resolved_program)
                 .expect("bprm_creds_for_exec failed");
 
             assert_eq!(
-                resolved_elf.creds.security_state,
+                resolved_program.creds.security_state,
                 TaskAttrs {
                     current_sid: target_sid,
                     exec_sid: None,
@@ -1422,14 +1390,14 @@ mod tests {
 
             let executable = testing::create_test_file(&grandchild_task);
             let file = open_test_file(&grandchild_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(&grandchild_task, file);
-            resolved_elf.creds.security_state = TaskAttrs::for_transition(
+            let mut resolved_program = testing::make_resolved_program(&grandchild_task, file);
+            resolved_program.creds.security_state = TaskAttrs::for_transition(
                 new_sid,
                 grandchild_task.real_creds().security_state.current_sid,
             );
 
-            bprm_committing_creds(&security_server, &grandchild_task, &resolved_elf);
-            grandchild_task.set_creds(resolved_elf.creds.clone());
+            bprm_committing_creds(&security_server, &grandchild_task, &resolved_program);
+            grandchild_task.set_creds(resolved_program.creds.clone());
             bprm_committed_creds(&security_server, &grandchild_task);
 
             let post_exec_limits = { grandchild_task.thread_group().limits.lock().clone() };
@@ -1449,14 +1417,14 @@ mod tests {
             let same_domain_task = child_task.clone_task_for_test(0, Some(SIGCHLD));
 
             let file = open_test_file(&same_domain_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(&same_domain_task, file);
-            resolved_elf.creds.security_state = TaskAttrs::for_transition(
+            let mut resolved_program = testing::make_resolved_program(&same_domain_task, file);
+            resolved_program.creds.security_state = TaskAttrs::for_transition(
                 previous_sid,
                 same_domain_task.real_creds().security_state.current_sid,
             );
 
-            bprm_committing_creds(&security_server, &same_domain_task, &resolved_elf);
-            same_domain_task.set_creds(resolved_elf.creds.clone());
+            bprm_committing_creds(&security_server, &same_domain_task, &resolved_program);
+            same_domain_task.set_creds(resolved_program.creds.clone());
             bprm_committed_creds(&security_server, &same_domain_task);
 
             let same_domain_limits = { same_domain_task.thread_group().limits.lock().clone() };
@@ -1501,14 +1469,14 @@ mod tests {
             assert_ne!(old_sid, new_sid);
             let executable = testing::create_test_file(&child_task);
             let file = open_test_file(&child_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(&child_task, file);
-            resolved_elf.creds.security_state = TaskAttrs::for_transition(
+            let mut resolved_program = testing::make_resolved_program(&child_task, file);
+            resolved_program.creds.security_state = TaskAttrs::for_transition(
                 new_sid,
                 child_task.real_creds().security_state.current_sid,
             );
 
-            bprm_committing_creds(&security_server, &child_task, &resolved_elf);
-            child_task.set_creds(resolved_elf.creds.clone());
+            bprm_committing_creds(&security_server, &child_task, &resolved_program);
+            child_task.set_creds(resolved_program.creds.clone());
             bprm_committed_creds(&security_server, &child_task);
 
             // Check that the child task's ITIMER_REAL is now unset.
@@ -1542,14 +1510,14 @@ mod tests {
             assert_ne!(old_sid, new_sid);
             let executable = testing::create_test_file(&child_task);
             let file = open_test_file(&child_task, &executable);
-            let mut resolved_elf = testing::make_resolved_elf(&child_task, file);
-            resolved_elf.creds.security_state = TaskAttrs::for_transition(
+            let mut resolved_program = testing::make_resolved_program(&child_task, file);
+            resolved_program.creds.security_state = TaskAttrs::for_transition(
                 new_sid,
                 child_task.real_creds().security_state.current_sid,
             );
 
-            bprm_committing_creds(&security_server, &child_task, &resolved_elf);
-            child_task.set_creds(resolved_elf.creds.clone());
+            bprm_committing_creds(&security_server, &child_task, &resolved_program);
+            child_task.set_creds(resolved_program.creds.clone());
             bprm_committed_creds(&security_server, &child_task);
 
             // Check that the previously pending signal has been cleared.

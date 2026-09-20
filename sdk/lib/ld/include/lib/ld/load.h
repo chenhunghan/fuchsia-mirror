@@ -22,7 +22,7 @@ namespace ld {
 
 // Shorthand.
 template <class Elf = elfldltl::Elf<>>
-using AbiModule = typename abi::Abi<Elf>::Module;
+using AbiModule = abi::Abi<Elf>::Module;
 
 // Set the module Phdrs, which is read directly from the load image, as opposed
 // to from a buffer read from the file.
@@ -39,7 +39,7 @@ constexpr void SetModulePhdrs(AbiModule<Elf>& module, const typename Elf::Ehdr& 
   // ELF format rules, so there's no way to avoid checking all the segments
   // until a qualifying one is found.
   load_info.VisitSegments([&](const auto& segment) {
-    using Phdr = typename Elf::Phdr;
+    using Phdr = Elf::Phdr;
     if (segment.offset() <= ehdr.phoff && ehdr.phoff - segment.offset() < segment.filesz() &&
         (segment.filesz() - (ehdr.phoff - segment.offset())) / sizeof(Phdr) >= ehdr.phnum) {
       if (auto read_phdrs = memory.template ReadArray<Phdr>(
@@ -102,7 +102,7 @@ template <class Elf = elfldltl::Elf<>, class Diagnostics, class Memory,
 constexpr fit::result<bool, std::span<const typename Elf::Dyn>> DecodeModuleDynamic(
     AbiModule<Elf>& module, Diagnostics& diag, Memory& memory,
     const std::optional<typename Elf::Phdr>& dyn_phdr, DynamicObservers&&... dynamic_observers) {
-  using Dyn = const typename Elf::Dyn;
+  using Dyn = const Elf::Dyn;
 
   if (!dyn_phdr) [[unlikely]] {
     return fit::error{diag.FormatError("no PT_DYNAMIC program header found")};

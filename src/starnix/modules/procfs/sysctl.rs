@@ -754,11 +754,16 @@ impl BytesFileOps for DropCachesFile {
         let val = parse_unsigned_file::<u32>(&data)?;
         match val {
             // 1: Frees page cache.
+            //
+            // Note: On Fuchsia, file data is cached in Zircon pager-backed VMOs whose lifetimes are
+            // tied to open file nodes (`FxFile`). Zircon does not support `ZX_VMO_OP_DECOMMIT` on
+            // pager-backed VMOs. Dropping dentries/inodes (via `2` or `3`) closes unreferenced
+            // `FxFile` nodes so the kernel can reclaim their VMO pages.
             1 => track_stub!(
                 TODO("https://fxbug.dev/322874299"),
                 "/proc/sys/vm/drop_caches pagecache"
             ),
-            // 2: Frees dentries and inodes.
+            // 2: Frees dentries and inodes (and underlying VMO page cache).
             2 => current_task.kernel().mounts.drop_caches(),
             // 3: Frees page cache, dentries, and inodes.
             3 => {

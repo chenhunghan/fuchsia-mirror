@@ -17,8 +17,8 @@ use crate::arch_rs::x86::ioapic::{
 };
 use crate::dev_interrupt::{InterruptHandler, InterruptPolarity, InterruptTriggerMode, MsiBlock};
 use crate::object::ResourceDispatcher;
-use core::mem::MaybeUninit;
-use pin_init::PinInit;
+use core::pin::Pin;
+use lazy_init::LazyInit;
 use zx_status::Status;
 use zx_types::{ZX_RSRC_KIND_IRQ, zx_status_t};
 
@@ -58,18 +58,10 @@ impl super::interrupt_manager::IoApic for RealIoApic {
     }
 }
 
-static mut INTERRUPT_MANAGER: MaybeUninit<InterruptManager<RealIoApic>> = MaybeUninit::uninit();
-
-/// Retrieves a reference to the global `InterruptManager` instance.
-fn get_interrupt_manager() -> &'static InterruptManager<RealIoApic> {
-    // SAFETY: `INTERRUPT_MANAGER` is initialized early during boot (in `platform_init_apic`)
-    // before any other CPUs are online or any concurrent interrupts are registered, making it safe
-    // to read the initialized value thereafter.
-    unsafe { &*(core::ptr::addr_of!(INTERRUPT_MANAGER) as *const InterruptManager<RealIoApic>) }
-}
+static INTERRUPT_MANAGER: LazyInit<InterruptManager<RealIoApic>> = LazyInit::uninit();
 
 // Values from ioapic to cache for calls to interrupt_get_base_vector / interrupt_get_max_vector
-static mut GSI_RANGE: Option<GsiRange> = None;
+static GSI_RANGE: LazyInit<GsiRange> = LazyInit::uninit();
 
 unsafe extern "C" {
     fn apic_vm_init();
@@ -155,8 +147,9 @@ fn platform_init_apic(_level: init::LkInitLevel) {
     apic_io_init_safe(&descriptors, &overrides);
 
     let range = apic_io_get_gsi_range();
+    // SAFETY: Called once during boot, serialized with respect to any other access.
     unsafe {
-        GSI_RANGE = Some(range);
+        GSI_RANGE.init(range);
     }
 
     // SAFETY: `cpp_arch_ints_disabled` returns if interrupts are disabled for the current cpu,
@@ -194,17 +187,12 @@ fn platform_init_apic(_level: init::LkInitLevel) {
     }
 
     // Initialize the global INTERRUPT_MANAGER
-    // SAFETY: `INTERRUPT_MANAGER` is a static mut variable. Pin-initializing it in-place
-    // is safe because it is done exactly once on the bootstrap processor early in the boot sequence,
-    // before any concurrent access is possible.
+    // SAFETY: Called once during boot, serialized with respect to any other access.
     let _ = unsafe {
-        InterruptManager::<RealIoApic>::new()
-            .__pinned_init(
-                core::ptr::addr_of_mut!(INTERRUPT_MANAGER) as *mut InterruptManager<RealIoApic>
-            )
+        Pin::static_ref(&INTERRUPT_MANAGER).init_pin(InterruptManager::<RealIoApic>::new())
     };
 
-    let status = get_interrupt_manager().init();
+    let status = (*INTERRUPT_MANAGER).init();
     if status.is_err() {
         panic!("InterruptManager init failed: {:?}", status);
     }
@@ -233,7 +221,7 @@ pub unsafe extern "C" fn platform_irq(frame: *const crate::arch_rs::x86::Iframe)
         x86_vector >= X86_INT_PLATFORM_BASE.0 as u64 && x86_vector <= X86_INT_PLATFORM_MAX.0 as u64
     );
 
-    get_interrupt_manager().invoke_x86_vector(x86_vector as u8);
+    INTERRUPT_MANAGER.invoke_x86_vector(x86_vector as u8);
 
     // SAFETY: Issuing an EOI is required to acknowledge the interrupt at the APIC level
     // and is safe to call inside the interrupt handler.
@@ -248,7 +236,7 @@ pub extern "C" fn register_int_handler(
     vector: u32,
     handler: InterruptHandler,
 ) -> Result<(), Status> {
-    get_interrupt_manager().register_interrupt_handler(vector, handler, false)
+    INTERRUPT_MANAGER.register_interrupt_handler(vector, handler, false)
 }
 
 /// Registers a permanent handler for the specified vector.
@@ -257,25 +245,25 @@ pub extern "C" fn register_permanent_int_handler(
     vector: u32,
     handler: InterruptHandler,
 ) -> Result<(), Status> {
-    get_interrupt_manager().register_interrupt_handler(vector, handler, true)
+    INTERRUPT_MANAGER.register_interrupt_handler(vector, handler, true)
 }
 
 /// Registers the MSI handler.
 #[unsafe(no_mangle)]
 pub extern "C" fn msi_register_handler(block: &MsiBlock, msi_id: u32, handler: InterruptHandler) {
-    get_interrupt_manager().msi_register_handler(block, msi_id, handler);
+    INTERRUPT_MANAGER.msi_register_handler(block, msi_id, handler);
 }
 
 /// Masks the specified interrupt vector.
 #[unsafe(no_mangle)]
 pub extern "C" fn mask_interrupt(vector: u32) -> zx_status_t {
-    Status::result_into_raw(get_interrupt_manager().mask_interrupt(vector))
+    Status::result_into_raw(INTERRUPT_MANAGER.mask_interrupt(vector))
 }
 
 /// Unmasks the specified interrupt vector.
 #[unsafe(no_mangle)]
 pub extern "C" fn unmask_interrupt(vector: u32) -> zx_status_t {
-    Status::result_into_raw(get_interrupt_manager().unmask_interrupt(vector))
+    Status::result_into_raw(INTERRUPT_MANAGER.unmask_interrupt(vector))
 }
 
 /// Configures the trigger mode and polarity of the specified interrupt vector.
@@ -285,7 +273,7 @@ pub extern "C" fn configure_interrupt(
     tm: InterruptTriggerMode,
     pol: InterruptPolarity,
 ) -> zx_status_t {
-    Status::result_into_raw(get_interrupt_manager().configure_interrupt(vector, tm, pol))
+    Status::result_into_raw(INTERRUPT_MANAGER.configure_interrupt(vector, tm, pol))
 }
 
 /// Retrieves the configuration of the specified interrupt vector.
@@ -295,7 +283,7 @@ pub extern "C" fn get_interrupt_config(
     tm: *mut InterruptTriggerMode,
     pol: *mut InterruptPolarity,
 ) -> zx_status_t {
-    match get_interrupt_manager().get_interrupt_config(vector) {
+    match INTERRUPT_MANAGER.get_interrupt_config(vector) {
         Ok((t, p)) => {
             if !tm.is_null() {
                 // SAFETY: `tm` is checked to be non-null and is a valid pointer provided by the caller
@@ -322,15 +310,13 @@ pub extern "C" fn get_interrupt_config(
 /// ACPI Spec 6.1, section 5.2.12 & section 5.2.13.
 #[unsafe(no_mangle)]
 pub extern "C" fn interrupt_get_base_vector() -> u32 {
-    let gsis = unsafe { GSI_RANGE }.expect("x64_gsis not initialized");
-    gsis.start
+    GSI_RANGE.start
 }
 
 /// Returns the maximum global IRQ vector.
 #[unsafe(no_mangle)]
 pub extern "C" fn interrupt_get_max_vector() -> u32 {
-    let gsis = unsafe { GSI_RANGE }.expect("x64_gsis not initialized");
-    gsis.end
+    GSI_RANGE.end
 }
 
 /// Returns true if the vector is a valid interrupt vector.
@@ -402,7 +388,7 @@ pub extern "C" fn msi_alloc_block(
     if out_block.allocated {
         return Status::INVALID_ARGS.into_raw();
     }
-    match get_interrupt_manager().msi_alloc_block(requested_irqs, can_target_64bit, is_msix) {
+    match INTERRUPT_MANAGER.msi_alloc_block(requested_irqs, can_target_64bit, is_msix) {
         Ok(block) => {
             *out_block = block;
             zx_status::sys::ZX_OK
@@ -414,7 +400,7 @@ pub extern "C" fn msi_alloc_block(
 /// Frees an allocated MSI block.
 #[unsafe(no_mangle)]
 pub extern "C" fn msi_free_block(block: &mut MsiBlock) {
-    get_interrupt_manager().msi_free_block(block);
+    INTERRUPT_MANAGER.msi_free_block(block);
 }
 
 /// Shutdown interrupts for the calling CPU.

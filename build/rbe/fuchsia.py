@@ -12,15 +12,10 @@ This includes information like:
 import os
 import platform
 import sys
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import (
     AbstractSet,
-    Callable,
-    FrozenSet,
-    Iterable,
-    List,
-    Optional,
-    Sequence,
 )
 
 _SCRIPT_PATH = Path(__file__)
@@ -142,11 +137,11 @@ _CHECK_DETERMINISM_SCRIPT = Path("build", "tracer", "output_cacher.py")
 def check_determinism_command(
     exec_root: Path,
     outputs: Sequence[Path],
-    command: Optional[Iterable[str]] = None,
-    max_attempts: Optional[int] = None,
-    miscomparison_export_dir: Optional[Path] = None,
-    label: Optional[str] = None,
-) -> List[str]:
+    command: Iterable[str] | None = None,
+    max_attempts: int | None = None,
+    miscomparison_export_dir: Path | None = None,
+    label: str | None = None,
+) -> list[str]:
     """Returns a command that checks for output determinism.
 
     The check runs locally twice, moving outputs out of the way temporarily,
@@ -185,7 +180,7 @@ def check_determinism_command(
     )
 
 
-def determinism_repetitions(paths: Iterable[Path]) -> Optional[int]:
+def determinism_repetitions(paths: Iterable[Path]) -> int | None:
     """Override the maximum number of determinism repetitions for specific files."""
     # For https://fxbug.dev/42080457: Increase repetition count to increase
     # chances of repro in infra.
@@ -205,7 +200,7 @@ def remote_rustc_shlibs(root_rel: Path) -> Iterable[Path]:
 
 def clang_runtime_libdirs(
     clang_dir_rel: Path, target_triple: str
-) -> List[Path]:
+) -> list[Path]:
     """Locate clang runtime libdir from the given toolchain directory."""
     return list(
         (clang_dir_rel / "lib" / "clang").glob(
@@ -413,7 +408,7 @@ def _force_target_runtime_libdirs_b354016617(
 def remote_clang_compiler_toolchain_inputs(
     clang_path_rel: Path,
     target: str,
-    sanitizers: FrozenSet[str],
+    sanitizers: frozenset[str],
 ) -> Iterable[Path]:
     """List compiler support files.
 

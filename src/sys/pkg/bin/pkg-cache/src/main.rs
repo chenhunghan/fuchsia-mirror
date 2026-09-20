@@ -41,6 +41,7 @@ mod blob_fetcher;
 mod cache_service;
 mod compat;
 mod component_resolver;
+mod executability;
 mod frozen_index;
 mod full_package_resolver;
 mod gc_service;
@@ -340,36 +341,27 @@ async fn main_inner() -> Result<(), Error> {
             )
             .context("adding fuchsia.pkg.garbagecollector/Manager to /svc")?;
     }
+    let base_package_resolver = base_package_resolver::Resolver::new(
+        Arc::clone(&base_index),
+        authenticator.clone(),
+        open_packages.clone(),
+        scope.clone(),
+    );
     {
-        let base_index = Arc::clone(&base_index);
-        let authenticator = authenticator.clone();
-        let open_packages = open_packages.clone();
-        let scope = scope.clone();
+        let base_package_resolver = Arc::clone(&base_package_resolver);
         let () = svc_dir
             .add_entry(
                 fpkg::PackageResolverMarker::PROTOCOL_NAME,
                 vfs::service::host(move |stream: fpkg::PackageResolverRequestStream| {
-                    base_package_resolver::serve_request_stream(
-                        stream,
-                        Arc::clone(&base_index),
-                        authenticator.clone(),
-                        open_packages.clone(),
-                        scope.clone(),
+                    Arc::clone(&base_package_resolver).serve_request_stream(stream).unwrap_or_else(
+                        |e: anyhow::Error| error!("serving fuchsia.pkg/PackageResolver: {e:#}"),
                     )
-                    .unwrap_or_else(|e: anyhow::Error| {
-                        error!("serving fuchsia.pkg/PackageResolver: {e:#}")
-                    })
                 }),
             )
             .context("adding fuchsia.pkg/PackageResolver to /svc")?;
     }
     {
-        let base_package_resolver = Arc::new(base_package_resolver::BaseResolver::new(
-            Arc::clone(&base_index),
-            authenticator.clone(),
-            open_packages.clone(),
-        ));
-        let scope = scope.clone();
+        let base_package_resolver = Arc::clone(&base_package_resolver);
         let () = svc_dir
             .add_entry(
                 fcomponent_resolution::ResolverMarker::PROTOCOL_NAME,
@@ -377,7 +369,6 @@ async fn main_inner() -> Result<(), Error> {
                     component_resolver::serve_request_stream(
                         stream,
                         Arc::clone(&base_package_resolver),
-                        scope.clone(),
                         "base component resolver",
                     )
                     .unwrap_or_else(|e: anyhow::Error| {
@@ -424,87 +415,66 @@ async fn main_inner() -> Result<(), Error> {
         blob_fetcher,
         root_dir_factory.clone(),
         open_packages.clone(),
+        inspector.root().create_child("package_fetcher"),
     );
     let package_fetcher_fut = Task::spawn(package_fetcher_fut);
     let tuf_authority = fuchsia_component::client::connect_to_protocol::<fpkg::AuthorityMarker>()
         .context("error connecting to fuchsia.pkg/Authority")?;
     {
-        let tuf_authority = tuf_authority.clone();
-        let package_fetcher = package_fetcher.clone();
-        let authenticator = authenticator.clone();
-        let root_dir_factory = root_dir_factory.clone();
-        let scope = scope.clone();
+        let resolver = ota_resolver::Resolver::new(
+            tuf_authority.clone(),
+            package_fetcher.clone(),
+            authenticator.clone(),
+            root_dir_factory.clone(),
+            scope.clone(),
+            inspector.root().create_child("fuchsia.pkg.PackageResolver-ota"),
+        );
         let () = svc_dir
             .add_entry(
                 format!("{}-ota", fpkg::PackageResolverMarker::PROTOCOL_NAME),
                 vfs::service::host(move |stream: fpkg::PackageResolverRequestStream| {
-                    ota_resolver::serve_request_stream(
-                        stream,
-                        tuf_authority.clone(),
-                        package_fetcher.clone(),
-                        authenticator.clone(),
-                        root_dir_factory.clone(),
-                        scope.clone(),
+                    Arc::clone(&resolver).serve_request_stream(stream).unwrap_or_else(
+                        |e: anyhow::Error| error!("serving fuchsia.pkg/PackageResolver-ota: {e:#}"),
                     )
-                    .unwrap_or_else(|e: anyhow::Error| {
-                        error!("serving fuchsia.pkg/PackageResolver-ota: {e:#}")
-                    })
                 }),
             )
             .context("adding fuchsia.pkg/PackageResolver-ota to /svc")?;
     }
+    let full_package_resolver = full_package_resolver::Resolver::new(
+        Arc::clone(&base_package_resolver),
+        upgradable_packages,
+        tuf_authority,
+        cache_index,
+        package_fetcher,
+        authenticator,
+        open_packages,
+        executability::Decider::new(executability_restrictions, Arc::clone(&base_index)),
+        scope.clone(),
+        inspector.root().create_child("fuchsia.pkg.PackageResolver-full"),
+    );
     {
-        let base_index = Arc::clone(&base_index);
-        let upgradable_packages = upgradable_packages.clone();
-        let tuf_authority = tuf_authority.clone();
-        let cache_index = Arc::clone(&cache_index);
-        let package_fetcher = package_fetcher.clone();
-        let authenticator = authenticator.clone();
-        let open_packages = open_packages.clone();
-        let scope = scope.clone();
+        let full_package_resolver = Arc::clone(&full_package_resolver);
         let () = svc_dir
             .add_entry(
                 format!("{}-full", fpkg::PackageResolverMarker::PROTOCOL_NAME),
                 vfs::service::host(move |stream: fpkg::PackageResolverRequestStream| {
-                    full_package_resolver::serve_request_stream(
-                        stream,
-                        Arc::clone(&base_index),
-                        upgradable_packages.clone(),
-                        tuf_authority.clone(),
-                        Arc::clone(&cache_index),
-                        package_fetcher.clone(),
-                        authenticator.clone(),
-                        open_packages.clone(),
-                        executability_restrictions,
-                        scope.clone(),
+                    Arc::clone(&full_package_resolver).serve_request_stream(stream).unwrap_or_else(
+                        |e: anyhow::Error| {
+                            error!("serving fuchsia.pkg/PackageResolver-full: {e:#}")
+                        },
                     )
-                    .unwrap_or_else(|e: anyhow::Error| {
-                        error!("serving fuchsia.pkg/PackageResolver-full: {e:#}")
-                    })
                 }),
             )
             .context("adding fuchsia.pkg/PackageResolver-full to /svc")?;
     }
     {
-        let full_package_resolver = Arc::new(full_package_resolver::FullResolver::new(
-            base_index.clone(),
-            upgradable_packages,
-            tuf_authority.clone(),
-            cache_index.clone(),
-            package_fetcher.clone(),
-            authenticator.clone(),
-            open_packages.clone(),
-            executability_restrictions,
-        ));
-        let scope = scope.clone();
         let () = svc_dir
             .add_entry(
                 format!("{}-full", fcomponent_resolution::ResolverMarker::PROTOCOL_NAME),
                 vfs::service::host(move |stream: fcomponent_resolution::ResolverRequestStream| {
                     component_resolver::serve_request_stream(
                         stream,
-                        full_package_resolver.clone(),
-                        scope.clone(),
+                        Arc::clone(&full_package_resolver),
                         "full component resolver",
                     )
                     .unwrap_or_else(|e: anyhow::Error| {
@@ -523,9 +493,7 @@ async fn main_inner() -> Result<(), Error> {
                 None,
                 None,
             ),
-            base_index.as_ref(),
-            &open_packages,
-            scope.clone(),
+            base_package_resolver.as_ref(),
         )
         .map(move |result| result.map(remote_dir).with_context(|| format!("getting {name} dir")))
     };
@@ -567,20 +535,10 @@ async fn main_inner() -> Result<(), Error> {
 
 async fn serve_base_package_if_present(
     url: AbsolutePackageUrl,
-    base_index: &crate::BaseIndex,
-    open_packages: &RootDirCache,
-    scope: package_directory::ExecutionScope,
+    resolver: &base_package_resolver::Resolver,
 ) -> anyhow::Result<fio::DirectoryProxy> {
     let (proxy, server) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-    match base_package_resolver::resolve_and_serve_no_context(
-        &url,
-        server,
-        base_index,
-        open_packages,
-        scope,
-    )
-    .await
-    {
+    match resolver.resolve_and_serve(&url, server).await.map(|_: fpkg::ResolutionContext| ()) {
         Ok(()) => (),
         Err(base_package_resolver::Error::PackageNotInIndex) => {
             log::warn!(url:%; "package not in base, so exposed directory will close connections")

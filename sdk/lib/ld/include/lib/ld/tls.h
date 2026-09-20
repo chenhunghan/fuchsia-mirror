@@ -37,9 +37,7 @@ namespace abi {
 
 template <class Elf, class AbiTraits>
 struct Abi<Elf, AbiTraits>::TlsModule {
-  constexpr typename Elf::size_type tls_size() const {
-    return tls_initial_data.size() + tls_bss_size;
-  }
+  constexpr Elf::size_type tls_size() const { return tls_initial_data.size() + tls_bss_size; }
 
   // Initial data image in memory, usually a pointer into the RODATA or RELRO
   // segment of the module's load image.
@@ -57,7 +55,7 @@ struct Abi<Elf, AbiTraits>::TlsModule {
 
   // <lib/ld/remote-abi-transcriber.h> introspection API.
 
-  using AbiLocal = typename Abi<Elf, elfldltl::LocalAbiTraits>::TlsModule;
+  using AbiLocal = Abi<Elf, elfldltl::LocalAbiTraits>::TlsModule;
 
   template <template <class...> class Template>
   using AbiBases = Template<>;
@@ -141,7 +139,7 @@ struct TlsSegment {
 template <class Elf, class AbiTraits>
 inline std::ranges::input_range auto TlsInitialExecSegments(
     const typename abi::Abi<Elf, AbiTraits>& abi, std::span<std::byte> block, size_t tp_offset) {
-  using size_type = typename Elf::size_type;
+  using size_type = Elf::size_type;
   return std::views::iota(size_type{1}, abi.static_tls_modules.size() + 1) |
          std::views::transform([&abi, block, tp_offset](size_type modid) {
            const auto& module = abi.static_tls_modules[modid - 1];

@@ -37,8 +37,13 @@ class BusDeviceInterface {
   virtual zx_status_t LinkDevice(fbl::RefPtr<pci::Device> device) = 0;
   // Remove a device from the Bus device tree.
   virtual zx_status_t UnlinkDevice(pci::Device* device) = 0;
-  // Add a device to the shared irq handler list for its legacy IRQ vector.
-  virtual zx_status_t AddToSharedIrqList(pci::Device* device, uint32_t vector) = 0;
+  // Shared IRQ handler list management for a device's legacy IRQ vector.
+  // Note on lock hierarchy: Called while holding Device::dev_lock_; implementations
+  // acquire Bus::devices_lock_. Note that Bus::HandleLegacyIrq acquires devices_lock_
+  // before dev_lock_; concurrent deadlock is prevented because both operations execute
+  // on the driver's synchronized dispatcher.
+  virtual zx_status_t AddToSharedIrqList(pci::Device* device, uint32_t vector,
+                                         zx::unowned_interrupt irq_handle) = 0;
   virtual zx_status_t RemoveFromSharedIrqList(pci::Device* device, uint32_t vector) = 0;
 };
 

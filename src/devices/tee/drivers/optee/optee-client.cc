@@ -78,7 +78,7 @@ fbl::StringBuffer<kTaPathLength> BuildTaPath(const optee::Uuid& ta_uuid) {
 
 zx_status_t ConvertOpteeToZxResult(fidl::AnyArena& allocator, uint32_t optee_return_code,
                                    uint32_t optee_return_origin,
-                                   fuchsia_tee::wire ::OpResult* zx_result) {
+                                   fuchsia_tee::wire::OpResult* zx_result) {
   ZX_DEBUG_ASSERT(zx_result != nullptr);
 
   // Do a quick check of the return origin to make sure we can map it to one
@@ -210,6 +210,15 @@ zx::result<fidl::ClientEnd<fio::Directory>> RecursivelyWalkDirectories(
   return zx::ok(std::move(current_dir));
 }
 
+// UUID of the Amlogic Provisioning Trusted Application.
+// This TA multiplexes factory and runtime commands. We restrict access to factory commands
+// (WRITE_EFUSE and DEC_HASH) for this TA.
+const optee::Uuid kProvisioningTaUuid(0xd83c3c4a, 0x9e8d, 0x4e4e,
+                                      {0xad, 0x30, 0x9d, 0x40, 0xe1, 0x37, 0xf6, 0x89});
+
+constexpr uint32_t kProvisionCmdIdWriteEfuse = 0;
+constexpr uint32_t kProvisionCmdDecHash = 3;
+
 }  // namespace
 
 namespace optee {
@@ -262,29 +271,38 @@ void OpteeClient::OpenSession2(OpenSession2RequestView request,
     return;
   }
 
-  LOG(TRACE, "OpenSession returned 0x%" PRIx32 " 0x%" PRIx32 " 0x%" PRIx32, call_code,
-      message.return_code(), message.return_origin());
+  const uint32_t return_code = message.return_code();
+  const uint32_t return_origin = message.return_origin();
+  const uint32_t session_id = message.session_id();
 
-  if (ConvertOpteeToZxResult(allocator, message.return_code(), message.return_origin(), &result) !=
-      ZX_OK) {
+  LOG(TRACE, "OpenSession returned 0x%" PRIx32 " 0x%" PRIx32 " 0x%" PRIx32, call_code, return_code,
+      return_origin);
+
+  if (ConvertOpteeToZxResult(allocator, return_code, return_origin, &result) != ZX_OK) {
     completer.Reply(kInvalidSession, result);
     return;
   }
 
   fidl::VectorView<fuchsia_tee::wire::Parameter> out_parameters;
   if (message.CreateOutputParameterSet(allocator, &out_parameters) != ZX_OK) {
-    // Since we failed to parse the output parameters, let's close the session and report error.
-    // It is okay that the session id is not in the session list.
-    CloseSession(message.session_id());
+    if (return_code == TEEC_SUCCESS) {
+      // Since we failed to parse the output parameters, let's close the session and report error.
+      // It is okay that the session id is not in the session list.
+      CloseSession(session_id);
+    }
     result.set_return_code(allocator, TEEC_ERROR_COMMUNICATION);
     result.set_return_origin(fuchsia_tee::wire::ReturnOrigin::kCommunication);
     completer.Reply(kInvalidSession, result);
     return;
   }
   result.set_parameter_set(allocator, out_parameters);
-  open_sessions_.insert(message.session_id());
 
-  completer.Reply(message.session_id(), result);
+  if (return_code == TEEC_SUCCESS) {
+    open_sessions_.insert(session_id);
+    completer.Reply(session_id, result);
+  } else {
+    completer.Reply(kInvalidSession, result);
+  }
 }
 
 void OpteeClient::InvokeCommand(
@@ -298,6 +316,17 @@ void OpteeClient::InvokeCommand(
     result.set_return_origin(fuchsia_tee::wire::ReturnOrigin::kCommunication);
     completer.Reply(result);
     return;
+  }
+
+  if (application_uuid_ == kProvisioningTaUuid) {
+    if (request->command_id == kProvisionCmdIdWriteEfuse ||
+        request->command_id == kProvisionCmdDecHash) {
+      LOG(ERROR, "command %" PRIu32 " is not allowed for provisioning TA", request->command_id);
+      result.set_return_code(allocator, TEEC_ERROR_ACCESS_DENIED);
+      result.set_return_origin(fuchsia_tee::wire::ReturnOrigin::kCommunication);
+      completer.Reply(result);
+      return;
+    }
   }
 
   auto create_result = InvokeCommandMessage::TryCreate(
@@ -331,11 +360,13 @@ void OpteeClient::InvokeCommand(
     return;
   }
 
-  LOG(TRACE, "InvokeCommand returned 0x%" PRIx32 " 0x%" PRIx32 " 0x%" PRIx32, call_code,
-      message.return_code(), message.return_origin());
+  const uint32_t return_code = message.return_code();
+  const uint32_t return_origin = message.return_origin();
 
-  if (ConvertOpteeToZxResult(allocator, message.return_code(), message.return_origin(), &result) !=
-      ZX_OK) {
+  LOG(TRACE, "InvokeCommand returned 0x%" PRIx32 " 0x%" PRIx32 " 0x%" PRIx32, call_code,
+      return_code, return_origin);
+
+  if (ConvertOpteeToZxResult(allocator, return_code, return_origin, &result) != ZX_OK) {
     completer.Reply(result);
     return;
   }
@@ -375,8 +406,11 @@ zx_status_t OpteeClient::CloseSession(uint32_t session_id) {
     open_sessions_.erase(session_id);
   }
 
-  LOG(TRACE, "CloseSession returned %" PRIx32 " %" PRIx32 " %" PRIx32, call_code,
-      message.return_code(), message.return_origin());
+  const uint32_t return_code = message.return_code();
+  const uint32_t return_origin = message.return_origin();
+
+  LOG(TRACE, "CloseSession returned 0x%" PRIx32 " 0x%" PRIx32 " 0x%" PRIx32, call_code, return_code,
+      return_origin);
   return ZX_OK;
 }
 

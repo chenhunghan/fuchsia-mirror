@@ -78,6 +78,7 @@ ffx_subtool_fidl_allowlist = [
 
   # used by ffx profile
   "//sdk/fidl/fuchsia.memory.attribution.plugin:fuchsia.memory.attribution.plugin",
+  "//sdk/fidl/fuchsia.memory.stacktrack.client:fuchsia.memory.stacktrack.client",
 
   # used by ffx process
   "//sdk/fidl/fuchsia.process.explorer:fuchsia.process.explorer",

@@ -20,8 +20,13 @@ group("tests") {
   deps = [ ":usb-fastboot-function-test" ]
 }
 
+fuchsia_driver_dml("usb-fastboot-function-dml") {
+  dml = "meta/usb-fastboot-function.dml"
+  driver_name = "usb-fastboot-function"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/usb-fastboot-function.bind"
+  dml_label = ":usb-fastboot-function-dml"
   bind_output = "usb-fastboot-function.bindbc"
   deps = [
     "//src/devices/bind/fuchsia.google.platform.usb",
@@ -69,7 +74,7 @@ fuchsia_driver_component("component") {
   component_name = "usb-fastboot-function"
   deps = [ ":driver" ]
   info = "meta/usb_fastboot_function-info.json"
-  manifest = "meta/usb-fastboot-function.cml"
+  dml_label = ":usb-fastboot-function-dml"
 }
 
 fuchsia_driver_package("pkg") {

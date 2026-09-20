@@ -23,17 +23,12 @@ import re
 import stat
 import subprocess
 import sys
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import (
     AbstractSet,
     Any,
-    Callable,
-    Dict,
-    Iterable,
-    Iterator,
     Optional,
-    Sequence,
-    Tuple,
 )
 
 import cl_utils
@@ -186,8 +181,8 @@ def _common_files_under_dirs(path1: Path, path2: Path) -> AbstractSet[Path]:
 
 
 def _expand_common_files_between_dirs(
-    path_pairs: Iterable[Tuple[Path, Path]],
-) -> Iterable[Tuple[Path, Path]]:
+    path_pairs: Iterable[tuple[Path, Path]],
+) -> Iterable[tuple[Path, Path]]:
     """Expands two directories into paths to their common files.
 
     Args:
@@ -397,15 +392,15 @@ def _remove_suffix(text: str, suffix: str) -> str:
 
 
 class ReproxyLogEntry(object):
-    def __init__(self, parsed_form: Dict[str, Any]):
+    def __init__(self, parsed_form: dict[str, Any]):
         self._raw = parsed_form
 
     @property
-    def command(self) -> Dict[str, Any]:
+    def command(self) -> dict[str, Any]:
         return self._raw["command"][0]
 
     @property
-    def identifiers(self) -> Dict[str, Any]:
+    def identifiers(self) -> dict[str, Any]:
         return self.command["identifiers"][0]
 
     @property
@@ -413,7 +408,7 @@ class ReproxyLogEntry(object):
         return self.identifiers["execution_id"][0].text.strip('"')
 
     @property
-    def remote_metadata(self) -> Dict[str, Any]:
+    def remote_metadata(self) -> dict[str, Any]:
         # remote_metadata does not always exist in the action log
         return self._raw.get("remote_metadata", [dict()])[0]
 
@@ -422,12 +417,12 @@ class ReproxyLogEntry(object):
         return self.remote_metadata["action_digest"][0].text.strip('"')
 
     @property
-    def output_file_digests(self) -> Dict[Path, str]:  # path, hash/size
+    def output_file_digests(self) -> dict[Path, str]:  # path, hash/size
         d = self.remote_metadata.get("output_file_digests", dict())
         return {Path(k): v.text.strip('"') for k, v in d.items()}
 
     @property
-    def output_directory_digests(self) -> Dict[Path, str]:  # path, hash/size
+    def output_directory_digests(self) -> dict[Path, str]:  # path, hash/size
         d = self.remote_metadata.get("output_directory_digests", dict())
         return {Path(k): v.text.strip('"') for k, v in d.items()}
 
@@ -463,7 +458,7 @@ class ReproxyLogEntry(object):
         files: Iterable[Path],
         dirs: Iterable[Path],
         build_id: str,
-    ) -> Dict[Path, "DownloadStubInfo"]:
+    ) -> dict[Path, "DownloadStubInfo"]:
         """Construct a map of paths to DownloadStubInfo.
 
         Args:
@@ -638,6 +633,7 @@ def analyze_rbe_logs(
 _RBE_DOWNLOAD_STUB_IDENTIFIER = "# RBE download stub"
 _RBE_DOWNLOAD_STUB_HELP = "# run //build/rbe/dlwrap.py on this file to download"
 _RBE_DOWNLOAD_STUB_SUFFIX = ".dl-stub"
+_MAX_DOWNLOAD_STUB_SIZE_BYTES = 1024
 
 # Filesystem extended attribute for digests.
 # This should match the 'xattr_digest' value in build/rbe/fuchsia-reproxy.cfg.
@@ -862,10 +858,21 @@ def is_download_stub_file(
     path: Path, use_xattr: bool = _CAN_HAVE_XATTR
 ) -> bool:
     """Returns true if the path points to a download stub."""
-    if use_xattr:
-        return _RBE_XATTR_IS_STUB in os.listxattr(path)
-    else:
-        return _file_starts_with(path, _RBE_DOWNLOAD_STUB_IDENTIFIER)
+    try:
+        if use_xattr:
+            return _RBE_XATTR_IS_STUB in os.listxattr(path)
+        else:
+            # Download stubs are small text files (~300 bytes).
+            # Fast check: files larger than _MAX_DOWNLOAD_STUB_SIZE_BYTES or
+            # directories cannot be stubs.
+            st = os.stat(path)
+            if st.st_size > _MAX_DOWNLOAD_STUB_SIZE_BYTES or stat.S_ISDIR(
+                st.st_mode
+            ):
+                return False
+            return _file_starts_with(path, _RBE_DOWNLOAD_STUB_IDENTIFIER)
+    except OSError:
+        return False
 
 
 def undownload(path: Path, use_xattr: bool = _CAN_HAVE_XATTR) -> bool:
@@ -953,6 +960,20 @@ def download_from_stub_path(
             )
         return cl_utils.SubprocessResult(0)
 
+    ok_result = cl_utils.SubprocessResult(0)
+    if not stub_path.exists():
+        msg(f"Ignoring request to download nonexistent stub: {stub_path}")
+        return ok_result
+
+    # Quick check without lock: regular files will never become stubs.
+    # Avoid creating lock files and directories for non-stub files.
+    if not is_download_stub_file(stub_path, use_xattr=use_xattr):
+        if verbose:
+            msg(
+                f"    {stub_path} already exists as a normal file (not downloading)"
+            )
+        return ok_result
+
     # Use lock file to safely handle potentially concurrent
     # download requests to the same artifact.
     # If there are concurrent requests to download the same stub,
@@ -965,7 +986,6 @@ def download_from_stub_path(
     lock_file = Path(".dl-locks") / stub_path
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     with cl_utils.BlockingFileLock(lock_file) as lock:
-        ok_result = cl_utils.SubprocessResult(0)
         if not stub_path.exists():
             msg(f"Ignoring request to download nonexistent stub: {stub_path}")
             return ok_result
@@ -1356,7 +1376,7 @@ exec "${{cmd[@]}}"
         return self._platform
 
     @property
-    def merged_platform(self) -> Dict[str, str]:
+    def merged_platform(self) -> dict[str, str]:
         """Combined platform values from --cfg and --platform.
 
         RBE flag precedence (highest-to-lowest):
@@ -1372,9 +1392,9 @@ exec "${{cmd[@]}}"
         Returns:
           Dictionary of platform values, combined from all sources.
         """
-        merged_values: Dict[str, str] = {}
+        merged_values: dict[str, str] = {}
 
-        def take_dict_last_values(key_values: str) -> Dict[str, str]:
+        def take_dict_last_values(key_values: str) -> dict[str, str]:
             return {
                 k: cl_utils.last_value_or_default(v, "")
                 for k, v in cl_utils.keyed_flags_to_values_dict(
@@ -1389,7 +1409,7 @@ exec "${{cmd[@]}}"
         else:
             cfg = self.config
             if cfg:
-                rewrapper_cfg: Dict[str, str] = cl_utils.read_config_file_lines(
+                rewrapper_cfg: dict[str, str] = cl_utils.read_config_file_lines(
                     cfg.read_text().splitlines()
                 )
                 cfg_platform = rewrapper_cfg.get("platform", "")
@@ -1799,7 +1819,7 @@ exec "${{cmd[@]}}"
 
     def download_inputs(
         self, keep_filter: Callable[[Path], bool]
-    ) -> Dict[Path, cl_utils.SubprocessResult]:
+    ) -> dict[Path, cl_utils.SubprocessResult]:
         """Downloading inputs is useful for running local actions whose inputs
         may have come from the outputs of remote actions that opted to
         not download their outputs.
@@ -2481,8 +2501,8 @@ exec "${{cmd[@]}}"
 # Module-scope functions are serializable.
 # Arguments are packed into a tuple to be map()-able.
 def _download_input_for_mp(
-    packed_args: Tuple[Path, remotetool.RemoteTool, Path, bool, bool],
-) -> Tuple[Path, cl_utils.SubprocessResult]:
+    packed_args: tuple[Path, remotetool.RemoteTool, Path, bool, bool],
+) -> tuple[Path, cl_utils.SubprocessResult]:
     path, downloader, working_dir_abs, verbose, use_xattr = packed_args
     if verbose:
         msg(f"  Considering input {path}")
@@ -2499,10 +2519,10 @@ def _download_input_for_mp(
 
 
 def _download_output_for_mp(
-    packed_args: Tuple[
+    packed_args: tuple[
         DownloadStubInfo, remotetool.RemoteTool, Path, bool, bool
     ],
-) -> Tuple[Path, cl_utils.SubprocessResult]:
+) -> tuple[Path, cl_utils.SubprocessResult]:
     stub_info, downloader, working_dir_abs, verbose, use_xattr = packed_args
     path = stub_info.path
     if verbose:
@@ -2528,7 +2548,7 @@ def download_input_stub_paths_batch(
     parallel: bool = True,
     verbose: bool = False,
     use_xattr: bool = _CAN_HAVE_XATTR,
-) -> Dict[Path, cl_utils.SubprocessResult]:
+) -> dict[Path, cl_utils.SubprocessResult]:
     """Downloads artifacts from a collection of stubs in parallel.
 
     Returns:
@@ -2541,13 +2561,16 @@ def download_input_stub_paths_batch(
         # args for _download_input_for_mp
         (stub_path, downloader, working_dir_abs, verbose, use_xattr)
         for stub_path in stub_paths
+        if is_download_stub_file(
+            working_dir_abs / stub_path, use_xattr=use_xattr
+        )
     ]
     if not download_args:
         if verbose:
             msg("  Nothing to download.")
         return {}
 
-    if parallel:
+    if parallel and len(download_args) > 1:
         try:
             with multiprocessing.Pool(_MAX_CONCURRENT_DOWNLOADS) as pool:
                 statuses = pool.map(_download_input_for_mp, download_args)
@@ -2575,7 +2598,7 @@ def download_output_stub_infos_batch(
     parallel: bool = True,
     verbose: bool = False,
     use_xattr: bool = _CAN_HAVE_XATTR,
-) -> Dict[Path, cl_utils.SubprocessResult]:
+) -> dict[Path, cl_utils.SubprocessResult]:
     """Downloads artifacts from a collection of stubs in parallel."""
     download_args = [
         # args for _download_output_for_mp
@@ -2585,7 +2608,7 @@ def download_output_stub_infos_batch(
     if not download_args:
         return {}
 
-    if parallel:
+    if parallel and len(download_args) > 1:
         try:
             with multiprocessing.Pool(_MAX_CONCURRENT_DOWNLOADS) as pool:
                 statuses = pool.map(_download_output_for_mp, download_args)
@@ -2939,7 +2962,7 @@ _FORWARDED_REMOTE_FLAGS = cl_utils.FlagForwarder(
 
 def forward_remote_flags(
     argv: Sequence[str],
-) -> Tuple[Sequence[str], Sequence[str]]:
+) -> tuple[Sequence[str], Sequence[str]]:
     """Propagate --remote-* flags from the wrapped command to main args.
 
     This allows late-appended flags to influence wrapper scripts' behavior.

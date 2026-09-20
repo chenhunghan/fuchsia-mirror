@@ -267,7 +267,6 @@ mod tests {
     use crate::task::CurrentTask;
     use crate::testing::spawn_kernel_and_run;
     use starnix_uapi::errors::{EINTR, ERESTARTSYS};
-    use starnix_uapi::file_mode::Access;
     use starnix_uapi::signals::{SIGUSR1, SIGUSR2};
     use starnix_uapi::{__NR_rt_sigreturn, SA_RESTART, SA_RESTORER, SA_SIGINFO, SI_USER};
     use std::future::Future;
@@ -583,7 +582,6 @@ mod tests {
                     0,
                     STACK_SIZE,
                     prot_flags,
-                    Access::rwx(),
                     MappingOptions::empty(),
                     MappingName::Stack,
                 )

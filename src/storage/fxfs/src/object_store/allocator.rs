@@ -2258,7 +2258,7 @@ impl<'a> Flusher<'a> {
             let object_id = layer.handle().map(|h| h.object_id());
             layer.close_layer().await;
             if let Some(object_id) = object_id {
-                root_store.tombstone_object(object_id, txn_options).await?;
+                root_store.tombstone_object(object_id, txn_options, None).await?;
             }
         }
 

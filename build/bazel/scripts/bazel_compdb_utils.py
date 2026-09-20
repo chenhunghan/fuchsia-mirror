@@ -8,8 +8,9 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 _CPP_EXTENSIONS = [".cc", ".c", ".cpp", ".cxx", ".S", ".s"]
 

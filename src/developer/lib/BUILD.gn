@@ -8,6 +8,7 @@ group("lib") {
   deps = [
     ":tests",
     "credentials",
+    "uart_fpl",
     "usb_vsock",
   ]
 }
@@ -17,6 +18,7 @@ group("tests") {
 
   deps = [
     "credentials:tests",
+    "uart_fpl:tests",
     "usb_vsock:tests",
     "writer:tests",
   ]

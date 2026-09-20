@@ -13,6 +13,9 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 use page_bindings as bindings;
 
+#[cfg(console_enabled)]
+use crate::console_rust::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+
 pub mod object {
     use page_bindings as bindings;
 
@@ -417,13 +420,24 @@ impl VmPage {
     /// The caller must ensure that it is safe to inspect the page state and union metadata
     /// (e.g. by holding conceptual ownership of the page or the appropriate subsystem locks).
     pub unsafe fn dump(&self) {
-        // SAFETY: cpp_vm_page_dump inspects the page state and accesses the state_union (an
-        // UnsafeCell). The caller guarantees via safety preconditions that accessing the page state
-        // and union is synchronized and safe.
-        unsafe {
-            bindings::cpp_vm_page_dump(
-                self as *const VmPage as *mut VmPage as *mut bindings::vm_page_t,
-            )
+        let page_state = self.state();
+        kprint::kprint!(
+            "page {:p}: address {:#x} state {:s}",
+            self as *const VmPage,
+            self.paddr().0,
+            super::page_state::page_state_to_string(page_state)
+        );
+        if page_state == VmPageState(bindings::vm_page_state::OBJECT) {
+            // SAFETY: Dereferencing UnsafeCell to read the object field from the active union variant.
+            // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
+            let object = unsafe { &*(*self.state_union.get()).object };
+            kprint::kprintln!(
+                " pin_count {:d} share_count {:u}",
+                object.pin_count() as i32,
+                object.share_count
+            );
+        } else {
+            kprint::kprintln!("");
         }
     }
 
@@ -563,6 +577,7 @@ impl fbl::DoublyLinkedListContainable<VmPage> for VmPage {
 /// and therefore `VmPagePtr` does not provide mutable references (`&mut VmPage`). Instead,
 /// operations that mutate page metadata require the caller to possess conceptual ownership of the
 /// page or holding the relevant subsystem locks, operating through interior mutability.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmPagePtr(NonNull<VmPage>);
 
@@ -805,24 +820,161 @@ impl VmPagePtr {
 
 pub type VmPageDoublyLinkedList = fbl::DoublyLinkedList<NonNull<VmPage>>;
 
-// Return the approximate number of pages in state |state|.
-//
-// When called concurrently with |set_state|, the count may be off by a small amount.
-#[inline]
+/// Return the approximate number of pages in state |state|.
+///
+/// When called concurrently with |set_state|, the count may be off by a small amount.
 pub fn get_count(state: VmPageState) -> u64 {
-    // SAFETY: cpp_get_count is a thread-safe FFI call that disables preemption and reads atomic
-    // per-CPU counters.
-    unsafe { bindings::cpp_get_count(state.0) }
+    let mut result: i64 = 0;
+    PerCpu::for_each_preempt_disable(|_cpu, p| {
+        // Because `get_count` could be called concurrently with `set_state` we're not guaranteed to
+        // get a consistent snapshot of the page counts. It's OK if the values are a little off. See
+        // comment at the definition of `vm_page_state`.
+        result += p.vm_page_counts.by_state[state.index()].load();
+    });
+    if result >= 0 { result as u64 } else { 0 }
 }
 
-// Add |n| to the count of pages in state |state|.
-//
-// Should be used when first constructing pages.
-#[inline]
+/// Add |n| to the count of pages in state |state|.
+///
+/// Should be used when first constructing pages.
 pub fn add_to_initial_count(state: VmPageState, n: u64) {
-    // SAFETY: cpp_add_to_initial_count is a thread-safe FFI call that disables preemption and
-    // modifies atomic per-CPU counters during initialization.
+    PerCpu::with_current_preempt_disable(|p| {
+        p.vm_page_counts.by_state[state.index()].fetch_add(n as i64);
+    })
+}
+
+// FFI trampolines exported to C++
+
+/// FFI trampoline for dumping information about `page` from C++.
+///
+/// # Safety
+///
+/// The caller must ensure that `page` points to a valid `VmPage` and that it is safe to inspect
+/// the page state and union metadata.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_vm_page_dump(page: &VmPage) {
+    // SAFETY: Preconditions forwarded from caller.
     unsafe {
-        bindings::cpp_add_to_initial_count(state.0, n);
+        page.dump();
     }
 }
+
+/// FFI trampoline for getting the approximate number of pages in `state` from C++.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_vm_page_get_count(state: bindings::vm_page_state) -> u64 {
+    get_count(VmPageState(state))
+}
+
+/// FFI trampoline for adding `n` to the count of pages in `state` from C++.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_vm_page_add_to_initial_count(state: bindings::vm_page_state, n: u64) {
+    add_to_initial_count(VmPageState(state), n);
+}
+
+#[cfg(console_enabled)]
+/// Console command handler for `vm_page`.
+///
+/// # Safety
+///
+/// If `argc > 0` and `argv` is non-null, `argv` must point to `argc` valid `CmdArgs` structures.
+unsafe extern "C" fn cmd_vm_page(
+    argc: core::ffi::c_int,
+    argv: *const CmdArgs,
+    _flags: u32,
+) -> core::ffi::c_int {
+    // SAFETY: The console framework guarantees argv points to argc elements if argv is non-null.
+    let args = if argc > 0 && !argv.is_null() {
+        unsafe { core::slice::from_raw_parts(argv, argc as usize) }
+    } else {
+        &[]
+    };
+
+    let cmd_name = if !args.is_empty() {
+        match args[0].as_str() {
+            "" => "vm_page",
+            s => s,
+        }
+    } else {
+        "vm_page"
+    };
+
+    let usage = || -> core::ffi::c_int {
+        kprint::kprint!("usage:\n");
+        kprint::kprint!("{:s} dump <address>\n", cmd_name);
+        kprint::kprint!("{:s} hexdump <address>\n", cmd_name);
+        zx_status::Status::INTERNAL.into_raw()
+    };
+
+    let not_enough_args = || -> core::ffi::c_int {
+        kprint::kprint!("not enough arguments\n");
+        usage()
+    };
+
+    if argc < 2 || argv.is_null() {
+        return not_enough_args();
+    }
+
+    match args[1].as_str() {
+        "dump" => {
+            if argc < 3 {
+                return not_enough_args();
+            }
+
+            let page = args[2].arg_uint as *const VmPage;
+            if page.is_null() {
+                kprint::kprint!("bad page or page not mapped in kernel space\n");
+                return zx_status::Status::INTERNAL.into_raw();
+            }
+
+            // SAFETY: The caller provides the address of a VmPage to dump.
+            unsafe {
+                (*page).dump();
+            }
+        }
+        "hexdump" => {
+            if argc < 3 {
+                return not_enough_args();
+            }
+
+            let page = args[2].arg_uint as *const VmPage;
+            if page.is_null() {
+                kprint::kprint!("bad page or page not mapped in kernel space\n");
+                return zx_status::Status::INTERNAL.into_raw();
+            }
+
+            // SAFETY: Caller passed address of a page.
+            let pa = unsafe { (*page).paddr() };
+            let vaddr = super::physmap::paddr_to_physmap(pa);
+            if vaddr.0 == 0 {
+                kprint::kprint!("bad page or page not mapped in kernel space\n");
+                return zx_status::Status::INTERNAL.into_raw();
+            }
+
+            let mut writer = debug::dprintf::KernelConsoleWriter;
+            // SAFETY: `vaddr` points to a valid mapped page in physmap of size `::page::SIZE`.
+            let _ = unsafe {
+                pretty::hexdump_very_ex_raw(
+                    &mut writer,
+                    vaddr.0 as *const u8,
+                    ::page::SIZE,
+                    vaddr.0 as u64,
+                )
+            };
+        }
+        _ => {
+            kprint::kprint!("unknown command\n");
+            return usage();
+        }
+    }
+
+    zx_status::sys::ZX_OK
+}
+
+#[cfg(console_enabled)]
+static_command!(
+    CMD_VM_PAGE,
+    c"vm_page".as_ptr(),
+    c"vm_page debug commands".as_ptr(),
+    cmd_vm_page,
+    CMD_AVAIL_NORMAL
+);

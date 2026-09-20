@@ -51,7 +51,7 @@ class BuildTestsJsonTest(unittest.TestCase):
         test_groups: list[T.Any],
         product_bundles: list[T.Any],
         with_bazel_tests: bool = False,
-        command_runner: T.Optional[CommandRunner] = None,
+        command_runner: CommandRunner | None = None,
     ) -> tuple[set[Path], list[T.Any]]:
         tests_from_metadata_str = json.dumps(tests_from_metadata)
         tests_from_metadata_path = self.build_dir / "tests_from_metadata.json"

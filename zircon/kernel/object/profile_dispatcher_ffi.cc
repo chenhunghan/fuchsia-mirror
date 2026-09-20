@@ -31,12 +31,12 @@ zx_status_t cpp_profile_dispatcher_create(
 }
 
 zx_status_t cpp_profile_dispatcher_validate_and_create_profile(
-    const zx_profile_info_t* info, SchedulerState::BaseProfile* profile_out) {
+    const zx_profile_info_t* info, ffi::Uninitialized<SchedulerState::BaseProfile>* profile_out) {
   zx::result<SchedulerState::BaseProfile> maybe_profile = validate_and_create_profile(*info);
   if (maybe_profile.is_error()) {
     return maybe_profile.error_value();
   }
-  *profile_out = maybe_profile.value();
+  profile_out->Initialize(maybe_profile.value());
   return ZX_OK;
 }
 

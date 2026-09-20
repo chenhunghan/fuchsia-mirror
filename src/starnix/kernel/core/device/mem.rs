@@ -112,7 +112,6 @@ impl FileOps for DevZero {
             memory_offset,
             length,
             prot_flags,
-            file.max_access_for_memory_mapping(),
             options,
             // We set the filename here, even though we are creating what is
             // functionally equivalent to an anonymous mapping. Doing so affects

@@ -4,7 +4,7 @@
 library fuchsia.hardware.audio;
 
 /// For an overview see
-/// [Audio Driver Streaming Interface](https://fuchsia.dev/fuchsia-src/concepts/drivers/driver_architectures/audio_drivers/audio_streaming).
+/// [Audio Driver Streaming Interface](https://fuchsia.dev/fuchsia-src/development/audio/drivers/streaming).
 /// # Deprecation
 ///
 /// Not supported anymore, instead use an

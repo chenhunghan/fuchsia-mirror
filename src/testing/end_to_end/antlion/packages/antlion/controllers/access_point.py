@@ -39,16 +39,18 @@ from antlion.controllers.ap_lib.wireless_network_management import (
 )
 from antlion.controllers.pdu import PduDevice, get_pdu_port_for_device
 from antlion.controllers.utils_lib.commands import (
-    command,
     ip,
-    journalctl,
     route,
 )
-from antlion.controllers.utils_lib.commands.date import LinuxDateCommand
 from antlion.controllers.utils_lib.commands.tcpdump import LinuxTcpdumpCommand
 from antlion.types import ControllerConfig, Json
 from antlion.validation import MapValidator
 from honeydew.typing.custom_types import MacAddress
+from libs.commands import (
+    command,
+    journalctl,
+)
+from libs.commands.date import LinuxDateCommand
 from libs.proc.runner import CalledProcessError
 from libs.ssh import connection, settings
 from mobly import logger
@@ -223,6 +225,10 @@ class AccessPoint:
             self.ssh.run("stop hostapd")
         except CalledProcessError:
             self.log.info("No hostapd running")
+        try:
+            self.ssh.run("killall dhcpd")
+        except CalledProcessError:
+            self.log.info("No dhcpd running")
         # Bring down all wireless interfaces
         for iface in self.wlan:
             WLAN_DOWN = f"ip link set {iface} down"

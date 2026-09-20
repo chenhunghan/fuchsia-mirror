@@ -8,6 +8,9 @@ use pin_init::PinInit;
 /// have multiple policy implementations allowing a specific instance of a lock to be acquired, at
 /// different times, in different ways.
 pub trait LockPolicy<L: RawLock + ?Sized> {
+    /// Arguments passed when acquiring the lock under this policy.
+    type AcquireArgs: Copy;
+
     /// State returned from lock acquisition and subsequently passed to lock release.
     type GuardState: Default + Copy;
 
@@ -19,7 +22,19 @@ pub trait LockPolicy<L: RawLock + ?Sized> {
     ///    which will be registered in the thread's active list.
     /// 2. The caller must ensure that the `entry` memory remains pinned on the stack and is not
     ///    dropped or moved until the matching `release` call completes.
-    unsafe fn acquire(lock: &L, entry: *mut L::LockEntry) -> Self::GuardState;
+    unsafe fn acquire(
+        lock: &L,
+        entry: *mut L::LockEntry,
+        args: Self::AcquireArgs,
+    ) -> Self::GuardState;
+
+    /// Re-acquires the raw synchronization lock using existing guard state (e.g. after
+    /// `call_unlocked`).
+    ///
+    /// # Safety
+    ///
+    /// Same safety requirements as [`acquire`].
+    unsafe fn reacquire(lock: &L, entry: *mut L::LockEntry, state: &mut Self::GuardState);
 
     /// Releases the raw synchronization lock, restoring the state.
     ///

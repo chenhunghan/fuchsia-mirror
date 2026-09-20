@@ -4,8 +4,8 @@
 # found in the LICENSE file.
 
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import depfile
 

@@ -7,8 +7,18 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("fake_interconnect-dml") {
+  dml = "meta/fake_interconnect.dml"
+  driver_name = "fake_interconnect"
+}
+
+fuchsia_driver_dml("interconnect-dml") {
+  dml = "meta/interconnect.dml"
+  driver_name = "interconnect"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/interconnect.bind"
+  dml_label = ":interconnect-dml"
   bind_output = "interconnect.bindbc"
   deps = [ "//src/devices/bind/fuchsia" ]
 }
@@ -43,8 +53,8 @@ fuchsia_rust_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
+  dml_label = ":interconnect-dml"
   component_name = "interconnect"
-  manifest = "meta/interconnect.cml"
   deps = [
     ":bind",
     ":driver",
@@ -70,12 +80,9 @@ fuchsia_unittest_package("unit-test-package") {
 }
 
 driver_bind_rules("fake_bind") {
-  rules = "meta/fake_interconnect.bind"
+  dml_label = ":fake_interconnect-dml"
   bind_output = "fake_interconnect.bindbc"
-  deps = [
-    "//src/devices/bind/fuchsia",
-    "//src/devices/bind/fuchsia.test",
-  ]
+  deps = [ "//src/devices/bind/fuchsia.test" ]
 }
 
 fidl("fuchsia.interconnect.test") {
@@ -104,9 +111,9 @@ fuchsia_rust_driver("fake_driver") {
 }
 
 fuchsia_driver_component("fake_component") {
+  dml_label = ":fake_interconnect-dml"
   testonly = true
   component_name = "fake_interconnect"
-  manifest = "meta/fake_interconnect.cml"
   deps = [
     ":fake_bind",
     ":fake_driver",

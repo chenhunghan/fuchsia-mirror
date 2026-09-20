@@ -34,6 +34,8 @@ ffx config env get
     | `connectivity.enable_network`           | Enable using MDNS to discover      |
     |                                         | targets and SSH to connect to      |
     |                                         | them. Defaults to `true`.          |
+    | `connectivity.enable_uart`              | Allow ffx to use a UART connection.|
+    |                                         | Defaults to `false`.               |
     | `connectivity.enable_usb`               | Allow ffx to use a USB connection. |
     |                                         | Not supported on mac. Defaults to  |
     |                                         | `false`.                           |
@@ -41,6 +43,9 @@ ffx config env get
     |                                         | connect to virtual machine targets |
     |                                         | where supported. Defaults to       |
     |                                         | `false`.                           |
+    | `connectivity.uart.baud`                | The baud rate for the UART port    |
+    |                                         | (only used for TTY targets).       |
+    |                                         | Defaults to `1000000`.             |
     | `connectivity.usb_driver_autostart`     | Allow ffx to start a driver        |
     |                                         | process in the background to       |
     |                                         | enable USB connections. Defaults   |

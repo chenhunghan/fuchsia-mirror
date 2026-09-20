@@ -8,6 +8,7 @@ use super::page::{VmPageDoublyLinkedList, VmPagePtr};
 use crate::kernel::types::PAddr;
 use crate::vm::compressor::VmCompressor;
 use crate::vm::discardable_vmo_tracker::DiscardableVmoTracker;
+use crate::vm::page_source::MultiPageRequest;
 use crate::vm::pmm_node::PmmOptDelayReuse;
 use core::convert::Infallible;
 use core::ffi::c_void;
@@ -152,6 +153,40 @@ impl VmCowPages {
         unsafe { RefPtr::try_from_raw(ptr.cast::<Self>()) }
     }
 
+    /// Upgrades a raw `VmCowPages` pointer to a `RefPtr<VmCowPages>`, or returns `None` if the
+    /// object is being destroyed.
+    ///
+    /// # Safety
+    ///
+    /// `cow` must be a valid pointer to `VmCowPages`.
+    pub unsafe fn upgrade_from_raw(cow: *mut bindings::VmCowPages) -> Option<RefPtr<Self>> {
+        let ptr = unsafe { bindings::cpp_vm_cow_pages_upgrade_from_raw(cow) };
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: `cpp_vm_cow_pages_upgrade_from_raw` incremented the refcount, so we can adopt it.
+            unsafe { RefPtr::try_from_raw(ptr.cast::<Self>()) }
+        }
+    }
+
+    /// Returns true if the `VmCowPages` is capable of borrowing pages.
+    pub fn can_borrow(&self) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
+        unsafe { bindings::cpp_vm_cow_pages_can_borrow(self.as_raw()) }
+    }
+
+    /// Returns true if the `VmCowPages` can evict pages (i.e. is user-pager backed).
+    pub fn can_evict(&self) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
+        unsafe { bindings::cpp_vm_cow_pages_can_evict(self.as_raw()) }
+    }
+
+    /// Returns true if the `VmCowPages` is discardable.
+    pub fn is_discardable(&self) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
+        unsafe { bindings::cpp_vm_cow_pages_is_discardable(self.as_raw()) }
+    }
+
     /// Replaces a page at offset with a loaned page.
     pub fn replace_page_with_loaned(
         &self,
@@ -196,6 +231,12 @@ impl VmCowPages {
         let raw = unsafe { bindings::cpp_vm_cow_pages_debug_get_page(self.as_raw(), offset) };
         // SAFETY: `raw` is either null or points to a valid `vm_page_t`.
         unsafe { VmPagePtr::from_ffi(raw) }
+    }
+
+    /// Returns whether the slot at `offset` holds a parent content marker.
+    pub fn debug_is_parent_content(&self, offset: u64) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
+        unsafe { bindings::cpp_vm_cow_pages_debug_is_parent_content(self.as_raw(), offset) }
     }
 
     /// Returns whether this node has no page at `offset`.
@@ -401,6 +442,55 @@ impl VmCowPages {
             )
         };
         Status::ok(status)
+    }
+
+    /// After successful completion the range of pages will all read as zeros. The mechanism used
+    /// to achieve this is not guaranteed to decommit, but it will try to.
+    ///
+    /// `range` must be page aligned offsets within the range of the object. `dirty_track`
+    /// specifies whether the range being zeroed subscribes to dirty tracking, if `true` the range
+    /// will start out as dirty. `dirty_track` only has meaning if the VMO supports dirty tracking,
+    /// otherwise it is ignored.
+    ///
+    /// Returns a status, and the number of bytes that were actually zeroed. The byte count may be
+    /// nonzero even if the status is an error.
+    ///
+    /// The returned status is one of the following:
+    ///  * `Ok` => The whole range was successfully zeroed.
+    ///  * `Err(Status::SHOULD_WAIT)` => The caller needs to wait on the `page_request` and then
+    ///    retry the operation. The caller may advance the start offset by the number of zeroed
+    ///    bytes before retrying.
+    ///  * Any other error indicates a failure to zero a part of the range or the whole range.
+    ///
+    /// The caller must hold *this* object's lock. `token` proves only that some lock of the
+    /// `VmCowPagesLockClass` class is held, and the C++ side runs with thread safety analysis
+    /// disabled, so neither side can check this.
+    pub fn zero_pages_locked(
+        &self,
+        _token: &LockToken<'_, VmCowPagesLockClass>,
+        range: VmCowRange,
+        dirty_track: bool,
+        deferred: Pin<&mut DeferredOps<'_>>,
+        page_request: Pin<&mut MultiPageRequest>,
+    ) -> (Result<(), Status>, u64) {
+        // SAFETY: We do not move `deferred`.
+        let deferred: &mut DeferredOps<'_> = unsafe { deferred.get_unchecked_mut() };
+        let deferred: *mut bindings::VmCowPages_DeferredOps = deferred.opaque.get();
+        let page_request = page_request.as_raw();
+        let mut zeroed_bytes = 0;
+        // SAFETY: `self.as_raw()` is a live VmCowPages, `deferred` and `page_request` point to the
+        // live pinned objects borrowed above, and `zeroed_bytes` is valid for writing.
+        let status = unsafe {
+            bindings::cpp_vm_cow_pages_zero_pages_locked(
+                self.as_raw(),
+                range,
+                dirty_track,
+                deferred,
+                page_request,
+                &mut zeroed_bytes,
+            )
+        };
+        (Status::ok(status), zeroed_bytes)
     }
 
     /// Test-only interface to get the current populated slots count.

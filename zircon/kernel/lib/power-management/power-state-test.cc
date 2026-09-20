@@ -220,4 +220,39 @@ TEST(PowerStateTest, UpdateUtilizationReflectsOnDomain) {
   EXPECT_EQ(kOneQuarterUtilization, domain2->total_normalized_utilization());
 }
 
+TEST(PowerStateTest, PrecedingTargetPowerLevel) {
+  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
+  auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
+
+  PowerState state;
+  state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
+  ASSERT_EQ(state.domain(), domain);
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel).status_value());
+
+  // At the minimum active power level, there is no preceding active level.
+  EXPECT_FALSE(state.has_preceding_target_power_level());
+  EXPECT_EQ(power_management::ProcessingRate{0}, state.preceding_target_processing_rate());
+
+  // At higher active power levels, there is a preceding active level.
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel + 1).status_value());
+  EXPECT_TRUE(state.has_preceding_target_power_level());
+  EXPECT_GT(state.preceding_target_processing_rate(), power_management::ProcessingRate{0});
+}
+
+TEST(PowerStateTest, SchedulerControlEnabled) {
+  auto domain = MakePowerDomainHelper(kModelId, 0, 1, 2, 3, 4, 5);
+
+  PowerState state;
+  EXPECT_FALSE(state.scheduler_control_enabled());
+
+  state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
+  EXPECT_FALSE(state.scheduler_control_enabled());
+
+  domain->SetSchedulerControlEnabled(true);
+  EXPECT_TRUE(state.scheduler_control_enabled());
+
+  domain->SetSchedulerControlEnabled(false);
+  EXPECT_FALSE(state.scheduler_control_enabled());
+}
+
 }  // namespace

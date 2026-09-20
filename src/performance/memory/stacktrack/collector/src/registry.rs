@@ -307,8 +307,7 @@ mod tests {
             let received_snapshot = stacktrack_snapshot::Snapshot::receive_from(src).await.unwrap();
             assert_eq!(received_snapshot.page_size, FAKE_PAGE_SIZE);
             assert_eq!(received_snapshot.stack_traces.len(), 1);
-            let stack_trace = &received_snapshot.stack_traces[0];
-            assert_eq!(stack_trace.thread_koid, FAKE_THREAD_KOID);
+            let stack_trace = received_snapshot.stack_traces.get(&FAKE_THREAD_KOID).unwrap();
             assert_eq!(stack_trace.frames.len(), 1);
             assert_eq!(stack_trace.frames[0].program_address, FAKE_FRAME_PC);
             assert_eq!(stack_trace.frames[0].frame_pointer, FAKE_FRAME_FP);

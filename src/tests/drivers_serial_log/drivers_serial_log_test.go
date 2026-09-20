@@ -29,7 +29,6 @@ func TestSerialLogsAvailable(t *testing.T) {
 	arch := distro.TargetCPU()
 	device := emulator.DefaultVirtualDevice(string(arch))
 	device.KernelArgs = append(device.KernelArgs, cmdline...)
-	device.Initrd = "zircon-a"
 	device.Drive = nil
 
 	ctx, cancel := context.WithCancel(context.Background())

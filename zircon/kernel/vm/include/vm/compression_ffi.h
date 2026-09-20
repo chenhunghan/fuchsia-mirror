@@ -20,6 +20,12 @@ FFI_ALWAYS_INLINE void cpp_vmcompression_destroy(VmCompression* compression);
 FFI_ALWAYS_INLINE void cpp_vmcompression_free(VmCompression* compression);
 FFI_ALWAYS_INLINE fbl::RefCounted<VmCompression>* cpp_vmcompression_get_ref_counted(
     VmCompression* compression);
+FFI_ALWAYS_INLINE void cpp_vmcompression_acquire_compressor(
+    ffi::Uninitialized<VmCompression::CompressorGuard>* guard, VmCompression* compression);
+FFI_ALWAYS_INLINE void cpp_vmcompression_compressor_guard_destroy(
+    VmCompression::CompressorGuard* guard);
+FFI_ALWAYS_INLINE VmCompressor* cpp_vmcompression_compressor_guard_get(
+    VmCompression::CompressorGuard* guard);
 
 __END_CDECLS
 

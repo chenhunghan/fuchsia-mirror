@@ -1022,7 +1022,6 @@ mod tests {
     };
     use futures::task::Poll;
     use ieee80211_testutils::{BSSID_REGEX, SSID_REGEX};
-    use rand::Rng;
     use std::pin::pin;
     use strum::EnumCount;
     use test_case::test_case;

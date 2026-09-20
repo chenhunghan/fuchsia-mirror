@@ -25,7 +25,7 @@ fuchsia_unittest_package("fuchsia-async-tests") {
     test_specs = {
     }
     test_specs = {
-      environments = []
+      build_only = true
     }
   }
 }
