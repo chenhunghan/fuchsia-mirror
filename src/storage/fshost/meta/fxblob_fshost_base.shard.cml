@@ -46,6 +46,10 @@
             path: "/fs/blob/svc/fuchsia.storage.mapping.MappingProvider",
         },
         {
+            protocol: "fuchsia.storage.block.Mapper",
+            path: "/fs/blob/svc/fuchsia.storage.block.Mapper",
+        },
+        {
             protocol: "fuchsia.fxfs.FileBackedVolumeProvider",
             path: "/fs/data/svc/fuchsia.fxfs.FileBackedVolumeProvider",
         },
@@ -143,6 +147,11 @@
         },
         {
             protocol: "fuchsia.storage.mapping.MappingProvider",
+            from: "self",
+            availability: "same_as_target",
+        },
+        {
+            protocol: "fuchsia.storage.block.Mapper",
             from: "self",
             availability: "same_as_target",
         },

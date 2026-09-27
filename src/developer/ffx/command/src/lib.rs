@@ -345,8 +345,16 @@ pub async fn exit(
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
     let exit_code = res.exit_code();
     match res {
-        Err(Error::Help { output, .. }) => {
-            writeln!(&mut std::io::stdout(), "{output}").unwrap();
+        Err(err @ Error::Help { .. }) => {
+            if should_format {
+                let mut out = std::io::stdout();
+                let err = SerializableError::from(&err);
+                let message = serde_json::to_string(&err).unwrap();
+                writeln!(&mut out, "{message}").unwrap();
+            } else {
+                let Error::Help { output, .. } = &err else { unreachable!() };
+                writeln!(&mut std::io::stdout(), "{output}").unwrap();
+            }
         }
         Err(err @ Error::Config(_)) | Err(err @ Error::User(_)) | Err(err @ Error::IoError(_)) => {
             // abort hard on a failure to print the user error somehow
@@ -379,7 +387,7 @@ pub async fn exit(
         Ok(_) | Err(Error::ExitWithCode(_)) => (),
     }
 
-    if timeout::timeout(SHUTDOWN_TIMEOUT, fuchsia_async::emulated_handle::shut_down_handles())
+    if timeout::timeout(SHUTDOWN_TIMEOUT, fuchsia_emulated_handle::shut_down_handles())
         .await
         .is_err()
     {

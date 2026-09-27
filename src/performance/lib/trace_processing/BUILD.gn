@@ -23,6 +23,7 @@ python_library("trace_processing") {
     "metrics/gpu.py",
     "metrics/input_latency.py",
     "metrics/memory.py",
+    "metrics/odpm_power.py",
     "metrics/power.py",
     "metrics/scenic.py",
     "metrics/suspend.py",
@@ -76,6 +77,30 @@ install_host_tools("run_cpu_breakdown") {
   testonly = true
   deps = [ ":copy_cpu_breakdown_pyz" ]
   outputs = [ "run_cpu_breakdown" ]
+}
+
+# Rename the resulting .pyz for the host tool
+copy("copy_odpm_power_metrics_pyz") {
+  testonly = true
+  deps = [ ":run_odpm_power_metrics_bin" ]
+  sources = [ "${target_out_dir}/run_odpm_power_metrics.pyz" ]
+  outputs = [ "${root_out_dir}/run_odpm_power_metrics" ]
+}
+
+install_host_tools("run_odpm_power_metrics") {
+  testonly = true
+  deps = [ ":copy_odpm_power_metrics_pyz" ]
+  outputs = [ "run_odpm_power_metrics" ]
+}
+
+python_binary("run_odpm_power_metrics_bin") {
+  testonly = true
+  main_source = "run_odpm_power_metrics.py"
+  deps = [
+    ":trace_processing",
+    "//src/performance/trace2json",
+  ]
+  output_name = "run_odpm_power_metrics.pyz"
 }
 
 # Rename the resulting .pyz for the host tool

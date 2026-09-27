@@ -72,8 +72,8 @@ source_set("ecies_hkdf_recipient_kem_boringssl") {
   public_deps = [
     ":common_enums",
     ":hkdf",
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
@@ -82,7 +82,6 @@ source_set("ecies_hkdf_recipient_kem_boringssl") {
     "//third_party/tink-cc/tink/internal:ec_util",
     "//third_party/tink-cc/tink/internal:fips_utils",
     "//third_party/tink-cc/tink/internal:ssl_unique_ptr",
-    "//third_party/tink-cc/tink/util:errors",
     "//third_party/tink-cc/tink/util:secret_data",
     "//third_party/tink-cc/tink/util:statusor",
   ]
@@ -124,7 +123,6 @@ source_set("ed25519_sign_boringssl") {
     "//third_party/tink-cc/src/tink/subtle/ed25519_sign_boringssl.h",
   ]
   public_deps = [
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/abseil-cpp/absl/strings:str_format",
@@ -142,7 +140,6 @@ source_set("ed25519_sign_boringssl") {
     "//third_party/tink-cc/tink/signature:ed25519_parameters",
     "//third_party/tink-cc/tink/signature:ed25519_private_key",
     "//third_party/tink-cc/tink/util:secret_data",
-    "//third_party/tink-cc/tink/util:status",
     "//third_party/tink-cc/tink/util:statusor",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
@@ -157,7 +154,6 @@ source_set("ed25519_verify_boringssl") {
     "//third_party/tink-cc/src/tink/subtle/ed25519_verify_boringssl.h",
   ]
   public_deps = [
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
@@ -252,6 +248,7 @@ source_set("hmac_boringssl") {
     ":common_enums",
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
     "//third_party/tink-cc/tink:mac",
@@ -280,21 +277,26 @@ source_set("ecdsa_sign_boringssl") {
   public_deps = [
     ":common_enums",
     ":subtle_util_boringssl",
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
+    "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
+    "//third_party/tink-cc/tink:ec_point",
     "//third_party/tink-cc/tink:insecure_secret_key_access",
     "//third_party/tink-cc/tink:partial_key_access",
     "//third_party/tink-cc/tink:public_key_sign",
+    "//third_party/tink-cc/tink/internal:bn_util",
+    "//third_party/tink-cc/tink/internal:call_with_core_dump_protection",
+    "//third_party/tink-cc/tink/internal:ec_util",
+    "//third_party/tink-cc/tink/internal:err_util",
     "//third_party/tink-cc/tink/internal:fips_utils",
     "//third_party/tink-cc/tink/internal:md_util",
+    "//third_party/tink-cc/tink/internal:ssl_unique_ptr",
     "//third_party/tink-cc/tink/internal:util",
     "//third_party/tink-cc/tink/signature:ecdsa_parameters",
     "//third_party/tink-cc/tink/signature:ecdsa_private_key",
     "//third_party/tink-cc/tink/signature/internal:ecdsa_raw_sign_boringssl",
-    "//third_party/tink-cc/tink/util:secret_data",
-    "//third_party/tink-cc/tink/util:status",
     "//third_party/tink-cc/tink/util:statusor",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
@@ -312,6 +314,7 @@ source_set("ecdsa_verify_boringssl") {
     ":common_enums",
     ":subtle_util_boringssl",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
@@ -325,9 +328,6 @@ source_set("ecdsa_verify_boringssl") {
     "//third_party/tink-cc/tink/internal:util",
     "//third_party/tink-cc/tink/signature:ecdsa_parameters",
     "//third_party/tink-cc/tink/signature:ecdsa_public_key",
-    "//third_party/tink-cc/tink/util:errors",
-    "//third_party/tink-cc/tink/util:status",
-    "//third_party/tink-cc/tink/util:statusor",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }
@@ -343,7 +343,6 @@ source_set("rsa_ssa_pss_verify_boringssl") {
   public_deps = [
     ":common_enums",
     "//third_party/abseil-cpp/absl/log:absl_check",
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
@@ -375,8 +374,8 @@ source_set("rsa_ssa_pss_sign_boringssl") {
   public_deps = [
     ":common_enums",
     ":subtle_util",
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
@@ -411,6 +410,7 @@ source_set("rsa_ssa_pkcs1_verify_boringssl") {
     ":common_enums",
     "//third_party/abseil-cpp/absl/algorithm:container",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
     "//third_party/tink-cc/tink:partial_key_access",
@@ -424,7 +424,6 @@ source_set("rsa_ssa_pkcs1_verify_boringssl") {
     "//third_party/tink-cc/tink/internal:util",
     "//third_party/tink-cc/tink/signature:rsa_ssa_pkcs1_parameters",
     "//third_party/tink-cc/tink/signature:rsa_ssa_pkcs1_public_key",
-    "//third_party/tink-cc/tink/util:errors",
     "//third_party/tink-cc/tink/util:status",
     "//third_party/tink-cc/tink/util:statusor",
   ]
@@ -444,6 +443,7 @@ source_set("rsa_ssa_pkcs1_sign_boringssl") {
     ":subtle_util",
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
     "//third_party/tink-cc/tink:insecure_secret_key_access",
@@ -505,8 +505,8 @@ source_set("aes_eax_boringssl") {
     "//third_party/abseil-cpp/absl/algorithm:container",
     "//third_party/abseil-cpp/absl/base:config",
     "//third_party/abseil-cpp/absl/base:nullability",
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/abseil-cpp/absl/types:span",
     "//third_party/boringssl:crypto",
@@ -517,7 +517,6 @@ source_set("aes_eax_boringssl") {
     "//third_party/tink-cc/tink/internal:fips_utils",
     "//third_party/tink-cc/tink/internal:secret_buffer",
     "//third_party/tink-cc/tink/internal:util",
-    "//third_party/tink-cc/tink/util:errors",
     "//third_party/tink-cc/tink/util:secret_data",
     "//third_party/tink-cc/tink/util:status",
     "//third_party/tink-cc/tink/util:statusor",
@@ -562,6 +561,7 @@ source_set("aes_ctr_boringssl") {
     "//third_party/abseil-cpp/absl/log:absl_check",
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings:string_view",
     "//third_party/boringssl:crypto",
@@ -636,8 +636,8 @@ source_set("aes_siv_boringssl") {
   public_deps = [
     ":subtle_util",
     "//third_party/abseil-cpp/absl/algorithm:container",
-    "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/abseil-cpp/absl/types:span",

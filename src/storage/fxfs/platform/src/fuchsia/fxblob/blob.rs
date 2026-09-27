@@ -51,6 +51,11 @@ pub struct BlobExtents {
 // (assertions will fire).
 const PURGED: usize = 1 << (usize::BITS - 1);
 
+const EMPTY_BLOB_HASH: Hash = Hash::from_array([
+    0x15, 0xec, 0x7b, 0xf0, 0xb5, 0x07, 0x32, 0xb4, 0x9f, 0x82, 0x28, 0xe0, 0x7d, 0x24, 0x36, 0x53,
+    0x38, 0xf9, 0xe3, 0xab, 0x99, 0x4b, 0x00, 0xaf, 0x08, 0xe5, 0xa3, 0xbf, 0xfe, 0x55, 0xfd, 0x8b,
+]);
+
 /// Represents an immutable blob stored on Fxfs with associated an merkle tree.
 #[derive(ToWeakNode)]
 pub struct FxBlob {
@@ -97,6 +102,25 @@ impl FxBlob {
                 )?),
             ),
         };
+
+        // Check the uncompressed size of the blob against the number of merkle leaves. This only
+        // ensures that the uncompressed size lands within the same merkle block as the true
+        // uncompressed size. To fully validate the uncompressed size requires reading in the last
+        // merkle block and verifying it.
+        let expect_merkle_hashes = if uncompressed_size <= fuchsia_merkle::BLOCK_SIZE as u64 {
+            0
+        } else {
+            uncompressed_size.div_ceil(fuchsia_merkle::BLOCK_SIZE as u64)
+        };
+        ensure!(
+            metadata.merkle_leaves.len() as u64 == expect_merkle_hashes,
+            FxfsError::IntegrityError
+        );
+        // Fully validate the empty blob and its size.
+        ensure!(
+            (uncompressed_size == 0) == (merkle_root == EMPTY_BLOB_HASH),
+            FxfsError::IntegrityError
+        );
         let merkle_verifier = metadata.into_merkle_verifier(merkle_root)?;
 
         let min_chunk_size = min_chunk_size(&compression_info);
@@ -258,7 +282,7 @@ impl FxBlob {
                 AttributeId::DATA,
             )])
             .await;
-        self.handle.read_unchecked(AttributeId::DATA, offset, buf, &guard).await
+        self.handle.read_aligned_unchecked(AttributeId::DATA, offset, buf, &guard).await
     }
 }
 
@@ -575,7 +599,7 @@ mod tests {
     use fxfs_make_blob_image::FxBlobBuilder;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
-    use storage_units::PAGE_SIZE;
+    use storage_units::page_size;
 
     const BLOCK_SIZE: u64 = fuchsia_merkle::BLOCK_SIZE as u64;
     const CHUNK_SIZE: usize = 32 * 1024;
@@ -677,7 +701,7 @@ mod tests {
     async fn test_non_page_aligned_blob() {
         let fixture = new_blob_fixture().await;
 
-        let page_size = PAGE_SIZE.get() as usize;
+        let page_size = page_size().get() as usize;
         let data = vec![0xffu8; page_size - 1];
         let hash = fixture.write_blob(&data, CompressionMode::Never).await;
         assert_eq!(fixture.read_blob(hash).await, data);
@@ -724,6 +748,75 @@ mod tests {
                 blob_vmo.read(&mut buf[..], READ_AHEAD_SIZE),
                 Err(zx::Status::IO_DATA_INTEGRITY)
             );
+        }
+
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_blob_invalid_uncompressed_size() {
+        use fxfs::object_handle::WriteObjectHandle;
+
+        let fixture = new_blob_fixture().await;
+
+        // 1. A single-block blob (uncompressed_size <= BLOCK_SIZE) should have 0 merkle leaves in
+        // metadata. If metadata contains 1 leaf (even if it equals the root hash), opening fails.
+        {
+            let data = vec![0xaa; BLOCK_SIZE as usize];
+            let hash = fixture.write_blob(&data, CompressionMode::Never).await;
+            let handle = fixture.get_blob_handle(&hash.to_string()).await;
+            BlobMetadata { merkle_leaves: vec![hash.into()], format: BlobFormat::Uncompressed }
+                .write_to(&handle)
+                .await
+                .expect("write_to failed");
+            let err = fixture.get_blob(hash).await.err().expect("get_blob should fail");
+            assert_matches!(err.downcast_ref::<FxfsError>(), Some(FxfsError::IntegrityError));
+        }
+
+        // 2. A multi-block compressed blob (uncompressed_size > BLOCK_SIZE) with 0 merkle leaves in
+        // metadata must fail to open with IntegrityError.
+        {
+            let data = vec![0xbb; (BLOCK_SIZE * 2) as usize];
+            let hash = fixture.write_blob(&data, CompressionMode::Always).await;
+            let handle = fixture.get_blob_handle(&hash.to_string()).await;
+            let mut metadata = BlobMetadata::read_from(&handle).await.expect("read_from failed");
+            metadata.merkle_leaves.clear();
+            metadata.write_to(&handle).await.expect("write_to failed");
+            let err = fixture.get_blob(hash).await.err().expect("get_blob should fail");
+            assert_matches!(err.downcast_ref::<FxfsError>(), Some(FxfsError::IntegrityError));
+        }
+
+        // 3. A multi-block blob whose uncompressed size disagrees with the number of merkle leaves
+        // (even when merkle_leaves validly hashes to the merkle root) must fail with
+        // IntegrityError.
+        {
+            let data = vec![0xcc; (BLOCK_SIZE * 2) as usize];
+            let hash = fixture.write_blob(&data, CompressionMode::Never).await;
+            let handle = fixture.get_blob_handle(&hash.to_string()).await;
+            handle.truncate(BLOCK_SIZE * 3).await.expect("truncate failed");
+            let err = fixture.get_blob(hash).await.err().expect("get_blob should fail");
+            assert_matches!(err.downcast_ref::<FxfsError>(), Some(FxfsError::IntegrityError));
+        }
+
+        // 4. A non-empty single-block blob truncated to 0 bytes must fail to open with
+        // IntegrityError.
+        {
+            let data = vec![0xdd; 100];
+            let hash = fixture.write_blob(&data, CompressionMode::Never).await;
+            let handle = fixture.get_blob_handle(&hash.to_string()).await;
+            handle.truncate(0).await.expect("truncate failed");
+            let err = fixture.get_blob(hash).await.err().expect("get_blob should fail");
+            assert_matches!(err.downcast_ref::<FxfsError>(), Some(FxfsError::IntegrityError));
+        }
+
+        // 5. An empty blob whose uncompressed size is non-zero must fail to open with
+        // IntegrityError.
+        {
+            let hash = fixture.write_blob(&[], CompressionMode::Never).await;
+            let handle = fixture.get_blob_handle(&hash.to_string()).await;
+            handle.truncate(100).await.expect("truncate failed");
+            let err = fixture.get_blob(hash).await.err().expect("get_blob should fail");
+            assert_matches!(err.downcast_ref::<FxfsError>(), Some(FxfsError::IntegrityError));
         }
 
         fixture.close().await;

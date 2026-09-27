@@ -3,12 +3,12 @@
 # found in the LICENSE file.
 
 # buildifier: disable=module-docstring
-load(":providers.bzl", "FuchsiaDriverToolInfo", "FuchsiaUnstrippedBinaryInfo")
+load(":providers.bzl", "FuchsiaDriverToolInfo", "FuchsiaUnstrippedBinariesInfo")
 
 def _fuchsia_driver_tool_impl(ctx):
     return [
         FuchsiaDriverToolInfo(
-            tool_path = ctx.attr.binary[FuchsiaUnstrippedBinaryInfo].dest,
+            tool_path = ctx.attr.binary[FuchsiaUnstrippedBinariesInfo].binaries[0].dest,
         ),
     ]
 
@@ -37,13 +37,14 @@ fuchsia_driver_tool = rule(
     )
 
     $ bazel run //pkg.my_tool -- --arg1 foo --arg2 bar
+    ```
     """,
     implementation = _fuchsia_driver_tool_impl,
     attrs = {
         "binary": attr.label(
             doc = "The tool's fuchsia_cc_binary() target.",
             mandatory = True,
-            providers = [[FuchsiaUnstrippedBinaryInfo]],
+            providers = [[FuchsiaUnstrippedBinariesInfo]],
         ),
     },
 )

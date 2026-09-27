@@ -41,7 +41,7 @@ pub enum ValidateError {
         ClassDefaultRange::TargetLow as u32,
         ClassDefaultRange::TargetHigh as u32,
         ClassDefaultRange::TargetLowHigh as u32,
-        ClassDefaultRange::UnknownUsedValue as u32]
+        ClassDefaultRange::Glblub as u32]
     )]
     InvalidClassDefaultRange { value: u32 },
     #[error("paths not ordered lexicographicaly")]

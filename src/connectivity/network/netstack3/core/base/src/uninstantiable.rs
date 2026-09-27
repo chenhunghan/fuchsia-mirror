@@ -9,7 +9,6 @@
 //! of their local traits on these types, so they can be used in uninstantiable
 //! contexts.
 
-use core::convert::Infallible as Never;
 use core::marker::PhantomData;
 
 use explicit::UnreachableExt as _;
@@ -21,10 +20,10 @@ use crate::{
 
 /// An uninstantiable type.
 #[derive(Clone, Copy)]
-pub struct Uninstantiable(Never);
+pub struct Uninstantiable(!);
 
-impl AsRef<Never> for Uninstantiable {
-    fn as_ref(&self) -> &Never {
+impl AsRef<!> for Uninstantiable {
+    fn as_ref(&self) -> &! {
         &self.0
     }
 }
@@ -45,10 +44,10 @@ impl<I, O> BidirectionalConverter<I, O> for Uninstantiable {
 // TODO(https://github.com/rust-lang/rust/issues/118212): Simplify the trait
 // implementations once Rust supports function delegation. Those impls are
 // spread among the core crates.
-pub struct UninstantiableWrapper<A>(Never, PhantomData<A>);
+pub struct UninstantiableWrapper<A>(!, PhantomData<A>);
 
-impl<A> AsRef<Never> for UninstantiableWrapper<A> {
-    fn as_ref(&self) -> &Never {
+impl<A> AsRef<!> for UninstantiableWrapper<A> {
+    fn as_ref(&self) -> &! {
         let Self(never, _marker) = self;
         &never
     }

@@ -7,8 +7,15 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
+
+# Add //build/python/modules/ to sys.path so we can import depfile
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "..", "python", "modules")
+)
+import depfile as depfile_module
 
 
 def zip_dir(dir, zip_file):
@@ -67,7 +74,7 @@ def package_tool_publish(args, dirs, depfile):
         "--package-list",
         args.input,
         "--depfile",
-        args.depfile,
+        depfile,
     ]
 
     if args.delivery_blob_type:
@@ -82,6 +89,7 @@ def main(args):
     with tempfile.TemporaryDirectory(
         dir=os.path.dirname(args.output)
     ) as gendir:
+        gendir = os.path.relpath(gendir)
         dirs = prepare_dirs(gendir)
 
         # Prepare for `package-tool repository publish` and gather deps associated with preparations.
@@ -91,6 +99,16 @@ def main(args):
 
         # Invoke `package-tool repository publish` and gather deps associated with invocation.
         package_tool_publish(args, dirs, depfile)
+
+        # package-tool writes dependencies against repository/timestamp.json.
+        # Rewrite the depfile to point to the actual output archive instead of
+        # the temporary timestamp.json.
+        with open(depfile, "r") as f:
+            parsed_depfile = depfile_module.DepFile.read_from(f)
+
+        parsed_depfile.outputs = [args.output]
+        with open(args.depfile, "w") as f:
+            parsed_depfile.write_to(f)
 
         # Output repository directory to zip file.
         with zipfile.ZipFile(

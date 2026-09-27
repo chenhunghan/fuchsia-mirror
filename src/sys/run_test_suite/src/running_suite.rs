@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 use crate::cancel::{Cancelled, NamedFutureExt, OrCancel};
-use crate::outcome::{Lifecycle, Outcome, RunTestSuiteError, UnexpectedEventError};
+use crate::outcome::{
+    ExtendedOutcome, Lifecycle, Outcome, RunTestSuiteError, UnexpectedEventError,
+};
 use crate::output::{self, ArtifactType, CaseId, SuiteReporter, Timestamp};
 use crate::stream_util::StreamUtil;
 use crate::trace::duration;
@@ -44,7 +46,7 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
     suite_reporter: &SuiteReporter<'_>,
     log_display: diagnostics::LogDisplayConfiguration,
     cancel_fut: F,
-) -> Result<Outcome, RunTestSuiteError> {
+) -> Result<ExtendedOutcome, RunTestSuiteError> {
     duration!("collect_suite");
 
     let RunningSuite {
@@ -69,6 +71,10 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
     let mut suite_finish_timestamp = Timestamp::Unknown;
     let mut outcome = Outcome::Passed;
 
+    // This future collects results by handling test manager events arriving via `event_stream`.
+    // The state of individual cases is tracked in `test_cases`, and the state of the suite is
+    // tracked in `suite_state`. An error is returned if collection could not be completed.
+    // The result type is `Result<(), RunTestSuiteError>`.
     let collect_results_fut = async {
         while let Some(event_result) = event_stream.next().named("next_event").await {
             match event_result {
@@ -297,15 +303,16 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
     }
     .boxed_local();
 
+    // `kill_timeout_future` never completes if no timeout is set. If a timeout is set,
+    // it completes after the timeout interval, in which case it returns `()`.
     let start_time = std::time::Instant::now();
     let kill_timeout_future = match timeout {
         None => futures::future::pending::<()>().boxed(),
         Some(duration) => fasync::Timer::new(start_time + duration + timeout_grace).boxed(),
     };
 
-    // If kill timeout or cancel occur, we want to stop polling events.
-    // kill_fut resolves to the outcome to which results should be overwritten
-    // if it resolves.
+    // `kill_fut` combines the timeout future with the cancel future that was passed in.
+    // If it completes, it returns `Outcome::Cancelled`. or `Outcome::Timedout`.
     let kill_fut = async move {
         match futures::future::select(cancel_fut, kill_timeout_future).await {
             Either::Left(_) => Outcome::Cancelled,
@@ -314,44 +321,84 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
     }
     .shared();
 
-    let early_termination_outcome =
+    let early_termination_outcome: Option<Outcome> =
+        // `or_cancelled` here wraps the result of `collect_results_fut` in another result.
+        // That outer result is an error if collection is cancelled or times out.
         match collect_results_fut.boxed_local().or_cancelled(kill_fut.clone()).await {
+            // Collection completed successfully. `early_termination_outcome` will be `None`.
             Ok(Ok(())) => None,
-            Ok(Err(e)) => return Err(e),
+            // Collection completed with an error. Return early from this function with an
+            // `ExtendedOutcome` that wraps the error.
+            Ok(Err(e)) => return Ok(ExtendedOutcome {
+                outcome: Outcome::Error { origin: Arc::new(e) },
+                // We regard setup as having succeeded if the `SuiteStarted` event was received.
+                // If it was not received, the suite's lifecycle will be `Found`.
+                setup_succeeded: Some(suite_state.lifecycle != Lifecycle::Found),
+                teardown_succeeded: if suite_state.lifecycle == Lifecycle::Stopped {
+                    // The suite stopped normally, but we're bailing for some reason. Teardown
+                    // failed, because we're not completing the rest of the teardown steps below.
+                    Some(false)
+                } else {
+                    // `setup_succeeded` is false, so we don't report a definite
+                    // `teardown_succeeded`.
+                    None
+                },
+            }),
+            // Collection was cancelled or timed out. Note that `Cancelled` here is the
+            // error type returned by `or_cancelled` and does not indicate that collection
+            // was necessarily cancelled (it may have timed out). `outcome` here will be
+            // `Outcome::Cancelled` or `Outcome::Timedout`.
             Err(Cancelled(outcome)) => Some(outcome),
         };
 
     // Finish collecting artifacts and report errors.
     info!("Awaiting case artifacts");
     let mut unfinished_test_case_names = vec![];
+
+    let mut teardown_succeeded = true;
+
+    // Here we examine all the test cases that were found. Note that `lifecycle` pertains to
+    // the specific case, whereas `early_termination_outcome` is the same value across all
+    // cases.
     for (_, test_case) in test_cases.into_iter() {
         let CollectedEntityState { reporter, name, lifecycle, artifact_tasks } = test_case;
         match (lifecycle, early_termination_outcome.clone()) {
             (Lifecycle::Started | Lifecycle::Found, Some(early)) => {
+                // The suite run was either cancelled or timed out, and the case either started
+                // but did not complete or was never started.
                 reporter.stopped(&early.into(), Timestamp::Unknown)?;
             }
             (Lifecycle::Found, None) => {
+                // The suite run completed normally, but this test case was never started.
                 unfinished_test_case_names.push(name.clone());
                 reporter.stopped(&Outcome::Inconclusive.into(), Timestamp::Unknown)?;
             }
             (Lifecycle::Started, None) => {
+                // The suite run completed normally. This test case was started, but never
+                // finished.
                 unfinished_test_case_names.push(name.clone());
                 reporter.stopped(&Outcome::DidNotFinish.into(), Timestamp::Unknown)?;
             }
-            (Lifecycle::Stopped | Lifecycle::Finished, _) => (),
+            (Lifecycle::Stopped | Lifecycle::Finished, _) => {
+                // This test case run stopped and maybe completed. The suite run may or may
+                // not have completed.
+            }
         }
 
+        // Wait for all artifacts to be collected for this case.
         let finish_artifacts_fut = FuturesUnordered::from_iter(artifact_tasks)
             .map(|result| match result {
                 Err(e) => {
                     error!("Failed to collect artifact for {}: {:?}", name, e);
+                    teardown_succeeded = false;
                 }
                 Ok(Some(_log_result)) => warn!("Unexpectedly got log results for a test case"),
                 Ok(None) => (),
             })
             .collect::<()>();
         if let Err(Cancelled(_)) = finish_artifacts_fut.or_cancelled(kill_fut.clone()).await {
-            warn!("Stopped polling artifacts for {} due to timeout", name);
+            warn!("Stopped polling artifacts for {} due to timeout or cancellation", name);
+            teardown_succeeded = false;
         }
 
         reporter.finished()?;
@@ -364,11 +411,16 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
 
     match (suite_state.lifecycle, early_termination_outcome) {
         (Lifecycle::Found | Lifecycle::Started, Some(early)) => {
-            if matches!(&outcome, Outcome::Passed | Outcome::Failed) {
+            // We terminated early and never got `SuiteStopped`. `outcome` was optimistically
+            // set to `Passed`, so we set it to `Cancelled` or `Timedout` depending on how we
+            // terminated early. Note that `outcome` cannot be `Failed` here, because we only
+            // set it to that if we get `SuiteStopped`.
+            if outcome == Outcome::Passed {
                 outcome = early;
             }
         }
         (Lifecycle::Found | Lifecycle::Started, None) => {
+            // There was no cancellation or timeout, but we never got `SuiteStopped`.
             outcome = Outcome::error(UnexpectedEventError::SuiteDidNotReportStop);
         }
         // If the suite successfully reported a result, don't alter it.
@@ -378,11 +430,13 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
     }
 
     let restricted_logs_present = AtomicBool::new(false);
+    let all_artifacts_finished = AtomicBool::new(true);
     let finish_artifacts_fut = FuturesUnordered::from_iter(suite_state.artifact_tasks)
         .then(|result| async {
             match result {
                 Err(e) => {
                     error!("Failed to collect artifact for suite: {:?}", e);
+                    all_artifacts_finished.store(false, Ordering::Relaxed);
                 }
                 Ok(Some(log_result)) => match log_result {
                     diagnostics::LogCollectionOutcome::Error { restricted_logs } => {
@@ -393,12 +447,14 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
                             Ok(artifact) => artifact,
                             Err(e) => {
                                 warn!("Error creating artifact to report restricted logs: {:?}", e);
+                                all_artifacts_finished.store(false, Ordering::Relaxed);
                                 return;
                             }
                         };
                         for log in restricted_logs.iter() {
                             if let Err(e) = writeln!(log_artifact, "{}", log) {
                                 warn!("Error recording restricted logs: {:?}", e);
+                                all_artifacts_finished.store(false, Ordering::Relaxed);
                                 return;
                             }
                         }
@@ -409,16 +465,32 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
             }
         })
         .collect::<()>();
+
     if let Err(Cancelled(_)) = finish_artifacts_fut.or_cancelled(kill_fut).await {
         warn!("Stopped polling artifacts due to timeout");
+        teardown_succeeded = false;
     }
     if restricted_logs_present.into_inner() && matches!(outcome, Outcome::Passed) {
         outcome = Outcome::Failed;
     }
 
+    teardown_succeeded &= all_artifacts_finished.into_inner();
+
     suite_reporter.stopped(&outcome.clone().into(), suite_finish_timestamp)?;
 
-    Ok(outcome)
+    Ok(ExtendedOutcome {
+        outcome: outcome,
+        // We regard setup as having succeeded if the `SuiteStarted` event was received.
+        // If it was not received, the suite's lifecycle will be `Found`.
+        setup_succeeded: Some(suite_state.lifecycle != Lifecycle::Found),
+        teardown_succeeded: if suite_state.lifecycle == Lifecycle::Stopped {
+            Some(teardown_succeeded)
+        } else {
+            // `setup_succeeded` is false, so we don't report a definite
+            // `teardown_succeeded`.
+            None
+        },
+    })
 }
 
 type EventStream =
@@ -823,7 +895,11 @@ mod test {
                 )
                 .await
                 .expect("collect results"),
-                Outcome::Passed
+                ExtendedOutcome {
+                    outcome: Outcome::Passed,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
             );
             suite_reporter.finished().expect("Reporter finished");
 
@@ -896,7 +972,11 @@ mod test {
                 )
                 .await
                 .expect("collect results"),
-                Outcome::Passed
+                ExtendedOutcome {
+                    outcome: Outcome::Passed,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
             );
             suite_reporter.finished().expect("Reporter finished");
 
@@ -984,7 +1064,11 @@ mod test {
                 )
                 .await
                 .expect("collect results"),
-                Outcome::Passed
+                ExtendedOutcome {
+                    outcome: Outcome::Passed,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
             );
             suite_reporter.finished().expect("Reporter finished");
 
@@ -1069,7 +1153,11 @@ mod test {
                 )
                 .await
                 .expect("collect results"),
-                Outcome::Passed
+                ExtendedOutcome {
+                    outcome: Outcome::Passed,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
             );
             suite_reporter.finished().expect("Reporter finished");
 
@@ -1144,7 +1232,11 @@ mod test {
                 )
                 .await
                 .expect("collect results"),
-                Outcome::Timedout
+                ExtendedOutcome {
+                    outcome: Outcome::Timedout,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: None,
+                }
             );
             suite_reporter.finished().expect("Reporter finished");
 
@@ -1179,5 +1271,324 @@ mod test {
         };
 
         futures::future::join(serve_all_events_then_hang(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_suite_failed() {
+        let all_events = vec![
+            suite_started_event(0),
+            case_found_event(100, 0, "my_test_case"),
+            case_started_event(200, 0),
+            case_stopped_event(300, 0, ftest_manager::TestCaseResult::Failed),
+            case_finished_event(400, 0),
+            suite_stopped_event(500, ftest_manager::SuiteResult::Failed),
+        ];
+
+        let (proxy, stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: None,
+            })
+            .await;
+            assert_eq!(
+                run_suite_and_collect_logs(
+                    suite,
+                    &suite_reporter,
+                    diagnostics::LogDisplayConfiguration::default(),
+                    futures::future::pending()
+                )
+                .await
+                .expect("collect results"),
+                ExtendedOutcome {
+                    outcome: Outcome::Failed,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
+            );
+            suite_reporter.finished().expect("Reporter finished");
+        };
+
+        futures::future::join(serve_all_events(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_suite_did_not_finish() {
+        let all_events = vec![
+            suite_started_event(0),
+            suite_stopped_event(500, ftest_manager::SuiteResult::DidNotFinish),
+        ];
+
+        let (proxy, stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: None,
+            })
+            .await;
+            assert_eq!(
+                run_suite_and_collect_logs(
+                    suite,
+                    &suite_reporter,
+                    diagnostics::LogDisplayConfiguration::default(),
+                    futures::future::pending()
+                )
+                .await
+                .expect("collect results"),
+                ExtendedOutcome {
+                    outcome: Outcome::Inconclusive,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
+            );
+            suite_reporter.finished().expect("Reporter finished");
+        };
+
+        futures::future::join(serve_all_events(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_suite_timed_out_clean_teardown() {
+        let all_events = vec![
+            suite_started_event(0),
+            case_found_event(100, 0, "my_test_case"),
+            case_started_event(200, 0),
+            case_stopped_event(300, 0, ftest_manager::TestCaseResult::TimedOut),
+            case_finished_event(400, 0),
+            suite_stopped_event(500, ftest_manager::SuiteResult::TimedOut),
+        ];
+
+        let (proxy, stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: None,
+            })
+            .await;
+            assert_eq!(
+                run_suite_and_collect_logs(
+                    suite,
+                    &suite_reporter,
+                    diagnostics::LogDisplayConfiguration::default(),
+                    futures::future::pending()
+                )
+                .await
+                .expect("collect results"),
+                ExtendedOutcome {
+                    outcome: Outcome::Timedout,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
+            );
+            suite_reporter.finished().expect("Reporter finished");
+        };
+
+        futures::future::join(serve_all_events(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_suite_internal_error() {
+        let all_events = vec![
+            suite_started_event(0),
+            suite_stopped_event(500, ftest_manager::SuiteResult::InternalError),
+        ];
+
+        let (proxy, stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: None,
+            })
+            .await;
+            assert_eq!(
+                run_suite_and_collect_logs(
+                    suite,
+                    &suite_reporter,
+                    diagnostics::LogDisplayConfiguration::default(),
+                    futures::future::pending()
+                )
+                .await
+                .expect("collect results"),
+                ExtendedOutcome {
+                    outcome: Outcome::error(UnexpectedEventError::InternalErrorSuiteResult),
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
+            );
+            suite_reporter.finished().expect("Reporter finished");
+        };
+
+        futures::future::join(serve_all_events(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_unfinished_case() {
+        let all_events = vec![
+            suite_started_event(0),
+            case_found_event(100, 0, "my_test_case"),
+            case_started_event(200, 0),
+            suite_stopped_event(500, ftest_manager::SuiteResult::Finished),
+        ];
+
+        let (proxy, stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: None,
+            })
+            .await;
+            assert_eq!(
+                run_suite_and_collect_logs(
+                    suite,
+                    &suite_reporter,
+                    diagnostics::LogDisplayConfiguration::default(),
+                    futures::future::pending()
+                )
+                .await
+                .expect("collect results"),
+                ExtendedOutcome {
+                    outcome: Outcome::error(UnexpectedEventError::CasesDidNotFinish {
+                        cases: vec!["my_test_case".to_string()],
+                    }),
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
+            );
+            suite_reporter.finished().expect("Reporter finished");
+        };
+
+        futures::future::join(serve_all_events(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_suite_did_not_report_stop() {
+        let all_events = vec![
+            suite_started_event(0),
+            case_found_event(100, 0, "my_test_case"),
+            case_started_event(200, 0),
+            case_stopped_event(300, 0, ftest_manager::TestCaseResult::Passed),
+            case_finished_event(400, 0),
+        ];
+
+        let (proxy, stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: None,
+            })
+            .await;
+            assert_eq!(
+                run_suite_and_collect_logs(
+                    suite,
+                    &suite_reporter,
+                    diagnostics::LogDisplayConfiguration::default(),
+                    futures::future::pending()
+                )
+                .await
+                .expect("collect results"),
+                ExtendedOutcome {
+                    outcome: Outcome::error(UnexpectedEventError::SuiteDidNotReportStop),
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: None,
+                }
+            );
+            suite_reporter.finished().expect("Reporter finished");
+        };
+
+        futures::future::join(serve_all_events(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_no_matching_cases_success() {
+        let (proxy, mut stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let serve_fut = async move {
+            while let Ok(Some(req)) = stream.try_next().await {
+                if let ftest_manager::SuiteControllerRequest::WatchEvents { responder, .. } = req {
+                    let _ = responder.send(Err(ftest_manager::LaunchError::NoMatchingCases));
+                }
+            }
+        };
+
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: Some(true),
+            })
+            .await;
+            assert_eq!(
+                run_suite_and_collect_logs(
+                    suite,
+                    &suite_reporter,
+                    diagnostics::LogDisplayConfiguration::default(),
+                    futures::future::pending()
+                )
+                .await
+                .expect("collect results"),
+                ExtendedOutcome {
+                    outcome: Outcome::Passed,
+                    setup_succeeded: Some(true),
+                    teardown_succeeded: Some(true),
+                }
+            );
+            suite_reporter.finished().expect("Reporter finished");
+        };
+
+        futures::future::join(serve_fut, test_fut).await;
     }
 }

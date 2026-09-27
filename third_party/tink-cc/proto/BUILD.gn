@@ -203,3 +203,28 @@ proto_library("slh_dsa_proto") {
   extra_configs = [ "//third_party/tink-cc:tink_config" ]
   sources = [ "//third_party/tink-cc/src/proto/slh_dsa.proto" ]
 }
+
+# CC Library : tink_cc_tinkpb
+source_set("tink_cc_tinkpb") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [ "//third_party/tink-cc/src/proto/tink.tinkpb.h" ]
+  public_deps = [
+    "//third_party/abseil-cpp/absl/strings:string_view",
+    "//third_party/tink-cc/tink/internal:proto_parser_enum_field",
+    "//third_party/tink-cc/tink/internal:proto_parser_field",
+    "//third_party/tink-cc/tink/internal:proto_parser_message",
+    "//third_party/tink-cc/tink/internal:proto_parser_options",
+    "//third_party/tink-cc/tink/internal:proto_parser_scalar_fields",
+    "//third_party/tink-cc/tink/internal:proto_parser_secret_data_field",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
+# CC Library : common_cc_tinkpb
+source_set("common_cc_tinkpb") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [ "//third_party/tink-cc/src/proto/common.tinkpb.h" ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}

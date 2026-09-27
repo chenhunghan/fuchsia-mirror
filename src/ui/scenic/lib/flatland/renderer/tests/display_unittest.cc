@@ -117,12 +117,12 @@ class DisplayTest : public gtest::RealLoopFixture {
     return layer_id;
   }
 
-  // Wait until a vsync is received with a stamp that is >= `target_stamp`.  Return ZX_ERR_TIMED_OUT
-  // if no such vsync is received before `timeout` elapses.
+  // Wait until a vsync is received with a stamp that is >= `target_stamp`.  Return
+  // `ZX_ERR_TIMED_OUT` if no such vsync is received before `timeout` elapses.
   zx::result<> WaitForVsync(display::WireConfigStamp target_stamp, zx::duration timeout) {
     std::optional<display::WireConfigStamp> received_stamp;
     auto vsync_callback_id = display_manager_->default_display()->AddVsyncCallback(
-        [&](zx::time, display::WireConfigStamp displayed_config_stamp) {
+        [&](display::DisplayId, zx::time, display::WireConfigStamp displayed_config_stamp) {
           received_stamp = displayed_config_stamp;
         });
 
@@ -138,7 +138,7 @@ class DisplayTest : public gtest::RealLoopFixture {
   }
 
   // Run promise on this test case's executor.
-  // Return true if result is_ok().
+  // Return true if result `is_ok()`.
   bool RunPromise(fpromise::promise<> promise) {
     return integration_tests::RunPromise(
         *executor_, [this](bool& done) { RunLoopUntil([&done] { return done; }); },
@@ -383,7 +383,7 @@ VK_TEST_F(DisplayTest, SetDisplayImageTest) {
   EXPECT_TRUE(vsync_result.is_ok())
       << "first WaitForVsync() failed with status: " << vsync_result.status_string();
 
-  // Set the layer image again, to the second image, so that our first call to SetLayerImage2()
+  // Set the layer image again, to the second image, so that our first call to `SetLayerImage2()`
   // above will signal.
   const fidl::OneWayStatus set_layer_image_result2 = display_coordinator.sync()->SetLayerImage2(
       layer_id, image_ids[1].ToFidl(), display_wait_event_id.ToFidl());

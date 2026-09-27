@@ -1406,15 +1406,21 @@ zx_status_t OpteeClient::HandleRpcCommandFileSystemReadFile(ReadFileFileSystemRp
 
     const auto& data = response.value()->data;
     read_chunk_actual = data.size();
+    if (read_chunk_actual > read_chunk_request) {
+      LOG(ERROR, "file read returned more bytes than requested");
+      message->set_return_code(TEEC_ERROR_GENERIC);
+      return ZX_ERR_IO_DATA_INTEGRITY;
+    }
+
+    if (read_chunk_actual == 0) {
+      break;
+    }
+
     memcpy(buffer, data.begin(), read_chunk_actual);
     buffer += read_chunk_actual;
     offset += read_chunk_actual;
     bytes_left -= read_chunk_actual;
     bytes_read += read_chunk_actual;
-
-    if (read_chunk_actual == 0) {
-      break;
-    }
   }
 
   message->set_output_file_contents_size(bytes_read);
@@ -1463,6 +1469,18 @@ zx_status_t OpteeClient::HandleRpcCommandFileSystemWriteFile(
           zx_status_get_string(response.error_value()));
       message->set_return_code(TEEC_ERROR_GENERIC);
       return response.error_value();
+    }
+
+    if (response.value()->actual_count > write_chunk_request) {
+      LOG(ERROR, "file write returned more bytes than requested");
+      message->set_return_code(TEEC_ERROR_GENERIC);
+      return ZX_ERR_IO_DATA_INTEGRITY;
+    }
+
+    if (response.value()->actual_count == 0) {
+      LOG(ERROR, "file write returned 0 bytes written; aborting to prevent infinite loop");
+      message->set_return_code(TEEC_ERROR_GENERIC);
+      return ZX_ERR_IO;
     }
 
     buffer += response.value()->actual_count;

@@ -8,6 +8,8 @@ use state::*;
 
 use crate::ap::event::{ClientEvent, Event};
 use crate::ap::{Context, MlmeRequest, RsnCfg, aid};
+use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
+use fidl_fuchsia_wlan_mlme as fidl_mlme;
 use ieee80211::{MacAddr, MacAddrBytes};
 use log::error;
 use wlan_common::ie::SupportedRate;
@@ -15,7 +17,6 @@ use wlan_common::mac::{Aid, CapabilityInfo};
 use wlan_common::timer::EventHandle;
 use wlan_rsn::key::Tk;
 use wlan_rsn::key::exchange::Key;
-use {fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211, fidl_fuchsia_wlan_mlme as fidl_mlme};
 
 pub struct RemoteClient {
     pub addr: MacAddr,
@@ -328,7 +329,7 @@ mod tests {
             &mut ctx,
             fidl_mlme::AuthenticateResultCode::AntiCloggingTokenRequired,
         );
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AuthResponse(fidl_mlme::AuthenticateResponse {
             peer_sta_address,
             result_code,
@@ -359,7 +360,7 @@ mod tests {
             CapabilityInfo(0).with_short_preamble(true),
             vec![SupportedRate(1), SupportedRate(2), SupportedRate(3)],
         );
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             result_code,
@@ -380,7 +381,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, _) = make_env();
         r_sta.send_deauthenticate_req(&mut ctx, fidl_ieee80211::ReasonCode::NoMoreStas);
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
             peer_sta_address,
             reason_code,
@@ -395,7 +396,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, _) = make_env();
         r_sta.send_eapol_req(&mut ctx, test_utils::eapol_key_frame());
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Eapol(fidl_mlme::EapolRequest {
             src_addr,
             dst_addr,
@@ -412,7 +413,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, _) = make_env();
         r_sta.send_key(&mut ctx, &Key::Ptk(test_utils::ptk()));
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::SetKeys(fidl_mlme::SetKeysRequest { keylist }) => {
             assert_eq!(keylist.len(), 1);
             let k = keylist.first().expect("expect key descriptor");
@@ -431,7 +432,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, _) = make_env();
         r_sta.send_key(&mut ctx, &Key::Gtk(test_utils::gtk()));
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::SetKeys(fidl_mlme::SetKeysRequest { keylist }) => {
             assert_eq!(keylist.len(), 1);
             let k = keylist.first().expect("expect key descriptor");
@@ -450,7 +451,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, _) = make_env();
         r_sta.send_set_controlled_port_req(&mut ctx, fidl_mlme::ControlledPortState::Open);
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::SetCtrlPort(fidl_mlme::SetControlledPortRequest {
             peer_sta_address,
             state,
@@ -469,7 +470,7 @@ mod tests {
             zx::MonotonicInstant::after(zx::MonotonicDuration::from_seconds(2)),
             ClientEvent::AssociationTimeout,
         );
-        let (_, timed_event, _) = time_stream.try_next().unwrap().expect("expected timed event");
+        let (_, timed_event, _) = time_stream.try_recv().expect("expected timed event");
         assert_eq!(timed_event.id, timeout_event.id());
         assert_matches!(timed_event.event, Event::Client { addr, event } => {
             assert_eq!(addr, *CLIENT_ADDR);

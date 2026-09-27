@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/lib/chunked-compression/compression-params.h"
+
 #include <fbl/algorithm.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
-#include <src/lib/chunked-compression/compression-params.h>
 #include <zstd/zstd.h>
+
+#include "src/lib/chunked-compression/chunked-archive.h"
 
 namespace chunked_compression {
 

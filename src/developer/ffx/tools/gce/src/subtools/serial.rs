@@ -12,7 +12,9 @@ use fho::{FfxMain, FfxTool, Result, return_user_error, user_error};
 use std::io::Write;
 use std::time::Duration;
 
-#[derive(FfxTool)]
+const SERIAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, FfxTool)]
 pub struct SerialTool {
     #[command]
     cmd: SerialCommand,
@@ -34,45 +36,65 @@ impl FfxMain for SerialTool {
         let instance = gce_watcher::Instance::new(&gce.project, &gce.zone, &self.cmd.name)
             .map_err(|e| user_error!("{e}"))?;
 
-        let mut current_offset = self.cmd.start;
-
-        loop {
-            let had_new_data = match gce
-                .client
-                .get_serial_port_output(
-                    &instance.project,
-                    &instance.zone,
-                    &instance.name,
-                    self.cmd.port,
-                    current_offset,
-                )
-                .await
-            {
-                Ok(output) => {
-                    let has_data = !output.contents.is_empty();
-                    write_serial_output(&mut writer, &output.contents)?;
-                    current_offset = Some(output.next);
-                    has_data
-                }
-                Err(e) => {
-                    return_user_error!("{e}");
-                }
-            };
-
-            if !self.cmd.follow {
-                break;
-            }
-
-            if !had_new_data {
-                fuchsia_async::Timer::new(Duration::from_millis(1000)).await;
-            }
-        }
-
-        Ok(())
+        stream_serial_output(
+            &gce,
+            &instance,
+            self.cmd.port,
+            self.cmd.start,
+            self.cmd.follow,
+            &mut writer,
+        )
+        .await
     }
 }
 
-fn write_serial_output<W: Write>(writer: &mut W, contents: &str) -> Result<()> {
+/// Reads or continuously streams serial port output from `instance` into `writer`.
+pub async fn stream_serial_output<W: Write>(
+    gce: &GceContext,
+    instance: &gce_watcher::Instance,
+    port: u32,
+    start: Option<i64>,
+    follow: bool,
+    mut writer: W,
+) -> Result<()> {
+    let mut current_offset = start;
+
+    loop {
+        let had_new_data = match gce
+            .client
+            .get_serial_port_output(
+                &instance.project,
+                &instance.zone,
+                &instance.name,
+                port,
+                current_offset,
+            )
+            .await
+        {
+            Ok(output) => {
+                let has_data = !output.contents.is_empty();
+                write_serial_output(&mut writer, &output.contents)?;
+                current_offset = Some(output.next);
+                has_data
+            }
+            Err(e) => {
+                return_user_error!("{e}");
+            }
+        };
+
+        if !follow {
+            break;
+        }
+
+        if !had_new_data {
+            fuchsia_async::Timer::new(SERIAL_POLL_INTERVAL).await;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_serial_output<W: Write>(mut writer: W, contents: &str) -> Result<()> {
     if !contents.is_empty() {
         write!(writer, "{}", contents)?;
         writer.flush()?;
@@ -85,7 +107,7 @@ mod tests {
     use super::*;
     use ffx_writer::TestBuffers;
 
-    #[test]
+    #[fuchsia::test]
     fn test_write_serial_output() {
         let test_buffers = TestBuffers::default();
         let mut writer = SimpleWriter::new_test(&test_buffers);
@@ -95,7 +117,7 @@ mod tests {
         assert_eq!(stdout, "[00000.000] 00000:00000> Welcome to Zircon!\n");
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_write_serial_output_empty() {
         let test_buffers = TestBuffers::default();
         let mut writer = SimpleWriter::new_test(&test_buffers);

@@ -214,6 +214,7 @@ mod tests {
                 allocated_blocks: 7u64,
                 deallocated_blocks: 0u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 240u64,
             }
         });
     }

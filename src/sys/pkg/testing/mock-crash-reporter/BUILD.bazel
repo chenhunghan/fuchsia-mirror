@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "mock_crash_reporter",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//src/lib/fuchsia",
+    ],
+    version = "0.0.1",
+    visibility = ["//src/sys/pkg:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

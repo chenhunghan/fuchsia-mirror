@@ -1,0 +1,36 @@
+{
+    "version": 1,
+    "tools": [
+        {
+            "name": "inspect_target",
+            "description": "Inspects BUILD.gn and BUILD.bazel in the target directory",
+            "script_file": "inspect_target.sh",
+            "allowed_roles": [
+                "coder",
+                "reviewer",
+                "evolver"
+            ],
+            "enabled": true
+        },
+        {
+            "name": "find_rdeps",
+            "description": "Finds true reverse dependencies across BUILD.gn and BUILD.bazel (excluding visibility allowlists and GN-only sentinel targets) and computes per-target 3-tier visibility recommendations (tight :__pkg__/LCA for narrow targets, 2-3 level area rollups for medium targets, and //visibility:public for globally-used platform libraries across >=6 areas)",
+            "script_file": "find_rdeps.sh",
+            "allowed_roles": [
+                "coder",
+                "reviewer",
+                "evolver"
+            ],
+            "enabled": true
+        },
+        {
+            "name": "run_checks",
+            "description": "Runs the checks in checks/manifest.json exactly the way planter runs them after the coder reports (same scripts, environment, parsing and severities) and prints the findings; exits 1 if any ERROR or WARNING would send the change back. --skip-build runs only the static checks (seconds); a run without it also builds, after waiting for a machinery evolution in progress. --only NAMES runs a subset, --json prints the findings array.",
+            "script_file": "run_checks.sh",
+            "allowed_roles": [
+                "coder"
+            ],
+            "enabled": true
+        }
+    ]
+}

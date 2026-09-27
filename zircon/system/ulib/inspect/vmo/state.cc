@@ -1453,6 +1453,7 @@ InspectStats State::GetStats() const {
   ret.allocated_blocks = heap_->TotalAllocatedBlocks();
   ret.deallocated_blocks = heap_->TotalDeallocatedBlocks();
   ret.failed_allocations = heap_->TotalFailedAllocations();
+  ret.peak_bytes_requested = heap_->PeakBytesRequested();
   return ret;
 }
 

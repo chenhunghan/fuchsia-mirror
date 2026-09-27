@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
@@ -404,6 +405,126 @@ TEST_F(BinderTest, MprotectCannotAddWriteToBinder) {
   EXPECT_THAT(mprotect(mapping->mapping(), kBinderMMapSize, PROT_READ | PROT_WRITE),
               SyscallFailsWithErrno(EACCES))
       << "mprotect should not be able to add PROT_WRITE to a binder mapping";
+}
+
+// In Linux Binder, binder objects are uniquely identified by the userspace pointer (ptr).
+// If userspace sends a binder object with an address that is already registered with a
+// different cookie, the driver detects a cookie mismatch and fails the transaction with
+// BR_FAILED_REPLY.
+TEST_F(BinderTest, BinderObjectCookieMismatch) {
+  using namespace starnix_binder;
+
+  auto receiver_ready = test_helper::MakeRendezvous();
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+
+  pid_t receiver_pid = fork_helper.RunInForkedProcess([&] {
+    auto fd_and_mapping = OpenBinderAndMap(TestPath("binderfs"));
+    ASSERT_THAT(ioctl(fd_and_mapping.fd_.get(), BINDER_SET_CONTEXT_MGR, 0), SyscallSucceeds());
+    EnterLooper(fd_and_mapping.fd_);
+    receiver_ready.poker.poke();
+    while (true) {
+      std::array<uint32_t, 32> read_buffer = {};
+      struct binder_write_read write_read = {
+          .read_size = sizeof(read_buffer),
+          .read_consumed = 0,
+          .read_buffer = (binder_uintptr_t)read_buffer.data(),
+      };
+      if (ioctl(fd_and_mapping.fd_.get(), BINDER_WRITE_READ, &write_read) < 0) {
+        break;
+      }
+    }
+  });
+
+  receiver_ready.holder.hold();
+
+  auto cleanup_receiver = fit::defer([&] {
+    ASSERT_THAT(kill(receiver_pid, SIGKILL), SyscallSucceeds());
+    fork_helper.ExpectSignal(SIGKILL);
+    ASSERT_TRUE(fork_helper.WaitForChildren());
+  });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  const auto& binder = binder_and_map.fd_;
+
+  uintptr_t binder_ptr = 0x12345000;
+  uintptr_t cookie1 = 0xaaaa0000;
+  uintptr_t cookie2 = 0xbbbb0000;
+
+  auto send_binder_object = [&](uintptr_t ptr, uintptr_t cookie) {
+    struct flat_binder_object obj = {
+        .hdr = {.type = BINDER_TYPE_BINDER},
+        .flags = 0x7f | FLAT_BINDER_FLAG_ACCEPTS_FDS,
+        .binder = ptr,
+        .cookie = cookie,
+    };
+    binder_size_t offset = 0;
+    TransactionWriteBuffer write_buffer = {
+        .command = BC_TRANSACTION,
+        .data =
+            {
+                .target = {.handle = kServiceManagerHandle},
+                .cookie = 0,
+                .code = 1,
+                .flags = TF_ONE_WAY,
+                .data_size = sizeof(obj),
+                .offsets_size = sizeof(offset),
+                .data =
+                    {
+                        .ptr =
+                            {
+                                .buffer = (binder_uintptr_t)&obj,
+                                .offsets = (binder_uintptr_t)&offset,
+                            },
+                    },
+            },
+    };
+    uint32_t read_buf[32] = {};
+    struct binder_write_read bwr = {
+        .write_size = sizeof(write_buffer),
+        .write_buffer = (binder_uintptr_t)&write_buffer,
+        .read_size = sizeof(read_buf),
+        .read_buffer = (binder_uintptr_t)read_buf,
+    };
+    EXPECT_THAT(ioctl(binder.get(), BINDER_WRITE_READ, &bwr), SyscallSucceeds());
+    return ParseMessage((binder_uintptr_t)read_buf, bwr.read_consumed);
+  };
+
+  // 1. Send first transaction with (binder_ptr, cookie1) to the receiver.
+  ParsedMessage pm1 = send_binder_object(binder_ptr, cookie1);
+
+  // When a new binder object is registered, the driver informs userspace that a reference
+  // was acquired (BR_ACQUIRE), followed by transaction completion (BR_TRANSACTION_COMPLETE).
+  if (std::find(pm1.returns_.begin(), pm1.returns_.end(), BR_TRANSACTION_COMPLETE) ==
+      pm1.returns_.end()) {
+    EXPECT_THAT(pm1.returns_, testing::Contains(BR_ACQUIRE));
+    uint32_t read_buf1_comp[32] = {};
+    struct binder_write_read bwr1_comp = {
+        .read_size = sizeof(read_buf1_comp),
+        .read_buffer = (binder_uintptr_t)read_buf1_comp,
+    };
+    ASSERT_THAT(ioctl(binder.get(), BINDER_WRITE_READ, &bwr1_comp), SyscallSucceeds());
+    ParsedMessage pm1_comp =
+        ParseMessage((binder_uintptr_t)read_buf1_comp, bwr1_comp.read_consumed);
+    EXPECT_THAT(pm1_comp.returns_, testing::Contains(BR_TRANSACTION_COMPLETE));
+  } else {
+    EXPECT_THAT(pm1.returns_, testing::Contains(BR_TRANSACTION_COMPLETE));
+  }
+  EXPECT_THAT(pm1.returns_, testing::Not(testing::Contains(BR_FAILED_REPLY)));
+
+  // 2. Send second transaction with the SAME binder_ptr, but DIFFERENT cookie2.
+  // This must fail with BR_FAILED_REPLY due to cookie mismatch.
+  ParsedMessage pm2 = send_binder_object(binder_ptr, cookie2);
+  EXPECT_THAT(pm2.returns_, testing::Contains(BR_FAILED_REPLY));
+  EXPECT_THAT(pm2.returns_, testing::Not(testing::Contains(BR_TRANSACTION_COMPLETE)));
+
+  // 3. Send third transaction with the SAME binder_ptr and matching cookie1.
+  // This should succeed.
+  ParsedMessage pm3 = send_binder_object(binder_ptr, cookie1);
+  EXPECT_THAT(pm3.returns_, testing::Contains(BR_TRANSACTION_COMPLETE));
+  EXPECT_THAT(pm3.returns_, testing::Not(testing::Contains(BR_FAILED_REPLY)));
 }
 
 }  // namespace

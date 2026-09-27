@@ -27,7 +27,7 @@ from typing import (
     TextIO,
 )
 
-trailing_white_spaces = re.compile("\\\s+\r?\n")
+trailing_white_spaces = re.compile(r"\\\s+\r?\n")
 
 
 def _partition(

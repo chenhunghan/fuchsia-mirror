@@ -40,31 +40,32 @@ static_assert(kQEMUExitCode != 0 && kQEMUExitCode % 2 != 0,
 
 ktl::atomic<cpu_mask_t> halted_cpus(0);
 
-void reboot() {
-  // select the default reboot reason
-  efi_bootbyte_set_reason(0u);
+// Records |reason| and then attempts to reset the system.
+//
+// Not all microarch configs reset the system when recording the reboot reason.
+// Configs using unknown_reboot_reason() (e.g. intel_default_config, used for
+// unrecognized Intel models) only write the reason to CMOS and return, so fall
+// back to the generic reset mechanisms. The reason has already been recorded
+// at that point, so the next boot still honors it.
+void reboot_with_reason(uint64_t reason) {
+  efi_bootbyte_set_reason(reason);
   x86_reboot_reason_func_t reboot_reason = x86_get_microarch_config()->reboot_reason;
   if (reboot_reason)
-    reboot_reason(0u);
+    reboot_reason(reason);
   // We fell through. Try normal reboot.
   x86_get_microarch_config()->reboot_system();
   // We fell through. Try rebooting via keyboard controller.
   pc_keyboard_reboot();
 }
 
-void reboot_recovery() {
-  efi_bootbyte_set_reason(2u);
-  x86_reboot_reason_func_t reboot_reason = x86_get_microarch_config()->reboot_reason;
-  if (reboot_reason)
-    reboot_reason(2u);
+void reboot() {
+  // select the default reboot reason
+  reboot_with_reason(0u);
 }
 
-void reboot_bootloader() {
-  efi_bootbyte_set_reason(4u);
-  x86_reboot_reason_func_t reboot_reason = x86_get_microarch_config()->reboot_reason;
-  if (reboot_reason)
-    reboot_reason(4u);
-}
+void reboot_recovery() { reboot_with_reason(2u); }
+
+void reboot_bootloader() { reboot_with_reason(4u); }
 
 void halt_other_cpus() {
   static ktl::atomic<int> halted(0);

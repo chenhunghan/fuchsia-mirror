@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 #include <arpa/inet.h>
-#include <fuchsia/wlan/ieee80211/cpp/fidl.h>
+#include <fidl/fuchsia.wlan.ieee80211/cpp/fidl.h>
 #include <zircon/errors.h>
 
 #include <wlan/drivers/macaddr.h>

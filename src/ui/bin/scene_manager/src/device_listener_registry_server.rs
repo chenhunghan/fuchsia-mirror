@@ -51,8 +51,8 @@ mod tests {
         let (_proxy, stream) = create_proxy_and_stream::<DeviceListenerRegistryMarker>();
         assert_matches!(server.handle_request(stream).await, Ok(()));
 
-        match receiver.try_next() {
-            Ok(opt) => assert!(opt.is_some()),
+        match receiver.try_recv() {
+            Ok(_) => {}
             Err(e) => panic!("reading failed with {:#?}", e),
         }
     }

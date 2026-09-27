@@ -207,7 +207,7 @@ function __fx_env_main() {
                 if [[ "${prev}" == "--pool-name" ]]; then
                   COMPREPLY=($(compgen -W "$(__fx_worktree_names_filtered physical_free)" -- "${cur}"))
                 else
-                  COMPREPLY=($(compgen -W "--sync --pool-name --json" -- "${cur}"))
+                  COMPREPLY=($(compgen -W "--pool-name --json" -- "${cur}"))
                 fi
                 ;;
               remove)

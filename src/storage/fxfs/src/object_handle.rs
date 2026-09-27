@@ -6,8 +6,7 @@ use crate::object_store::{DirType, PosixAttributes, Timestamp};
 use anyhow::Error;
 use async_trait::async_trait;
 use std::future::Future;
-use std::ops::Deref;
-use std::pin::Pin;
+use std::sync::Arc;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use storage_units::BlockSize;
 
@@ -60,9 +59,14 @@ pub struct ObjectProperties {
 
 #[async_trait]
 pub trait ReadObjectHandle: ObjectHandle {
-    /// Fills |buf| with up to |buf.len()| bytes read from |offset| on the underlying device.
-    /// |offset| and |buf| must both be block-aligned.
-    async fn read(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error>;
+    /// Fills `buf` with bytes read from `offset` on the underlying device.
+    ///
+    /// Both `offset` and `buf.len()` must be aligned to the object's `block_size()`.
+    ///
+    /// Returns the number of bytes read. If `offset >= size`, returns 0. Holes/sparse extents
+    /// within the read range are zero-filled. Callers should not make any assumptions about the
+    /// contents of the buffer past the returned read amount.
+    async fn read_aligned(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error>;
 
     /// Returns the size of the object.
     fn get_size(&self) -> u64;
@@ -104,29 +108,31 @@ pub trait WriteBytes: Sized {
     fn skip(&mut self, amount: u64) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-// Implements ReadObjectHandle for things like `Arc<dyn ReadObjectHandle>` and
-// `Box<dyn ReadObjectHandle>`.  The below impl of `ObjectHandle` is also necessary for this.
-impl<T: Deref<Target = dyn ReadObjectHandle> + Send + Sync + 'static> ReadObjectHandle for T {
-    // Manual expansion of `async_trait` to avoid double boxing the `Future`.
-    fn read<'a, 'b, 'c>(
-        &'a self,
-        offset: u64,
-        buf: MutableBufferRef<'b>,
-    ) -> Pin<Box<dyn Future<Output = Result<usize, Error>> + Send + 'c>>
-    where
-        'a: 'c,
-        'b: 'c,
-        Self: 'c,
-    {
-        (**self).read(offset, buf)
+impl LayerObject for dyn ReadObjectHandle + '_ {}
+
+/// A handle for reading layer objects.
+#[async_trait]
+pub trait LayerObject: ReadObjectHandle {
+    /// Returns a memory-mapped slice of the entire layer file if supported (e.g. when backed by a
+    /// pager-managed VMO).
+    fn as_slice(&self) -> Option<&[u8]> {
+        None
     }
 
-    fn get_size(&self) -> u64 {
-        (**self).get_size()
+    /// Returns true if an underlying I/O error occurred while paging in data for this object.
+    fn has_io_error(&self) -> bool {
+        false
     }
+
+    /// Requests that cached data (such as paged-in pages) for this object be purged.
+    fn purge_cached_data(&self) {}
+
+    /// Called when the layer is closed to release any external resources (such as pager
+    /// registrations).
+    async fn close(&self) {}
 }
 
-impl<T: Deref<Target = dyn ReadObjectHandle> + Send + Sync + 'static> ObjectHandle for T {
+impl<T: ObjectHandle + ?Sized> ObjectHandle for Arc<T> {
     fn object_id(&self) -> u64 {
         (**self).object_id()
     }
@@ -141,5 +147,83 @@ impl<T: Deref<Target = dyn ReadObjectHandle> + Send + Sync + 'static> ObjectHand
 
     fn set_trace(&self, v: bool) {
         (**self).set_trace(v)
+    }
+}
+
+#[async_trait]
+impl<T: ReadObjectHandle + ?Sized> ReadObjectHandle for Arc<T> {
+    async fn read_aligned(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+        (**self).read_aligned(offset, buf).await
+    }
+
+    fn get_size(&self) -> u64 {
+        (**self).get_size()
+    }
+}
+
+#[async_trait]
+impl<T: LayerObject + ?Sized> LayerObject for Arc<T> {
+    fn as_slice(&self) -> Option<&[u8]> {
+        (**self).as_slice()
+    }
+
+    fn has_io_error(&self) -> bool {
+        (**self).has_io_error()
+    }
+
+    fn purge_cached_data(&self) {
+        (**self).purge_cached_data()
+    }
+
+    async fn close(&self) {
+        (**self).close().await
+    }
+}
+
+impl<T: ObjectHandle + ?Sized> ObjectHandle for Box<T> {
+    fn object_id(&self) -> u64 {
+        (**self).object_id()
+    }
+
+    fn block_size(&self) -> BlockSize {
+        (**self).block_size()
+    }
+
+    fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
+        (**self).allocate_buffer(size)
+    }
+
+    fn set_trace(&self, v: bool) {
+        (**self).set_trace(v)
+    }
+}
+
+#[async_trait]
+impl<T: ReadObjectHandle + ?Sized> ReadObjectHandle for Box<T> {
+    async fn read_aligned(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+        (**self).read_aligned(offset, buf).await
+    }
+
+    fn get_size(&self) -> u64 {
+        (**self).get_size()
+    }
+}
+
+#[async_trait]
+impl<T: LayerObject + ?Sized> LayerObject for Box<T> {
+    fn as_slice(&self) -> Option<&[u8]> {
+        (**self).as_slice()
+    }
+
+    fn has_io_error(&self) -> bool {
+        (**self).has_io_error()
+    }
+
+    fn purge_cached_data(&self) {
+        (**self).purge_cached_data()
+    }
+
+    async fn close(&self) {
+        (**self).close().await
     }
 }

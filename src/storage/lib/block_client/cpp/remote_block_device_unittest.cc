@@ -74,6 +74,21 @@ class MockBlockDevice final : public fidl::testing::WireTestBase<fuchsia_storage
     completer.Reply(ZX_ERR_NOT_SUPPORTED, {}, {});
   }
 
+  void QuerySlices(QuerySlicesRequestView request, QuerySlicesCompleter::Sync& completer) override {
+    completer.Reply(query_slices_status_, query_slices_response_, query_slices_response_count_);
+  }
+
+  void set_query_slices_status(zx_status_t status) { query_slices_status_ = status; }
+  void set_query_slices_response(fidl::Array<fuchsia_storage_block::wire::VsliceRange,
+                                             fuchsia_storage_block::wire::kMaxSliceRequests>
+                                     response) {
+    query_slices_response_ = response;
+  }
+  void set_query_slices_response_count(uint64_t count) { query_slices_response_count_ = count; }
+  void set_query_slices_response_at(size_t index, fuchsia_storage_block::wire::VsliceRange range) {
+    query_slices_response_[index] = range;
+  }
+
   void GetInfo(GetInfoCompleter::Sync& completer) override {
     completer.ReplySuccess({
         .block_count = kBlockCount,
@@ -134,6 +149,12 @@ class MockBlockDevice final : public fidl::testing::WireTestBase<fuchsia_storage
   MockSession session_;
   std::vector<uint8_t> buffer_;
   async::Loop loop_;
+
+  zx_status_t query_slices_status_ = ZX_OK;
+  fidl::Array<fuchsia_storage_block::wire::VsliceRange,
+              fuchsia_storage_block::wire::kMaxSliceRequests>
+      query_slices_response_ = {};
+  uint64_t query_slices_response_count_ = 0;
 };
 
 // Tests that the RemoteBlockDevice can be created and immediately destroyed.
@@ -441,6 +462,42 @@ TEST(RemoteBlockDeviceTest, TransactionSanitizesPaddingAndReqids) {
   ASSERT_EQ(device->FifoTransaction(requests, 2), ZX_OK);
   vmoid.TakeId();
   server_thread.join();
+}
+
+TEST(RemoteBlockDeviceTest, VolumeQuerySlicesValidation) {
+  auto [client, server] = fidl::Endpoints<fuchsia_storage_block::Block>::Create();
+
+  MockBlockDevice mock_device;
+  mock_device.BindServer(std::move(server));
+
+  zx::result device = RemoteBlockDevice::Create(
+      fidl::ClientEnd<fuchsia_storage_block::Block>{client.TakeChannel()});
+  ASSERT_TRUE(device.is_ok()) << device.status_string();
+
+  fuchsia_storage_block::wire::VsliceRange ranges[fuchsia_storage_block::wire::kMaxSliceRequests];
+  size_t actual_ranges_count = 0;
+  uint64_t start_slices[2] = {1, 2};
+
+  // Case 1: Success where response_count <= slices_count and response_count <= kMaxSliceRequests
+  mock_device.set_query_slices_status(ZX_OK);
+  mock_device.set_query_slices_response_count(2);
+  mock_device.set_query_slices_response_at(0, {.allocated = true, .count = 10});
+  mock_device.set_query_slices_response_at(1, {.allocated = false, .count = 20});
+
+  EXPECT_EQ(device->VolumeQuerySlices(start_slices, 2, ranges, &actual_ranges_count), ZX_OK);
+  EXPECT_EQ(actual_ranges_count, 2u);
+  EXPECT_TRUE(ranges[0].allocated);
+  EXPECT_EQ(ranges[0].count, 10u);
+  EXPECT_FALSE(ranges[1].allocated);
+  EXPECT_EQ(ranges[1].count, 20u);
+
+  // Case 2: Failure where response_count > slices_count (buffer overflow risk)
+  mock_device.set_query_slices_response_count(3);
+  EXPECT_EQ(device->VolumeQuerySlices(start_slices, 2, ranges, &actual_ranges_count), ZX_ERR_IO);
+
+  // Case 3: Failure where response_count > kMaxSliceRequests (buffer over-read risk)
+  mock_device.set_query_slices_response_count(fuchsia_storage_block::wire::kMaxSliceRequests + 1);
+  EXPECT_EQ(device->VolumeQuerySlices(start_slices, 2, ranges, &actual_ranges_count), ZX_ERR_IO);
 }
 
 }  // namespace

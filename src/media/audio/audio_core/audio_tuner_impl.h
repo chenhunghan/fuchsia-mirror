@@ -82,11 +82,11 @@ inline fuchsia::media::tuning::AudioMixGroup ToAudioMixGroup(
   std::string name = mix_group.name;
   bool loopback = mix_group.loopback;
   std::vector<fuchsia::media::tuning::AudioEffectConfig> effects;
-  for (auto effect : mix_group.effects_v1) {
+  for (const auto& effect : mix_group.effects_v1) {
     effects.push_back(ToAudioEffectConfig(effect));
   }
   std::vector<std::unique_ptr<fuchsia::media::tuning::AudioMixGroup>> inputs;
-  for (auto input : mix_group.inputs) {
+  for (const auto& input : mix_group.inputs) {
     inputs.push_back(
         std::make_unique<fuchsia::media::tuning::AudioMixGroup>(ToAudioMixGroup(input)));
   }

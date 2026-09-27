@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/wlan/ieee80211/cpp/fidl.h>
+#include <fidl/fuchsia.wlan.ieee80211/cpp/fidl.h>
 #include <zircon/errors.h>
 
 #include <wlan/common/channel.h>
@@ -179,7 +179,7 @@ class AuthTest : public SimTest {
   wlan_ieee80211::StatusCode connect_status_ = wlan_ieee80211::StatusCode::kSuccess;
   std::list<AuthFrameContent> rx_auth_frames_;
   std::list<AuthFrameContent> expect_auth_frames_;
-  uint8_t security_ie_[fuchsia::wlan::ieee80211::WLAN_IE_MAX_LEN];
+  uint8_t security_ie_[fuchsia_wlan_ieee80211::kWlanIeMaxLen];
 
  private:
   // Stationifc overrides

@@ -212,6 +212,7 @@ device. However, you can also select which trace to stop by using the
 `--output` flag, which then stops the trace that is associated with the
 output file.
 
+Pass `--compressed` to keep the trace compressed with Zstandard on the host (saving to `trace.fxt.zst`).
 Pass `--upload` to automatically upload the trace data to GCS upon stopping.
 
 This command prints output similar to the following:
@@ -227,7 +228,39 @@ To analyze the results collected from this run, see
 [Visualize trace results](#visualize-trace-results) or
 [Upload traces to Google Cloud Storage](#upload-traces-to-google-cloud-storage).
 
+## Record compressed traces {:#record-compressed-traces}
+
+Traces, particularly in `streaming` buffering mode or recorded over extended
+durations, can grow to hundreds of megabytes or gigabytes. This can cause trace
+artifacts to exceed storage or test runner upload limits (such as ResultDB's
+640 MB per-artifact limit).
+
+To keep the trace file compressed with Zstandard on the host machine, pass the
+`--compressed` flag to `ffx trace start` or `ffx trace stop`:
+
+```posix-terminal
+ffx trace start --compressed
+```
+
+Or when stopping a background trace:
+
+```posix-terminal
+ffx trace stop --compressed
+```
+
+When `--compressed` is enabled:
+
+* The output file defaults to `trace.fxt.zst` in the current directory (or to
+  the custom path specified via `--output`).
+* `ffx trace` decompresses the trace on the fly to perform FIDL IPC symbolization
+  and category checks (`post_process`), and then recompresses the symbolized
+  trace using Zstandard.
+* The resulting `.fxt.zst` file can be opened directly in the
+  [Perfetto viewer][perfetto-viewer]{:.external} or analyzed with
+  `fx perf-analyze` without requiring manual decompression.
+
 ## Upload traces to Google Cloud Storage {:#upload-traces-to-google-cloud-storage}
+
 
 You can upload recorded trace files to Google Cloud Storage (GCS) to generate
 a direct link for viewing and sharing traces in the Perfetto viewer.

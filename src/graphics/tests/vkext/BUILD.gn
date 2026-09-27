@@ -140,30 +140,20 @@ fuchsia_test_package("vkext-unprotected-package") {
   subpackages = [ ":vkext-child-package" ]
   test_specs = {
     # TODO(https://fxbug.dev/445702094) - enable goldfish
-    environments =
-        vulkan_envs - vulkan_goldfish_envs - magma_libvulkan_arm_hardware_envs
+    # Exclude sorrel_env as Qualcomm Adreno driver does not support YV12.
+    environments = vulkan_envs - vulkan_goldfish_envs - vulkan_lavapipe_envs -
+                   protected_libvulkan_envs - [ sorrel_env ]
     log_settings = {
       max_severity = "ERROR"
     }
   }
 }
 
-fuchsia_test_component("vkext-unprotected-mali-test-component") {
-  component_name = "vkext-unprotected-mali"
-  manifest = "meta/vkext_unprotected_mali.cml"
-  test_type = "vulkan"
-}
-
-fuchsia_test_package("vkext-unprotected-mali-package") {
-  package_name = "vkext_unprotected_mali_test"
-  test_components = [ ":vkext-unprotected-mali-test-component" ]
-  subpackages = [ ":vkext-child-package" ]
-  test_specs = {
-    environments = magma_libvulkan_arm_hardware_envs - protected_libvulkan_envs
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
+# Kept for backward compatibility with references to
+# vkext-unprotected-mali-package.
+group("vkext-unprotected-mali-package") {
+  testonly = true
+  public_deps = [ ":vkext-unprotected-package" ]
 }
 
 fuchsia_test_component("vkext-unprotected-lavapipe-test-component") {

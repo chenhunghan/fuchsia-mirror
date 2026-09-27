@@ -83,7 +83,7 @@ zx_status_t Nelson::NnaInit() {
   }};
 
   auto aml_nna_composite_spec = fuchsia_driver_framework::CompositeNodeSpec{{
-      .name = "aml_nna",
+      .name = "aml-nna",
       .parents2 = {{aml_nna_register_reset_node}},
   }};
 

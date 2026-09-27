@@ -5,8 +5,13 @@
 import("//build/bind/bind.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("igc-dml") {
+  dml = "meta/igc.dml"
+  driver_name = "igc"
+}
+
 driver_bind_rules("igc_bind") {
-  rules = "meta/igc.bind"
+  dml_label = ":igc-dml"
   tests = "meta/bind-tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -61,7 +66,7 @@ fuchsia_driver_component("igc") {
   component_name = "igc"
   deps = [ ":igc-driver" ]
   info = "meta/igc-info.json"
-  manifest = "meta/igc.cml"
+  dml_label = ":igc-dml"
 }
 
 fuchsia_driver_package("package") {

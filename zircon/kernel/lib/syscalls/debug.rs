@@ -116,11 +116,20 @@ pub fn sys_debug_send_command(
 
     let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); MAX_DEBUG_WRITE_SIZE];
     let slice = ptr.copy_slice_from_user(&mut buf[..len]).map_err(|_| Status::INVALID_ARGS)?;
-    let cmd_str = core::str::from_utf8(slice).map_err(|_| Status::INVALID_ARGS)?;
 
-    let status = crate::console_rust::console::console_run_script(cmd_str);
-    Status::ok(status)?;
-    Ok(())
+    let cmd_str = core::str::from_utf8(slice).map_err(|_| Status::INVALID_ARGS)?;
+    cfg_select! {
+        console_enabled => {
+            let status = crate::console::console_run_script(cmd_str);
+            Status::ok(status)
+        }
+        _ => {
+            // We still want the validation up until we are ready to run the script,
+            // even in the case where the console is disabled.
+            let _ = cmd_str;
+            Ok(())
+        }
+    }
 }
 
 #[syscall]

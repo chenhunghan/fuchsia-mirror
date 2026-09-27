@@ -43,7 +43,6 @@ if (is_host) {
     ]
     deps = [
       "//src/connectivity/network/testing/conformance/expectation/outcome",
-      "//src/connectivity/network/testing/conformance/expectation/platform",
       "//src/connectivity/network/testing/conformance/parseoutput",
     ]
   }

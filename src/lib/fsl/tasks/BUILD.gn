@@ -37,7 +37,10 @@ source_set("tasks") {
   sources = [ "fd_waiter.cc" ]
   public = [ "fd_waiter.h" ]
   deps = [ "//src/zircon/lib/zircon" ]
-  visibility = [ "//src/lib/fsl/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/fsl/*",
+  ]
   public_deps = [
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-default",

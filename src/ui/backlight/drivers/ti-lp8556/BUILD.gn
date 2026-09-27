@@ -8,8 +8,13 @@ import("//build/drivers.gni")
 import("//build/fidl/fidl.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("ti-lp8556-dml") {
+  dml = "meta/ti-lp8556.dml"
+  driver_name = "ti-lp8556"
+}
+
 driver_bind_rules("ti-lp8556-bind") {
-  rules = "meta/ti-lp8556.bind"
+  dml_label = ":ti-lp8556-dml"
   bind_output = "ti-lp8556.bindbc"
   tests = "meta/ti-lp8556-bind-test.json"
   deps = [
@@ -56,9 +61,6 @@ source_set("common") {
 fuchsia_cc_driver("ti-lp8556-driver") {
   output_name = "ti-lp8556"
   deps = [ ":common" ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_driver_component("ti-lp8556") {
@@ -68,7 +70,7 @@ fuchsia_driver_component("ti-lp8556") {
     ":ti-lp8556-driver",
   ]
   info = "meta/ti-lp8556-info.json"
-  manifest = "meta/ti-lp8556.cml"
+  dml_label = ":ti-lp8556-dml"
 }
 
 fuchsia_driver_package("package") {
@@ -94,9 +96,6 @@ test("ti-lp8556-test-bin") {
     "//src/lib/testing/predicates",
     "//zircon/system/ulib/ddk-platform-defs",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_unittest_package("ti-lp8556-test") {

@@ -121,8 +121,10 @@ ProcessException GetFakeException(zx_koid_t process_koid = 1, zx_koid_t thread_k
 
   ProcessException exception;
   exception.set_info(info);
-  exception.set_process(zx::process(process_koid));  // Invalid handle. Never rely on it.
-  exception.set_thread(zx::thread(thread_koid));     // Invalid handle. Never rely on it.
+  exception.set_process(
+      zx::process(static_cast<zx_handle_t>(process_koid)));  // Invalid handle. Never rely on it.
+  exception.set_thread(
+      zx::thread(static_cast<zx_handle_t>(thread_koid)));  // Invalid handle. Never rely on it.
 
   return exception;
 }

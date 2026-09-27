@@ -37,13 +37,13 @@ impl CachedProcessInfo {
         self.cell
             .get_or_try_init(|| async {
                 match self.driver_host.get_process_info().await {
-                    Ok(Ok((job_koid, process_koid, main_thread_koid, threads, dispatchers))) => {
+                    Ok(Ok((job_koid, process_koid, main_thread_koid, _threads, _dispatchers))) => {
                         Ok(ProcessInfo {
                             job_koid: zx::Koid::from_raw(job_koid),
                             process_koid: zx::Koid::from_raw(process_koid),
                             main_thread_koid: zx::Koid::from_raw(main_thread_koid),
-                            threads,
-                            dispatchers,
+                            threads: Vec::new(),
+                            dispatchers: Vec::new(),
                         })
                     }
                     Ok(Err(e)) => Err(zx::Status::err_from_raw(e)),
@@ -54,6 +54,19 @@ impl CachedProcessInfo {
                 }
             })
             .await
+    }
+
+    pub(crate) async fn cache_koids(&self, info: &ProcessInfo) {
+        let _ = self
+            .cell
+            .set(ProcessInfo {
+                job_koid: info.job_koid,
+                process_koid: info.process_koid,
+                main_thread_koid: info.main_thread_koid,
+                threads: Vec::new(),
+                dispatchers: Vec::new(),
+            })
+            .await;
     }
 }
 

@@ -38,14 +38,14 @@ pub mod fuchsia_handles {
 /// Non-Fuchsia implementation of handles
 #[cfg(not(target_os = "fuchsia"))]
 pub mod non_fuchsia_handles {
-    pub use fuchsia_async::emulated_handle::{
+    pub use fuchsia_emulated_handle::{
         AsHandleRef, EmulatedHandleRef, Handle, Handle as NullableHandle, HandleDisposition,
         HandleInfo, HandleOp, HandleRef, Koid, MessageBufEtc, ObjectType, Peered, Rights, Signals,
         SocketOpts,
     };
     pub use zx_status::Status;
 
-    pub use fuchsia_async::invoke_for_handle_types;
+    pub use fuchsia_emulated_handle::invoke_for_handle_types;
 
     macro_rules! declare_unsupported_fidl_handle {
         ($name:ident) => {
@@ -73,7 +73,7 @@ pub mod non_fuchsia_handles {
 
     macro_rules! declare_fidl_handle {
         ($name:ident) => {
-            pub use fuchsia_async::emulated_handle::$name;
+            pub use fuchsia_emulated_handle::$name;
         };
     }
 

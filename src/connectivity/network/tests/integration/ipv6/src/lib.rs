@@ -41,7 +41,7 @@ use netstack_testing_common::ndp::{
     wait_for_router_solicitation,
 };
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, Netstack3, NetstackVersion, TestSandboxExt as _, constants,
+    KnownServiceProvider, Netstack3, NetstackVersion, TestSandboxExt as _, constants,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, interfaces,
@@ -85,7 +85,7 @@ struct StableAddrs {
     global: net_types::ip::Ipv6Addr,
 }
 
-async fn install_and_get_stable_ipv6_addrs_for_endpoint<N: Netstack>(
+async fn install_and_get_stable_ipv6_addrs_for_endpoint(
     realm: &netemul::TestRealm<'_>,
     endpoint: &netemul::TestEndpoint<'_>,
     fake_endpoint: &netemul::TestFakeEndpoint<'_>,
@@ -172,8 +172,7 @@ async fn install_and_get_stable_ipv6_addrs_for_endpoint<N: Netstack>(
 /// Test that across netstack runs, a device will initially be assigned the same
 /// stable IPv6 addresses (both link-local and global).
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn consistent_initial_stable_ipv6_addrs<N: Netstack>(name: &str) {
+async fn consistent_initial_stable_ipv6_addrs(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let network = sandbox.create_network(name).await.expect("create network");
     let realm = sandbox
@@ -183,16 +182,7 @@ async fn consistent_initial_stable_ipv6_addrs<N: Netstack>(name: &str) {
                 // This test exercises stash persistence. Netstack-debug, which
                 // is the default used by test helpers, does not use
                 // persistence.
-                KnownServiceProvider::Netstack(match N::VERSION {
-                    NetstackVersion::Netstack2 { tracing: false, fast_udp: false } => NetstackVersion::ProdNetstack2,
-                    NetstackVersion::Netstack3 => NetstackVersion::Netstack3,
-                    v @ (NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-                    | NetstackVersion::ProdNetstack2
-                    | NetstackVersion::ProdNetstack3
-                    ) => {
-                        panic!("netstack_test should only ever be parameterized with Netstack2 or Netstack3: got {:?}", v)
-                    }
-                }),
+                KnownServiceProvider::Netstack(NetstackVersion::Netstack3),
                 KnownServiceProvider::SecureStash,
             ],
         )
@@ -203,15 +193,13 @@ async fn consistent_initial_stable_ipv6_addrs<N: Netstack>(name: &str) {
 
     // Make sure netstack uses the same addresses across runs for a device.
     let first_run_addrs =
-        install_and_get_stable_ipv6_addrs_for_endpoint::<N>(&realm, &endpoint, &fake_ep, name)
-            .await;
+        install_and_get_stable_ipv6_addrs_for_endpoint(&realm, &endpoint, &fake_ep, name).await;
 
     // Stop the netstack.
     realm.stop_child_component(constants::netstack::COMPONENT_NAME).await.expect("stop netstack");
 
     let second_run_addrs =
-        install_and_get_stable_ipv6_addrs_for_endpoint::<N>(&realm, &endpoint, &fake_ep, name)
-            .await;
+        install_and_get_stable_ipv6_addrs_for_endpoint(&realm, &endpoint, &fake_ep, name).await;
     assert_eq!(first_run_addrs, second_run_addrs);
 }
 
@@ -238,20 +226,15 @@ async fn enable_ipv6_forwarding(iface: &netemul::TestInterface<'_>) {
 /// Tests that `EXPECTED_ROUTER_SOLICIATIONS` Router Solicitation messages are transmitted
 /// when the interface is brought up.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case("host", false ; "host")]
 #[test_case("router", true ; "router")]
-async fn sends_router_solicitations<N: Netstack>(
-    test_name: &str,
-    sub_test_name: &str,
-    forwarding: bool,
-) {
+async fn sends_router_solicitations(test_name: &str, sub_test_name: &str, forwarding: bool) {
     let name = format!("{}_{}", test_name, sub_test_name);
     let name = name.as_str();
 
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_network, _realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     if forwarding {
         enable_ipv6_forwarding(&iface).await;
@@ -362,19 +345,14 @@ async fn sends_router_solicitations<N: Netstack>(
 
 /// Tests that both stable and temporary SLAAC addresses are generated for a SLAAC prefix.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case("host", false ; "host")]
 #[test_case("router", true ; "router")]
-async fn slaac_with_privacy_extensions<N: Netstack>(
-    test_name: &str,
-    sub_test_name: &str,
-    forwarding: bool,
-) {
+async fn slaac_with_privacy_extensions(test_name: &str, sub_test_name: &str, forwarding: bool) {
     let name = format!("{}_{}", test_name, sub_test_name);
     let name = name.as_str();
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_network, realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     if forwarding {
         enable_ipv6_forwarding(&iface).await;
@@ -553,13 +531,12 @@ async fn add_address_for_dad<
 /// and a remote node is already assigned the address or attempts to assign the
 /// address at the same time, DAD fails on the local interface.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(true ; "ns")]
 #[test_case(false ; "na")]
-async fn dad_fails_due_to_remote_address_conflict<N: Netstack>(name: &str, with_ns: bool) {
+async fn dad_fails_due_to_remote_address_conflict(name: &str, with_ns: bool) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_network, _realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     let control = iface.control();
 
@@ -581,11 +558,10 @@ async fn dad_fails_due_to_remote_address_conflict<N: Netstack>(name: &str, with_
 /// Tests that duplicate address detection succeeds when no remote node has any
 /// interest in the address.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dad_succeeds_if_no_remote_address_conflict<N: Netstack>(name: &str) {
+async fn dad_succeeds_if_no_remote_address_conflict(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_network, _realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     let control = iface.control();
 
@@ -610,11 +586,10 @@ async fn dad_succeeds_if_no_remote_address_conflict<N: Netstack>(name: &str) {
 /// Tests that duplicate address detection repeats and succeeds when an
 /// interface with an assigned address is disabled and re-enabled.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dad_link_state_change<N: Netstack>(name: &str) {
+async fn dad_link_state_change(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_network, _realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     let control = iface.control();
 
@@ -649,11 +624,10 @@ async fn dad_link_state_change<N: Netstack>(name: &str) {
 /// Tests that if an address is added while an interface is disabled, duplicate
 /// address detection runs and succeeds when the interface is re-enabled.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dad_address_assigned_while_interface_down<N: Netstack>(name: &str) {
+async fn dad_address_assigned_while_interface_down(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_network, _realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     let control = iface.control();
 
@@ -687,13 +661,13 @@ async fn dad_address_assigned_while_interface_down<N: Netstack>(name: &str) {
 /// the address to be assigned) even if our DAD probes are being echoed back
 /// at us.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dad_assigns_when_echoed<N: Netstack>(name: &str) {
+async fn dad_assigns_when_echoed(name: &str) {
     const MAXIMUM_RETRIES: usize = 10;
     for _ in 0..MAXIMUM_RETRIES {
         let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-        let (_network, _realm, iface, fake_ep) =
-            setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        let (_network, _realm, iface, fake_ep) = setup_network::<Netstack3>(&sandbox, name, None)
+            .await
+            .expect("error setting up network");
 
         let control = iface.control();
 
@@ -803,14 +777,9 @@ async fn check_route_table(
 /// Tests to make sure default router discovery, prefix discovery and more-specific
 /// route discovery works.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case("host", false ; "host")]
 #[test_case("router", true ; "router")]
-async fn on_and_off_link_route_discovery<N: Netstack>(
-    test_name: &str,
-    sub_test_name: &str,
-    forwarding: bool,
-) {
+async fn on_and_off_link_route_discovery(test_name: &str, sub_test_name: &str, forwarding: bool) {
     pub const SUBNET_WITH_MORE_SPECIFIC_ROUTE: net_types_ip::Subnet<net_types_ip::Ipv6Addr> = unsafe {
         net_types_ip::Subnet::new_unchecked(
             net_types_ip::Ipv6Addr::new([0xa001, 0xf1f0, 0x4060, 0x0001, 0, 0, 0, 0]),
@@ -824,7 +793,9 @@ async fn on_and_off_link_route_discovery<N: Netstack>(
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     const METRIC: u32 = 200;
     let (_network, realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, Some(METRIC)).await.expect("failed to setup network");
+        setup_network::<Netstack3>(&sandbox, name, Some(METRIC))
+            .await
+            .expect("failed to setup network");
 
     let main_route_table = realm
         .connect_to_protocol::<fnet_routes_admin::RouteTableV6Marker>()
@@ -1145,12 +1116,13 @@ async fn route_discovery_no_default_route(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn route_discovery_preference_resolve<N: Netstack>(name: &str) {
+async fn route_discovery_preference_resolve(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     const METRIC: u32 = 100;
     let (_network, realm, iface1, fake_ep1) =
-        setup_network::<N>(&sandbox, name, Some(METRIC)).await.expect("failed to setup network");
+        setup_network::<Netstack3>(&sandbox, name, Some(METRIC))
+            .await
+            .expect("failed to setup network");
 
     let network2 = sandbox.create_network(format!("{}_2", name)).await.expect("create network");
     let fake_ep2 = network2.create_fake_endpoint().expect("create fake endpoint 2");
@@ -1297,8 +1269,7 @@ async fn route_discovery_preference_resolve<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn slaac_regeneration_after_dad_failure<N: Netstack>(name: &str) {
+async fn slaac_regeneration_after_dad_failure(name: &str) {
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     enum SlaacAddrState {
         #[default]
@@ -1352,7 +1323,7 @@ async fn slaac_regeneration_after_dad_failure<N: Netstack>(name: &str) {
     }
 
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let (_network, realm, iface, fake_ep) = setup_network_with::<N, _>(
+    let (_network, realm, iface, fake_ep) = setup_network_with::<Netstack3, _>(
         &sandbox,
         name,
         InterfaceConfig {
@@ -1539,17 +1510,14 @@ fn check_mld_report(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(Some(fnet_interfaces_admin::MldVersion::V1); "mldv1")]
 #[test_case(Some(fnet_interfaces_admin::MldVersion::V2); "mldv2")]
 #[test_case(None; "default")]
-async fn sends_mld_reports<N: Netstack>(
-    name: &str,
-    mld_version: Option<fnet_interfaces_admin::MldVersion>,
-) {
+async fn sends_mld_reports(name: &str, mld_version: Option<fnet_interfaces_admin::MldVersion>) {
     let sandbox = netemul::TestSandbox::new().expect("error creating sandbox");
-    let (_network, _realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up networking");
+    let (_network, _realm, iface, fake_ep) = setup_network::<Netstack3>(&sandbox, name, None)
+        .await
+        .expect("error setting up networking");
 
     if let Some(mld_version) = mld_version {
         let gen_config = |mld_version| fnet_interfaces_admin::Configuration {
@@ -1688,11 +1656,11 @@ async fn sends_mld_reports<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn sending_ra_with_autoconf_flag_triggers_slaac<N: Netstack>(name: &str) {
+async fn sending_ra_with_autoconf_flag_triggers_slaac(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("error creating sandbox");
-    let (network, realm, iface, _fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up networking");
+    let (network, realm, iface, _fake_ep) = setup_network::<Netstack3>(&sandbox, name, None)
+        .await
+        .expect("error setting up networking");
 
     let interfaces_state =
         &realm.connect_to_protocol::<fnet_interfaces::StateMarker>().expect("connect to protocol");
@@ -1767,10 +1735,9 @@ async fn sending_ra_with_autoconf_flag_triggers_slaac<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn add_device_adds_link_local_subnet_route<N: Netstack>(name: &str) {
+async fn add_device_adds_link_local_subnet_route(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let endpoint = sandbox.create_endpoint(name).await.expect("create endpoint");
     let iface = realm
         .install_endpoint(endpoint, InterfaceConfig::default())
@@ -1837,10 +1804,9 @@ async fn add_device_adds_link_local_subnet_route<N: Netstack>(name: &str) {
 
 /// Tests that temporary IPv6 addresses are preferred.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn prefers_temporary<N: Netstack>(name: &str) {
+async fn prefers_temporary(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let endpoint = sandbox.create_endpoint(name).await.expect("create endpoint");
     let iface = realm
         .install_endpoint(endpoint, InterfaceConfig::default())
@@ -1904,11 +1870,10 @@ async fn prefers_temporary<N: Netstack>(name: &str) {
 /// Tests that addresses generated by SLAAC report new lifetimes over the
 /// watcher API appropriately.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn slaac_addrs_report_lifetimes<N: Netstack>(name: &str) {
+async fn slaac_addrs_report_lifetimes(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_network, realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     const INITIAL_VALID_LIFETIME_SECS: u32 = 100_000;
     const INITIAL_PREFERRED_LIFETIME_SECS: u32 = 100_00;

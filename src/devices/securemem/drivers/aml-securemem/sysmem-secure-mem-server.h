@@ -137,6 +137,16 @@ class SysmemSecureMemServer : public fidl::WireServer<fuchsia_sysmem2::SecureMem
   zx_status_t ZeroSubRangeIncrementally(bool is_covering_range_explicit, uint64_t physical_address,
                                         size_t size_bytes);
 
+  bool IsWithinAllowedHeap(const fuchsia_sysmem2::wire::SecureHeapRange& range)
+      __TA_REQUIRES(checker_);
+  bool ValidateSecureHeapRange(const fuchsia_sysmem2::wire::SecureHeapRange& range)
+      __TA_REQUIRES(checker_);
+  bool ValidateSecureHeapAndRange(const fuchsia_sysmem2::wire::SecureHeapAndRange& heap_range,
+                                  bool is_zeroing) __TA_REQUIRES(checker_);
+  bool ValidateSecureHeapAndRangeModification(
+      const fuchsia_sysmem2::wire::SecureHeapAndRangeModification& range_modification)
+      __TA_REQUIRES(checker_);
+
   static bool IsOverlap(const Range& a, const Range& b);
   static std::pair<Range, Range> SubtractRanges(const Range& a, const Range& b);
 
@@ -150,6 +160,7 @@ class SysmemSecureMemServer : public fidl::WireServer<fuchsia_sysmem2::SecureMem
   bool is_dynamic_checked_ = {};
   bool is_dynamic_ = {};
   uint32_t max_range_count_ = 0;
+  std::optional<Range> allowed_heap_ __TA_GUARDED(checker_) = std::nullopt;
 
   // We try to open a SecmemSession once.  If that fails, we remember the status and
   // EnsureSecmemSession() will return that status without trying Init() again.

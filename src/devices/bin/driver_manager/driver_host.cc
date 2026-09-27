@@ -299,10 +299,6 @@ void DriverHostComponent::Start(
 }
 
 zx::result<fuchsia_driver_host::ProcessInfo> DriverHostComponent::GetProcessInfo() const {
-  if (process_info_) {
-    return zx::ok(*process_info_);
-  }
-
   if (!(*server_connected_)) {
     return zx::error(ZX_ERR_SHOULD_WAIT);
   }
@@ -314,8 +310,12 @@ zx::result<fuchsia_driver_host::ProcessInfo> DriverHostComponent::GetProcessInfo
   if (result->is_error()) {
     return zx::error(result->error_value());
   }
-  process_info_ = fidl::ToNatural(*result->value());
-  return zx::ok(*process_info_);
+  fuchsia_driver_host::ProcessInfo info = fidl::ToNatural(*result->value());
+  if (!process_info_.has_value()) {
+    process_info_ = fuchsia_driver_host::ProcessInfo(info.job_koid(), info.process_koid(),
+                                                     info.main_thread_koid(), {}, {});
+  }
+  return zx::ok(std::move(info));
 }
 
 void DriverHostComponent::GetCrashInfo(
@@ -347,6 +347,9 @@ void DriverHostComponent::GetCrashInfo(
 }
 
 zx::result<uint64_t> DriverHostComponent::GetJobKoid() const {
+  if (process_info_) {
+    return zx::ok(process_info_->job_koid());
+  }
   zx::result result = GetProcessInfo();
   if (result.is_error()) {
     return result.take_error();
@@ -355,6 +358,9 @@ zx::result<uint64_t> DriverHostComponent::GetJobKoid() const {
 }
 
 zx::result<uint64_t> DriverHostComponent::GetMainThreadKoid() const {
+  if (process_info_) {
+    return zx::ok(process_info_->main_thread_koid());
+  }
   zx::result result = GetProcessInfo();
   if (result.is_error()) {
     return result.take_error();
@@ -363,6 +369,9 @@ zx::result<uint64_t> DriverHostComponent::GetMainThreadKoid() const {
 }
 
 zx::result<uint64_t> DriverHostComponent::GetProcessKoid() const {
+  if (process_info_) {
+    return zx::ok(process_info_->process_koid());
+  }
   zx::result result = GetProcessInfo();
   if (result.is_error()) {
     return result.take_error();
@@ -393,7 +402,9 @@ void DriverHostComponent::GetProcessKoidAsync(fit::callback<void(zx::result<uint
           cb(zx::error(result->error_value()));
           return;
         }
-        process_info_ = fidl::ToNatural(*result->value());
+        const auto* val = result->value();
+        process_info_ = fuchsia_driver_host::ProcessInfo(val->job_koid, val->process_koid,
+                                                         val->main_thread_koid, {}, {});
         cb(zx::ok(process_info_->process_koid()));
       });
 }

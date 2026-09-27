@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/rust/rustc_binary.gni")
+import("//build/testing/perf/test.gni")
+
+group("benchmarks") {
+  deps = [
+    ":rcu_atomic_benchmarks",
+    ":rcu_rseq_benchmarks",
+  ]
+  testonly = true
+}
+
+group("pkg") {
+  deps = [ ":fuchsia_rcu_benchmarks_pkg" ]
+  testonly = true
+}
+
+rustc_binary("bin_rseq") {
+  output_name = "fuchsia_rcu_benchmarks_rseq"
+  testonly = true
+  edition = "2024"
+  sources = [ "src/main.rs" ]
+  deps = [
+    "//src/developer/fuchsia-criterion",
+    "//src/lib/fuchsia-rcu:fuchsia-rcu-rseq",
+  ]
+  check_cfgs = [ "rcu_backend, values(\"rseq\", \"atomic\")" ]
+  rustflags = [ "--cfg=rcu_backend=\"rseq\"" ]
+  configs += [ "//build/config/rust/lints:deny_unused_results" ]
+}
+
+rustc_binary("bin_atomic") {
+  output_name = "fuchsia_rcu_benchmarks_atomic"
+  testonly = true
+  edition = "2024"
+  sources = [ "src/main.rs" ]
+  deps = [
+    "//src/developer/fuchsia-criterion",
+    "//src/lib/fuchsia-rcu",
+  ]
+  check_cfgs = [ "rcu_backend, values(\"rseq\", \"atomic\")" ]
+  rustflags = [ "--cfg=rcu_backend=\"atomic\"" ]
+  configs += [ "//build/config/rust/lints:deny_unused_results" ]
+}
+
+fuchsia_component("rcu_rseq_benchmarks_component") {
+  testonly = true
+  component_name = "rcu_rseq_benchmarks"
+  manifest = "meta/rcu_rseq_benchmarks.cml"
+  deps = [ ":bin_rseq" ]
+}
+
+fuchsia_component("rcu_atomic_benchmarks_component") {
+  testonly = true
+  component_name = "rcu_atomic_benchmarks"
+  manifest = "meta/rcu_atomic_benchmarks.cml"
+  deps = [ ":bin_atomic" ]
+}
+
+fuchsia_test_package("fuchsia_rcu_benchmarks_pkg") {
+  package_name = "fuchsia_rcu_benchmarks"
+  test_components = [
+    ":rcu_atomic_benchmarks_component",
+    ":rcu_rseq_benchmarks_component",
+  ]
+}
+
+group("fuchsia_rcu_benchmarks") {
+  testonly = true
+  deps = [ ":fuchsia_rcu_benchmarks_pkg" ]
+}
+
+fuchsia_component_perf_test("rcu_rseq_benchmarks") {
+  package = ":fuchsia_rcu_benchmarks_pkg"
+  package_name = "fuchsia_rcu_benchmarks"
+  component_name = "rcu_rseq_benchmarks"
+  expected_metric_names_filepath =
+      "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.rcu.rseq.txt"
+}
+
+fuchsia_component_perf_test("rcu_atomic_benchmarks") {
+  package = ":fuchsia_rcu_benchmarks_pkg"
+  package_name = "fuchsia_rcu_benchmarks"
+  component_name = "rcu_atomic_benchmarks"
+  expected_metric_names_filepath =
+      "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.rcu.atomic.txt"
+}

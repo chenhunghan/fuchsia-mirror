@@ -22,6 +22,15 @@
             to: "#wlancfg",
         },
         {
+            protocol: [
+                "fuchsia.power.broker.Topology",
+                "fuchsia.power.system.ActivityGovernor",
+            ],
+            from: "parent",
+            to: "#wlancfg",
+            availability: "same_as_target",
+        },
+        {
             protocol: "fuchsia.stash.SecureStore",
             from: "#stash_secure",
             to: "#wlancfg",

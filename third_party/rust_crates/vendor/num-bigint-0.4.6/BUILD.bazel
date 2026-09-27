@@ -60,7 +60,14 @@ rust_library(
     edition = "2021",
     rustc_flags = [
         "--cap-lints=allow",
-    ],
+        "--cfg=u64_digit",
+        "--cfg=has_try_from",
+    ] + select({
+        "@platforms//cpu:x86_64": [
+            "--cfg=use_addcarry",  # @platforms//cpu:x86_64
+        ],
+        "//conditions:default": [],
+    }),
     tags = [
         "cargo-bazel",
         "crate-name=num-bigint",

@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+LIB_SRCS = [
+    "src/content_publisher.rs",
+    "src/graph/digraph.rs",
+    "src/graph/edge.rs",
+    "src/graph/mod.rs",
+    "src/graph/types.rs",
+    "src/graph/vertex.rs",
+    "src/id_enum.rs",
+    "src/inspectable/mod.rs",
+    "src/lib.rs",
+    "src/log/impls.rs",
+    "src/log/mod.rs",
+    "src/log/wrappers.rs",
+    "src/nodes/dedupe_log.rs",
+    "src/nodes/list.rs",
+    "src/nodes/lru_cache.rs",
+    "src/nodes/mod.rs",
+]
+
+# @bazel2gn:transformer=deps
+LIB_PROC_MACRO_DEPS = [
+    "//third_party/rust_crates/vendor:derivative",
+]
+
+# @bazel2gn:transformer=deps
+LIB_DEPS = [
+    "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+    "//sdk/rust/zx",
+    "//src/lib/diagnostics/inspect/derive",
+    "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:lru",
+    "//third_party/rust_crates/vendor:strum",
+]
+
+rustc_library(
+    name = "fuchsia-inspect-contrib",
+    srcs = LIB_SRCS,
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = LIB_PROC_MACRO_DEPS,
+    version = "0.1.0",
+    # Used widely across the repository (sdk/lib, connectivity, devices, diagnostics, performance, power, session, starnix, sys, vendor).
+    visibility = ["//visibility:public"],
+    deps = LIB_DEPS,
+)
+
+# Declared as an explicit rustc_test rather than with_unit_tests = True because
+# the unit tests depend on the strum_macros proc-macro crate, which is not used
+# by the library target and cannot be passed via test_deps in Bazel.
+rustc_test(
+    name = "fuchsia-inspect-contrib_test",
+    srcs = LIB_SRCS,
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = LIB_PROC_MACRO_DEPS + [
+        "//third_party/rust_crates/vendor:strum_macros",
+    ],
+    deps = LIB_DEPS + [
+        "//src/lib/diagnostics/inspect/format/rust:lib",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/test_util",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+alias(
+    name = "rust",
+    actual = ":fuchsia-inspect-contrib",
+    # Used widely across the repository (sdk/lib, connectivity, devices, diagnostics, performance, power, session, starnix, sys, vendor).
+    visibility = ["//visibility:public"],
+)

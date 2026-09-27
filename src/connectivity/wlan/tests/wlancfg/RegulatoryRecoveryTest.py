@@ -116,13 +116,14 @@ class RegulatoryRecoveryTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                     f"No network ID in AP update: {ap_updates}"
                 )
             asserts.assert_equal(
-                ap_updates[0].id_.ssid, "test_ssid", "Wrong ssid", ap_updates
+                bytes(ap_updates[0].id_.ssid).decode("utf-8"),
+                "test_ssid",
+                f"Wrong ssid in {ap_updates}",
             )
             asserts.assert_equal(
-                ap_updates[0].id_.security_type,
+                ap_updates[0].id_.type_,
                 f_wlan_policy.SecurityType.NONE,
-                "Wrong security type",
-                ap_updates,
+                f"Wrong security type in {ap_updates}",
             )
 
 

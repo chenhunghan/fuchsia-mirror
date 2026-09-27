@@ -2,11 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::Error;
+use anyhow::{Context, Error};
 use async_lock::OnceCell;
+use fidl_fuchsia_boot as fboot;
 use fidl_fuchsia_feedback::{LastRebootInfoProviderMarker, RebootReason};
 use fidl_fuchsia_io as fio;
-use fuchsia_component::client::connect_to_protocol_sync;
+use fuchsia_component::client::{connect_to_protocol, connect_to_protocol_sync};
 use fuchsia_fs::node::OpenError;
 use log::{debug, info};
 use zx_status::Status;
@@ -52,6 +53,49 @@ pub async fn get_or_init_android_bootreason(
         .await
 }
 
+/// Name of the `ZBI_TYPE_BOOTLOADER_FILE` boot item holding the bootloader's verbatim
+/// `androidboot.bootreason` string.
+///
+/// Android bootloaders report a much more specific reason than the coarse
+/// `ZBI_TYPE_HW_REBOOT_REASON` enum can express (e.g. `reboot,uvlo,pmic,sub` rather than just
+/// "brownout"), and that detail is needed to attribute a reboot to a particular power rail. Boot
+/// shims that can recover the string publish it under this name.
+const ANDROID_BOOTREASON_BOOTLOADER_FILE: &str = "androidboot.bootreason";
+
+/// Reads the bootloader's `androidboot.bootreason` from its `ZBI_TYPE_BOOTLOADER_FILE` boot item.
+///
+/// Returns `Ok(None)` if no such boot item was published.
+pub async fn get_bootloader_file_bootreason() -> Result<Option<String>, Error> {
+    let items =
+        connect_to_protocol::<fboot::ItemsMarker>().context("Failed to connect to boot items")?;
+
+    let Some(vmo) = items
+        .get_bootloader_file(ANDROID_BOOTREASON_BOOTLOADER_FILE)
+        .await
+        .context("FIDL: Failed to get bootloader file")?
+    else {
+        return Ok(None);
+    };
+
+    // `fuchsia.boot.Items` sets ZX_PROP_VMO_CONTENT_SIZE to the file's content size.
+    let size = vmo.get_content_size().context("Failed to get bootloader file content size")?;
+    let bytes = vmo.read_to_vec(0, size).context("Failed to read bootloader file vmo")?;
+
+    Ok(Some(String::from_utf8(bytes).context("Bootloader file is not valid UTF-8")?))
+}
+
+fn is_specific_bootloader_bootreason(reason: &str) -> bool {
+    const SPECIFIC_PREFIXES: &[&str] = &[
+        "reboot,uvlo",
+        "reboot,ocp",
+        "reboot,master_dc,reset",
+        "reboot,sys_ldo_ok",
+        "reboot,smpl_timeout",
+        "reboot,longkey",
+    ];
+    SPECIFIC_PREFIXES.iter().any(|prefix| reason.starts_with(prefix))
+}
+
 /// Update the Android bootreason.
 /// Use get_or_init_android_bootreason to get the cached Android boot reason instead of this.
 pub async fn update_android_bootreason(
@@ -67,7 +111,8 @@ pub async fn update_android_bootreason(
     // There are certain values from the Android bootloader that are more specific than
     // what the Fuchsia platform knows so use that when relevant.
     if let Some(reason) = &android_provided_bootreason {
-        if reason.starts_with("reboot,uvlo") || reason.starts_with("reboot,longkey") {
+        info!("Android bootloader provided bootreason: {reason}");
+        if is_specific_bootloader_bootreason(reason) {
             return Ok(reason.clone());
         }
     }
@@ -156,6 +201,39 @@ pub fn get_console_ramoops() -> Option<Vec<u8>> {
         None => {
             info!("Android bootreason not initialized.");
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_specific_bootloader_bootreason() {
+        for specific in [
+            "reboot,uvlo",
+            "reboot,uvlo,pmic,main",
+            "reboot,uvlo,pmic,sub",
+            "reboot,ocp,pmic,if",
+            "reboot,ocp2,pmic,sub",
+            "reboot,ocp3,pmic,if,usb",
+            "reboot,master_dc,reset",
+            "reboot,sys_ldo_ok,pmic,main",
+            "reboot,smpl_timeout,pmic,main",
+            "reboot,longkey,s2",
+        ] {
+            assert!(
+                is_specific_bootloader_bootreason(specific),
+                "Expected {specific} to pass through"
+            );
+        }
+
+        for non_specific in ["warm", "cold", "reboot,cold", "reboot,warm", "reboot"] {
+            assert!(
+                !is_specific_bootloader_bootreason(non_specific),
+                "Did not expect {non_specific} to pass through"
+            );
         }
     }
 }

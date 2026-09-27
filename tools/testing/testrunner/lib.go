@@ -843,11 +843,13 @@ func runTestOnce(
 	if len(result.Cases) == 0 && len(result.OutputFiles) == 0 {
 		cases, err := testparser.Parse(stdoutForParsing.Bytes())
 		if err != nil {
-			result.Status = runtests.TestFailure
-			logger.Errorf(ctx, "Failed to parse test cases: %s", err)
-			if result.FailureReason == nil {
+			if result.Passed() {
+				// Only report the test parser failure as a failure
+				// reason if the test would have otherwise passed.
 				result.FailureReason = runtests.FailureReasonFromMessage(fmt.Sprintf("failed to parse test cases: %s", err))
 			}
+			result.Status = runtests.TestFailure
+			logger.Errorf(ctx, "Failed to parse test cases: %s", err)
 		} else {
 			result.Cases = cases
 		}
@@ -856,11 +858,13 @@ func runTestOnce(
 		// Remove this hack once tags are properly handled by `ffx test`.
 		cases, err := testparser.Parse(stdoutForParsing.Bytes())
 		if err != nil && len(result.Cases) == 0 {
-			result.Status = runtests.TestFailure
-			logger.Errorf(ctx, "Failed to parse test cases: %s", err)
-			if result.FailureReason == nil {
+			if result.Passed() {
+				// Only report the test parser failure as a failure
+				// reason if the test would have otherwise passed.
 				result.FailureReason = runtests.FailureReasonFromMessage(fmt.Sprintf("failed to parse test cases: %s", err))
 			}
+			result.Status = runtests.TestFailure
+			logger.Errorf(ctx, "Failed to parse test cases: %s", err)
 		} else if err == nil {
 			caseToTags := make(map[string][]build.TestTag)
 			for _, tc := range cases {

@@ -79,7 +79,8 @@ class Dispatcher : public DispatcherInterface,
   // Public for std::make_unique.
   // Use |Create| instead of calling directly.
   Dispatcher(uint32_t options, std::string_view name, bool unsynchronized, bool allow_sync_calls,
-             const void* owner, fdf_dispatcher_shutdown_observer_t* observer);
+             const void* owner, fdf_dispatcher_shutdown_observer_t* observer,
+             std::string_view scheduler_role = "");
   ~Dispatcher();
 
   void SetEventWaiter(EventWaiter* event_waiter) __TA_EXCLUDES(&callback_lock_) {
@@ -373,6 +374,7 @@ class Dispatcher : public DispatcherInterface,
 
   // User provided name. Useful for debugging purposes.
   fbl::StringBuffer<ZX_MAX_NAME_LEN> name_;
+  const std::string scheduler_role_;
 
   // Dispatcher options set by the user.
   uint32_t options_;

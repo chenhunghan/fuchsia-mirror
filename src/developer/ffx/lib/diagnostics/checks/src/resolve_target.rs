@@ -43,6 +43,7 @@ fn sources_from_query(query: &TargetInfoQuery) -> DiscoverySources {
                 | DiscoverySources::MANUAL
                 | DiscoverySources::GCE
         }
+        TargetInfoQuery::Uart(_) => DiscoverySources::UART,
     }
 }
 
@@ -397,5 +398,11 @@ mod test {
         assert!(!output.contains('\r'));
         assert!(output.contains("target\\u{1b}[2J_query"));
         assert!(output.contains("malicious\\u{1b}[31m_node\\n\\r\\u{0}"));
+    }
+
+    #[fuchsia::test]
+    async fn test_sources_from_query_uart() {
+        let query = TargetInfoQuery::Uart("/dev/ttyUSB0".to_string());
+        assert_eq!(sources_from_query(&query), DiscoverySources::UART);
     }
 }

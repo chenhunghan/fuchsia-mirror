@@ -1,0 +1,21 @@
+# Test that pointer arithmetic on a releasable resource preserves its releasable
+# tracking, so that passing an offset pointer to a helper after the resource is
+# released is rejected by the verifier.
+
+-- asm
+mov %r1, 16
+call 103
+jne %r0, 0, +2
+mov %r0, 1
+exit
+mov %r6, %r0
+mov %r7, %r6
+add %r7, 8
+mov %r1, %r6
+call 104
+mov %r1, %r7
+call 101
+mov %r0, 0
+exit
+-- error
+Resource already released for index 0 at pc 11

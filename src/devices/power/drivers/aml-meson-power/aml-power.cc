@@ -4,6 +4,7 @@
 
 #include "aml-power.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <lib/driver/component/cpp/driver_export.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
 
@@ -15,9 +16,34 @@
 #include <fbl/alloc_checker.h>
 #include <soc/aml-common/aml-pwm-regs.h>
 
+#include "src/devices/power/drivers/aml-meson-power/aml-meson-power_parser.h"
+
 namespace power {
 
 namespace {
+
+fuchsia_hardware_power::DomainMetadata ConvertMetadata(
+    const aml_meson_power_metadata::Aml_meson_powerMetadata& parsed) {
+  fuchsia_hardware_power::DomainMetadata metadata;
+  if (parsed.domains.has_value()) {
+    std::vector<fuchsia_hardware_power::Domain> domains;
+    for (const auto& d : *parsed.domains) {
+      fuchsia_hardware_power::Domain domain;
+      if (d.id.has_value()) {
+        domain.id(*d.id);
+      }
+      if (d.name.has_value()) {
+        domain.name(*d.name);
+      }
+      if (d.global_id.has_value()) {
+        domain.global_id(*d.global_id);
+      }
+      domains.push_back(std::move(domain));
+    }
+    metadata.domains(std::move(domains));
+  }
+  return metadata;
+}
 
 // Sleep for 200 microseconds inorder to let the voltage change
 // take effect. Source: Amlogic SDK.
@@ -394,13 +420,28 @@ zx::result<> AmlPower::Start(fdf::DriverContext context) {
     fdf::error("Failed to connect to platform device: {}", pdev_client);
     return pdev_client.take_error();
   }
-  if (zx::result result =
-          metadata_server_.ForwardAndServe(*outgoing(), dispatcher(), pdev_client.value());
-      result.is_error()) {
-    fdf::error("Failed to forward and serve metadata: {}", result);
-    return result.take_error();
-  }
   fdf::PDev pdev(std::move(pdev_client.value()));
+  auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+      "fuchsia.hardware.power.DomainMetadata");
+  if (dict_result.is_ok()) {
+    auto parsed = aml_meson_power_metadata::Aml_meson_powerMetadata::Parse(dict_result.value());
+    if (!parsed.has_value()) {
+      fdf::error("Failed to parse DomainMetadata from Dictionary");
+      return zx::error(ZX_ERR_INTERNAL);
+    }
+    fuchsia_hardware_power::DomainMetadata metadata = ConvertMetadata(*parsed);
+    if (zx::result result = metadata_server_.Serve(*outgoing(), dispatcher(), metadata);
+        result.is_error()) {
+      fdf::error("Failed to serve metadata: {}", result);
+      return result.take_error();
+    }
+  } else {
+    zx::result forward_result = metadata_server_.ForwardAndServe(*outgoing(), dispatcher(), pdev);
+    if (forward_result.is_error()) {
+      fdf::error("Failed to forward and serve metadata: {}", forward_result);
+      return forward_result.take_error();
+    }
+  }
 
   compat::DeviceServer::BanjoConfig banjo_config{.default_proto_id = ZX_PROTOCOL_POWER_IMPL};
   banjo_config.callbacks[ZX_PROTOCOL_POWER_IMPL] = banjo_server_.callback();

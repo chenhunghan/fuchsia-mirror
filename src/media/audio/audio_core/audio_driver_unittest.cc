@@ -284,8 +284,8 @@ TEST_F(AudioDriverTest, StartFarFutureStartTime) {
   RunLoopUntilIdle();
   ASSERT_EQ(driver_->state(), AudioDriver::State::Configured);
 
-  // Set a start time far in the future (> 1 second ahead of monotonic clock).
-  remote_driver_->set_mono_start_time(zx::clock::get_monotonic() + zx::min(2));
+  // Set a start time far in the future (> 1 second ahead of current time).
+  remote_driver_->set_mono_start_time(async::Now(dispatcher()) + zx::min(2));
 
   ASSERT_EQ(ZX_OK, driver_->Start());
   RunLoopUntilIdle();

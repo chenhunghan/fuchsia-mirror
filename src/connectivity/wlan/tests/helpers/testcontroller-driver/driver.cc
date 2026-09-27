@@ -72,6 +72,15 @@ class WlanFullmacImplIfcBridgeServer
                KV("status", result.error_value().FormatDescription()));
     }
   }
+  void OnRssiThresholdBreached(OnRssiThresholdBreachedRequest& request,
+                               OnRssiThresholdBreachedCompleter::Sync& completer) override {
+    WLAN_TRACE_DURATION();
+    auto result = bridge_client_->OnRssiThresholdBreached(request);
+    if (result.is_error()) {
+      FDF_SLOG(ERROR, "Failed to forward OnRssiThresholdBreached",
+               KV("status", result.error_value().FormatDescription()));
+    }
+  }
   void ConnectConf(ConnectConfRequest& request, ConnectConfCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
     bridge_client_->ConnectConf(request).Then(
@@ -419,6 +428,25 @@ class WlanFullmacImplBridgeServer : public fidl::Server<fuchsia_wlan_fullmac::Wl
     WLAN_TRACE_DURATION();
     bridge_client_->GetScheduledScanEnabled().Then(
         ForwardResult<WlanFullmacImpl::GetScheduledScanEnabled>(completer.ToAsync()));
+  }
+
+  void QueryRssiMonitorSupport(QueryRssiMonitorSupportCompleter::Sync& completer) override {
+    WLAN_TRACE_DURATION();
+    bridge_client_->QueryRssiMonitorSupport().Then(
+        ForwardResult<WlanFullmacImpl::QueryRssiMonitorSupport>(completer.ToAsync()));
+  }
+
+  void StartRssiMonitor(StartRssiMonitorRequest& request,
+                        StartRssiMonitorCompleter::Sync& completer) override {
+    WLAN_TRACE_DURATION();
+    bridge_client_->StartRssiMonitor(request).Then(
+        ForwardResult<WlanFullmacImpl::StartRssiMonitor>(completer.ToAsync()));
+  }
+
+  void StopRssiMonitor(StopRssiMonitorCompleter::Sync& completer) override {
+    WLAN_TRACE_DURATION();
+    bridge_client_->StopRssiMonitor().Then(
+        ForwardResult<WlanFullmacImpl::StopRssiMonitor>(completer.ToAsync()));
   }
 
   // Calling |RemoveChild| will cause this server to eventually unbind.

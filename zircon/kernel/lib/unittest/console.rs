@@ -12,7 +12,7 @@ use kalloc::Box;
 use kprint::{kprint, kprintln};
 use unittest::{TestCaseRegistration, TestSuiteRegistration};
 
-use crate::console_rust::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 use crate::kernel::mp::get_online_mask;
 use crate::kernel::scheduler::peek_active_mask;
 use crate::kernel::thread;

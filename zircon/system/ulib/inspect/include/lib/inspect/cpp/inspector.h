@@ -54,6 +54,9 @@ struct InspectStats final {
 
   // The current utilization ratio of the VMO, in parts-per-10k.
   size_t utilization_per_ten_k;
+
+  // The peak number of bytes requested over the lifetime of the inspector.
+  size_t peak_bytes_requested;
 };
 
 class Inspector;

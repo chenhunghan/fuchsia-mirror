@@ -20,9 +20,7 @@ use futures::future::FutureExt;
 use futures::prelude::*;
 use http::uri::Uri;
 use isolated_ota::{OmahaConfig, UpdateError, download_and_apply_update_with_updater};
-use isolated_ota_env::{
-    GLOBAL_SSL_CERTS_PATH, OmahaState, TestEnvBuilder, TestExecutor, TestParams, expose_mock_paver,
-};
+use isolated_ota_env::{OmahaState, TestEnvBuilder, TestExecutor, TestParams, expose_mock_paver};
 use isolated_swd::updater::Updater;
 use mock_omaha_server::OmahaResponse;
 use mock_paver::{PaverEvent, hooks as mphooks};
@@ -76,6 +74,8 @@ impl TestExecutor<TestResult> for IsolatedOtaTestExecutor {
                     .capability(Capability::protocol_by_name(
                         "fuchsia.metrics.MetricEventLoggerFactory",
                     ))
+                    .capability(Capability::protocol_by_name("fuchsia.net.http.Loader"))
+                    .capability(Capability::protocol_by_name("fuchsia.pkg.http.Client"))
                     .capability(Capability::protocol_by_name("fuchsia.tracing.provider.Registry"))
                     .from(Ref::parent())
                     .to(&pkg_component),
@@ -101,9 +101,6 @@ impl TestExecutor<TestResult> for IsolatedOtaTestExecutor {
                 "build-info" => vfs::pseudo_directory!{
                     "build" => read_only(b"test")
                 },
-            "ssl" => vfs::remote::remote_dir(
-                    params.ssl_certs
-                ),
             },
         };
         let directories_out_dir = Mutex::new(Some(directories_out_dir));
@@ -129,60 +126,6 @@ impl TestExecutor<TestResult> for IsolatedOtaTestExecutor {
                     .boxed()
                 },
                 ChildOptions::new(),
-            )
-            .await
-            .unwrap();
-
-        let http_client_child = realm_builder
-            .add_child("http_client", "#meta/http-client.cm", ChildOptions::new())
-            .await
-            .unwrap();
-        realm_builder
-            .add_route(
-                Route::new()
-                    .capability(Capability::configuration(
-                        "fuchsia.http-client.StopOnIdleTimeoutMillis",
-                    ))
-                    .capability(Capability::configuration(
-                        "fuchsia.http-client.TcpReceiveBufferSizeBytes",
-                    ))
-                    .from(Ref::void())
-                    .to(&http_client_child),
-            )
-            .await
-            .unwrap();
-        realm_builder
-            .add_route(
-                Route::new()
-                    .capability(
-                        Capability::directory("root-ssl-certificates")
-                            .path(GLOBAL_SSL_CERTS_PATH)
-                            .rights(fio::R_STAR_DIR),
-                    )
-                    .from(&directories_component)
-                    .to(&http_client_child),
-            )
-            .await
-            .unwrap();
-        realm_builder
-            .add_route(
-                Route::new()
-                    .capability(Capability::protocol_by_name("fuchsia.logger.LogSink"))
-                    .capability(Capability::protocol_by_name("fuchsia.net.name.Lookup"))
-                    .capability(Capability::protocol_by_name("fuchsia.posix.socket.Provider"))
-                    .capability(Capability::protocol_by_name("fuchsia.tracing.provider.Registry"))
-                    .from(Ref::parent())
-                    .to(&http_client_child),
-            )
-            .await
-            .unwrap();
-        realm_builder
-            .add_route(
-                Route::new()
-                    .capability(Capability::protocol_by_name("fuchsia.pkg.http.Client"))
-                    .capability(Capability::protocol_by_name("fuchsia.net.http.Loader"))
-                    .from(&http_client_child)
-                    .to(&pkg_component),
             )
             .await
             .unwrap();

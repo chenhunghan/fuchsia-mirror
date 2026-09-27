@@ -830,10 +830,31 @@
             ]
         },
         {
+            "name": "MountTest.ContextWithFsContextRequiresRelabelFromAndAssociate",
+            "audit_expectations": [
+                "avc:  denied  { relabelfrom } for scontext=test_u:test_r:test_mount_relabel_allowed_t:s0 tcontext=test_u:object_r:test_mount_fscontext_t:s0 tclass=filesystem permissive=0",
+                "avc:  denied  { associate } for scontext=test_u:object_r:test_mount_rootcontext_t:s0 tcontext=test_u:object_r:test_mount_fscontext_t:s0 tclass=filesystem permissive=0"
+            ]
+        },
+        {
             "name": "MountTest.FsContextRequiresRelabelFromAndTo",
             "audit_expectations": [
                 "avc:  denied  { relabelto } for scontext=test_u:test_r:test_mount_relabelto_denied_t:s0 tcontext=test_u:object_r:test_mount_fscontext_t:s0 tclass=filesystem permissive=0",
                 "avc:  denied  { relabelfrom } for scontext=test_u:test_r:test_mount_relabelfrom_denied_t:s0 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=0"
+            ]
+        },
+        {
+            "name": "MountTest.FsContextToSameLabelStillRequiresRelabel",
+            "audit_expectations": [
+                "avc:  denied  { relabelfrom } for scontext=test_u:test_r:test_mount_relabelfrom_denied_t:s0 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=0",
+                "avc:  denied  { relabelto } for scontext=test_u:test_r:test_mount_relabelto_denied_t:s0 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=0"
+            ]
+        },
+        {
+            "name": "MountTest.RootContextRequiresRelabelFromAndAssociate",
+            "audit_expectations": [
+                "avc:  denied  { relabelfrom } for scontext=test_u:test_r:test_mount_relabelfrom_denied_t:s0 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=0",
+                "avc:  denied  { associate } for scontext=test_u:object_r:test_mount_fscontext_t:s0 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=0"
             ]
         },
         {

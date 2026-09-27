@@ -40,7 +40,7 @@ _MODULES_DIR = os.path.join(_SCRIPT_DIR, "../../python/modules")
 sys.path.insert(0, _MODULES_DIR)
 from depfile import DepFile
 
-# LINT.ThenChange(//build/bazel/bazel_action.gni:delayed_action_imports)
+# LINT.ThenChange(//build/bazel/bazel_action.gni:delayed_action_imports, //build/bazel/scripts/BUILD.gn:delayed_action_imports)
 
 # Set this to True to debug operations locally in this script.
 # IMPORTANT: Setting this to True will result in Ninja timeouts in CQ
@@ -51,10 +51,123 @@ _DEBUG = False
 _DEBUG_TIME_PROFILE = _DEBUG
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, order=True)
 class TargetWithPlatform:
     target: str
     platform: str
+
+
+def read_extra_bazel_targets(path: Path) -> list[str]:
+    """Reads the Bazel labels listed in an `extra_bazel_targets_file`.
+
+    The file is written by a GN `generated_file()`, one label per line, and is
+    empty when the metadata walk that feeds it collected nothing.
+
+    Raises:
+        ValueError: if `path` does not exist on disk.
+    """
+    if not path.exists():
+        raise ValueError(
+            f"extra_bazel_targets_file {path} does not exist. It must be "
+            "written at `gn gen` time (e.g. via `generated_file()`), not by "
+            "a build-time Ninja action."
+        )
+    return [
+        line.strip() for line in path.read_text().splitlines() if line.strip()
+    ]
+
+
+def validate_extra_bazel_targets(
+    extra_targets_by_owner: dict[TargetWithPlatform, list[str]],
+    bazel_target_infos_map: BazelTargetInfosMap,
+) -> None:
+    """Checks that no Bazel label is claimed by two actions on one platform.
+
+    Nothing keys off an extra target the way the stamp file keys off
+    `bazel_target`, so an overlap would silently give one label two owners:
+    results for it would be attributed to the wrong action, or to several.
+
+    Raises:
+        ValueError: if a label is both declared as some action's
+            `bazel_target` and named by another action's extra targets file,
+            or is named by two actions' extra targets files.
+    """
+    seen: dict[TargetWithPlatform, TargetWithPlatform] = {}
+    for owner, extra_targets in sorted(extra_targets_by_owner.items()):
+        for extra_target in extra_targets:
+            extra_with_platform = TargetWithPlatform(
+                extra_target, owner.platform
+            )
+            if bazel_target_infos_map.get_info(extra_target, owner.platform):
+                raise ValueError(
+                    f"Bazel target {extra_target} is both declared by a "
+                    f"bazel_action() and named by {owner.target}'s "
+                    f"extra_bazel_targets_file, for platform {owner.platform}."
+                )
+            previous_owner = seen.setdefault(extra_with_platform, owner)
+            if previous_owner != owner:
+                raise ValueError(
+                    f"Bazel target {extra_target} is named by the "
+                    f"extra_bazel_targets_file of both {previous_owner.target} "
+                    f"and {owner.target}, for platform {owner.platform}."
+                )
+
+
+def compute_sources_by_owner(
+    source_files: dict[str, list[str]],
+    requested_targets: T.Iterable[str],
+    extra_targets_by_owner: dict[TargetWithPlatform, list[str]],
+    platform_label: str,
+) -> dict[TargetWithPlatform, list[str]]:
+    """Maps each requested Bazel target to the source files it is accountable for.
+
+    Bazel expands the `test_suite()` labels named by an
+    `extra_bazel_targets_file` into their member tests, so it reports results
+    for targets that no action declared. Labels that appear verbatim in an
+    action's extra targets list (such as the `test_suite()` label itself in
+    `buildfiles_genquery`) are attributed directly to that action; expanded
+    member targets, for which Bazel does not report the originating command
+    line suite, are attributed to every action in the batch that supplied extra
+    targets so the depfile over-approximates rather than drops inputs.
+
+    Every requested target appears in the result even when it has no sources,
+    because the caller writes stamp files while iterating and an action whose
+    targets report nothing - an empty list of test suites, say - still owes
+    Ninja the stamp it declared as an output.
+
+    Raises:
+        ValueError: if Bazel reported a target that nothing can account for.
+    """
+    sources_by_owner: dict[TargetWithPlatform, list[str]] = {
+        TargetWithPlatform(target, platform_label): []
+        for target in requested_targets
+    }
+    extra_target_to_owner_map: dict[TargetWithPlatform, TargetWithPlatform] = {
+        TargetWithPlatform(extra_target, platform_label): owner
+        for owner, extra_targets in extra_targets_by_owner.items()
+        if owner in sources_by_owner
+        for extra_target in extra_targets
+    }
+    fallback_owners = [
+        owner for owner in extra_targets_by_owner if owner in sources_by_owner
+    ]
+    for target, sources in source_files.items():
+        target_with_platform = TargetWithPlatform(target, platform_label)
+        if target_with_platform in sources_by_owner:
+            owners: T.Sequence[TargetWithPlatform] = [target_with_platform]
+        elif target_with_platform in extra_target_to_owner_map:
+            owners = [extra_target_to_owner_map[target_with_platform]]
+        else:
+            owners = fallback_owners
+        if not owners:
+            raise ValueError(
+                f"Bazel reported results for target {target} on platform "
+                f"{platform_label}, which no bazel_action() requested and no "
+                "extra_bazel_targets_file could have expanded to."
+            )
+        for owner in owners:
+            sources_by_owner[owner].extend(sources)
+    return sources_by_owner
 
 
 def main() -> int:
@@ -106,7 +219,7 @@ def main() -> int:
 
     # load the BazelTargetInfos so that we can find which targets need to be built in order
     # to build the requested outputs.
-    bazel_target_infos = BazelTargetInfosMap.create_from_build_dir(
+    bazel_target_infos_map = BazelTargetInfosMap.create_from_build_dir(
         bazel_paths.ninja_build_dir
     )
 
@@ -137,7 +250,7 @@ def main() -> int:
 
     for action in ninja_request.actions:
         for output in action.ninja_outputs:
-            target = bazel_target_infos.get_target(output)
+            target = bazel_target_infos_map.get_target(output)
 
             if target:
                 # In order to line up the results with the action IDs (and to setup the depfile
@@ -167,14 +280,33 @@ def main() -> int:
             else:
                 parser.error(f"Can't find a Bazel target for output: {output}")
 
+    # Read the extra command line targets of every declared bazel_action(),
+    # not just of the ones in this batch, so that the validation below cannot
+    # depend on which actions Ninja happened to batch together.
+    extra_targets_by_owner: dict[TargetWithPlatform, list[str]] = {
+        TargetWithPlatform(
+            target_info.bazel_target, target_info.bazel_platform_label
+        ): read_extra_bazel_targets(
+            bazel_paths.ninja_build_dir / target_info.extra_bazel_targets_file
+        )
+        for target_info in bazel_target_infos_map.all_infos()
+        if target_info.extra_bazel_targets_file
+    }
+    try:
+        validate_extra_bazel_targets(
+            extra_targets_by_owner, bazel_target_infos_map
+        )
+    except ValueError as e:
+        parser.error(str(e))
+
     if _DEBUG:
         print()
         print("Bazel targets to build:")
-        for platform, targets in sorted(targets_by_platform.items()):
+        for platform, platform_targets in sorted(targets_by_platform.items()):
             print()
             print(f"Using platform: {platform}")
-            for target in sorted(targets):
-                print(f"    {target}")
+            for target_label in sorted(platform_targets):
+                print(f"    {target_label}")
             print()
 
     bazel_action_runner = bazel_action_impl.BazelActionRunner(
@@ -187,13 +319,19 @@ def main() -> int:
         for platform_label, platform_targets in targets_by_platform.items():
             time_profile.start("merging_bazel_target_infos")
 
-            bazel_target_infos = list(platform_targets.values())
-            platform_config = bazel_target_infos[0].bazel_platform_config
+            print(
+                f"Building {len(platform_targets)} targets using {platform_label}"
+            )
+
+            platform_target_infos = list(platform_targets.values())
+            platform_config = platform_target_infos[0].bazel_platform_config
 
             (
                 outputs,
                 gn_target_manifests,
-            ) = bazel_action_impl.merge_target_info_outputs(bazel_target_infos)
+            ) = bazel_action_impl.merge_target_info_outputs(
+                platform_target_infos
+            )
 
             gn_target_manifest_entries = merge_gn_target_manifests(
                 gn_target_manifests
@@ -227,14 +365,38 @@ def main() -> int:
                 bazel_paths, gn_targets_dir, check_license_timestamps=True
             )
 
+            # Extra targets are attached to an individual action rather than
+            # unioned over the batch, so they are only built when Ninja
+            # actually asked for that action's outputs.
+            #
+            # All targets in `extra_bazel_targets_file` are built under this
+            # action's platform (`--config=<platform_config>`). The generator of
+            # `extra_bazel_targets_file` (e.g. `//:bazel_host_test_suites`) is
+            # responsible for only listing targets intended for that platform.
+            # Note that when an extra target is a `test_suite()`, Bazel expands
+            # it and silently skips any member tests whose
+            # `target_compatible_with` constraints do not match the platform
+            # (see https://fxbug.dev/540003943).
+            targets: list[str] = []
+            extra_targets: list[str] = []
+            for target_info in platform_target_infos:
+                targets.append(target_info.bazel_target)
+                if target_info.extra_bazel_targets_file:
+                    extra_targets += extra_targets_by_owner[
+                        TargetWithPlatform(
+                            target_info.bazel_target, platform_label
+                        )
+                    ]
+
+            # Deduplicate targets, because passing the same target twice makes
+            # Bazel report it twice.
+            targets = list(dict.fromkeys(targets + extra_targets))
+
             action_result = bazel_action_runner.run(
                 command="build",
                 platform_config=platform_config,
                 platform_label=platform_label,
-                targets=[
-                    target_info.bazel_target
-                    for target_info in bazel_target_infos
-                ],
+                targets=targets,
                 outputs=outputs,
                 time_profile=time_profile,
             )
@@ -256,10 +418,14 @@ def main() -> int:
                         bazel_paths.ninja_build_dir,
                         str(bazel_paths.launcher),
                         action_result.configured_args,
-                        [
-                            target_info.bazel_target
-                            for target_info in bazel_target_infos
-                        ],
+                        # Query the targets in `action_result.source_files`
+                        # rather than the requested `bazel_target` labels so
+                        # that all targets found by the source-collection
+                        # aspect, including member tests expanded from command
+                        # line `test_suite()`s, are included in the compilation
+                        # database (`bazel aquery` finds no actions under a
+                        # `test_suite()` label itself).
+                        list(action_result.source_files.keys()),
                     )
                 )
                 write_file_if_changed(
@@ -273,7 +439,7 @@ def main() -> int:
             # the rust_project.json file, then do so now.
             if any(
                 target_info.update_rust_project
-                for target_info in bazel_target_infos
+                for target_info in platform_target_infos
             ):
                 rust_project_file = (
                     bazel_paths.ninja_build_dir / "rust-project.json"
@@ -323,12 +489,21 @@ def main() -> int:
 
             # Update the depfiles data and the stamp file
             time_profile.start("update_depfile_and_stampfiles")
-            for target, sources in action_result.source_files.items():
-                # Locate the action request and stamp path for this target.
-                target_with_platform = TargetWithPlatform(
-                    target, platform_label
+            updated_outputs = set(action_result.output_files)
+
+            try:
+                sources_by_owner = compute_sources_by_owner(
+                    action_result.source_files,
+                    platform_targets.keys(),
+                    extra_targets_by_owner,
+                    platform_label,
                 )
-                action, stamp_path = target_request_map[target_with_platform]
+            except ValueError as e:
+                raise bazel_action_impl.BazelActionError(str(e)) from e
+
+            for owner, sources in sources_by_owner.items():
+                # Locate the action request and stamp path for this target.
+                action, stamp_path = target_request_map[owner]
 
                 # Construct a depfile for it.
                 depfile = DepFile(action.ninja_outputs[0])
@@ -349,17 +524,36 @@ def main() -> int:
                     ):
                         depfile.add_input(source)
 
+                # The file listing extra command line targets is written by
+                # `gn gen`. GN won't accept a generated file in `inputs` unless
+                # the action depends on the target that generates it, and for
+                # the host test suites that dependency would be a cycle
+                # (`//:bazel_host_test_suites` walks `//:host_tests`, which
+                # depends on this action). Record the file in the depfile
+                # instead so the action still reruns when its contents change.
+                extra_targets_file = platform_targets[
+                    owner.target
+                ].extra_bazel_targets_file
+                if extra_targets_file:
+                    depfile.add_input(extra_targets_file)
+
                 # And then write out the depfile
                 with open(action.ninja_depfile, "w") as f:
                     depfile.write_to(f)
 
-                # Update the stamp file.
-                timestamp = datetime.datetime.now().timestamp()
-                stamp_path.parent.mkdir(parents=True, exist_ok=True)
-                if stamp_path.exists():
-                    stamp_path.unlink()
-                with open(stamp_path, "w") as f:
-                    f.write(f"{timestamp}\n")
+                # Only update the stamp file if it does not exist yet or if at
+                # least one of the action's outputs was updated, so that Ninja's
+                # restat can prune downstream dependents when outputs are unchanged.
+                if not stamp_path.exists() or any(
+                    Path(output) in updated_outputs
+                    for output in action.ninja_outputs[1:]
+                ):
+                    timestamp = datetime.datetime.now().timestamp()
+                    stamp_path.parent.mkdir(parents=True, exist_ok=True)
+                    if stamp_path.exists():
+                        stamp_path.unlink()
+                    with open(stamp_path, "w") as f:
+                        f.write(f"{timestamp}\n")
 
         rc = 0
 

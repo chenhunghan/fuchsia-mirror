@@ -16,6 +16,7 @@ if (is_host) {
       "src/builder.rs",
       "src/lib.rs",
       "src/vbmeta.rs",
+      "src/zbi.rs",
     ]
 
     inputs = [

@@ -1,0 +1,48 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "usb-audio",
+    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
+    program: {
+        colocate: "true",
+        compat: "driver/usb-audio.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        allowed_scheduler_roles: [ "fuchsia.devices.usb.audio" ],
+        bind: {
+            one_of: [
+                {
+                    protocol: "fuchsia.usb.BIND_PROTOCOL.INTERFACE",
+                    usb: {
+                        class: "fuchsia.usb.BIND_USB_CLASS.AUDIO",
+                        subclass: "fuchsia.usb.audio.BIND_USB_SUBCLASS.AUDIO_CONTROL",
+                        protocol: 0,
+                    },
+                },
+                {
+                    protocol: "fuchsia.usb.BIND_PROTOCOL.INTERFACE_ASSOCIATION",
+                    usb: {
+                        class: "fuchsia.usb.BIND_USB_CLASS.AUDIO",
+                        subclass: [
+                            "fuchsia.usb.audio.BIND_USB_SUBCLASS.AUDIO_CONTROL",
+                            "fuchsia.usb.audio.BIND_USB_SUBCLASS.AUDIO_STREAMING",
+                        ],
+                        protocol: 0,
+                    },
+                },
+            ],
+        },
+    },
+    use: [
+        {
+            name: "default",
+            service: "fuchsia.hardware.usb.UsbService",
+            generate_bind_rule: false,
+        },
+        {
+            name: "default",
+            service: "fuchsia.hardware.usb.endpoint.Endpoint",
+            generate_bind_rule: false,
+        },
+    ],
+}

@@ -360,10 +360,27 @@ def parse_args(
             cli_args[extra_index + 1 :],
         )
 
+    show_advanced_help = "--help-advanced" in cli_args
+
+    def adv_help(help_text: str) -> str:
+        """Hides an argument's help usage behind `--help-advanced`.
+
+        Showing too many uncommon/irrelevant flags in `fx test --help` causes agents not to process
+        arguments effectively -- their harnesses will truncate excessive command output.
+        """
+        return help_text if show_advanced_help else argparse.SUPPRESS
+
     parser = argparse.ArgumentParser(
         "fx test",
+        usage="fx test [options] [selection ...] [-- test_args ...]",
         description="Test Executor for Humans",
+        epilog="Run 'fx test --help-advanced' to show all advanced and internal options.",
         exit_on_error=False,
+    )
+    parser.add_argument(
+        "--help-advanced",
+        action="help",
+        help="Show full help message including advanced and internal options.",
     )
     utility = parser.add_argument_group("Utility Options")
     utility.add_argument(
@@ -380,7 +397,9 @@ def parse_args(
         "--affected-since",
         type=str,
         default=None,
-        help="Get affected files by comparing against this commit/branch instead of checking uncommitted files in the working area.",
+        help=adv_help(
+            "Get affected files by comparing against this commit/branch instead of checking uncommitted files in the working area."
+        ),
     )
     utility.add_argument(
         "--dry",
@@ -399,7 +418,8 @@ def parse_args(
         const=1,
         default=None,
         choices=range(1, 4),
-        help="""If specified, requests an AI-powered analysis of stack traces from test failures.
+        help=adv_help(
+            """If specified, requests an AI-powered analysis of stack traces from test failures.
         Requires the GEMINI_API_KEY environment variable to be set.
         The Gemini model can be specified using the `--gemini-model` flag.
         An optional verbosity level from 1-3 can be provided (eg., --gemini-analysis=3).
@@ -407,32 +427,39 @@ def parse_args(
         Level 1: Key lines from the stack trace.
         Level 2: Key lines and a potential error from the git diff.
         Level 3: Full analysis with file contents and code snippets.
-        """,
+        """
+        ),
         dest="gemini_analysis",
     )
     utility.add_argument(
         "--gemini-model",
         type=str,
         default="gemini-2.5-flash-lite-preview-09-2025",
-        help="The Gemini model to use for the analysis.",
+        help=adv_help("The Gemini model to use for the analysis."),
         dest="gemini_model",
     )
     utility.add_argument(
         "--list-runtime-deps",
         action="store_true",
-        help="Do not actually run tests. Instead print out the contents of the `runtime_deps` for each test. This can be useful for debugging whether the correct artifacts are being uploaded to test runners",
+        help=adv_help(
+            "Do not actually run tests. Instead print out the contents of the `runtime_deps` for each test. This can be useful for debugging whether the correct artifacts are being uploaded to test runners"
+        ),
     )
     utility.add_argument(
         "--remote-suggestions",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Whether to use remote tests.json files for tests suggestions.",
+        help=adv_help(
+            "Whether to use remote tests.json files for tests suggestions."
+        ),
     )
-    parser.add_argument(
+    utility.add_argument(
         "--remote-suggestion-builder",
         type=str,
         action="append",
-        help="Add additional builder to query. May be specified multiple times.",
+        help=adv_help(
+            "Add additional builder to query. May be specified multiple times."
+        ),
         default=[],
     )
     utility.add_argument(
@@ -442,7 +469,8 @@ def parse_args(
         dest="previous",
         type=PrevOption,
         choices=list(PrevOption),
-        help=f"Do not actually run tests. Instead print information from the previous run. Input is read from the last log file, and it respects the value of --logpath.",
+        metavar="OPTION",
+        help="Print information from the previous run (choices: log, path, replay, artifact-path, failed-tests, stats, help).",
     )
     build = parser.add_argument_group("Build Options")
     build.add_argument(
@@ -454,13 +482,17 @@ def parse_args(
     build.add_argument(
         "--updateifinbase",
         action=argparse.BooleanOptionalAction,
-        help="Invoke `fx update-if-in-base` before running device tests (defaults to on)",
+        help=adv_help(
+            "Invoke `fx update-if-in-base` before running device tests (defaults to on)"
+        ),
         default=True,
     )
     build.add_argument(
         "--build-updates",
         action=argparse.BooleanOptionalAction,
-        help="Build the updates package if there are device tests (defaults to on)",
+        help=adv_help(
+            "Build the updates package if there are device tests (defaults to on)"
+        ),
         default=True,
     )
 
@@ -482,8 +514,7 @@ def parse_args(
         "--exact",
         action="store_true",
         default=False,
-        help="""Only match tests whose name exactly matches the selection.
-        Cannot be specified along with --host or --device.""",
+        help="Only match tests whose name exactly matches the selection (incompatible with --host/--device).",
     )
     selection.add_argument(
         "--e2e",
@@ -495,7 +526,7 @@ def parse_args(
         "--only-e2e",
         action="store_true",
         default=False,
-        help="Only run end to end tests. Implies --e2e.",
+        help=adv_help("Only run end to end tests. Implies --e2e."),
     )
     selection.add_argument(
         "-p",
@@ -525,29 +556,38 @@ def parse_args(
         "selection",
         action=selection_action.SelectionAction,
         nargs="*",
+        help="Test targets or patterns to select.",
     )
     selection.add_argument(
         "--fuzzy",
         type=int,
         default=3,
-        help="The Damerau-Levenshtein distance threshold for fuzzy matching tests",
+        help=adv_help(
+            "The Damerau-Levenshtein distance threshold for fuzzy matching tests"
+        ),
     )
     selection.add_argument(
         "--allow-empty-selection",
         action=argparse.BooleanOptionalAction,
-        help="If True and multiple selections are provided, allow individual selections that match no tests as long as at least one test is selected. Default is True.",
+        help=adv_help(
+            "If True and multiple selections are provided, allow individual selections that match no tests as long as at least one test is selected. Default is True."
+        ),
         default=True,
     )
     selection.add_argument(
         "--show-suggestions",
         action=argparse.BooleanOptionalAction,
-        help="If True and no tests match, suggest matching tests from the build directory. Default is True.",
+        help=adv_help(
+            "If True and no tests match, suggest matching tests from the build directory. Default is True."
+        ),
         default=True,
     )
     selection.add_argument(
         "--suggestion-count",
         type=int,
-        help="Show this number of suggestions if no tests match. Default is 6.",
+        help=adv_help(
+            "Show this number of suggestions if no tests match. Default is 6."
+        ),
         default=6,
     )
 
@@ -555,7 +595,9 @@ def parse_args(
     execution.add_argument(
         "--use-package-hash",
         action=argparse.BooleanOptionalAction,
-        help="Use the package Merkle root hash from the build artifacts to ensure you are running the most recently built device test code.",
+        help=adv_help(
+            "Use the package Merkle root hash from the build artifacts to ensure you are running the most recently built device test code."
+        ),
         default=True,
     )
     execution.add_argument(
@@ -567,25 +609,29 @@ def parse_args(
     execution.add_argument(
         "--parallel-cases",
         type=int,
-        help="Instruct on-device test runners to prefer running this number of cases in parallel.",
+        help=adv_help(
+            "Instruct on-device test runners to prefer running this number of cases in parallel."
+        ),
         default=0,
     )
     execution.add_argument(
         "-r",
         "--random",
         action="store_true",
-        help="Randomize test execution order",
+        help=adv_help("Randomize test execution order"),
         default=False,
     )
     execution.add_argument(
         "--timeout",
         type=float,
-        help="Terminate tests that take longer than this number of seconds to complete. By default, uses test default timeout values. A zero timeout value disables the timeout.",
+        help="Terminate tests that take longer than this number of seconds to complete (0 disables timeout).",
     )
     execution.add_argument(
         "--timeout-grace-period",
         type=float,
-        help="Number of seconds following timeout after which the test process will be killed. Default 15 seconds.",
+        help=adv_help(
+            "Number of seconds following timeout after which the test process will be killed. Default 15 seconds."
+        ),
         default=15.0,
     )
     execution.add_argument(
@@ -593,12 +639,12 @@ def parse_args(
         type=str,
         action="append",
         default=[],
-        help="Run specific test cases in a test suite. Can be specified multiple times to pass in multiple patterns.",
+        help="Run specific test cases in a test suite. Can be specified multiple times.",
     )
     execution.add_argument(
         "--count",
         type=int,
-        help="Execute each test this many times. If any iteration of a test times out, no further iterations will be executed",
+        help="Execute each test this many times. Stops repeating if an iteration times out.",
         default=1,
     )
     execution.add_argument(
@@ -610,20 +656,24 @@ def parse_args(
     execution.add_argument(
         "--offset",
         type=int,
-        help="Skip this many tests at the beginning of the test list. Combine with --limit to deterministically select a subrange of tests.",
+        help=adv_help(
+            "Skip this many tests at the beginning of the test list. Combine with --limit to deterministically select a subrange of tests."
+        ),
         default=0,
     )
     execution.add_argument(
         "-f",
         "--fail",
         action="store_true",
-        help="Stop running tests after the first failed test suite. This will abort all tests in progress and end with a failure code.",
+        help="Stop running tests after the first failed test suite.",
         default=False,
     )
     execution.add_argument(
         "--fail-by-group",
         action=argparse.BooleanOptionalAction,
-        help="When repeating tests with --count, stop repeating if any execution fails. If --no-fail-by-group is sets, continue repeating test executions despite failures to identify flakes.",
+        help=adv_help(
+            "When repeating tests with --count, stop repeating if any execution fails. If --no-fail-by-group is sets, continue repeating test executions despite failures to identify flakes."
+        ),
         default=True,
     )
     execution.add_argument(
@@ -635,24 +685,24 @@ def parse_args(
     execution.add_argument(
         "--min-severity-logs",
         nargs="*",
-        help="""Modifies the minimum log severity level emitted by components during the test execution.
-        Specify using the format <component-selector>#<log-level>, or just <log-level> (in which
-        case the severity will apply to all components under the test, including the test component
-        itself) with level as one of FATAL|ERROR|WARN|INFO|DEBUG|TRACE.""",
+        metavar="LEVEL",
+        help="Minimum log severity (<selector>#<level> or <level>: FATAL|ERROR|WARN|INFO|DEBUG|TRACE).",
         default=[],
     )
     execution.add_argument(
         "--also-run-disabled-tests",
         action="store_true",
-        help="If True, also run tests that are disabled by the test author. This only affects test components. Default is False.",
+        help="If True, also run tests that are disabled by the test author (components only).",
         default=False,
     )
     execution.add_argument(
         "--show-full-moniker-in-logs",
         action=argparse.BooleanOptionalAction,
-        help="""If set, show the full moniker in log output for on-device tests.
+        help=adv_help(
+            """If set, show the full moniker in log output for on-device tests.
         Otherwise only the last segment of the moniker is displayed.
-        Default is False.""",
+        Default is False."""
+        ),
         default=False,
     )
     execution.add_argument(
@@ -660,15 +710,13 @@ def parse_args(
         "--env",
         action="append",
         type=str,
-        help="Add an environment variable to each test invocation. May be specified multiple times.",
+        help="Add an environment variable (NAME=VALUE) to each test invocation. May be specified multiple times.",
         default=[],
     )
     execution.add_argument(
         "--break-on-failure",
         action=argparse.BooleanOptionalAction,
-        help="""If set and supported by the test runner, any test case failures will stop test
-        execution. zxdb is automatically launched and attached to the failed test case unless
-        `--use-existing-debugger` is set.""",
+        help="Stop test execution and launch/attach zxdb on any test case failure.",
         default=None,
     )
     execution.add_argument(
@@ -676,66 +724,80 @@ def parse_args(
         metavar="BREAKPOINT",  # This is to make the help text singular.
         dest="breakpoints",
         action="append",
-        help="""Run the test with zxdb attached and set the given breakpoint. For example,
-        `--breakpoint my_source_file.cc:37` will insert a breakpoint at line 37 of any file
-        named my_source_file.cc. May be specified multiple times to add multiple breakpoints.""",
+        help="Run test with zxdb attached and set breakpoint (e.g. `--breakpoint file.cc:37`). May be repeated.",
         default=[],
     )
     execution.add_argument(
         "--use-existing-debugger",
         action="store_true",
-        help="""If set, suppresses the automatic launch and attach of zxdb when `--break-on-failure`
-        is set. Incompatible with `--breakpoint`.""",
+        help=adv_help(
+            """If set, suppresses the automatic launch and attach of zxdb when `--break-on-failure`
+        is set. Incompatible with `--breakpoint`."""
+        ),
         default=False,
     )
     execution.add_argument(
         "--enable-debug-adapter",
-        help="""If set, spawns zxdb in Debug Adapter mode. This will not spawn a zxdb console
+        help=adv_help(
+            """If set, spawns zxdb in Debug Adapter mode. This will not spawn a zxdb console
         session. Instead, zxdb will be acting as a Debug Adapter server. This option is incompatible
-        with --use-existing-debugger.""",
+        with --use-existing-debugger."""
+        ),
         action=argparse.BooleanOptionalAction,
         default=None,
     )
     execution.add_argument(
         "--debug-adapter-port",
         type=int,
-        help="""Specifies the PORT to use for the Debug Adapter Server. Must be used in conjunction
-        with --enable-debug-adapter. An open port is randomly assigned if not specified.""",
+        help=adv_help(
+            """Specifies the PORT to use for the Debug Adapter Server. Must be used in conjunction
+        with --enable-debug-adapter. An open port is randomly assigned if not specified."""
+        ),
         metavar="PORT",
         default=None,
     )
     execution.add_argument(
         "--agent-debugging-mode",
         action="store_true",
-        help="""If set, automatically begins an fx debug cli session in the background, which should
+        help=adv_help(
+            """If set, automatically begins an fx debug cli session in the background, which should
         be used by Agents for test debugging workflows. Implies --break-on-failure and
-        --enable-debug-adapter.""",
+        --enable-debug-adapter."""
+        ),
         default=False,
     )
     execution.add_argument(
         "--allow-temporary-package-server",
         action=argparse.BooleanOptionalAction,
-        help="Allow this script to start a temporary package server if one is not already running. Default is True.",
+        help=adv_help(
+            "Allow this script to start a temporary package server if one is not already running. Default is True."
+        ),
         default=True,
     )
     execution.add_argument(
         "--ffx-usb-socket-path",
-        help="""If set, explicitly sets the path to the socket used to communicate with the FFX USB
-        driver. Otherwise the default is used from your ffx config.""",
+        help=adv_help(
+            """If set, explicitly sets the path to the socket used to communicate with the FFX USB
+        driver. Otherwise the default is used from your ffx config."""
+        ),
         default=None,
     )
 
     execution.add_argument(
         "--allow-temporary-emulator",
         action=argparse.BooleanOptionalAction,
-        help="Allow this script to start a temporary emulator if no active device is detected. Default is True.",
+        help=adv_help(
+            "Allow this script to start a temporary emulator if no active device is detected. Default is True."
+        ),
         default=True,
     )
 
     execution.add_argument(
         "--use-test-pilot",
         action=argparse.BooleanOptionalAction,
-        help="""Run test components using test-pilot. Note: this flag is experimental""",
+        help=adv_help(
+            """Run test components using test-pilot. Note: this flag is experimental"""
+        ),
         default=False,
     )
 
@@ -744,24 +806,30 @@ def parse_args(
         "-o",
         "--output",
         action=argparse.BooleanOptionalAction,
-        help="Display the output from passing tests. Some test arguments may be needed.",
+        help="Display the output from passing tests.",
     )
     output.add_argument(
         "--simple",
         action=argparse.BooleanOptionalAction,
         default=True if agents_lib.is_invoked_by_agent() else False,
-        help="Remove any color or decoration from output. Disable pretty status printing. Implies --no-style",
+        help=adv_help(
+            "Remove any color or decoration from output. Disable pretty status printing. Implies --no-style"
+        ),
     )
     output.add_argument(
         "--style",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Remove color and decoration from output. Does not disable pretty status printing. Default is to only style for TTY output.",
+        help=adv_help(
+            "Remove color and decoration from output. Does not disable pretty status printing. Default is to only style for TTY output."
+        ),
     )
     output.add_argument(
         "--log",
         action=argparse.BooleanOptionalAction,
-        help="Emit command events to a file. Turned on when running real tests unless `--no-log` is passed.",
+        help=adv_help(
+            "Emit command events to a file. Turned on when running real tests unless `--no-log` is passed."
+        ),
         default=True,
     )
     output.add_argument(
@@ -771,13 +839,15 @@ def parse_args(
     )
     output.add_argument(
         "--save-log-path-to-file",
-        help="Write the path of the log file to this file. Used for scripting so a script will know where the log path is without needing to intercept output.",
+        help=adv_help(
+            "Write the path of the log file to this file. Used for scripting so a script will know where the log path is without needing to intercept output."
+        ),
         default=None,
     )
     output.add_argument(
         "--json",
         action="store_true",
-        help="Format output as JSON logs, alias for --logpath -",
+        help=adv_help("Format output as JSON logs, alias for --logpath -"),
         default=False,
     )
     output.add_argument(
@@ -791,25 +861,27 @@ def parse_args(
         "--status",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Toggle interactive status printing to console. Default is to vary behavior depending on if output is to a TTY. Setting to True on a non-TTY is an error.",
+        help="Toggle interactive status printing to console (default: enabled on TTY).",
     )
     output.add_argument(
         "--status-lines",
         default=8,
         type=int,
-        help="Number of lines used to display status output.",
+        help=adv_help("Number of lines used to display status output."),
     )
     output.add_argument(
         "--status-delay",
         default=0.033,
         type=float,
-        help="Control how frequently the status output is updated. Default is every 0.033s, but you can increase the number for calmer output on slower connections.",
+        help=adv_help(
+            "Control how frequently the status output is updated. Default is every 0.033s, but you can increase the number for calmer output on slower connections."
+        ),
     )
     output.add_argument(
         "--timestamp-artifacts",
         default=False,
         action=argparse.BooleanOptionalAction,
-        help="If set, output artifacts in a timestamped directory under the given output directory. Default is False.",
+        help="Output artifacts in a timestamped subdirectory under --outdir.",
     )
     output.add_argument(
         "--outdir",
@@ -817,14 +889,17 @@ def parse_args(
         "--artifact-output-directory",
         default=None,
         dest="artifact_output_directory",
-        help="If set, write test artifact output to this directory for post processing.",
+        metavar="DIR",
+        help="Write test artifact output to this directory.",
     )
     output.add_argument(
         "-s",
         "--slow",
         type=float,
         default=0,
-        help="If non-zero, automatically show output for tests taking longer than this many seconds.",
+        help=adv_help(
+            "If non-zero, automatically show output for tests taking longer than this many seconds."
+        ),
     )
     output.add_argument(
         "-q",
@@ -837,30 +912,40 @@ def parse_args(
         "--replay-speed",
         type=float,
         default=1,
-        help="Speed up replays by this amount. Can be less than 1 for slow motion.",
+        help=adv_help(
+            "Speed up replays by this amount. Can be less than 1 for slow motion."
+        ),
     )
     output.add_argument(
         "--capture-syslog",
         action=argparse.BooleanOptionalAction,
-        help="""If set, include captured syslog in output. Set by default.""",
+        help=adv_help(
+            """If set, include captured syslog in output. Set by default."""
+        ),
         default=True,
     )
     output.add_argument(
         "--summary-json",
         default=None,
-        help="If set, write a structured JSON summary of the test run to this path.",
+        help=adv_help(
+            "If set, write a structured JSON summary of the test run to this path."
+        ),
     )
     output.add_argument(
         "--summary-to-stdout",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="If set, print the structured JSON summary to stdout on completion.",
+        help=adv_help(
+            "If set, print the structured JSON summary to stdout on completion."
+        ),
     )
     output.add_argument(
         "--agent-output",
         action=argparse.BooleanOptionalAction,
         default=True if agents_lib.is_invoked_by_agent() else False,
-        help="Format output for AI agents with isolated logs and JSON summary output.",
+        help=adv_help(
+            "Format output for AI agents with isolated logs and JSON summary output."
+        ),
     )
 
     if defaults is not None:

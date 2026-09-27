@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::object_handle::{ObjectHandle, ReadObjectHandle, WriteObjectHandle};
+use crate::errors::FxfsError;
+use crate::object_handle::{LayerObject, ObjectHandle, ReadObjectHandle, WriteObjectHandle};
 use crate::object_store::journal::JournalHandle;
-use anyhow::Error;
+use anyhow::{Error, ensure};
 use async_trait::async_trait;
 use fuchsia_sync::Mutex;
 use std::cmp::min;
@@ -84,7 +85,10 @@ impl ObjectHandle for FakeObjectHandle {
 
 #[async_trait]
 impl ReadObjectHandle for FakeObjectHandle {
-    async fn read(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+    async fn read_aligned(&self, offset: u64, buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+        let block_size = self.block_size();
+        ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
+        ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
         self.object.read(offset, buf)
     }
 
@@ -92,6 +96,8 @@ impl ReadObjectHandle for FakeObjectHandle {
         self.object.get_size()
     }
 }
+
+impl LayerObject for FakeObjectHandle {}
 
 impl WriteObjectHandle for FakeObjectHandle {
     async fn write_or_append(&self, offset: Option<u64>, buf: BufferRef<'_>) -> Result<u64, Error> {

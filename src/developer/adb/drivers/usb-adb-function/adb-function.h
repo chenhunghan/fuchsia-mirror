@@ -139,7 +139,7 @@ class UsbAdbDevice : public fdf::DriverBase2,
   // State transition helpers.
   void SetState(State new_state);
   zx::result<> StartUsb();
-  void EnableEndpoints();
+  zx::result<> EnableEndpoints();
   void ResetOrStopUsb(State stop_state);
   void CheckUsbStopComplete();
 
@@ -234,6 +234,7 @@ class UsbAdbDevice : public fdf::DriverBase2,
 
   bool bulk_in_cancelled_ = false;
   bool bulk_out_cancelled_ = false;
+  bool pending_reconfigure_ = false;
 
   bool CancelAllCompleted() const { return bulk_in_cancelled_ && bulk_out_cancelled_; }
   bool AllRequestsReturned() {

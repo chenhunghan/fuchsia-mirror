@@ -266,11 +266,9 @@ impl VsockDevice {
         // completing the shutdown handshake), or be blocking guest TX (credit updates and
         // connection establishments). If RX chains are limited, servicing control packets
         // as soon as possible with what chains are available will allow the most net throughput.
-        let control_packet = match control_packets.try_next() {
-            Ok(header) => match header {
-                None => Err(anyhow!("Unexpected end of control packet stream")),
-                header => Ok(header),
-            },
+        let control_packet = match control_packets.try_recv() {
+            Ok(header) => Ok(Some(header)),
+            Err(e) if e.is_closed() => Err(anyhow!("Unexpected end of control packet stream")),
             Err(_) => {
                 // It's expected that the queue may be empty of control packets.
                 Ok(None)
@@ -997,7 +995,7 @@ mod tests {
             device.new_connection_rx.take().expect("No new connection rx channel");
 
         // Device didn't report this invalid connection.
-        assert!(new_connections.try_next().is_err());
+        assert!(new_connections.try_recv().is_err());
         assert!(device.connections.borrow().is_empty());
 
         // Successfully connect on a port with a listener.

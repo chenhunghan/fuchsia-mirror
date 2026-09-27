@@ -6,23 +6,6 @@ import("//build/components.gni")
 import("//build/rust/rustc_binary.gni")
 import("//build/testing/cc_test_executable.gni")
 
-executable("bin") {
-  output_name = "build_info"
-  sources = [
-    "build_info.cc",
-    "build_info.h",
-    "main.cc",
-  ]
-
-  deps = [
-    "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_cpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/component/outgoing/cpp",
-    "//src/lib/fsl",
-  ]
-}
-
 rustc_binary("shell_bin") {
   name = "build-info"
   edition = "2024"
@@ -38,15 +21,6 @@ rustc_binary("shell_bin") {
 
   sources = [ "shell.rs" ]
   source_root = "shell.rs"
-}
-
-fuchsia_component("build-info") {
-  manifest = "meta/build_info.cml"
-  deps = [ ":bin" ]
-}
-
-fuchsia_package("build-info-service") {
-  deps = [ ":build-info" ]
 }
 
 fuchsia_package_with_single_component("build-info-shell") {

@@ -70,8 +70,10 @@ class UsbFastbootFunction
   uint8_t bulk_in_addr() const { return descriptors_.bulk_in_ep.b_endpoint_address; }
 
  private:
-  zx_status_t ConfigureEndpoints(bool enable);
+  zx_status_t ConfigureEndpoints();
+  zx_status_t DisableEndpoints();
 
+  bool endpoints_enabled_ = false;
   std::atomic<bool> configured_ = false;
 
   std::optional<inspect::ComponentInspector> inspector_;
@@ -112,6 +114,16 @@ class UsbFastbootFunction
   void QueueTx();
   void QueueRx();
 
+  void CheckTeardownComplete();
+  void CancelActiveTransfers();
+  void CancelEndpointRequests();
+
+  std::optional<fdf::StopCompleter> stop_completer_;
+  std::optional<SetConfiguredCompleter::Async> set_configured_completer_;
+  bool stopping_ = false;
+  bool bulk_in_cancelled_ = false;
+  bool bulk_out_cancelled_ = false;
+
   // USB Fastboot interface descriptor.
   struct {
     usb_interface_descriptor_t fastboot_intf;
@@ -132,7 +144,7 @@ class UsbFastbootFunction
     //
     // This should be changed if/when the fastboot CLI logic (ffx and upstream fastboot tool) knows
     // how to handle interface alt-configs.
-    usb_interface_descriptor_t placehodler_intf;
+    usb_interface_descriptor_t placeholder_intf;
   } descriptors_ [[maybe_unused]] = {
       .fastboot_intf =
           {
@@ -164,7 +176,7 @@ class UsbFastbootFunction
               .w_max_packet_size = htole16(uint16_t{kPacketSize}),
               .b_interval = 0,
           },
-      .placehodler_intf =
+      .placeholder_intf =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
               .b_descriptor_type = USB_DT_INTERFACE,

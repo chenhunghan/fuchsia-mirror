@@ -11,17 +11,18 @@ use anyhow::{Error, format_err};
 use font_info::FontInfoLoaderImpl;
 use fuchsia_inspect as finspect;
 use fuchsia_trace as trace;
-use lru_cache::LruCache;
+use lru::LruCache;
 use manifest::{FontManifestWrapper, FontsManifest, v2};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use unicase::UniCase;
 
-const LOG_CACHE_SIZE_ELEMENTS: usize = 10;
+const LOG_CACHE_SIZE_ELEMENTS: NonZeroUsize = NonZeroUsize::new(10).unwrap();
 
 /// Builder for [`FontService`]. Allows populating the fields that remain immutable for the
 /// lifetime of the service.

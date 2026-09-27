@@ -523,7 +523,7 @@ impl RngImpl {
 ///
 /// [`SysRng`] is a zero-sized type that provides randomness from the OS.
 impl rand::TryRng for RngImpl {
-    type Error = core::convert::Infallible;
+    type Error = !;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         Ok(SysRng.try_next_u32().unwrap())
@@ -752,8 +752,7 @@ impl<I: IpExt> IcmpEchoBindingsContext<I, DeviceId<BindingsCtx>> for BindingsCtx
 
 impl IcmpEchoBindingsTypes for BindingsCtx {
     type ExternalData<I: Ip> = socket::datagram::DatagramSocketExternalData<I>;
-    type SocketWritableListener = socket::event_pair::SocketEventPair;
-    type SendToken = ();
+    type SendToken = socket::datagram::SendBufferToken;
 }
 
 impl<I: IpExt> UdpReceiveBindingsContext<I, DeviceId<BindingsCtx>> for BindingsCtx {
@@ -780,8 +779,7 @@ impl<I: IpExt> UdpReceiveBindingsContext<I, DeviceId<BindingsCtx>> for BindingsC
 
 impl UdpBindingsTypes for BindingsCtx {
     type ExternalData<I: Ip> = socket::datagram::DatagramSocketExternalData<I>;
-    type SocketWritableListener = socket::event_pair::SocketEventPair;
-    type SendToken = ();
+    type SendToken = socket::datagram::SendBufferToken;
 }
 
 impl<I: Ip> EventContext<IpDeviceEvent<DeviceId<BindingsCtx>, I, StackTime>> for BindingsCtx {

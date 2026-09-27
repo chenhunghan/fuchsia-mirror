@@ -20,6 +20,9 @@
     capabilities: [
         {
             protocol: [
+                // Privileged backend registration protocol (for RegisterHeap / RegisterSecureMem
+                // ONLY). Normal clients (including drivers) should use fuchsia.sysmem2.Allocator.
+                // Only components that legitimately register a heap or securemem may `use` this.
                 "fuchsia.hardware.sysmem.Sysmem",
                 "fuchsia.sysmem.Allocator",
                 "fuchsia.sysmem2.Allocator",

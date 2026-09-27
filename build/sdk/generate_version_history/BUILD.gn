@@ -53,7 +53,10 @@ if (is_host) {
 if (is_host) {
   python_library("generate_version_history") {
     sources = [ "__init__.py" ]
-    visibility = [ "//build/sdk/generate_version_history/*" ]
+    visibility = [
+      ":*",
+      "//build/sdk/generate_version_history/*",
+    ]
   }
 }
 if (is_host) {

@@ -856,7 +856,7 @@ func (f *FFXInstance) BootloaderBoot(ctx context.Context, target, productBundle 
 	configs := map[string]any{
 		"discovery.mdns.enabled": false,
 		"fastboot.usb.disabled":  true,
-		"discovery.timeout":      12000,
+		"discovery.timeout":      30000,
 	}
 
 	return f.invoker([]string{"target", "bootloader", "--product-bundle", productBundle, "boot"}).setTarget(target).setTimeout(0).setConfigs(configs).run(ctx)

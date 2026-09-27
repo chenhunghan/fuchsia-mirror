@@ -9,7 +9,6 @@
 
 pub(crate) mod info;
 
-use core::convert::{Infallible, TryFrom as _};
 use core::fmt::Debug;
 use core::num::{NonZeroU8, NonZeroU32, NonZeroUsize, TryFromIntError};
 use core::ops::{Deref, DerefMut};
@@ -260,7 +259,7 @@ pub struct Listen {
 /// Dispositions of [`Listen::on_segment`].
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum ListenOnSegmentDisposition<I: Instant> {
-    SendSynAckAndEnterSynRcvd(Segment<()>, SynRcvd<I, Infallible>),
+    SendSynAckAndEnterSynRcvd(Segment<()>, SynRcvd<I, !>),
     SendRst(Segment<()>),
     Ignore,
 }
@@ -728,7 +727,7 @@ pub struct SynRcvd<I, ActiveOpen> {
     rcv: RecvParams<I>,
 }
 
-impl<I: Instant, R: ReceiveBuffer, S: SendBuffer, ActiveOpen> From<SynRcvd<I, Infallible>>
+impl<I: Instant, R: ReceiveBuffer, S: SendBuffer, ActiveOpen> From<SynRcvd<I, !>>
     for State<I, R, S, ActiveOpen>
 {
     fn from(
@@ -744,7 +743,7 @@ impl<I: Instant, R: ReceiveBuffer, S: SendBuffer, ActiveOpen> From<SynRcvd<I, In
             snd_wnd_scale,
             sack_permitted,
             rcv,
-        }: SynRcvd<I, Infallible>,
+        }: SynRcvd<I, !>,
     ) -> Self {
         match simultaneous_open {
             None => State::SynRcvd(SynRcvd {

@@ -15,22 +15,21 @@ class ComponentControllerImpl final
  public:
   // Binds `controller` to a new component controller using the given `outgoing_dir` and
   // `pkg_directory`. On error, `controller` will be closed with an epitaph.
-  static zx::result<std::unique_ptr<fidl::Server<fuchsia_component_runner::ComponentController>>>
-  Bind(async_dispatcher_t* dispatcher,
-       fidl::ServerEnd<fuchsia_component_runner::ComponentController> controller,
-       fidl::ServerEnd<fuchsia_io::Directory> outgoing_dir,
-       fidl::ClientEnd<fuchsia_io::Directory> pkg_directory);
+  static zx::result<> Bind(
+      async_dispatcher_t* dispatcher,
+      fidl::ServerEnd<fuchsia_component_runner::ComponentController> controller,
+      fidl::ServerEnd<fuchsia_io::Directory> outgoing_dir,
+      fidl::ClientEnd<fuchsia_io::Directory> pkg_directory);
 
  private:
   explicit ComponentControllerImpl(async_dispatcher_t* dispatcher);
-  void Stop(StopCompleter::Sync& completer) override { binding_->Close(ZX_OK); }
-  void Kill(KillCompleter::Sync& completer) override { binding_->Close(ZX_OK); }
+  void Stop(StopCompleter::Sync& completer) override { completer.Close(ZX_OK); }
+  void Kill(KillCompleter::Sync& completer) override { completer.Close(ZX_OK); }
   void handle_unknown_method(
       fidl::UnknownMethodMetadata<fuchsia_component_runner::ComponentController>,
       fidl::UnknownMethodCompleter::Sync&) override {}
 
   fs::SynchronousVfs vfs_;
-  std::optional<fidl::ServerBindingRef<fuchsia_component_runner::ComponentController>> binding_;
 };
 
 // This implements the icd_runner interface.
@@ -46,7 +45,6 @@ class IcdRunnerImpl : public fidl::Server<fuchsia_component_runner::ComponentRun
 
  private:
   async_dispatcher_t* const dispatcher_;
-  std::unique_ptr<fidl::Server<fuchsia_component_runner::ComponentController>> controller_server_;
 };
 
 #endif  // SRC_GRAPHICS_BIN_VULKAN_LOADER_ICD_RUNNER_H_

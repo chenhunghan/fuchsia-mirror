@@ -52,7 +52,6 @@ class Timer::Instance : public std::enable_shared_from_this<Instance> {
   zx_duration_t interval_ = 0;
   bool active_ = false;
   std::atomic<AsyncTask*> async_task_ = nullptr;
-  std::function<void()> handler_;
 };
 
 Timer::Timer(async_dispatcher_t* dispatcher, std::function<void()>&& callback, Type type)
@@ -148,26 +147,6 @@ Timer::Instance::~Instance() { Stop(); }
 
 zx_status_t Timer::Instance::Start(zx_duration_t interval) {
   std::lock_guard lock(mutex_);
-  if (!handler_) {
-    // shared_from_this doesn't work in the constructor of Instance since the shared_ptr hasn't
-    // been created at that time. Set the task handler here where shared_from_this can be used.
-    handler_ = [this, weak_instance = std::weak_ptr(shared_from_this())]() {
-      std::shared_ptr shared_instance = weak_instance.lock();
-      if (!shared_instance) {
-        // If the weak pointer can't be locked the instance was destroyed. Do nothing.
-        return;
-      }
-      std::lock_guard lock(shared_instance->mutex_);
-      if (!shared_instance->active_) {
-        // The instance is alive but the timer has been stopped, don't trigger the handler.
-        return;
-      }
-      // Mark active as false to avoid a race condition if Stop() or Start() gets called in the
-      // handler.
-      shared_instance->active_ = false;
-      timer_.TimerHandler();
-    };
-  }
   interval_ = interval;
   if (interval_ == 0) {
     // One way to stop periodic timer
@@ -190,12 +169,27 @@ void Timer::Instance::Stop() {
 void Timer::Instance::Handler(async_dispatcher_t*, async_task_t* task, zx_status_t status) {
   // Place the task in a unique_ptr, it has to be destroyed when the handler completes.
   std::unique_ptr<AsyncTask> async_task(static_cast<AsyncTask*>(task));
-  if (status != ZX_OK) {
+  std::shared_ptr<Instance> instance = async_task->instance.lock();
+  if (!instance) {
+    // The instance was destroyed, which means the timer was stopped and we can't call its handler.
     return;
   }
-  std::shared_ptr<Instance> shared_async_task = async_task->instance.lock();
-  if (shared_async_task) {
-    shared_async_task->handler_();
+
+  std::scoped_lock lock(instance->mutex_);
+
+  // If the current active task is still equal to this task make sure we clear it to indicate
+  // that there is no currently active task. It's possible that another Start call has replaced
+  // our task, which will then be the next task to run, so it's important to only do this if the
+  // pointers match. This also avoids unnecessary attempts to cancel the current task if the
+  // handler attempts to restart the timer.
+  AsyncTask* expected = async_task.get();
+  instance->async_task_.compare_exchange_strong(expected, nullptr);
+
+  if (status == ZX_OK && instance->active_) {
+    // Mark active as false to avoid a race condition if Stop() or Start() gets called in the
+    // handler.
+    instance->active_ = false;
+    instance->timer_.TimerHandler();
   }
 }
 

@@ -15,7 +15,13 @@ use std::os::unix::io::AsRawFd;
 use std::pin::pin;
 use std::task::{Poll, ready};
 
-const BUFFER_SIZE: usize = 65536;
+// LINT.IfChange
+const BUFFER_SIZE: usize = 256 * 1024;
+// LINT.ThenChange(
+//     //src/developer/ffx/lib/target/src/target_connector.rs,
+//     //src/developer/remote-control/runner/src/main.rs,
+//     //src/lib/fdomain/container/src/lib.rs
+// )
 
 #[derive(Copy, Clone)]
 enum CopyDirection {

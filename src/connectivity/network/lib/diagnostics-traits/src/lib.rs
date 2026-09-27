@@ -17,7 +17,6 @@ pub use fuchsia::*;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
-use core::convert::Infallible as Never;
 use core::fmt::{Debug, Display};
 
 use net_types::ip::IpAddress;
@@ -148,7 +147,7 @@ pub trait InspectableValue {
     fn record<I: Inspector>(&self, name: &str, inspector: &mut I);
 }
 
-impl InspectableValue for Never {
+impl InspectableValue for ! {
     fn record<I: Inspector>(&self, _name: &str, _inspector: &mut I) {
         match *self {}
     }

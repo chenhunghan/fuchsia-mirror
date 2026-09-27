@@ -8,6 +8,8 @@ library fuchsia.hardware.reset;
 type ResetDescriptor = table {
     /// The hardware-specific ID for this reset line.
     1: reset_id uint32;
+    /// The unique node ID / global ID for this reset line.
+    2: id uint32;
 };
 
 @serializable

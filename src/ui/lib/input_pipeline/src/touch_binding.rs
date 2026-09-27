@@ -992,7 +992,7 @@ mod tests {
         );
 
         // Assert there are no pending events on the receiver.
-        let event = event_receiver.try_next();
+        let event = event_receiver.try_recv();
         assert!(event.is_err());
 
         diagnostics_assertions::assert_data_tree!(inspector, root: {
@@ -1249,7 +1249,7 @@ mod tests {
             &metrics::MetricsLogger::default(),
             &input_device::InputPipelineFeatureFlags::default(),
         );
-        assert_matches!(event_receiver.try_next(), Ok(Some(events)) if events.len() == 1 && events[0].trace_id.is_some());
+        assert_matches!(event_receiver.try_recv(), Ok(events) if events.len() == 1 && events[0].trace_id.is_some());
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -1766,12 +1766,11 @@ mod tests {
         );
 
         // Expect EXACTLY one batch containing two events.
-        let batch = event_receiver.try_next().expect("Expected a batch of events");
-        let events = batch.expect("Expected events in the batch");
+        let events = event_receiver.try_recv().expect("Expected a batch of events");
         assert_eq!(events.len(), 2);
 
         // Verify no more batches.
-        assert!(event_receiver.try_next().is_err());
+        assert!(event_receiver.try_recv().is_err());
     }
 
     #[fuchsia::test]
@@ -1836,7 +1835,7 @@ mod tests {
             },
         );
 
-        let batch = event_receiver.try_next().unwrap().unwrap();
+        let batch = event_receiver.try_recv().unwrap();
 
         // Expected events: Add, Move(30), Remove.
         assert_eq!(batch.len(), 3);
@@ -1923,7 +1922,7 @@ mod tests {
             },
         );
 
-        let batch = event_receiver.try_next().unwrap().unwrap();
+        let batch = event_receiver.try_recv().unwrap();
 
         // Expected events: Add, Move(10), Move(20), Move(30), Remove.
         assert_eq!(batch.len(), 5);

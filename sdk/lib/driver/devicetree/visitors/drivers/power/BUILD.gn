@@ -6,6 +6,7 @@ group("tests") {
   deps = [
     "power-domain:tests",
     "power-element:tests",
+    "power-supply:tests",
   ]
   testonly = true
 }

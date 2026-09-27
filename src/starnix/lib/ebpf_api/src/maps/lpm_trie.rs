@@ -281,8 +281,8 @@ mod internal {
                 max_entries: schema.max_entries,
             };
 
-            // Verify that all sizes are valid and we won't see any overflows.
-            if result.checked_total_size().is_none() {
+            // Verify that all sizes are valid and won't cause any overflows.
+            if result.checked_total_size().and_then(MapBuffer::round_up_to_page_size).is_none() {
                 return Err(MapError::InvalidParam);
             }
 

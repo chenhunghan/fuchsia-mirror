@@ -619,6 +619,7 @@ template("fidl") {
       if (enable_rust) {
         # Define conversion crates
         rust_dep = "${target_name}_rust"
+
         fidl_rust_next_convert("${target_name}_rust_next_convert") {
           forward_variables_from(invoker,
                                  [

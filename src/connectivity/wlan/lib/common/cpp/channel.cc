@@ -7,7 +7,7 @@
 #include <wlan/common/channel.h>
 #include <wlan/common/logging.h>
 
-#include "fidl/fuchsia.wlan.common/cpp/wire_types.h"
+#include "fidl/fuchsia.wlan.ieee80211/cpp/wire_types.h"
 
 namespace wlan_ieee80211_wire = ::fuchsia_wlan_ieee80211::wire;
 

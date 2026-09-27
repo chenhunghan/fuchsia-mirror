@@ -10,7 +10,7 @@ use super::apic::{
 };
 use crate::arch_rs::x86::interrupts::{X86_INT_PLATFORM_BASE, X86_INT_PLATFORM_MAX};
 #[cfg(console_enabled)]
-use crate::console_rust::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 use crate::dev_interrupt::{InterruptPolarity, InterruptTriggerMode};
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE,

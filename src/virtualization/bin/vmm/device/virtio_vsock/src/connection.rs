@@ -552,19 +552,13 @@ mod tests {
 
         // Device sends response to the guest after receiving a socket from the client.
         assert!(executor.run_until_stalled(&mut state_action_fut).is_pending());
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::Response);
 
         // After transitioning to the read-write state, the device immediately sends a credit
         // to the guest since the guest has no idea what the credit status of the client is and so
         // cannot send any packets.
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::CreditUpdate);
 
         // Close connection by closing the client socket.
@@ -620,7 +614,7 @@ mod tests {
         let state_action_fut = connection.handle_state_action();
         futures::pin_mut!(state_action_fut);
         assert!(executor.run_until_stalled(&mut state_action_fut).is_pending());
-        let header = control_rx.try_next().unwrap().unwrap();
+        let header = control_rx.try_recv().unwrap();
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::Request);
 
         // Transition into a ReadWrite state.
@@ -760,10 +754,7 @@ mod tests {
 
         // The connection should have transitioned through a guest initiated shutdown state
         // and into a clean shutdown, replying to the guest with a Reset packet.
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::Reset);
     }
 }

@@ -31,6 +31,11 @@ python_host_test("python_format_test") {
   ]
 }
 
+python_host_test("bazel_root_package_labels_test") {
+  main_source = "bazel_root_package_labels_test.py"
+  sources = [ "//scripts/shac/bazel_root_package_labels.py" ]
+}
+
 python_host_test("check_header_guards_test") {
   main_source = "check_header_guards_test.py"
   sources = [ "//scripts/shac/check_header_guards.py" ]
@@ -44,6 +49,7 @@ python_host_test("commit_msg_checker_test") {
 group("tests") {
   testonly = true
   deps = [
+    ":bazel_root_package_labels_test",
     ":check_header_guards_test",
     ":commit_msg_checker_test",
     ":python_format_test",

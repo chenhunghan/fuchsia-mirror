@@ -123,8 +123,8 @@ TEST_F(MapPinTest, Pin) {
   ASSERT_OK(vmo->GetPinnedRegions(0, VmoSize(), regions, kVmoPages, &region_count));
   ASSERT_EQ(region_count, static_cast<size_t>(vmo->pinned_vmo().region_count()));
   for (size_t i = 0; i < region_count; i++) {
-    EXPECT_EQ(regions[i].size, vmo->pinned_vmo().region(i).size);
-    EXPECT_EQ(regions[i].phys_addr, vmo->pinned_vmo().region(i).phys_addr);
+    EXPECT_EQ(regions[i].size, vmo->pinned_vmo().region(static_cast<uint32_t>(i)).size);
+    EXPECT_EQ(regions[i].phys_addr, vmo->pinned_vmo().region(static_cast<uint32_t>(i)).phys_addr);
   }
 }
 
@@ -168,8 +168,8 @@ TEST_F(MapPinTest, PinSingleRegion) {
   ASSERT_OK(vmo->GetPinnedRegions(0, zx_system_get_page_size(), regions, 1, &region_count));
   ASSERT_EQ(region_count, static_cast<size_t>(vmo->pinned_vmo().region_count()));
   for (size_t i = 0; i < region_count; i++) {
-    EXPECT_EQ(regions[i].size, vmo->pinned_vmo().region(i).size);
-    EXPECT_EQ(regions[i].phys_addr, vmo->pinned_vmo().region(i).phys_addr);
+    EXPECT_EQ(regions[i].size, vmo->pinned_vmo().region(static_cast<uint32_t>(i)).size);
+    EXPECT_EQ(regions[i].phys_addr, vmo->pinned_vmo().region(static_cast<uint32_t>(i)).phys_addr);
   }
 
   // Register another larger vmo and verify that we can't get the pinned regions when indexing is

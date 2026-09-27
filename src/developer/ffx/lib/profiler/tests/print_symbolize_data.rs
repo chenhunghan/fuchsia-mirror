@@ -157,7 +157,7 @@ define_to_be_symbolized_function!(5);
 
 fn get_function_addr() -> Vec<u64> {
     vec![
-        to_be_symbolized_1 as *const () as u64 + 1,
+        to_be_symbolized_1 as *const () as u64,
         to_be_symbolized_2 as *const () as u64 + 1,
         to_be_symbolized_3 as *const () as u64 + 1,
         to_be_symbolized_4 as *const () as u64 + 1,

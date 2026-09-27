@@ -63,15 +63,21 @@ To add an external crate, do the following:
 
       You may need to provide additional configuration for crates that use a
       `build.rs` script. This configuration replaces the script, which is
-      intentionally unsupported by the build system. Configuration should be
-      placed in both:
+      intentionally unsupported by the GN build system. Configuration should be
+      placed in:
 
-      - A `[gn.package.<crate>]` section inside the `Cargo.toml` file, and
-      - `//build/bazel/update-rustc-third-party/crate_annotations.bzl`
+      - A `[gn.package.<crate>]` section inside the `Cargo.toml` file.
 
-      This configuration is used by `cargo-gnaw` which generates the GN build
-      rules, and `crate_universe` which generates the Bazel build rules. See
-      [cargo-gnaw's README][cargo-gnaw-readme] for more details.
+      When running `fx update-rustc-third-party`, these configurations
+      are automatically translated into Bazel annotations in
+      `//build/bazel/update-rustc-third-party/crate_annotations.bzl`.
+      If a crate requires Bazel-specific configuration (such as disabling
+      unsupported build scripts or specifying custom Bazel target labels),
+      overrides should be placed in:
+
+      - `//build/bazel/update-rustc-third-party/crate_annotation_overwrites.bzl`
+
+      See [cargo-gnaw's README][cargo-gnaw-readme] for more details.
 
       After committing your change locally, run `fx update-rustc-third-party`
       a second time and ensure it completes successfully without producing any

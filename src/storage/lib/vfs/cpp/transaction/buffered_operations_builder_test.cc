@@ -4,7 +4,6 @@
 
 #include "src/storage/lib/vfs/cpp/transaction/buffered_operations_builder.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/zx/vmo.h>
 #include <zircon/errors.h>
 #include <zircon/types.h>
@@ -24,6 +23,7 @@ using fs::BufferedOperationsBuilder;
 using storage::Operation;
 using storage::OperationType;
 using storage::VmoBuffer;
+using storage::vmoid_t;
 using storage::VmoidRegistry;
 
 const vmoid_t kVmoid1 = 5;

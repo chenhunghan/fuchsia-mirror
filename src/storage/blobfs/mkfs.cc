@@ -5,7 +5,6 @@
 #include "src/storage/blobfs/mkfs.h"
 
 #include <fidl/fuchsia.storage.block/cpp/wire_types.h>
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>

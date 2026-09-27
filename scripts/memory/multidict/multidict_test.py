@@ -9,18 +9,18 @@ from multidict import multidict
 
 class MultidictTest(unittest.TestCase):
     def test_empty(self) -> None:
-        self.assertEquals(multidict([]), {})
-        self.assertEquals(
+        self.assertEqual(multidict([]), {})
+        self.assertEqual(
             multidict([], value_container=set),
             {},
         )
 
     def test_simple(self) -> None:
-        self.assertEquals(multidict([(1, 2)]), {1: [2]})
-        self.assertEquals(
+        self.assertEqual(multidict([(1, 2)]), {1: [2]})
+        self.assertEqual(
             multidict([(1, 2), (3, 4), (1, "a")]), {1: [2, "a"], 3: [4]}
         )
-        self.assertEquals(
+        self.assertEqual(
             multidict([(1, 2), (3, 4), (1, "a")], value_container=set),
             {1: {2, "a"}, 3: {4}},
         )

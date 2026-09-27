@@ -6,6 +6,7 @@ package ffxutil
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	"go.fuchsia.dev/fuchsia/tools/lib/logger"
@@ -16,7 +17,7 @@ func (f *FFXInstance) Flash(ctx context.Context, target, sshKey, productBundle s
 	configs := map[string]any{
 		"discovery.mdns.enabled":          false,
 		"fastboot.usb.disabled":           true,
-		"discovery.timeout":               12000,
+		"discovery.timeout":               30000,
 		"fastboot.flash.timeout_rate":     "1",
 		"fastboot.flash.min_timeout_secs": "600",
 	}
@@ -24,8 +25,9 @@ func (f *FFXInstance) Flash(ctx context.Context, target, sshKey, productBundle s
 	// Set the machine format to json so that errors will get printed to stdout
 	// for parsing.
 	args := []string{"-v", "--machine", "json", "target", "flash", "--product-bundle", productBundle}
-	if tcp {
-		// Rebooting while flashing over TCP will error out.
+	if tcp || os.Getenv("FUCHSIA_DEVICE_TYPE") == "Sorrel" || strings.Contains(strings.ToLower(productBundle), "sorrel") {
+		// Rebooting while flashing over TCP or on Sorrel over USB can trigger
+		// hardware USB PHY re-enumeration stalls during intermediate bootloader reboots.
 		args = append(args, "--no-bootloader-reboot")
 	}
 	if sshKey != "" {

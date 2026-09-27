@@ -738,7 +738,8 @@ pub async fn verify(
                         if inline_flags.contains(InlineFlags::Data) {
                             let mut buffer =
                                 handle.allocate_buffer(FXFS_BLOCK_SIZE.get() as usize).await;
-                            let len = handle.read(0, buffer.as_mut()).await.context("read")?;
+                            let len =
+                                handle.read_aligned(0, buffer.as_mut()).await.context("read")?;
                             let f2fs_block = inode.inline_data.as_ref().unwrap();
                             assert_eq!(
                                 &buffer.to_vec()[..len],
@@ -752,7 +753,10 @@ pub async fn verify(
                             for i in 0..inode.header.block_size as u32 {
                                 if let Some(f2fs_block) = f2fs.read_data(&inode, i).await.unwrap() {
                                     let len = handle
-                                        .read(i as u64 * FXFS_BLOCK_SIZE, fxfs_buffer.as_mut())
+                                        .read_aligned(
+                                            i as u64 * FXFS_BLOCK_SIZE,
+                                            fxfs_buffer.as_mut(),
+                                        )
                                         .await
                                         .unwrap();
                                     assert_eq!(

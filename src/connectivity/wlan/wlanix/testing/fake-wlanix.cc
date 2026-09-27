@@ -298,6 +298,17 @@ void FakeWlanix::ReadApfPacketFilterData(ReadApfPacketFilterDataCompleter::Sync&
   completer.Reply(fit::ok(&response));
 }
 
+void FakeWlanix::GetLinkLayerStats(GetLinkLayerStatsCompleter::Sync& completer) {
+  AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceGetLinkLayerStats});
+  fidl::Arena arena;
+  auto stats_builder = fuchsia_wlan_wlanix::wire::LinkLayerStats::Builder(arena);
+  auto stats = stats_builder.Build();
+  auto builder = fuchsia_wlan_wlanix::wire::WifiStaIfaceGetLinkLayerStatsResponse::Builder(arena);
+  builder.stats(stats);
+  auto response = builder.Build();
+  completer.Reply(fit::ok(&response));
+}
+
 void FakeWlanix::handle_unknown_method(
     fidl::UnknownMethodMetadata<fuchsia_wlan_wlanix::WifiStaIface> metadata,
     fidl::UnknownMethodCompleter::Sync& completer) {

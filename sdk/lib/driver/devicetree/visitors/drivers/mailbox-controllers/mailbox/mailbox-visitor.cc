@@ -104,6 +104,7 @@ zx::result<> MailboxVisitor::Visit(fdf_devicetree::Node& node,
 
     fuchsia_hardware_mailbox::ChannelInfo channel_info;
     channel_info.channel(spec->channel);
+    channel_info.id(spec->channel);
     if (spec->client) {
       channel_info.client(*spec->client);
     }

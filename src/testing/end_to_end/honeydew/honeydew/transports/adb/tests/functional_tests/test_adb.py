@@ -6,7 +6,7 @@
 
 import fuchsia_base_test
 from honeydew.transports.adb import adb as adb_transport
-from mobly import asserts, signals, test_runner
+from mobly import asserts, test_runner
 
 
 class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
@@ -17,56 +17,107 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """setup_class is called once before running tests."""
         await super().setup_class()
-        if self.dut.adb is None or not await self.dut.adb.is_supported():
-            raise signals.TestAbortClass("ADB is not supported on this target")
+        # Ensure ADB is supported and enabled on this device before starting the test
+        # (raises NotSupportedError or NotEnabledError otherwise).
         self.adb = self.dut.adb
-        await self.adb.run(["wait-for-device"])
+
+    async def test_verify_supported_and_check_connection(self) -> None:
+        """Test case for ADB.verify_supported(), check_connection(), and wait_for_boot_complete()."""
+        self.adb.verify_supported()
+        self.adb.check_connection()
+        self.adb.wait_for_boot_complete()
 
     async def test_list_devices(self) -> None:
         """Test case for ADB.run(["devices", "-l"])."""
-        output = await self.adb.run(["devices", "-l"])
-        asserts.assert_in("device:", output)
+        output = self.adb.run(["devices", "-l"], include_serial=False)
+        serial = self.dut.ffx.serial_number
+        asserts.assert_regex(output, rf"{serial}\s+device\b")
 
     async def test_adb_shell(self) -> None:
         """Test case for ADB.run(["shell", ...])."""
-        output = await self.adb.run(["shell", 'echo "hello"'])
+        output = self.adb.run(["shell", 'echo "hello"'])
         asserts.assert_in("hello", output)
 
-    async def test_adb_reboot(self) -> None:
-        """Test case for ADB.run(["reboot"])."""
-        await self.adb.run(["reboot"])
+    async def test_adb_getprop_setprop(self) -> None:
+        """Test case for ADB.getprop() and ADB.setprop()."""
+        test_prop = "debug.honeydew.test_prop"
+        test_val = "test_val_123"
+        self.adb.setprop(test_prop, test_val)
+        asserts.assert_equal(self.adb.getprop(test_prop), test_val)
+
+    async def test_android_reboot(self) -> None:
+        """Test case for ensuring ADB transport works after rebooting via Android."""
+        self.adb.run(["reboot"])
+
         await self.dut.wait_for_online()
         await self.dut.on_device_boot()
-        await self.adb.run(["wait-for-device"])
-        output = await self.adb.run(["shell", 'echo "hello"'])
+
+        output = self.adb.run(["shell", 'echo "hello"'])
         asserts.assert_in("hello", output)
 
     async def test_fuchsia_reboot(self) -> None:
-        """Ensure ADB transport is functional after FuchsiaDevice reboot."""
+        """Test case for ensuring ADB transport works after rebooting via Fuchsia."""
         await self.dut.reboot()
-        await self.adb.run(["wait-for-device"])
-        output = await self.adb.run(["shell", 'echo "hello"'])
+
+        output = self.adb.run(["shell", 'echo "hello"'])
         asserts.assert_in("hello", output)
 
     async def test_adb_root_unroot(self) -> None:
-        """Test case for ADB root and unroot commands."""
+        """Test case for ADB root(), unroot(), is_root, and use_adb_root()."""
         try:
             # Ensure we start as non-root
-            await self.adb.run(["unroot"])
-            await self.adb.run(["wait-for-device"])
-            output = await self.adb.run(["shell", "id"])
+            self.adb.unroot()
+            asserts.assert_false(
+                self.adb.is_root, "Expected is_root to be False"
+            )
+            output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=2000(shell)", output)
 
             # Switch to root
-            await self.adb.run(["root"])
-            await self.adb.run(["wait-for-device"])
-            output = await self.adb.run(["shell", "id"])
+            self.adb.root()
+            asserts.assert_true(self.adb.is_root, "Expected is_root to be True")
+            output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=0(root)", output)
+
+            # Switch back to non-root
+            self.adb.unroot()
+            asserts.assert_false(
+                self.adb.is_root, "Expected is_root to be False"
+            )
+            output = self.adb.run(["shell", "id"])
+            asserts.assert_in("uid=2000(shell)", output)
+
+            # Test synchronous use_adb_root context manager
+            with self.adb.use_adb_root():
+                asserts.assert_true(
+                    self.adb.is_root, "Expected is_root to be True"
+                )
+                output = self.adb.run(["shell", "id"])
+                asserts.assert_in("uid=0(root)", output)
+
+            asserts.assert_false(
+                self.adb.is_root, "Expected is_root to be False"
+            )
+            output = self.adb.run(["shell", "id"])
+            asserts.assert_in("uid=2000(shell)", output)
+
+            # Test asynchronous use_adb_root context manager
+            async with self.adb.use_adb_root():
+                asserts.assert_true(
+                    self.adb.is_root, "Expected is_root to be True"
+                )
+                output = self.adb.run(["shell", "id"])
+                asserts.assert_in("uid=0(root)", output)
+
+            asserts.assert_false(
+                self.adb.is_root, "Expected is_root to be False"
+            )
+            output = self.adb.run(["shell", "id"])
+            asserts.assert_in("uid=2000(shell)", output)
         finally:
             # Always restore non-root state
-            await self.adb.run(["unroot"])
-            await self.adb.run(["wait-for-device"])
-            output = await self.adb.run(["shell", "id"])
+            self.adb.unroot()
+            output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=2000(shell)", output)
 
 

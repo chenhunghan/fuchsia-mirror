@@ -9,7 +9,7 @@ use chrono::Duration;
 use command::Command;
 use fuchsia_async::TimeoutExt;
 use futures::io::{AsyncRead, AsyncWrite};
-use futures::lock::Mutex;
+use futures::lock::{Mutex, MutexLockFuture};
 use futures::{AsyncReadExt, AsyncWriteExt};
 use std::io::Read;
 use std::sync::Arc;
@@ -23,7 +23,14 @@ pub use crate::command::MAX_COMMAND_LENGTH;
 
 pub const BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 
-const MAX_PACKET_SIZE: usize = 64;
+/// According to the fastboot specification this packet size should be
+/// negotiated based on the speed of the device
+///
+/// Max packet size must be 64 bytes for full-speed, 512 bytes for high-speed
+/// and 1024 bytes for Super Speed USB.
+///
+/// But we are leaving it at the maximum size to maximize compatibility
+const MAX_PACKET_SIZE: usize = 1024;
 const DEFAULT_READ_TIMEOUT_SECS: i64 = 30;
 
 #[derive(Debug, Clone)]
@@ -35,6 +42,10 @@ pub struct FastbootContext {
 impl FastbootContext {
     pub fn new() -> Self {
         Self { send_lock: Arc::new(Mutex::new(())), transfer_lock: Arc::new(Mutex::new(())) }
+    }
+
+    pub fn lock_transfer(&self) -> MutexLockFuture<'_, ()> {
+        self.transfer_lock.lock()
     }
 }
 
@@ -104,7 +115,8 @@ pub trait InfoListener {
     }
 }
 
-struct LogInfoListener {}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LogInfoListener;
 impl InfoListener for LogInfoListener {}
 
 #[async_trait]
@@ -116,15 +128,14 @@ pub trait UploadProgressListener {
 }
 
 async fn read_from_interface<T: AsyncRead + Unpin>(interface: &mut T) -> Result<Reply, ReadError> {
-    let mut buf: [u8; MAX_PACKET_SIZE] = [0; MAX_PACKET_SIZE];
+    let mut buf = vec![0u8; MAX_PACKET_SIZE];
     let size = interface.read(&mut buf).await?;
-    let (trimmed, _) = buf.split_at(size);
-    let trimmed = trimmed.to_vec();
-    let reply = Reply::try_from(trimmed.as_slice()).map_err(|e| {
-        log::debug!("fastboot: could not parse reply: {}", String::from_utf8_lossy(&trimmed));
+    let trimmed = &buf[..size];
+    let reply = Reply::try_from(trimmed).map_err(|e| {
+        log::debug!("fastboot: could not parse reply: {}", String::from_utf8_lossy(trimmed));
         ReadError::Parse(e)
     })?;
-    log::debug!("fastboot: received {reply:?}: {}", String::from_utf8_lossy(&trimmed));
+    log::debug!("fastboot: received {reply:?}: {}", String::from_utf8_lossy(trimmed));
     Ok(reply)
 }
 
@@ -132,7 +143,12 @@ async fn read<T: AsyncRead + Unpin>(
     interface: &mut T,
     listener: &(impl InfoListener + Sync),
 ) -> Result<Reply, ReadError> {
-    read_with_timeout(interface, listener, Duration::seconds(DEFAULT_READ_TIMEOUT_SECS)).await
+    read_with_timeout(
+        interface,
+        listener,
+        std::time::Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS as u64),
+    )
+    .await
 }
 
 async fn read_and_log_info<T: AsyncRead + Unpin>(interface: &mut T) -> Result<Reply, ReadError> {
@@ -143,47 +159,61 @@ pub async fn read_and_log_info_with_timeout<T: AsyncRead + Unpin>(
     interface: &mut T,
     duration: Duration,
 ) -> Result<Reply, ReadError> {
-    read_with_timeout(interface, &LogInfoListener {}, duration).await
+    let std_duration = duration.to_std().expect("converting chrono Duration to std");
+    read_with_timeout(interface, &LogInfoListener, std_duration).await
+}
+
+/// Returns true if an I/O error represents a transient USB read timeout during polling.
+fn is_timeout_error(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::TimedOut {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if err.raw_os_error() == Some(110) {
+            return true;
+        }
+        // Some legacy USB transports on Linux (such as usb_bulk) do not map raw OS errors
+        // to ErrorKind::TimedOut, but instead return ErrorKind::Other with a formatted
+        // error message (e.g. "Read error: -110" or "os error 110").
+        let s = err.to_string();
+        if s == "Read error: -110" || s.contains("os error 110") || s.contains("ETIMEDOUT") {
+            return true;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let s = err.to_string();
+        if s.contains("ETIMEDOUT") {
+            return true;
+        }
+    }
+    false
 }
 
 async fn read_with_timeout<T: AsyncRead + Unpin>(
     interface: &mut T,
     listener: &(impl InfoListener + Sync),
-    timeout: Duration,
+    timeout: std::time::Duration,
 ) -> Result<Reply, ReadError> {
-    let std_timeout = timeout.to_std().expect("converting chrono Duration to std");
-    let end_time = std::time::Instant::now() + std_timeout;
+    let end_time = std::time::Instant::now() + timeout;
     loop {
         match read_from_interface(interface).on_timeout(end_time, || Err(ReadError::Timeout)).await
         {
             Ok(Reply::Info(msg)) => listener.on_info(msg).await?,
-            #[cfg(target_os = "linux")]
-            Err(e) => {
-                // If we get a TIMEDOUT response, keep reading -- that's just the usb_bulk crate
-                // not willing to spend more than 800ms waiting for a result
-                // Desired code:
-                // if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
-                //     if ioe.kind() != std::io::ErrorKind::TimedOut {
-                //         ...
-                //     }
-                // }
-                // Unfortunately usb_bulk does not try to interpret the
-                // type of the error, but instead always sets the kind to
-                // ErrorKind::Other.  So we can't check if the kind is
-                // Timeout.  So instead, let's just read the text of
-                // the error, ugh.
-                if e.to_string() != "Read error: -110" {
-                    return Err(e);
-                }
+            Err(ReadError::Io(ref e)) if is_timeout_error(e) => {
+                // If we get a TIMEDOUT response, keep reading -- the underlying USB
+                // transport can return timeout every 800ms while polling for a result.
             }
             #[cfg(target_os = "macos")]
-            Err(_) => {
+            Err(ReadError::Io(_)) => {
                 // usb_bulk returns different values on mac vs. linux. On Linux it
                 // returns ETIMEDOUT, but on the Mac it's just a generic -1. (And
                 // Apple doesn't actually document how to determine whether a read
-                // has timed out.)  So on Mac, we'll ignore _all_ errors, and cross
+                // has timed out.)  So on Mac, we'll ignore IO errors, and cross
                 // our fingers.
             }
+            Err(e) => return Err(e),
             other => return other,
         }
         // We can't actually rely on `on_timeout()` to time out, because while
@@ -195,6 +225,78 @@ async fn read_with_timeout<T: AsyncRead + Unpin>(
             return Err(ReadError::Timeout);
         }
     }
+}
+
+/// Result of draining unread startup messages from the interface.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DrainResult {
+    /// Number of asynchronous INFO messages successfully drained.
+    pub info_count: usize,
+    /// Preserved non-INFO reply if the device returned a terminal response.
+    pub pending_reply: Option<Reply>,
+}
+
+/// Drains any pending unread asynchronous INFO messages from the interface.
+///
+/// Flushes startup messages left in the device's TX FIFO by bootloaders (e.g., U-Boot)
+/// to prevent bulk IN endpoint desynchronization.
+///
+/// The `timeout` parameter specifies the idle timeout (maximum time to wait between
+/// successive messages) while draining.
+///
+/// If a non-INFO reply (such as OKAY, FAIL, or DATA) is encountered, draining stops
+/// immediately and the reply is returned in `DrainResult` to prevent silent data loss.
+pub async fn drain_unread<T: AsyncRead + Unpin>(
+    interface: &mut T,
+    listener: &(impl InfoListener + Sync),
+    timeout: std::time::Duration,
+) -> Result<DrainResult, ReadError> {
+    let mut result = DrainResult::default();
+    let mut deadline = std::time::Instant::now() + timeout;
+    loop {
+        match read_from_interface(interface).on_timeout(deadline, || Err(ReadError::Timeout)).await
+        {
+            Ok(Reply::Info(msg)) => {
+                log::debug!("fastboot: drained asynchronous INFO message: {msg}");
+                listener.on_info(msg).await?;
+                result.info_count += 1;
+                // Reset the idle timeout deadline since we received a message
+                deadline = std::time::Instant::now() + timeout;
+            }
+            Ok(non_info) => {
+                log::warn!(
+                    "fastboot: drain_unread encountered unexpected terminal reply: {non_info:?}"
+                );
+                result.pending_reply = Some(non_info);
+                break;
+            }
+            Err(ReadError::Timeout) => {
+                break;
+            }
+            Err(ReadError::Parse(crate::reply::ParseReplyError::ReplyTooShort {
+                reply_len: 0,
+            })) => {
+                break;
+            }
+            Err(ReadError::Io(ref e)) if is_timeout_error(e) => {
+                // Ignore polling timeout and let the manual timeout check below handle it
+            }
+            #[cfg(target_os = "macos")]
+            Err(ReadError::Io(_)) => {
+                // Ignore generic Mac timeout and let the manual timeout check below handle it
+            }
+            Err(e) => {
+                log::error!("fastboot: transport error during drain_unread: {e:?}");
+                return Err(e);
+            }
+        }
+
+        // Fallback manual timeout check for blocking transports like usb_bulk
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+    }
+    Ok(result)
 }
 
 pub async fn send_with_listener<T: AsyncRead + AsyncWrite + Unpin>(
@@ -232,7 +334,8 @@ pub async fn send_with_timeout<T: AsyncRead + AsyncWrite + Unpin>(
     let bytes = Vec::<u8>::try_from(&cmd)?;
     log::debug!("Fastboot: writing command {cmd:?}: {}", String::from_utf8_lossy(&bytes));
     interface.write_all(&bytes).await?;
-    Ok(read_with_timeout(interface, &LogInfoListener {}, timeout).await?)
+    let std_timeout = timeout.to_std().expect("converting chrono Duration to std");
+    Ok(read_with_timeout(interface, &LogInfoListener, std_timeout).await?)
 }
 
 const PIPELINE_BUFFER_CHUNKS: usize = 2;
@@ -266,7 +369,7 @@ pub async fn upload_with_read_timeout<
     listener: &impl UploadProgressListener,
     timeout: Duration,
 ) -> Result<Reply, FastbootError> {
-    let _lock = ctx.transfer_lock.lock().await;
+    let _lock = ctx.lock_transfer().await;
     // We are sending "Download" in our "upload" function because we are the
     // host -- from the device's point of view, it is a download
     let reply = send(ctx.clone(), Command::Download(size), interface).await?;
@@ -369,7 +472,7 @@ pub async fn upload_from_reader<T: AsyncRead + AsyncWrite + Unpin, R: Read + ?Si
     listener: &impl UploadProgressListener,
     timeout: Duration,
 ) -> Result<Reply, FastbootError> {
-    let _lock = ctx.transfer_lock.lock().await;
+    let _lock = ctx.lock_transfer().await;
     let reply = send(ctx.clone(), Command::Download(size), interface).await?;
     let Reply::Data(s) = reply else {
         return Err(FastbootError::Upload(UploadError::UnexpectedReply { reply }));
@@ -439,7 +542,7 @@ pub async fn download<T: AsyncRead + AsyncWrite + Unpin>(
     path: &String,
     interface: &mut T,
 ) -> Result<Reply, FastbootError> {
-    let _lock = ctx.transfer_lock.lock().await;
+    let _lock = ctx.lock_transfer().await;
     // We are sending "Upload" in our "download" function because we are the
     // host -- from the device's point of view, it is an upload
     let reply = send(ctx.clone(), Command::Upload, interface).await?;
@@ -489,8 +592,11 @@ mod test {
     use super::*;
     use crate::command::ClientVariable;
     use crate::test_transport::TestTransport;
+    use std::collections::VecDeque;
     use std::io::Cursor;
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
 
     #[derive(Debug, PartialEq)]
     enum UploadEvent {
@@ -660,5 +766,224 @@ mod test {
                 "Target responded with wrong data size - received:1000 expected:1024".to_string()
             ),]
         );
+    }
+
+    #[fuchsia::test]
+    async fn test_drain_unread_consumes_pending_info_messages() {
+        let mut test_transport = TestTransport::new();
+        test_transport.extend([
+            Reply::Info("Startup notice 1".to_string()),
+            Reply::Info("Startup notice 2".to_string()),
+        ]);
+
+        let drained = drain_unread(
+            &mut test_transport,
+            &LogInfoListener,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        assert_eq!(drained, DrainResult { info_count: 2, pending_reply: None });
+
+        // After draining, the transport should be empty.
+        let drained_more = drain_unread(
+            &mut test_transport,
+            &LogInfoListener,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(drained_more, DrainResult { info_count: 0, pending_reply: None });
+    }
+
+    #[fuchsia::test]
+    async fn test_drain_unread_stops_on_eof_when_empty() {
+        let mut test_transport = TestTransport::new();
+        let drained = drain_unread(
+            &mut test_transport,
+            &LogInfoListener,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        assert_eq!(drained, DrainResult { info_count: 0, pending_reply: None });
+    }
+
+    struct MockPendingTransport;
+
+    impl AsyncRead for MockPendingTransport {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_drain_unread_stops_on_timeout_when_pending() {
+        let mut transport = MockPendingTransport;
+        let drained =
+            drain_unread(&mut transport, &LogInfoListener, std::time::Duration::from_millis(10))
+                .await
+                .unwrap();
+        assert_eq!(drained, DrainResult { info_count: 0, pending_reply: None });
+    }
+
+    #[fuchsia::test]
+    async fn test_drain_unread_preserves_unexpected_terminal_reply() {
+        let mut test_transport = TestTransport::new();
+        test_transport
+            .extend([Reply::Info("Startup notice".to_string()), Reply::Okay("0.4".to_string())]);
+
+        // Draining should consume the INFO message and stop upon seeing a non-INFO reply,
+        // preserving the unexpected terminal reply in DrainResult.
+        let drained = drain_unread(
+            &mut test_transport,
+            &LogInfoListener,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            drained,
+            DrainResult { info_count: 1, pending_reply: Some(Reply::Okay("0.4".to_string())) }
+        );
+    }
+
+    struct MockRawTransport {
+        chunks: VecDeque<std::io::Result<Vec<u8>>>,
+    }
+
+    impl MockRawTransport {
+        fn new(chunks: impl IntoIterator<Item = std::io::Result<Vec<u8>>>) -> Self {
+            Self { chunks: chunks.into_iter().collect() }
+        }
+    }
+
+    impl AsyncRead for MockRawTransport {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if let Some(res) = self.chunks.pop_front() {
+                match res {
+                    Ok(data) => {
+                        assert!(
+                            buf.len() >= data.len(),
+                            "MockRawTransport buffer too small for chunk: {} < {}",
+                            buf.len(),
+                            data.len()
+                        );
+                        buf[..data.len()].copy_from_slice(&data);
+                        Poll::Ready(Ok(data.len()))
+                    }
+                    Err(e) => Poll::Ready(Err(e)),
+                }
+            } else {
+                Poll::Ready(Ok(0))
+            }
+        }
+    }
+
+    impl AsyncWrite for MockRawTransport {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_read_with_timeout_fails_immediately_on_parse_error_containing_110() {
+        // Device sends corrupted response "X110" that fails parsing and contains "110".
+        let mut transport = MockRawTransport::new([Ok(b"X110".to_vec())]);
+        let res = read_with_timeout(
+            &mut transport,
+            &LogInfoListener,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+        match res {
+            Err(ReadError::Parse(crate::reply::ParseReplyError::UnknownReply {
+                ref reply_type,
+            })) if reply_type == "X110" => {}
+            other => {
+                panic!("Expected immediate ReadError::Parse(UnknownReply(\"X110\")), got {other:?}")
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fuchsia::test]
+    async fn test_read_with_timeout_retries_on_usb_timedout_io_error() {
+        // First read yields OS error 110 (ETIMEDOUT); second read yields OKAYDone.
+        let mut transport = MockRawTransport::new([
+            Err(std::io::Error::from_raw_os_error(110)),
+            Ok(b"OKAYDone".to_vec()),
+        ]);
+        let res =
+            read_with_timeout(&mut transport, &LogInfoListener, std::time::Duration::from_secs(1))
+                .await;
+        assert_eq!(res.unwrap(), Reply::Okay("Done".to_string()));
+    }
+
+    #[fuchsia::test]
+    async fn test_read_with_timeout_retries_on_kind_timedout_io_error() {
+        // First read yields std::io::ErrorKind::TimedOut; second read yields OKAYDone.
+        let mut transport = MockRawTransport::new([
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out")),
+            Ok(b"OKAYDone".to_vec()),
+        ]);
+        let res =
+            read_with_timeout(&mut transport, &LogInfoListener, std::time::Duration::from_secs(1))
+                .await;
+        assert_eq!(res.unwrap(), Reply::Okay("Done".to_string()));
+    }
+
+    #[fuchsia::test]
+    async fn test_drain_unread_continues_past_intermittent_timedout_io_errors() {
+        // Transport yields:
+        // 1. INFO Notice 1
+        // 2. ErrorKind::TimedOut (simulating an 800ms USB transport polling tick)
+        // 3. INFO Notice 2
+        let mut transport = MockRawTransport::new([
+            Ok(b"INFO Notice 1".to_vec()),
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "polling timeout")),
+            Ok(b"INFO Notice 2".to_vec()),
+        ]);
+
+        let drained =
+            drain_unread(&mut transport, &LogInfoListener, std::time::Duration::from_millis(50))
+                .await
+                .unwrap();
+
+        assert_eq!(drained, DrainResult { info_count: 2, pending_reply: None });
+    }
+
+    #[fuchsia::test]
+    async fn test_drain_unread_stops_when_manual_deadline_exceeded() {
+        // Transport returns TimedOut and deadline is 0, so manual deadline fallback triggers immediately.
+        let mut transport = MockRawTransport::new([Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "polling timeout",
+        ))]);
+
+        let drained =
+            drain_unread(&mut transport, &LogInfoListener, std::time::Duration::from_millis(0))
+                .await
+                .unwrap();
+
+        assert_eq!(drained, DrainResult { info_count: 0, pending_reply: None });
     }
 }

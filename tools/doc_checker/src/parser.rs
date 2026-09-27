@@ -33,6 +33,9 @@ pub(crate) fn element_from_event<'a>(
             doc_context.line_num += newlines;
             element
         }
+        Start(Tag::CodeBlock(CodeBlockKind::Fenced(code))) => {
+            read_codeblock(code, range, doc_context)
+        }
         Start(_) => parse_tag_element(event, doc_context),
         End(_) => {
             //should not happen
@@ -114,10 +117,6 @@ fn parse_tag_element<'a>(event: Event<'a>, doc_context: &mut DocContext<'a>) -> 
         }
         Start(Tag::BlockQuote(kind)) => {
             let block = read_block(Tag::BlockQuote(kind), doc_context);
-            block
-        }
-        Start(Tag::CodeBlock(CodeBlockKind::Fenced(code))) => {
-            let block = read_codeblock(code, doc_context);
             block
         }
         Start(Tag::CodeBlock(CodeBlockKind::Indented)) => {
@@ -222,13 +221,24 @@ fn read_list<'a>(starting: Option<u64>, doc_context: &mut DocContext<'a>) -> Ele
     panic!("{:?} has no end?", starting);
 }
 
-fn read_codeblock<'a>(code: CowStr<'a>, doc_context: &mut DocContext<'a>) -> Element<'a> {
+fn read_codeblock<'a>(
+    code: CowStr<'a>,
+    range: Range<usize>,
+    doc_context: &mut DocContext<'a>,
+) -> Element<'a> {
     let mut elements = vec![];
     let start = doc_context.line();
-    while let Some((event, range)) = doc_context.parser.next() {
+    while let Some((event, inner_range)) = doc_context.parser.next() {
         match event {
-            End(TagEnd::CodeBlock) => return Element::CodeBlock(code, elements, start),
-            _ => elements.push(element_from_event(event, range, doc_context)),
+            End(TagEnd::CodeBlock) => {
+                return Element::CodeBlock(
+                    code,
+                    elements,
+                    start,
+                    Some((doc_context.file_text, range)),
+                );
+            }
+            _ => elements.push(element_from_event(event, inner_range, doc_context)),
         };
     }
     // This should not happen, so panic.

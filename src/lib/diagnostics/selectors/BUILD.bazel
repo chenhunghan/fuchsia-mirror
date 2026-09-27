@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "selectors",
+    srcs = [
+        "src/error.rs",
+        "src/ir.rs",
+        "src/lib.rs",
+        "src/parser.rs",
+        "src/selectors.rs",
+        "src/validate.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+    version = "0.1.0",
+    visibility = ["//:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_common",
+        "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+        "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust_common",
+        "//src/lib/buf-read-ext",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:winnow",
+    ],
+)

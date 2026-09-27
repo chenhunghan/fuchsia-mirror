@@ -36,7 +36,10 @@ if (is_host) {
 source_set("handles") {
   sources = [ "object_info.cc" ]
   public = [ "object_info.h" ]
-  visibility = [ "//src/lib/fsl/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/fsl/*",
+  ]
   public_deps = [
     "//src/lib/fxl:common",
     "//zircon/system/ulib/zx",

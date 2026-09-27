@@ -6,21 +6,42 @@ library fuchsia.hardware.sysmem;
 using fuchsia.sysmem2;
 using zx;
 
-/// This interface is for driver-to-driver connection to sysmem. This includes
-/// both connection to both sysmem/sysmem2 `Allocator`, and special-purpose
-/// connection for custom heaps and secure memory.
+/// Privileged backend registration interface for registering external heaps or
+/// secure memory with sysmem.
+///
+/// NOTE: Most clients (including nearly all drivers) that need to allocate or
+/// share buffers should use [`fuchsia.sysmem2/Allocator`] instead of this
+/// protocol. This protocol does NOT provide buffer allocation.
+///
+/// Security model:
+/// This protocol confers high privilege and trusts connected clients:
+/// - `RegisterHeap` allows a client to back allocations for a heap type.
+/// - `RegisterSecureMem` allows a client to specify physical address ranges for
+///   which sysmem will mint physical VMOs using its MMIO resource capability.
+///
+/// Sysmem relies on Component Framework capability routing to enforce access
+/// control. Only components/drivers that specifically and legitimately need to
+/// perform one of the operations in this protocol may `use` this protocol in
+/// their component manifest.
 @discoverable
 closed protocol Sysmem {
     /// Takes the client end of a FIDL connection that'll serve
-    /// fuchsia.sysmem2.Heap.
+    /// [`fuchsia.hardware.sysmem/Heap`].
+    ///
+    /// Only drivers that legitimately implement an external sysmem heap should
+    /// call this method.
     strict RegisterHeap(resource struct {
         heap uint64;
         heap_connection client_end:Heap;
     });
 
     /// Takes the client end of a FIDL connection that'll serve
-    /// fuchsia.sysmem2.SecureMem, which is a protocol that's specific to
+    /// [`fuchsia.sysmem2/SecureMem`], which is a protocol that's specific to
     /// sysmem<->securemem concerns.
+    ///
+    /// Security note: Sysmem trusts the physical address ranges reported by the
+    /// provided `secure_mem_connection` and creates physical VMOs over them.
+    /// Only the trusted securemem driver should be permitted to call this.
     strict RegisterSecureMem(resource struct {
         secure_mem_connection client_end:fuchsia.sysmem2.SecureMem;
     });

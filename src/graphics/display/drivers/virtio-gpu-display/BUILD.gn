@@ -6,16 +6,31 @@ import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
+
 declare_args() {
   # Toggles between the C++ and Rust driver implementations.
   #
   # TODO(https://fxbug.dev/504722357): Remove the toggle after the Rust port is completed.
   # Valid values: "cpp", "rust"
-  virtio_gpu_display_flavor = "cpp"
+  virtio_gpu_display_flavor = "rust"
+}
+
+fuchsia_driver_dml("virtio-gpu-display-cpp-dml") {
+  dml = "meta/virtio-gpu-display-cpp.dml"
+  golden_bind = "meta/virtio-gpu-display.bind"
+  driver_name = "virtio-gpu-display-cpp"
+  component_name = "virtio-gpu-display"
+}
+
+fuchsia_driver_dml("virtio-gpu-display-rust-dml") {
+  dml = "meta/virtio-gpu-display-rust.dml"
+  golden_bind = "meta/virtio-gpu-display.bind"
+  driver_name = "virtio-gpu-display-rust"
+  component_name = "virtio-gpu-display"
 }
 
 driver_bind_rules("virtio-gpu-display-bind") {
-  rules = "meta/virtio-gpu-display.bind"
+  dml_label = ":virtio-gpu-display-cpp-dml"
   bind_output = "virtio-gpu-display.bindbc"
   tests = "meta/bind-tests.json"
   deps = [
@@ -125,6 +140,7 @@ fuchsia_rust_driver("driver-rust") {
   output_name = "virtio-gpu-display-rust"
   sources = [
     "rust/src/driver.rs",
+    "rust/src/engine.rs",
     "rust/src/imported_image.rs",
     "rust/src/imported_images.rs",
     "rust/src/lib.rs",
@@ -148,11 +164,13 @@ fuchsia_rust_driver("driver-rust") {
     "rust/src/virtio/pci/pci_notifications.rs",
     "rust/src/virtio/pci/pci_queue.rs",
     "rust/src/virtio_gpu_abi.rs",
+    "rust/src/virtio_gpu_device.rs",
   ]
   deps = [
     ":virtio-gpu-display-bind",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.hardware.display.engine:fuchsia.hardware.display.engine_rust_next",
+    "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_rust_next",
     "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_rust_next",
     "//sdk/fidl/fuchsia.images2:fuchsia.images2_rust_next",
     "//sdk/fidl/fuchsia.math:fuchsia.math_rust_next",
@@ -164,7 +182,9 @@ fuchsia_rust_driver("driver-rust") {
     "//sdk/rust/zx-sys",
     "//src/lib/fidl/rust_next/fidl_next",
     "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:bitfield",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
@@ -176,14 +196,14 @@ fuchsia_rust_driver("driver-rust") {
 fuchsia_driver_component("component-cpp") {
   component_name = "virtio-gpu-display"
   info = "meta/virtio-gpu-display-info.json"
-  manifest = "meta/virtio-gpu-display-cpp.cml"
+  dml_label = ":virtio-gpu-display-cpp-dml"
   deps = [ ":driver-cpp" ]
 }
 
 fuchsia_driver_component("component-rust") {
   component_name = "virtio-gpu-display"
   info = "meta/virtio-gpu-display-info.json"
-  manifest = "meta/virtio-gpu-display-rust.cml"
+  dml_label = ":virtio-gpu-display-rust-dml"
   deps = [ ":driver-rust" ]
 }
 

@@ -15,14 +15,15 @@ rustc_library("affine") {
     "src/transform.rs",
     "src/utils.rs",
   ]
-  deps = [ "//src/lib/zr" ]
+  deps = [
+    "//src/lib/zr",
+    "//third_party/rust_crates:zerocopy",
+  ]
   with_unit_tests = true
 
   # TODO(https://fxbug.dev/548748442): remove when all fixed in the code
   if (is_kernel) {
     configs += [ "//zircon/kernel/switch:allow-suspicious-arithmetic-impl" ]
-    configs += [ "//zircon/kernel/switch:allow-derivable-impls" ]
-    configs += [ "//zircon/kernel/switch:allow-match-like-matches-macro" ]
   }
 }
 

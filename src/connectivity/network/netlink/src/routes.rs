@@ -1406,7 +1406,6 @@ mod tests {
     use super::*;
 
     use std::collections::{HashMap, VecDeque};
-    use std::convert::Infallible as Never;
     use std::pin::pin;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -2527,7 +2526,7 @@ mod tests {
             FakeSender<RouteNetlinkMessage>,
             OnlyRoutes,
         >,
-    ) -> Never {
+    ) -> ! {
         let included_workers = match I::VERSION {
             IpVersion::V4 => crate::route_eventloop::IncludedWorkers {
                 routes_v4: EventLoopComponent::Present(()),

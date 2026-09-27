@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+from typing import Any
+
 from worktree import Worktree, WorktreeState
 from worktree_pool import WorktreePool
 from worktree_printer import WorktreePrinter
@@ -15,7 +17,12 @@ def _format_title(wt: Worktree) -> str:
     return wt.name
 
 
-def run(pool: WorktreePool) -> None:
-    WorktreePrinter.print_worktrees(
-        pool.get_worktrees(), title_fn=_format_title
-    )
+def run(args: Any, pool: WorktreePool) -> None:
+    if args.json:
+        WorktreePrinter.print_worktrees_json(
+            pool.get_worktrees(), include_inactive=True
+        )
+    else:
+        WorktreePrinter.print_worktrees(
+            pool.get_worktrees(), title_fn=_format_title
+        )

@@ -18,7 +18,7 @@ use maplit::hashmap;
 use net_declare::{fidl_ip, fidl_subnet};
 use net_types::ip::{GenericOverIp, Ip, IpVersion, IpVersionMarker, Ipv4Addr, Ipv6Addr};
 use netemul::RealmUdpSocket as _;
-use netstack_testing_common::realms::{Netstack, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, interfaces};
 use netstack_testing_macros::netstack_test;
 use std::collections::HashMap;
@@ -112,11 +112,13 @@ enum Server {
     B,
 }
 
-fn create_router_realm<'a, N: Netstack>(
+fn create_router_realm<'a>(
     name: &'a str,
     sandbox: &'a netemul::TestSandbox,
 ) -> netemul::TestRealm<'a> {
-    sandbox.create_netstack_realm::<N, _>(format!("{}_router_realm", name)).expect("create realm")
+    sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{}_router_realm", name))
+        .expect("create realm")
 }
 
 impl Server {
@@ -179,7 +181,7 @@ struct MulticastForwardingNetwork<'a, I: Ip> {
 impl<'a, I: Ip + FidlMulticastAdminIpExt> MulticastForwardingNetwork<'a, I> {
     const PAYLOAD: &'static str = "Hello multicast";
 
-    async fn new<N: Netstack>(
+    async fn new(
         name: &'a str,
         sandbox: &'a netemul::TestSandbox,
         router_realm: &'a netemul::TestRealm<'a>,
@@ -196,7 +198,7 @@ impl<'a, I: Ip + FidlMulticastAdminIpExt> MulticastForwardingNetwork<'a, I> {
         let multicast_socket_addr = create_socket_addr(IpAddrType::Multicast.address(I::VERSION));
         let servers: HashMap<_, _> = futures::stream::iter(servers)
             .then(|server| async move {
-                let device = create_router_connected_device::<N>(
+                let device = create_router_connected_device(
                     format!("{}_{}", name, server.name()),
                     sandbox,
                     router_realm,
@@ -209,7 +211,7 @@ impl<'a, I: Ip + FidlMulticastAdminIpExt> MulticastForwardingNetwork<'a, I> {
             .await;
         let clients: HashMap<_, _> = futures::stream::iter(clients)
             .then(|client| async move {
-                let device = create_router_connected_device::<N>(
+                let device = create_router_connected_device(
                     format!("{}_{}", name, client.name()),
                     sandbox,
                     router_realm,
@@ -644,14 +646,14 @@ async fn add_address(interface: &netemul::TestInterface<'_>, addr: fnet::Subnet)
 
 /// Creates a `RouterConnectedDevice` from the provided `config` that is
 /// connected to the `router_realm`.
-async fn create_router_connected_device<'a, N: Netstack>(
+async fn create_router_connected_device<'a>(
     name: String,
     sandbox: &'a netemul::TestSandbox,
     router_realm: &'a netemul::TestRealm<'a>,
     config: RouterConnectedDeviceConfig,
 ) -> RouterConnectedDevice<'a> {
     let realm = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_realm", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_realm", name))
         .expect("create_netstack_realm failed");
     let network =
         sandbox.create_network(format!("{}_network", name)).await.expect("create_network failed");
@@ -817,7 +819,6 @@ struct MulticastForwardingTestOptions {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(
     "ttl_same_as_route_min_ttl",
@@ -1013,7 +1014,7 @@ struct MulticastForwardingTestOptions {
     };
     "missing route"
 )]
-async fn multicast_forwarding<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
+async fn multicast_forwarding<I: Ip + FidlMulticastAdminIpExt>(
     name: &str,
     case_name: &str,
     clients: HashMap<Client, ClientConfig>,
@@ -1028,8 +1029,8 @@ async fn multicast_forwarding<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
     } = options;
     let test_name = format!("{}_{}", name, case_name);
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(&test_name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(&test_name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         &test_name,
         &sandbox,
         &router_realm,
@@ -1155,7 +1156,6 @@ struct AddMulticastRouteTestOptions {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(
     "success",
@@ -1382,7 +1382,7 @@ struct AddMulticastRouteTestOptions {
     AddMulticastRouteTestOptions::default();
     "min ttl 0 disallowed"
 )]
-async fn add_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
+async fn add_multicast_route<I: Ip + FidlMulticastAdminIpExt>(
     name: &str,
     case_name: &str,
     client: ClientConfig,
@@ -1400,8 +1400,8 @@ async fn add_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
 
     let test_name = format!("{}_{}", name, case_name);
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(&test_name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(&test_name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         &test_name,
         &sandbox,
         &router_realm,
@@ -1514,15 +1514,14 @@ async fn add_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
 /// Verify that installing a multicast route overwrites an existing route with
 /// the same src/dst address tuple.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn overwrite_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(name: &str) {
+async fn overwrite_multicast_route<I: Ip + FidlMulticastAdminIpExt>(name: &str) {
     // Setup a network with one server and two clients.
     // Originally, install a multicast route to forward packets to Client A, and
     // later overwrite it with a multicast route to forward packets to Client B.
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         name,
         &sandbox,
         &router_realm,
@@ -1574,11 +1573,10 @@ async fn overwrite_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn multiple_multicast_controllers<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(name: &str) {
+async fn multiple_multicast_controllers<I: Ip + FidlMulticastAdminIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         name,
         &sandbox,
         &router_realm,
@@ -1610,11 +1608,10 @@ async fn multiple_multicast_controllers<I: Ip + FidlMulticastAdminIpExt, N: Nets
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn watch_routing_events_hanging<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(name: &str) {
+async fn watch_routing_events_hanging<I: Ip + FidlMulticastAdminIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         name,
         &sandbox,
         &router_realm,
@@ -1654,13 +1651,10 @@ async fn watch_routing_events_hanging<I: Ip + FidlMulticastAdminIpExt, N: Netsta
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn watch_routing_events_already_hanging<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
-    name: &str,
-) {
+async fn watch_routing_events_already_hanging<I: Ip + FidlMulticastAdminIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         name,
         &sandbox,
         &router_realm,
@@ -1708,11 +1702,10 @@ async fn watch_routing_events_already_hanging<I: Ip + FidlMulticastAdminIpExt, N
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn watch_multiple_routing_events<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(name: &str) {
+async fn watch_multiple_routing_events<I: Ip + FidlMulticastAdminIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         name,
         &sandbox,
         &router_realm,
@@ -1767,13 +1760,10 @@ async fn watch_multiple_routing_events<I: Ip + FidlMulticastAdminIpExt, N: Netst
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn watch_routing_events_dropped_events<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
-    name: &str,
-) {
+async fn watch_routing_events_dropped_events<I: Ip + FidlMulticastAdminIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         name,
         &sandbox,
         &router_realm,
@@ -1839,7 +1829,6 @@ async fn watch_routing_events_dropped_events<I: Ip + FidlMulticastAdminIpExt, N:
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
 #[test_case(
     "success",
     DeviceAddress::Server(Server::A),
@@ -1904,7 +1893,7 @@ async fn watch_routing_events_dropped_events<I: Ip + FidlMulticastAdminIpExt, N:
     Err(DelRouteError::InvalidAddress);
     "link local multicast destination address"
 )]
-async fn del_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
+async fn del_multicast_route<I: Ip + FidlMulticastAdminIpExt>(
     name: &str,
     case_name: &str,
     source_address: DeviceAddress,
@@ -1914,8 +1903,8 @@ async fn del_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
 ) {
     let test_name = format!("{}_{}", name, case_name);
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(&test_name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(&test_name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         &test_name,
         &sandbox,
         &router_realm,
@@ -1957,7 +1946,6 @@ async fn del_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
 #[test_case(
     "no_matching_route_for_source_address",
     DeviceAddress::Server(Server::B),
@@ -2014,7 +2002,7 @@ async fn del_multicast_route<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
     GetRouteStatsError::InvalidAddress;
     "link local multicast destination address"
 )]
-async fn get_route_stats_errors<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
+async fn get_route_stats_errors<I: Ip + FidlMulticastAdminIpExt>(
     name: &str,
     case_name: &str,
     source_address: DeviceAddress,
@@ -2024,8 +2012,8 @@ async fn get_route_stats_errors<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
 ) {
     let test_name = format!("{}_{}", name, case_name);
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(&test_name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(&test_name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         &test_name,
         &sandbox,
         &router_realm,
@@ -2051,11 +2039,10 @@ async fn get_route_stats_errors<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn get_route_stats<I: Ip + FidlMulticastAdminIpExt, N: Netstack>(name: &str) {
+async fn get_route_stats<I: Ip + FidlMulticastAdminIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let router_realm = create_router_realm::<N>(name, &sandbox);
-    let test_network = MulticastForwardingNetwork::<I>::new::<N>(
+    let router_realm = create_router_realm(name, &sandbox);
+    let test_network = MulticastForwardingNetwork::<I>::new(
         name,
         &sandbox,
         &router_realm,

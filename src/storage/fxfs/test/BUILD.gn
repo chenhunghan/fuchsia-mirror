@@ -12,6 +12,7 @@ rustc_test("fxfs_mapper_integration_test_bin") {
   source_root = "src/mapper_integration_test.rs"
   sources = [ "src/mapper_integration_test.rs" ]
   deps = [
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
     "//sdk/fidl/fuchsia.storage.partitions:fuchsia.storage.partitions_rust",
     "//sdk/rust/zx",
@@ -33,6 +34,7 @@ rustc_test("fxfs_mapper_integration_test_bin") {
     "//src/sys/pkg/lib/fuchsia-merkle",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:log",
+    "//third_party/rust_crates:test-case",
   ]
 }
 

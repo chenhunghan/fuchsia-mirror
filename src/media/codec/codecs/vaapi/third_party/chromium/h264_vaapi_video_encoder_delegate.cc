@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include <safemath/safe_math.h>
 #include <va/va.h>
 #include <va/va_enc_h264.h>
 
@@ -14,6 +15,7 @@
 // #include "base/memory/ref_counted_memory.h"
 // #include "build/build_config.h"
 // #include "media/base/media_switches.h"
+#include "src/media/codec/codecs/vaapi/vaapi_utils.h"
 #include "src/media/third_party/chromium_media/media/gpu/gpu_video_encode_accelerator_helpers.h"
 // #include "media/gpu/macros.h"
 // #include "media/gpu/vaapi/vaapi_common.h"
@@ -217,13 +219,26 @@ bool H264VaapiVideoEncoderDelegate::Initialize(
     FX_LOGS(DEBUG) << "The pixel sizes are not even: " << visible_size_.ToString();
     return false;
   }
-  constexpr uint32_t kH264MacroblockSizeInPixels = 16;
-  coded_size_ = gfx::Size(base::bits::AlignUp(static_cast<uint32_t>(visible_size_.width()),
-                                              kH264MacroblockSizeInPixels),
-                          base::bits::AlignUp(static_cast<uint32_t>(visible_size_.height()),
-                                              kH264MacroblockSizeInPixels));
+  constexpr int kH264MacroblockSizeInPixels = 16;
+  auto aligned_width = CheckedRoundUp(visible_size_.width(), kH264MacroblockSizeInPixels);
+  auto aligned_height = CheckedRoundUp(visible_size_.height(), kH264MacroblockSizeInPixels);
+  if (!aligned_width.IsValid() || !aligned_height.IsValid()) {
+    FX_LOGS(DEBUG) << "Aligned dimensions overflowed for visible_size: "
+                   << visible_size_.ToString();
+    return false;
+  }
+  coded_size_ = gfx::Size(aligned_width.ValueOrDie(), aligned_height.ValueOrDie());
+  if (!coded_size_.GetCheckedArea().IsValid()) {
+    FX_LOGS(DEBUG) << "Coded size area overflowed: " << coded_size_.ToString();
+    return false;
+  }
   mb_width_ = coded_size_.width() / kH264MacroblockSizeInPixels;
   mb_height_ = coded_size_.height() / kH264MacroblockSizeInPixels;
+  uint32_t framesize_in_mbs = 0;
+  if (!safemath::CheckMul(mb_width_, mb_height_).AssignIfValid(&framesize_in_mbs)) {
+    FX_LOGS(DEBUG) << "Macroblock count overflowed for coded_size: " << coded_size_.ToString();
+    return false;
+  }
 
   profile_ = config.output_profile;
   level_ = config.h264_output_level.value_or(H264SPS::kLevelIDC4p0);
@@ -232,9 +247,9 @@ bool H264VaapiVideoEncoderDelegate::Initialize(
   // level that comforts Table A-1 in H.264 spec with specified bitrate,
   // framerate and dimension.
   if (!CheckH264LevelLimits(profile_, level_, config.bitrate.target_bps(), initial_framerate,
-                            mb_width_ * mb_height_)) {
-    std::optional<uint8_t> valid_level = FindValidH264Level(
-        profile_, config.bitrate.target_bps(), initial_framerate, mb_width_ * mb_height_);
+                            framesize_in_mbs)) {
+    std::optional<uint8_t> valid_level = FindValidH264Level(profile_, config.bitrate.target_bps(),
+                                                            initial_framerate, framesize_in_mbs);
     if (!valid_level) {
       FX_LOGS(DEBUG) << "Could not find a valid h264 level for" << " profile=" << profile_
                      << " bitrate=" << config.bitrate.target_bps()
@@ -294,10 +309,14 @@ bool H264VaapiVideoEncoderDelegate::Initialize(
     FX_LOGS(DEBUG) << "Packed headers are not submitted to a driver";
   }
 
+  if (!UpdateRates(AllocateBitrateForDefaultEncoding(config), initial_framerate)) {
+    return false;
+  }
+
   UpdateSPS();
   UpdatePPS();
 
-  return UpdateRates(AllocateBitrateForDefaultEncoding(config), initial_framerate);
+  return true;
 }
 
 gfx::Size H264VaapiVideoEncoderDelegate::GetCodedSize() const {
@@ -404,7 +423,7 @@ bool H264VaapiVideoEncoderDelegate::UpdateRates(const VideoBitrateAllocation& bi
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   uint32_t bitrate = bitrate_allocation.GetSumBps();
-  if (bitrate == 0 || framerate == 0)
+  if (bitrate == 0 || framerate == 0 || !safemath::CheckMul<int>(framerate, 2).IsValid())
     return false;
 
   if (curr_params_.bitrate_allocation == bitrate_allocation &&
@@ -509,6 +528,7 @@ void H264VaapiVideoEncoderDelegate::UpdateSPS() {
   current_sps_.vui_parameters_present_flag = true;
   current_sps_.timing_info_present_flag = true;
   current_sps_.num_units_in_tick = 1;
+  ZX_ASSERT(safemath::CheckMul<int>(curr_params_.framerate, 2).IsValid());
   current_sps_.time_scale = curr_params_.framerate * 2;  // See equation D-2 in spec.
   current_sps_.fixed_frame_rate_flag = true;
 

@@ -1,0 +1,26 @@
+# Test that allocating multiple releasable resources (e.g., via malloc) and releasing
+# only a subset leaves unreleased resources tracked by the verifier, causing program
+# verification to fail at exit.
+
+-- asm
+# Allocate two releasable memory buffers using malloc (helper 103).
+mov %r1, 8
+call 103
+jne %r0, 0, +2
+mov %r0, 1
+exit
+mov %r6, %r0
+mov %r1, 8
+call 103
+jne %r0, 0, +2
+mov %r0, 1
+exit
+mov %r7, %r0
+# Free only the first buffer using free (helper 104) and leave the second buffer unreleased.
+mov %r1, %r6
+call 104
+# Verification must fail at exit because the second allocation was not released.
+mov %r0, 0
+exit
+-- error
+some resources have not been released at exit time at pc 15

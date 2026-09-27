@@ -320,7 +320,7 @@ mod tests {
 
         // within 24 hrs so no report filed
         observer.on_event(StateMachineEvent::InstallerError(None)).await;
-        assert_matches!(recv.try_next(), Err(_));
+        assert_matches!(recv.try_recv(), Err(_));
 
         // hit 24 hours so file report
         time_source.advance(Duration::from_secs(60 * 60 * 24));
@@ -350,7 +350,7 @@ mod tests {
             consecutive_failed_update_checks: n,
             ..ProtocolState::default()
         });
-        assert_matches!(recv.try_next(), Err(_));
+        assert_matches!(recv.try_recv(), Err(_));
     }
 
     /// Verify we file crash reports on >= 5 consecutive failed update checks.

@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(zircon_asserts)
+build_flags(
+    name = "enable_zircon_asserts",
+    defines = ["ZX_ASSERT_LEVEL=2"],
+    visibility = ["//visibility:public"],
+)
+
+build_flags(
+    name = "zircon_asserts",
+    subflags = [":enable_zircon_asserts"] if not is_release else [],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:zircon_asserts)

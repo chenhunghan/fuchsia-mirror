@@ -91,7 +91,7 @@ impl Session {
     pub async fn recv<'a>(
         &'a self,
         ready_storage: &'a mut RxReadyStorage,
-    ) -> Result<impl Iterator<Item = Result<Buffer<Rx>>> + 'a> {
+    ) -> Result<impl ExactSizeIterator<Item = Result<Buffer<Rx>>> + 'a> {
         self.inner.recv(ready_storage).await
     }
 
@@ -205,7 +205,7 @@ impl Session {
                 }
             };
             let hold_until_frame = hold_until_frame.ok_or(Error::InvalidLease)?;
-            let handle = RxLease { handle: handle.ok_or(Error::InvalidLease)? };
+            let handle = RxLease::new(handle.ok_or(Error::InvalidLease)?);
 
             watcher.wait_until(hold_until_frame).await;
             Ok(Some((handle, (inner, watcher))))
@@ -383,7 +383,7 @@ impl Inner {
     async fn recv<'a>(
         &'a self,
         ready_storage: &'a mut RxReadyStorage,
-    ) -> Result<impl Iterator<Item = Result<Buffer<Rx>>> + 'a> {
+    ) -> Result<impl ExactSizeIterator<Item = Result<Buffer<Rx>>> + 'a> {
         poll_fn(|cx| ready_storage.poll_fifo(cx, &self.rx))
             .await
             .map_err(|status| Error::Fifo("read", "rx", status))?;
@@ -924,7 +924,14 @@ impl<'a, T> Iterator for Drain<'a, T> {
             None
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.ready.available.len();
+        (len, Some(len))
+    }
 }
+
+impl<'a, T> ExactSizeIterator for Drain<'a, T> {}
 
 impl<'a, T> Drop for Drain<'a, T> {
     fn drop(&mut self) {
@@ -1053,9 +1060,20 @@ impl Drop for RxLease {
 }
 
 impl RxLease {
+    /// Creates a lease from a delegated lease handle.
+    pub fn new(handle: netdev::DelegatedRxLeaseHandle) -> Self {
+        Self { handle }
+    }
+
     /// Peeks the internal lease.
     pub fn inner(&self) -> &netdev::DelegatedRxLeaseHandle {
         &self.handle
+    }
+}
+
+impl From<netdev::DelegatedRxLeaseHandle> for RxLease {
+    fn from(handle: netdev::DelegatedRxLeaseHandle) -> Self {
+        Self::new(handle)
     }
 }
 

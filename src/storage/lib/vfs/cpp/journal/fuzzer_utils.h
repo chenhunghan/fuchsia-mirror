@@ -3,8 +3,6 @@
 
 #ifndef SRC_STORAGE_LIB_VFS_CPP_JOURNAL_FUZZER_UTILS_H_
 #define SRC_STORAGE_LIB_VFS_CPP_JOURNAL_FUZZER_UTILS_H_
-
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/zx/vmo.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,6 +14,7 @@
 
 #include <fuzzer/FuzzedDataProvider.h>
 
+#include "src/storage/lib/block_protocol/block-fifo.h"
 #include "src/storage/lib/buffer/blocking_ring_buffer.h"
 #include "src/storage/lib/buffer/vmo_buffer.h"
 #include "src/storage/lib/buffer/vmoid_registry.h"

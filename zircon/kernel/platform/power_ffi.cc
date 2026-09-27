@@ -8,12 +8,14 @@
 #include <zircon/boot/crash-reason.h>
 
 #include <arch/regs.h>
+#include <platform/halt_token.h>
 
 extern "C" {
 
 void cpp_platform_halt(uint32_t action, uint32_t reason);
 void cpp_platform_panic_start();
 void cpp_platform_halt_cpu();
+bool cpp_halt_token_take();
 
 void cpp_platform_halt(uint32_t action, uint32_t reason) {
   platform_halt(static_cast<platform_halt_action>(action),
@@ -23,5 +25,7 @@ void cpp_platform_halt(uint32_t action, uint32_t reason) {
 void cpp_platform_panic_start() { platform_panic_start(); }
 
 void cpp_platform_halt_cpu() { platform_halt_cpu(); }
+
+bool cpp_halt_token_take() { return HaltToken::Get().Take(); }
 
 }  // extern "C"

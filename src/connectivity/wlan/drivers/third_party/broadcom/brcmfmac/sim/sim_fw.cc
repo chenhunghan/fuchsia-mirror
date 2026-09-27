@@ -17,7 +17,8 @@
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/sim/sim_fw.h"
 
 #include <arpa/inet.h>
-#include <fuchsia/wlan/ieee80211/cpp/fidl.h>
+#include <fidl/fuchsia.wlan.ieee80211/cpp/fidl.h>
+#include <lib/zx/vmar.h>
 #include <zircon/assert.h>
 #include <zircon/compiler.h>
 

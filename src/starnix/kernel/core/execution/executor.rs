@@ -107,6 +107,8 @@ where
     // `process_handle`.
     let (sender, receiver) = sync_channel::<TaskBuilder>(1);
     let result = std::thread::Builder::new().name("user-thread".to_string()).spawn(move || {
+        let _rcu_registration = fuchsia_rcu::register_thread();
+
         // Note, cross-process shared resources allocated in this function that aren't freed by the
         // Zircon kernel upon thread and/or process termination (like mappings in the shared region)
         // should be freed using the delayed finalizer mechanism and Task drop.

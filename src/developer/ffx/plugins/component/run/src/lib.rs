@@ -8,13 +8,13 @@ use component_debug_fdomain::cli::doctor::write_result_table;
 use component_debug_fdomain::cli::run_cmd;
 use component_debug_fdomain::config::resolve_raw_config_overrides;
 use component_debug_fdomain::doctor::validate_routes;
+use errors::ffx_error;
 use ffx_component::rcs::{
     connect_to_lifecycle_controller, connect_to_realm_query, connect_to_route_validator,
 };
 use ffx_component::server::{DefaultPackageServerRunner, maybe_start_server};
 use ffx_component_run_args::RunComponentCommand;
 use ffx_config::EnvironmentContext;
-use ffx_core::macro_deps::errors::ffx_error;
 use ffx_log::log_impl;
 use ffx_log_args::LogCommand;
 use ffx_writer::MachineWriter;

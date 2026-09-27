@@ -194,7 +194,7 @@ void DecryptorAdapter::CoreCodecQueueInputFormatDetails(
   QueueInputItem(CodecInputItem::FormatDetails(per_stream_override_format_details));
 }
 
-void DecryptorAdapter::CoreCodecQueueInputPacket(CodecPacket* packet) {
+void DecryptorAdapter::CoreCodecQueueInputPacket(const CodecPacket* packet) {
   QueueInputItem(CodecInputItem::Packet(packet));
 }
 

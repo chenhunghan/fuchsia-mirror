@@ -14,11 +14,6 @@ pub(super) struct MapBuffer {
     size: usize,
 }
 
-fn round_up_to_page_size(size: usize) -> usize {
-    let page_size = *MapBuffer::PAGE_SIZE;
-    (size + page_size - 1) & !(page_size - 1)
-}
-
 pub(crate) enum VmoOrName {
     Vmo(zx::Vmo),
     Name(String),
@@ -64,7 +59,7 @@ impl MapBuffer {
     /// Creates a new buffer. If `vmo_or_name` is a VMO then it's used for this
     /// map. Otherwise a new map with the specified name is allocated.
     pub fn new(size: usize, vmo_or_name: impl Into<VmoOrName>) -> Result<Self, MapError> {
-        let vmo_size = round_up_to_page_size(size);
+        let vmo_size = Self::round_up_to_page_size(size).ok_or(MapError::InvalidParam)?;
         let vmo = match vmo_or_name.into() {
             VmoOrName::Vmo(vmo) => {
                 let actual_vmo_size = vmo.get_size().map_err(|_| MapError::InvalidVmo)? as usize;
@@ -85,7 +80,13 @@ impl MapBuffer {
 
         let addr = fuchsia_runtime::vmar_root_self()
             .map(0, &vmo, 0, vmo_size, zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE)
-            .map_err(|_| MapError::InvalidVmo)?;
+            .map_err(|e| match e {
+                zx::Status::NO_MEMORY
+                | zx::Status::NO_RESOURCES
+                | zx::Status::OUT_OF_RANGE
+                | zx::Status::INVALID_ARGS => MapError::NoMemory,
+                _ => MapError::InvalidVmo,
+            })?;
 
         Ok(Self { vmo: Arc::new(vmo), addr, size })
     }
@@ -104,6 +105,14 @@ impl MapBuffer {
     pub fn round_up_to_alignment(value_size: usize) -> Option<usize> {
         Some(value_size.checked_add(Self::ALIGNMENT - 1)? & !(Self::ALIGNMENT - 1))
     }
+
+    pub fn round_up_to_page_size(size: usize) -> Option<usize> {
+        if size == 0 {
+            return None;
+        }
+        let page_size = *Self::PAGE_SIZE;
+        Some(size.checked_add(page_size - 1)? & !(page_size - 1))
+    }
 }
 
 impl Drop for MapBuffer {
@@ -114,7 +123,7 @@ impl Drop for MapBuffer {
         // references to every map used by the program.
         unsafe {
             fuchsia_runtime::vmar_root_self()
-                .unmap(self.addr, round_up_to_page_size(self.size))
+                .unmap(self.addr, Self::round_up_to_page_size(self.size).unwrap())
                 .expect("Failed to unmap VMO.");
         }
     }

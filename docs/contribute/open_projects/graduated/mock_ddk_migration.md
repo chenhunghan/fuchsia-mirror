@@ -192,25 +192,25 @@ access them with a call to `device_get_protocol()`
 
 * {Fake DDK}
 
-     ```c++
-     fake_ddk::Bind bind;
-     const fake_ddk::Protocol kTestProto = {
-       .ctx = reinterpret_cast<void*>(0x10),
-       .ops = nullptr,
-     };
+    ```c++
+    fake_ddk::Bind bind;
+    const fake_ddk::Protocol kTestProto = {
+      .ctx = reinterpret_cast<void*>(0x10),
+      .ops = nullptr,
+    };
 
-     bind.SetProtocol(8, &kTestProto);
-     ```
+    bind.SetProtocol(8, &kTestProto);
+    ```
 
 * {Mock DDK}
 
-     ```c++
-     auto parent = MockDevice::FakeRootParent();
-     const void* ctx = reinterpret_cast<void*>(0x10),
-     const void* ops = nullptr,
+    ```c++
+    auto parent = MockDevice::FakeRootParent();
+    const void* ctx = reinterpret_cast<void*>(0x10),
+    const void* ops = nullptr,
 
-     parent->AddProtocol(8, ops, ctx);
-     ```
+    parent->AddProtocol(8, ops, ctx);
+    ```
 
 
 ##### Fragment protocols
@@ -222,15 +222,15 @@ to indicate it comes from a fragment.
 
 * {Fake DDK}
 
-     ```c++
-     fake_ddk::Bind bind;
-         fbl::Array<fake_ddk::FragmentEntry> fragments(new fake_ddk::FragmentEntry[2], 2);
-         fragments[0].name = "fragment-1";
-         fragments[0].protocols.emplace_back(
-             fake_ddk::ProtocolEntry{0, fake_ddk::Protocol{nullptr, nullptr}});
-         fragments[0].protocols.emplace_back(
-             fake_ddk::ProtocolEntry{1, fake_ddk::Protocol{nullptr, nullptr}});
-         fragments[1].name = "fragment-2";
+    ```c++
+    fake_ddk::Bind bind;
+    fbl::Array<fake_ddk::FragmentEntry> fragments(new fake_ddk::FragmentEntry[2], 2);
+    fragments[0].name = "fragment-1";
+    fragments[0].protocols.emplace_back(
+        fake_ddk::ProtocolEntry{0, fake_ddk::Protocol{nullptr, nullptr}});
+    fragments[0].protocols.emplace_back(
+        fake_ddk::ProtocolEntry{1, fake_ddk::Protocol{nullptr, nullptr}});
+    fragments[1].name = "fragment-2";
     fragments[1].protocols.emplace_back(
         fake_ddk::ProtocolEntry{2, fake_ddk::Protocol{nullptr, nullptr}});
     bind.SetFragments(std::move(fragments));
@@ -238,16 +238,16 @@ to indicate it comes from a fragment.
 
 * {Mock DDK}
 
-     ```c++
-     auto parent = MockDevice::FakeRootParent();
-     void* ctx = reinterpret_cast<void*>(0x10),
-     void* ops = nullptr,
-     // Mock-ddk uses the same call as adding a
-     // normal parent protocol:
-     parent->AddProtocol(0, ops, ctx, "fragment-1");
-     parent->AddProtocol(1, ops, ctx, "fragment-1");
-     parent->AddProtocol(2, ops, ctx, "fragment-2");
-     ```
+    ```c++
+    auto parent = MockDevice::FakeRootParent();
+    void* ctx = reinterpret_cast<void*>(0x10),
+    void* ops = nullptr,
+    // Mock-ddk uses the same call as adding a
+    // normal parent protocol:
+    parent->AddProtocol(0, ops, ctx, "fragment-1");
+    parent->AddProtocol(1, ops, ctx, "fragment-1");
+    parent->AddProtocol(2, ops, ctx, "fragment-2");
+    ```
 
 
 
@@ -262,7 +262,7 @@ the device class over a fidl channel.
 
 * {Fake DDK}
 
-     ```c++
+    ```c++
     fake_ddk::Bind bind;
     TestDevice* dev  = TestDevice::Create(fake_ddk::kFakeParent);
     FidlMessenger fidl;

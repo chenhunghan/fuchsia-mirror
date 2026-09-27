@@ -16,11 +16,5 @@
             from: "#network",
             to: "#pkg-resolver",
         },
-        {
-            directory: "root-ssl-certificates",
-            from: "parent",
-            as: "swd-root-ssl-certificates",
-            to: "#system-update",
-        },
     ],
 }

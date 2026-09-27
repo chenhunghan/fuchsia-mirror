@@ -135,6 +135,10 @@ pub struct Stop {
     #[argh(switch)]
     pub abort: bool,
 
+    /// keep the trace file compressed on the host. Defaults to false.
+    #[argh(switch)]
+    pub compressed: bool,
+
     /// upload the trace file to GCS and display the Perfetto Trace Viewer URL. Defaults to false.
     #[argh(switch)]
     pub upload: bool,
@@ -305,9 +309,9 @@ pub struct Start {
     #[argh(switch)]
     pub retain_raw_fidl: bool,
 
-    /// disable zstd compression during transfer. Defaults to false.
+    /// keep the trace file compressed on the host. Defaults to false.
     #[argh(switch)]
-    pub nocompress: bool,
+    pub compressed: bool,
 
     /// upload the trace file to GCS and display the Perfetto Trace Viewer URL. Defaults to false.
     #[argh(switch)]
@@ -333,7 +337,7 @@ impl Default for Start {
             no_symbolize: false,
             no_verify_trace: false,
             retain_raw_fidl: false,
-            nocompress: false,
+            compressed: false,
             upload: false,
             bucket: None,
         }
@@ -497,5 +501,23 @@ mod tests {
         let default_start = Start::from_args(&["start"], &[]).unwrap();
         assert!(!default_start.upload);
         assert_eq!(default_start.bucket, None);
+    }
+
+    #[test]
+    fn test_start_args_compressed() {
+        let start = Start::from_args(START_CMD_NAME, &["--compressed"]).unwrap();
+        assert!(start.compressed);
+
+        let default_start = Start::from_args(START_CMD_NAME, &[]).unwrap();
+        assert!(!default_start.compressed);
+    }
+
+    #[test]
+    fn test_stop_args_compressed() {
+        let stop = Stop::from_args(&["stop"], &["--compressed"]).unwrap();
+        assert!(stop.compressed);
+
+        let default_stop = Stop::from_args(&["stop"], &[]).unwrap();
+        assert!(!default_stop.compressed);
     }
 }

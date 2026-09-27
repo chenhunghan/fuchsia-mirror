@@ -11,13 +11,12 @@ use net_types::ip::{AddrSubnetEither, Ipv4, Ipv6};
 use netemul::InterfaceConfig;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
 use netstack_testing_common::ping;
-use netstack_testing_common::realms::{Netstack, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 use test_case::test_case;
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn ping<N: Netstack>(name: &str) {
+async fn ping(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
@@ -26,7 +25,7 @@ async fn ping<N: Netstack>(name: &str) {
         let net = &net;
         async move {
             let realm = sandbox
-                .create_netstack_realm::<N, _>(format!("{}_{}", name, suffix))
+                .create_netstack_realm::<Netstack3, _>(format!("{}_{}", name, suffix))
                 .expect("failed to create realm");
             let interface = realm
                 .join_network(&net, format!("ep_{}", suffix))
@@ -55,13 +54,12 @@ async fn ping<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(net_addr_subnet!("192.0.2.1/32"); "v4")]
 #[test_case(net_addr_subnet!("fe80::1234:5678:90ab:cdef/128"); "v6_link_local")]
 #[test_case(net_addr_subnet!("2001:db8::1/128"); "v6")]
-async fn ping_self<N: Netstack>(name: &str, addr: AddrSubnetEither) {
+async fn ping_self(name: &str, addr: AddrSubnetEither) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let ep = sandbox.create_endpoint(name).await.expect("create endpoint");
     let interface =
         realm.install_endpoint(ep, InterfaceConfig::default()).await.expect("install endpoint");

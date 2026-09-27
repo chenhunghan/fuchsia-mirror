@@ -39,6 +39,9 @@ if (is_host) {
       "aemu.go",
       "qemu.go",
     ]
-    visibility = [ "//tools/*" ]
+    visibility = [
+      ":*",
+      "//tools/*",
+    ]
   }
 }

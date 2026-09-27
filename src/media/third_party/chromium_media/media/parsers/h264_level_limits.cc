@@ -134,7 +134,13 @@ bool CheckH264LevelLimits(VideoCodecProfile profile,
     return false;
   }
 
-  uint32_t mbps = framesize_in_mbs * framerate;
+  uint32_t mbps = 0;
+  if (!safemath::CheckMul(framesize_in_mbs, framerate).AssignIfValid(&mbps)) {
+    FX_LOGS(DEBUG)
+        << "Target macroblock processing rate overflowed for framesize_in_mbs="
+        << framesize_in_mbs << ", framerate=" << framerate;
+    return false;
+  }
   if (mbps > H264LevelToMaxMBPS(level)) {
     FX_LOGS(DEBUG) << "Target macroblock processing rate: " << mbps
                    << " exceeds Max: " << H264LevelToMaxMBPS(level)

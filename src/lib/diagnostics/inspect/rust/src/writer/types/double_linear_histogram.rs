@@ -25,6 +25,8 @@ impl InspectType for DoubleLinearHistogramProperty {
     }
 }
 
+crate::impl_inspect_type_internal_histogram!(DoubleLinearHistogramProperty);
+
 impl DoubleLinearHistogramProperty {
     pub(crate) fn new(
         name: Cow<'_, str>,

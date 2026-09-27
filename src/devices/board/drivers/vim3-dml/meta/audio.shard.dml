@@ -15,14 +15,14 @@
             service: "fuchsia.hardware.clock.Service",
             from: "#clock-controller-ff63c000",
             to: "#audio-controller-ff642000",
-            constraints: { id: 0x1000b },
+            constraints: { clock_id: 0x1000b },
         },
         {
             name: "clock-pll",
             service: "fuchsia.hardware.clock.Service",
             from: "#clock-controller-ff63c000",
             to: "#audio-controller-ff642000",
-            constraints: { id: 0x20002 },
+            constraints: { clock_id: 0x20002 },
         },
         {
             name: "pin-states-0",

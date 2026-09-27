@@ -2388,10 +2388,8 @@ mod tests {
         );
         let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
 
-        let report = receiver.try_next();
+        let report = receiver.try_recv();
         assert!(report.is_ok());
-        let report = report.unwrap();
-        assert!(report.is_some());
         let report = report.unwrap();
         assert_eq!(report.report.crash_signature.unwrap(), LongLeaseDetector::CRASH_SIGNATURE);
     }
@@ -2471,7 +2469,7 @@ mod tests {
 
         // We expect exactly 3 reports in the receiver (2 for A, 1 for B)
         let mut reports = Vec::new();
-        while let Ok(Some(report)) = receiver.try_next() {
+        while let Ok(report) = receiver.try_recv() {
             reports.push(report);
         }
         assert_eq!(reports.len(), 3);
@@ -2535,8 +2533,8 @@ mod tests {
         );
         let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
 
-        let res = receiver.try_next();
-        assert!(res.is_err() || res.unwrap().is_none(), "Expected no crash report to be filed");
+        let res = receiver.try_recv();
+        assert!(res.is_err(), "Expected no crash report to be filed");
 
         LeaseManager::handle_unmonitored_lease_dropped(
             true,
@@ -2556,10 +2554,8 @@ mod tests {
         );
         let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
 
-        let report = receiver.try_next();
+        let report = receiver.try_recv();
         assert!(report.is_ok());
-        let report = report.unwrap();
-        assert!(report.is_some());
         let report = report.unwrap();
         assert_eq!(report.report.crash_signature.unwrap(), LongLeaseDetector::CRASH_SIGNATURE);
 
@@ -2647,10 +2643,8 @@ mod tests {
         let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
 
         // 6. Verify report received!
-        let report = receiver.try_next();
+        let report = receiver.try_recv();
         assert!(report.is_ok());
-        let report = report.unwrap();
-        assert!(report.is_some());
         let report = report.unwrap();
         assert_eq!(report.report.crash_signature.unwrap(), LongLeaseDetector::CRASH_SIGNATURE);
 
@@ -2727,7 +2721,7 @@ mod tests {
         let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
 
         // Verify report received and history node populated
-        assert!(receiver.try_next().is_ok());
+        assert!(receiver.try_recv().is_ok());
         assert!(active_lease.history_node.borrow().is_some());
 
         // 5. Acquire an unmonitored lease again. This cancels/cleans up timer_task.
@@ -2917,7 +2911,7 @@ mod tests {
 
         // Verify that only 2 crash reports were received (suppressed on the 3rd)
         let mut report_count = 0;
-        while let Ok(Some(_report)) = receiver.try_next() {
+        while let Ok(_report) = receiver.try_recv() {
             report_count += 1;
         }
         assert_eq!(report_count, 2);

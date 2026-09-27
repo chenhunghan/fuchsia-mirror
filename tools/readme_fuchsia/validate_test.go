@@ -348,3 +348,142 @@ Source File: baz/qux.cc
 		t.Fatalf("expected 0 validation errors, got: %v", errs)
 	}
 }
+
+func TestValidate_MissingLicenseRemediationMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	projDir := filepath.Join(tmpDir, "third_party", "no_license_proj")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	readmePath := filepath.Join(projDir, "README.fuchsia")
+
+	readme := Readme{
+		FilePath:         readmePath,
+		Name:             "no_license_proj",
+		URL:              "https://example.com",
+		Revision:         "1234",
+		SecurityCritical: "no",
+	}
+
+	errs := Validate(projDir, []*Readme{&readme})
+	if len(errs) != 2 {
+		t.Fatalf("expected 2 validation errors (missing License and License File), got %d: %v", len(errs), errs)
+	}
+	for _, err := range errs {
+		if !strings.Contains(err.Error(), "fx check-licenses policy add -bug BUG_ID AllProjectsMustHaveALicense") {
+			t.Errorf("expected error to include policy add remediation command, got: %v", err)
+		}
+	}
+
+	// Verify virtual README path formats to the logical project path in remediation message
+	virtualReadmePath := filepath.Join(tmpDir, "vendor/google/tools/check-licenses/assets/readmes/prebuilt/vendor/foo/README.fuchsia")
+	virtualReadme := readme
+	virtualReadme.FilePath = virtualReadmePath
+	virtualErrs := Validate("", []*Readme{&virtualReadme})
+	for _, err := range virtualErrs {
+		if !strings.Contains(err.Error(), "AllProjectsMustHaveALicense prebuilt/vendor/foo") {
+			t.Errorf("expected virtual README error to format logical project path 'prebuilt/vendor/foo', got: %v", err)
+		}
+	}
+}
+
+func TestFindFuchsiaDir_WalksUpWithoutEnv(t *testing.T) {
+	tmpRoot := t.TempDir()
+	oldEnv := os.Getenv("FUCHSIA_DIR")
+	defer os.Setenv("FUCHSIA_DIR", oldEnv)
+	os.Setenv("FUCHSIA_DIR", "")
+
+	// Create marker file tools/check-licenses/config.json
+	cfgPath := filepath.Join(tmpRoot, "tools", "check-licenses", "config.json")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	nested := filepath.Join(tmpRoot, "third_party", "foo", "bar")
+	if got := FindFuchsiaDir(nested); got != tmpRoot {
+		t.Errorf("expected FindFuchsiaDir(%q) = %q, got %q", nested, tmpRoot, got)
+	}
+}
+
+func TestValidate_MultiBlockPolicyException(t *testing.T) {
+	tmpRoot := t.TempDir()
+	oldEnv := os.Getenv("FUCHSIA_DIR")
+	defer os.Setenv("FUCHSIA_DIR", oldEnv)
+	os.Setenv("FUCHSIA_DIR", tmpRoot)
+
+	policyDir := filepath.Join(tmpRoot, "tools", "check-licenses", "assets", "configs", "policy_exceptions", "AllProjectsMustHaveALicense")
+	if err := os.MkdirAll(policyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	policyJSON := `{
+  "policy_exceptions": {
+    "AllProjectsMustHaveALicense": [
+      {
+        "bug": "12345",
+        "description": "exempt sub-project only",
+        "paths": [
+          "third_party/parent_proj/sub_exempt"
+        ]
+      }
+    ]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(policyDir, "exempt.json"), []byte(policyJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	parentDir := filepath.Join(tmpRoot, "third_party", "parent_proj")
+	subExemptDir := filepath.Join(parentDir, "sub_exempt")
+	subNonExemptDir := filepath.Join(parentDir, "sub_non_exempt")
+	for _, d := range []string{parentDir, subExemptDir, subNonExemptDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "LICENSE"), []byte("MIT"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	readmePath := filepath.Join(parentDir, "README.fuchsia")
+	readmes := []*Readme{
+		{
+			FilePath:         readmePath,
+			Name:             "parent_proj",
+			URL:              "https://example.com",
+			Revision:         "1234",
+			SecurityCritical: "no",
+			Licenses:         []string{"MIT"},
+			LicenseFiles:     []string{"LICENSE"},
+		},
+		{
+			FilePath:         readmePath,
+			Name:             "sub_exempt",
+			Location:         "sub_exempt",
+			URL:              "https://example.com",
+			Revision:         "1234",
+			SecurityCritical: "no",
+		},
+		{
+			FilePath:         readmePath,
+			Name:             "sub_non_exempt",
+			Location:         "sub_non_exempt",
+			URL:              "https://example.com",
+			Revision:         "1234",
+			SecurityCritical: "no",
+		},
+	}
+
+	errs := Validate(parentDir, readmes)
+	// Only block [3] (sub_non_exempt) should emit missing License and License File errors.
+	if len(errs) != 2 {
+		t.Fatalf("expected 2 errors (for sub_non_exempt only), got %d: %v", len(errs), errs)
+	}
+	for _, err := range errs {
+		if !strings.Contains(err.Error(), "[3]: Missing required field") {
+			t.Errorf("expected error only on block [3], got: %v", err)
+		}
+	}
+}

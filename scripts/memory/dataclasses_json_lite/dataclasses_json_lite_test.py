@@ -19,7 +19,7 @@ class DataclassesJsonLite(unittest.TestCase):
             maybe_number: Optional[int] = None
             maybe_number2: int | None = None
 
-        self.assertEquals(
+        self.assertEqual(
             MyClass(
                 number=12,
                 numbers=[1, 2, 3],
@@ -28,7 +28,7 @@ class DataclassesJsonLite(unittest.TestCase):
             ),
             MyClass.from_dict(dict(number=12, numbers=[1, 2, 3])),  # type: ignore[attr-defined]
         )
-        self.assertEquals(
+        self.assertEqual(
             MyClass(
                 number=12, numbers=[1, 2, 3], maybe_number=13, maybe_number2=14
             ),
@@ -50,7 +50,7 @@ class DataclassesJsonLite(unittest.TestCase):
             numbers: List[int] = field(metadata=config(field_name="ns"))
             numbers2: Sequence[int] = field(metadata=config(field_name="ns2"))
 
-        self.assertEquals(
+        self.assertEqual(
             MyClass(number=12, numbers=[1, 2, 3], numbers2=[2, 3]),
             MyClass.from_dict(dict(n=12, ns=[1, 2, 3], ns2=[2, 3])),  # type: ignore[attr-defined]
         )
@@ -68,7 +68,7 @@ class DataclassesJsonLite(unittest.TestCase):
             member: UserClass
             members: List[List[UserClass]]
 
-        self.assertEquals(
+        self.assertEqual(
             MyClass(
                 member=UserClass(name="A", age=1),
                 members=[[UserClass(name="B", age=2)]],
@@ -99,7 +99,7 @@ class DataclassesJsonLite(unittest.TestCase):
                 metadata=config(decoder=decoder, field_name="O")
             )
 
-        self.assertEquals(
+        self.assertEqual(
             MyClass(
                 member=UserClass(name="A", age=1),
                 other=UserClass(name="B", age=2),
@@ -135,7 +135,7 @@ class DataclassesJsonLite(unittest.TestCase):
         )
 
     def test_composition(self) -> None:
-        self.assertEquals(
+        self.assertEqual(
             MyComposedClass.from_dict(  # type: ignore[attr-defined]
                 dict(opt_sub=dict(list_sub=[]), list_sub=[dict(list_sub=[])])
             ),

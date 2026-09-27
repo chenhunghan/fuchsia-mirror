@@ -18,12 +18,12 @@ use crate::object_store::extent::MIN_BLOCK_SIZE;
 use crate::object_store::transaction::{self, LockKey, ObjectStoreMutation, Options, lock_keys};
 use crate::object_store::volume::root_volume;
 use crate::object_store::{
-    AttributeId, AttributeKey, ChildValue, DirType, EncryptionKeys, ExtentMode, ExtentValue,
-    FsverityMetadata, HandleOptions, Mutation, NewChildStoreOptions, ObjectAttributes,
+    AttributeId, AttributeKey, BytesAndNodes, ChildValue, DirType, EncryptionKeys, ExtentMode,
+    ExtentValue, FsverityMetadata, HandleOptions, Mutation, NewChildStoreOptions, ObjectAttributes,
     ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, ProjectId,
     RootDigest, StoreInfo, StoreOptions, Timestamp, VOLUME_DATA_KEY_ID,
 };
-use crate::serialized_types::VersionedLatest;
+use crate::serialized_types::{OLD_KEY_SERIALIZATION_VERSION, VersionedLatest};
 use crate::testing::writer::Writer;
 use anyhow::{Context, Error};
 use assert_matches::assert_matches;
@@ -367,13 +367,15 @@ async fn test_malformed_allocation() {
         transaction.commit().await.expect("commit failed");
 
         {
-            let mut writer = PersistentLayerWriter::<_, AllocatorKey, AllocatorValue>::new(
-                Writer::new(&layer_handle).await,
-                1,
-                fs.block_size(),
-            )
-            .await
-            .expect("writer new");
+            let mut writer =
+                PersistentLayerWriter::<_, AllocatorKey, AllocatorValue>::new_with_version(
+                    Writer::new(&layer_handle).await,
+                    1,
+                    fs.block_size(),
+                    OLD_KEY_SERIALIZATION_VERSION,
+                )
+                .await
+                .expect("writer new");
             // We also need a discontiguous allocation, and some blocks will have been used up by
             // other things, so allocate the very last block.  Note that changing our allocation
             // strategy might break this test.
@@ -886,7 +888,7 @@ async fn test_misordered_layer_file() {
                     ObjectValue::deleted_extent(),
                 ),
                 Item::new(
-                    ObjectKey::extent(1, AttributeId::TEST_ID, 0..MIN_BLOCK_SIZE.get()),
+                    ObjectKey::extent(5, AttributeId::TEST_ID, 0..MIN_BLOCK_SIZE.get()),
                     ObjectValue::deleted_extent(),
                 ),
             ],
@@ -3602,12 +3604,10 @@ async fn test_project_accounting() {
             )
             .await
             .expect("new_transaction failed");
-        transaction.add(
+        transaction.merge_bytes_and_nodes(
             store_id,
-            Mutation::merge_object(
-                ObjectKey::project_usage(root_directory.object_id(), ProjectId::new(4).unwrap()),
-                ObjectValue::BytesAndNodes { bytes: 0, nodes: 2 },
-            ),
+            ObjectKey::project_usage(root_directory.object_id(), ProjectId::new(4).unwrap()),
+            BytesAndNodes { bytes: 0, nodes: 2 },
         );
         transaction.add(
             store_id,
@@ -3650,12 +3650,10 @@ async fn test_project_accounting() {
             )
             .await
             .expect("new_transaction failed");
-        transaction.add(
+        transaction.merge_bytes_and_nodes(
             store_id,
-            Mutation::merge_object(
-                ObjectKey::project_usage(root_directory.object_id(), ProjectId::new(5).unwrap()),
-                ObjectValue::BytesAndNodes { bytes: 0, nodes: 1 },
-            ),
+            ObjectKey::project_usage(root_directory.object_id(), ProjectId::new(5).unwrap()),
+            BytesAndNodes { bytes: 0, nodes: 1 },
         );
         transaction.add(
             store_id,
@@ -4382,7 +4380,7 @@ async fn test_invalid_bloom_filter_for_allocator() {
             // `MINIMUM_DATA_BLOCKS_FOR_BLOOM_FILTER`, and `fs.block_size()`. See the
             // `PersistentLayerWriter`'s implementation of`LayerWriter::write(..)` for details of
             // of how the items are written to the persistent layer.
-            let item_count = 1000;
+            let item_count = 3000;
             let mut items: Vec<Item<AllocatorKey, AllocatorValue>> = vec![];
             for i in 0..item_count as u64 {
                 // The range per item needs to be disjoint to avoid them being merged.

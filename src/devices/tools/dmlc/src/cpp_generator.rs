@@ -50,7 +50,8 @@ namespace {normalized_namespace} {{
             }
             h_code.push_str(&format!("enum class {name} : uint8_t {{\n"));
             for (idx, variant) in enum_def.variants.iter().enumerate() {
-                h_code.push_str(&format!("    k{variant} = {idx},\n"));
+                let cpp_variant = to_camel_case(variant);
+                h_code.push_str(&format!("    k{cpp_variant} = {idx},\n"));
             }
             h_code.push_str("};\n\n");
         }
@@ -434,7 +435,8 @@ namespace {{
             let mut sorted_fields = struct_def.fields.clone();
             sorted_fields.sort_by(|a, b| a.name.cmp(&b.name));
 
-            let all_optional = !sorted_fields.is_empty() && sorted_fields.iter().all(|f| f.optional);
+            let all_optional =
+                !sorted_fields.is_empty() && sorted_fields.iter().all(|f| f.optional);
             if all_optional {
                 cc_code.push_str("    bool has_any_field = false;\n");
             }
@@ -509,6 +511,34 @@ namespace {{
     Ok((h_code, cc_code))
 }
 
+fn to_camel_case(s: &str) -> String {
+    if s.contains('_') || s.chars().all(|c| !c.is_alphabetic() || c.is_uppercase()) {
+        let mut result = String::new();
+        for part in s.split('_') {
+            if part.is_empty() {
+                continue;
+            }
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                result.push_str(&first.to_uppercase().to_string());
+                for c in chars {
+                    result.push_str(&c.to_lowercase().to_string());
+                }
+            }
+        }
+        result
+    } else {
+        let mut chars = s.chars();
+        if let Some(first) = chars.next() {
+            let mut res = first.to_uppercase().to_string();
+            res.extend(chars);
+            res
+        } else {
+            String::new()
+        }
+    }
+}
+
 fn to_cpp_type(ty: &Type, optional: bool) -> String {
     let base = match ty {
         Type::Bool => "bool".to_string(),
@@ -557,8 +587,9 @@ fn get_value_getter(
             let num_variants = enum_def.variants.len();
             let mut str_checks = String::new();
             for variant in &enum_def.variants {
+                let cpp_variant = to_camel_case(variant);
                 str_checks
-                    .push_str(&format!("if (*s == \"{variant}\") return {name}::k{variant}; "));
+                    .push_str(&format!("if (*s == \"{variant}\") return {name}::k{cpp_variant}; "));
             }
             format!(
                 "[&]() -> std::optional<{name}> {{ if (auto s = GetString({dict_expr}, {key_expr}); s) {{ {str_checks}}} if (auto v = GetUint8({dict_expr}, {key_expr}); v) {{ if (*v < {num_variants}) return static_cast<{name}>(*v); }} return std::nullopt; }}()",
@@ -578,6 +609,45 @@ fn get_value_getter(
             )
         }
         Type::Vector(inner) => match &**inner {
+            Type::Enum(name) => {
+                let enum_def = schema
+                    .enums
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("Enum '{}' not found in schema", name))?;
+                let num_variants = enum_def.variants.len();
+                let mut str_checks = String::new();
+                for variant in &enum_def.variants {
+                    let cpp_variant = to_camel_case(variant);
+                    str_checks.push_str(&format!(
+                        "if (s == \"{variant}\") {{ res.push_back({name}::k{cpp_variant}); }} else "
+                    ));
+                }
+                format!(
+                    "[&]() -> std::optional<std::vector<{name}>> {{ \
+                        if (auto str_vec = GetStrVec({dict_expr}, {key_expr}); str_vec) {{ \
+                            std::vector<{name}> res; \
+                            for (const auto& s : *str_vec) {{ \
+                                {str_checks}{{ return std::nullopt; }} \
+                            }} \
+                            return res; \
+                        }} \
+                        if (auto uint8_vec = GetUint8Vec({dict_expr}, {key_expr}); uint8_vec) {{ \
+                            std::vector<{name}> res; \
+                            for (auto v : *uint8_vec) {{ \
+                                if (v >= {num_variants}) return std::nullopt; \
+                                res.push_back(static_cast<{name}>(v)); \
+                            }} \
+                            return res; \
+                        }} \
+                        return std::nullopt; \
+                    }}()",
+                    name = name,
+                    dict_expr = dict_expr,
+                    key_expr = key_expr,
+                    str_checks = str_checks,
+                    num_variants = num_variants
+                )
+            }
             Type::Struct(name) => {
                 let struct_def = schema.structs.get(name).ok_or_else(|| {
                     anyhow::anyhow!("Struct {} referenced in vector not found in schema", name)
@@ -1028,6 +1098,96 @@ mod tests {
             cc_code.contains("if (!has_any_field) { return std::nullopt; }"),
             "Generated code missing !has_any_field check:\n{}",
             cc_code
+        );
+    }
+
+    #[test]
+    fn test_vector_of_enums_cpp_generation() {
+        let mut enums = HashMap::new();
+        enums.insert(
+            "MyEnum".to_string(),
+            EnumDef {
+                name: "MyEnum".to_string(),
+                variants: vec!["FOO".to_string(), "BAR".to_string()],
+            },
+        );
+
+        let schema = Schema {
+            id: "fuchsia.test.Metadata".to_string(),
+            enums,
+            structs: HashMap::new(),
+            root_layout: StructDef {
+                name: "Metadata".to_string(),
+                fields: vec![Field {
+                    name: "items".to_string(),
+                    ty: Type::Vector(Box::new(Type::Enum("MyEnum".to_string()))),
+                    optional: false,
+                }],
+            },
+        };
+
+        let res = generate_cpp_parser(&[schema], "test_driver", "test_driver", "2026");
+        assert!(res.is_ok());
+        let (h_code, cc_code) = res.unwrap();
+        assert!(h_code.contains("enum class MyEnum : uint8_t {"));
+        assert!(h_code.contains("    kFoo = 0,"));
+        assert!(h_code.contains("    kBar = 1,"));
+        assert!(h_code.contains("std::vector<MyEnum> items;"));
+        assert!(
+            cc_code.contains("if (auto str_vec = GetStrVec(dict, (prefix.empty() ? \"items\" : prefix + \".items\")); str_vec)")
+        );
+        assert!(cc_code.contains("if (s == \"FOO\") { res.push_back(MyEnum::kFoo); } else if (s == \"BAR\") { res.push_back(MyEnum::kBar); }"));
+    }
+
+    #[test]
+    fn test_enum_snake_case_conversion() {
+        let mut enums = HashMap::new();
+        enums.insert(
+            "GpioButtonId".to_string(),
+            EnumDef {
+                name: "GpioButtonId".to_string(),
+                variants: vec![
+                    "VOLUME_UP".to_string(),
+                    "MIC_MUTE".to_string(),
+                    "FDR".to_string(),
+                    "KEY_A".to_string(),
+                    "MIC_AND_CAM_MUTE".to_string(),
+                ],
+            },
+        );
+
+        let root = StructDef {
+            name: "ButtonConfig".to_string(),
+            fields: vec![Field {
+                name: "id".to_string(),
+                ty: Type::Enum("GpioButtonId".to_string()),
+                optional: true,
+            }],
+        };
+
+        let mut structs = HashMap::new();
+        structs.insert("ButtonConfig".to_string(), root.clone());
+
+        let schema = Schema { id: "test_buttons".to_string(), enums, structs, root_layout: root };
+
+        let res = generate_cpp_parser(&[schema], "buttons", "buttons", "2026");
+        assert!(res.is_ok());
+        let (h_code, cc_code) = res.unwrap();
+
+        assert!(h_code.contains("enum class GpioButtonId : uint8_t {"));
+        assert!(h_code.contains("    kVolumeUp = 0,"));
+        assert!(h_code.contains("    kMicMute = 1,"));
+        assert!(h_code.contains("    kFdr = 2,"));
+        assert!(h_code.contains("    kKeyA = 3,"));
+        assert!(h_code.contains("    kMicAndCamMute = 4,"));
+
+        assert!(cc_code.contains("if (*s == \"VOLUME_UP\") return GpioButtonId::kVolumeUp;"));
+        assert!(cc_code.contains("if (*s == \"MIC_MUTE\") return GpioButtonId::kMicMute;"));
+        assert!(cc_code.contains("if (*s == \"FDR\") return GpioButtonId::kFdr;"));
+        assert!(cc_code.contains("if (*s == \"KEY_A\") return GpioButtonId::kKeyA;"));
+        assert!(
+            cc_code
+                .contains("if (*s == \"MIC_AND_CAM_MUTE\") return GpioButtonId::kMicAndCamMute;")
         );
     }
 }

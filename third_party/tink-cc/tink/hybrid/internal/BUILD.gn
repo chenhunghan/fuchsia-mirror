@@ -203,7 +203,9 @@ source_set("hpke_util") {
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/tink-cc/proto:hpke_proto",
+    "//third_party/tink-cc/tink/hybrid:hpke_parameters",
     "//third_party/tink-cc/tink/internal:ec_util",
+    "//third_party/tink-cc/tink/internal:output_prefix_util",
     "//third_party/tink-cc/tink/subtle:common_enums",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
@@ -245,6 +247,7 @@ source_set("config_2026") {
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
     "//third_party/abseil-cpp/absl/status:statusor",
+    "//third_party/boringssl:crypto",
     "//third_party/tink-cc/tink:configuration",
     "//third_party/tink-cc/tink:hybrid_decrypt",
     "//third_party/tink-cc/tink:hybrid_encrypt",
@@ -256,6 +259,28 @@ source_set("config_2026") {
     "//third_party/tink-cc/tink/hybrid:hybrid_decrypt_wrapper",
     "//third_party/tink-cc/tink/hybrid:hybrid_encrypt_wrapper",
     "//third_party/tink-cc/tink/internal:configuration_impl",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
+# CC Library : key_gen_config_2026
+source_set("key_gen_config_2026") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/hybrid/internal/key_gen_config_2026.cc",
+    "//third_party/tink-cc/src/tink/hybrid/internal/key_gen_config_2026.h",
+  ]
+  public_deps = [
+    ":hpke_private_key_manager",
+    ":hpke_public_key_manager",
+    "//third_party/abseil-cpp/absl/memory",
+    "//third_party/abseil-cpp/absl/status",
+    "//third_party/boringssl:crypto",
+    "//third_party/tink-cc/tink:key_gen_configuration",
+    "//third_party/tink-cc/tink/hybrid:ecies_aead_hkdf_private_key_manager",
+    "//third_party/tink-cc/tink/hybrid:ecies_aead_hkdf_public_key_manager",
+    "//third_party/tink-cc/tink/internal:key_gen_configuration_impl",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }

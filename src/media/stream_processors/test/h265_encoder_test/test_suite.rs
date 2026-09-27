@@ -4,8 +4,8 @@
 
 use anyhow::format_err;
 use async_trait::async_trait;
+use fidl_fuchsia_images2 as images2;
 use fidl_fuchsia_media::*;
-use fidl_fuchsia_sysmem as sysmem;
 use log::info;
 use std::io::Write;
 use std::rc::Rc;
@@ -88,7 +88,7 @@ impl OutputValidator for H265NalValidator {
 
 pub struct H265EncoderTestCase {
     pub num_frames: usize,
-    pub input_format: sysmem::ImageFormat2,
+    pub input_format: images2::ImageFormat,
     // This is a function because FIDL unions are not Copy or Clone.
     pub settings: Rc<dyn Fn() -> EncoderSettings>,
     pub expected_key_frames: Option<usize>,
@@ -139,7 +139,7 @@ impl H265EncoderTestCase {
 
     fn create_test_stream(&self) -> Result<Rc<VideoFrameStream>> {
         Ok(Rc::new(VideoFrameStream::create(
-            self.input_format,
+            self.input_format.clone(),
             self.num_frames,
             self.settings.clone(),
             self.get_frame_rate(),

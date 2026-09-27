@@ -4,7 +4,6 @@
 
 #include "src/storage/blobfs/blob.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/zx/result.h>
 #include <lib/zx/time.h>
 #include <lib/zx/vmo.h>
@@ -38,6 +37,7 @@
 #include "src/storage/blobfs/cache_node.h"
 #include "src/storage/blobfs/common.h"
 #include "src/storage/blobfs/compression_settings.h"
+#include "src/storage/blobfs/delivery_blob_private.h"
 #include "src/storage/blobfs/format.h"
 #include "src/storage/blobfs/mkfs.h"
 #include "src/storage/blobfs/test/blob_utils.h"
@@ -427,6 +427,36 @@ TEST_P(BlobTest, CheckerboardFragmentationExhaustsJournalOnBlobWrite) {
   // number of writes will exceed the journal size.
   zx::result<fbl::RefPtr<Blob>> large_blob = CreateBlob(large_delivery_blob);
   ASSERT_OK(large_blob);
+}
+
+TEST_P(BlobTest, DeliveryBlobLengthMismatchFails) {
+  auto blob_data = TestBlobData::Create(64);
+  auto delivery_blob =
+      TestDeliveryBlob::CreateWithCompressionAlgorithm(blob_data, GetCompressionAlgorithm());
+
+  std::vector<uint8_t> corrupted_data(delivery_blob.data().begin(), delivery_blob.data().end());
+  {
+    // Need to force the data into alignment before we operate on it.
+    DeliveryBlobHeader header;
+    std::memcpy(&header, corrupted_data.data(), sizeof(DeliveryBlobHeader));
+
+    uint8_t* metadata_ptr = corrupted_data.data() + sizeof(DeliveryBlobHeader);
+    MetadataType1 metadata;
+    std::memcpy(&metadata, metadata_ptr, sizeof(MetadataType1));
+
+    metadata.payload_length += 1024;
+    metadata.checksum = metadata.Checksum(header);
+
+    std::memcpy(metadata_ptr, &metadata, sizeof(MetadataType1));
+  }
+
+  fbl::RefPtr blob = fbl::MakeRefCounted<Blob>(*blobfs(), delivery_blob.digest());
+  ASSERT_OK(blobfs()->GetCache().Add(blob));
+  ASSERT_OK(blob->Truncate(delivery_blob.data().size()));
+
+  size_t out_actual;
+  ASSERT_STATUS(blob->Write(corrupted_data.data(), corrupted_data.size(), 0, &out_actual),
+                ZX_ERR_IO_DATA_INTEGRITY);
 }
 
 std::string GetTestParamName(

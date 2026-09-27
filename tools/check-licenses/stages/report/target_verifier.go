@@ -13,7 +13,36 @@ import (
 
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline"
 	"go.fuchsia.dev/fuchsia/tools/check-licenses/readme"
+	"go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate"
 )
+
+func isWithin(parent, child string) bool {
+	if parent == "" || child == "" {
+		return false
+	}
+	rel, err := filepath.Rel(parent, child)
+	return err == nil && !strings.HasPrefix(rel, "..")
+}
+
+func matchesTarget(targetPath string, isDir bool, filePath string) bool {
+	if isDir {
+		return isWithin(targetPath, filePath)
+	}
+	return filePath == targetPath
+}
+
+func errorMatchesTarget(targetPath string, isDir bool, checkName, filePath, projPath string) bool {
+	if matchesTarget(targetPath, isDir, filePath) {
+		return true
+	}
+	isProjectError := filePath == "" || validate.IsProjectScopePolicy(checkName)
+	if !isProjectError {
+		return false
+	}
+	// Match if the target is within the project (e.g., targeting a file or the project dir itself),
+	// or if the target is a parent directory that contains the project.
+	return isWithin(projPath, targetPath) || (isDir && isWithin(targetPath, projPath))
+}
 
 // Check names emitted by TargetComplianceVerifier.
 const (
@@ -96,31 +125,7 @@ func (v *TargetComplianceVerifier) Run(ctx context.Context, projects []*pipeline
 				}
 				isDir := targetIsDir[targetPath]
 
-				matches := false
-				if isDir {
-					if filePath != "" {
-						rel, err := filepath.Rel(targetPath, filePath)
-						if err == nil && !strings.HasPrefix(rel, "..") {
-							matches = true
-						}
-					} else if projPath != "" {
-						rel, err := filepath.Rel(projPath, targetPath)
-						if err == nil && !strings.HasPrefix(rel, "..") {
-							matches = true
-						}
-					}
-				} else {
-					if filePath == targetPath {
-						matches = true
-					} else if filePath == "" && projPath != "" {
-						rel, err := filepath.Rel(projPath, targetPath)
-						if err == nil && !strings.HasPrefix(rel, "..") {
-							matches = true
-						}
-					}
-				}
-
-				if matches {
+				if errorMatchesTarget(targetPath, isDir, e.CheckName, filePath, projPath) {
 					relPath := v.relPath(e.FilePath)
 					if relPath == "" {
 						relPath = v.relPath(targetPath)
@@ -165,12 +170,11 @@ func (v *TargetComplianceVerifier) Run(ctx context.Context, projects []*pipeline
 
 			relTargetClean, err := filepath.Rel(proj.RootPath, absTarget)
 			targetInProj := err == nil && !strings.HasPrefix(relTargetClean, "..")
-			projInTarget := false
-			if isDir {
-				relProjFromTarget, err := filepath.Rel(absTarget, proj.RootPath)
-				projInTarget = err == nil && !strings.HasPrefix(relProjFromTarget, "..")
-			}
-			if !targetInProj && !projInTarget {
+			projInTarget := isDir && isWithin(absTarget, proj.RootPath)
+			// Virtual READMEs reside under tools/check-licenses/assets/readmes/ outside proj.RootPath,
+			// so explicitly check if the target path is the project's governing README.
+			isReadmeTarget := filepath.Clean(absTarget) == filepath.Clean(proj.Readme.Path)
+			if !targetInProj && !projInTarget && !isReadmeTarget {
 				continue
 			}
 
@@ -234,8 +238,6 @@ func (v *TargetComplianceVerifier) Run(ctx context.Context, projects []*pipeline
 			readmeMatchesAll := readme.DeclarationsMatchAll(origs, updated)
 
 			relReadme := v.relPath(proj.Readme.Path)
-
-			isReadmeTarget := filepath.Clean(absTarget) == filepath.Clean(proj.Readme.Path)
 
 			var expectedEntry string
 			var actualEntry string

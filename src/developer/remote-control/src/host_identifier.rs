@@ -29,6 +29,12 @@ impl DefaultIdentifier {
     }
 }
 
+const MILESTONE: &str = include_str!("../../../../integration/MILESTONE");
+
+pub(crate) fn current_f_release() -> Option<u32> {
+    MILESTONE.trim().parse::<u32>().ok()
+}
+
 #[async_trait::async_trait]
 impl Identifier for DefaultIdentifier {
     async fn identify(&self) -> Result<rcs::IdentifyHostResponse, rcs::IdentifyHostError> {
@@ -36,6 +42,7 @@ impl Identifier for DefaultIdentifier {
             nodename: Some("fuchsia-default-nodename".into()),
             serial_number: Some("fuchsia-default-serial-number".into()),
             boot_timestamp_nanos: Some(self.boot_timestamp_nanos),
+            f_release: current_f_release(),
             ..Default::default()
         })
     }
@@ -167,6 +174,7 @@ impl Identifier for HostIdentifier {
             product_config,
             board_config,
             boot_id,
+            f_release: current_f_release(),
             ..Default::default()
         })
     }

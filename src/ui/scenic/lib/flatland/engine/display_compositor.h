@@ -37,7 +37,7 @@ class DisplayCompositorTest;
 
 using allocation::BufferCollectionUsage;
 
-// Provides overridable default values for constructing a DisplayCompositor.
+// Provides overridable default values for constructing a `DisplayCompositor`.
 struct DisplayCompositorConfig {
   // Whether to attempt display composition at all. If false we always fall back to GPU-compositing.
   bool enable_direct_to_display = true;
@@ -49,40 +49,40 @@ struct DisplayCompositorConfig {
   bool enable_frame_counter_overlay = false;
 };
 
-// The DisplayCompositor is responsible for compositing Flatland render data onto the display(s).
+// The `DisplayCompositor` is responsible for compositing Flatland render data onto the display(s).
 // It accomplishes this either by direct hardware compositing via the display coordinator
 // interface, or rendering on the GPU via a custom renderer API. It also handles the
 // registration of sysmem buffer collections and importation of images to both the
-// display coordinator and the renderer via the BufferCollectionImporter interface. The
-// BufferCollectionImporter interface is how Flatland instances communicate with the
-// DisplayCompositor, providing it with the necessary data to render without exposing to Flatland
-// the DisplayCoordinator or other dependencies.
+// display coordinator and the renderer via the `BufferCollectionImporter` interface. The
+// `BufferCollectionImporter` interface is how Flatland sessions communicate with the
+// `DisplayCompositor`, providing it with the necessary data to render without exposing to Flatland
+// the `DisplayCoordinator` or other dependencies.
 class DisplayCompositor final : public allocation::BufferCollectionImporter,
                                 public std::enable_shared_from_this<DisplayCompositor> {
  public:
-  // Describes the result of RenderFrame().  If it succeeds it is either by showing client images
+  // Describes the result of `RenderFrame()`.  If it succeeds it is either by showing client images
   // directly on the display, or by first using the GPU to composite them into a single image.
   enum class RenderFrameResult { kDirectToDisplay, kGpuComposition, kFailure };
-  // Args which can be passed to customize RenderFrame() behavior in tests.  The default values are
-  // the ones used in production.
+  // Args which can be passed to customize `RenderFrame()` behavior in tests.  The default values
+  // are the ones used in production.
   struct RenderFrameTestArgs {
     bool force_gpu_composition = false;
 
-    // This is a workaround so that RenderFrame() can provide a default value, while still allowing
-    // callers to use aggregate initialization syntax.  Adding a default constructor would sacrifice
-    // this ability.  See:
+    // This is a workaround so that `RenderFrame()` can provide a default value, while still
+    // allowing callers to use aggregate initialization syntax.  Adding a default constructor would
+    // sacrifice this ability.  See:
     // https://stackoverflow.com/questions/53408962/try-to-understand-compiler-error-message-default-member-initializer-required-be
     static RenderFrameTestArgs Default() { return {}; }
   };
 
-  // TODO(https://fxbug.dev/42145655): The DisplayCompositor has multiple parts of its code where
+  // TODO(https://fxbug.dev/42145655): The `DisplayCompositor` has multiple parts of its code where
   // usage of the display coordinator is protected by locks, because of the multithreaded
-  // environment of flatland. Ideally, we'd want the DisplayCompositor to have sole ownership of the
-  // display coordinator - meaning that it would require a unique_ptr instead of a shared_ptr. But
-  // since access to the real display coordinator is provided to clients via a shared_ptr, we take
-  // in a shared_ptr as a parameter here. However, this could cause problems with our locking
-  // mechanisms, as other display-coordinator clients could be accessing the same functions and/or
-  // state at the same time as the DisplayCompositor without making use of locks.
+  // environment of flatland. Ideally, we'd want the `DisplayCompositor` to have sole ownership of
+  // the display coordinator, i.e. it would require a `unique_ptr` instead of a `shared_ptr`.
+  // But since access to the real display coordinator is provided to clients via a `shared_ptr`,
+  // we take in a `shared_ptr` as a parameter here. However, this could cause problems with our
+  // locking mechanisms, as other display-coordinator clients could be accessing the same functions
+  // and/or state at the same time as the `DisplayCompositor` without making use of locks.
   DisplayCompositor(async_dispatcher_t* main_dispatcher,
                     std::shared_ptr<display::CoordinatorProxy> coordinator_proxy,
                     const std::shared_ptr<Renderer>& renderer,
@@ -91,7 +91,7 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
 
   ~DisplayCompositor() override;
 
-  // |BufferCollectionImporter|
+  // `BufferCollectionImporter`
   // Only called from the main thread.
   fpromise::promise<> ImportBufferCollection(
       allocation::GlobalBufferCollectionId collection_id,
@@ -99,18 +99,18 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
       fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token, BufferCollectionUsage usage,
       std::optional<fuchsia_math::SizeU> size) override FXL_LOCKS_EXCLUDED(lock_);
 
-  // |BufferCollectionImporter|
+  // `BufferCollectionImporter`
   // Only called from the main thread.
   void ReleaseBufferCollection(allocation::GlobalBufferCollectionId collection_id,
                                BufferCollectionUsage usage_type) override FXL_LOCKS_EXCLUDED(lock_);
 
-  // |BufferCollectionImporter|
+  // `BufferCollectionImporter`
   // Called from main thread or Flatland threads.
   fpromise::promise<> ImportBufferImage(const allocation::ImageMetadata& metadata,
                                         BufferCollectionUsage usage_type) override
       FXL_LOCKS_EXCLUDED(lock_);
 
-  // |BufferCollectionImporter|
+  // `BufferCollectionImporter`
   // Called from main thread or Flatland threads.
   void ReleaseBufferImage(allocation::GlobalImageId image_id) override FXL_LOCKS_EXCLUDED(lock_);
 
@@ -118,7 +118,7 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   // images, or it may involve first using the GPU to composite (some of) these images into a single
   // image which is then scanned out.
   //
-  // |args| can be used to customize behavior in tests.  Production code should omit this arg; the
+  // `args` can be used to customize behavior in tests.  Production code should omit this arg; the
   // default values are correct for production use cases.
   //
   // Only called from the main thread.
@@ -130,11 +130,11 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
       // Allows customization of behavior for tests.  Default values are used in production.
       RenderFrameTestArgs test_args = RenderFrameTestArgs::Default()) FXL_LOCKS_EXCLUDED(lock_);
 
-  // Register a new display to the DisplayCompositor, which also generates the render targets to be
-  // presented on the display when compositing on the GPU. If |num_render_targets| is 0, this
+  // Register a new display to the `DisplayCompositor`, which also generates the render targets to
+  // be presented on the display when compositing on the GPU. If `num_render_targets` is 0, this
   // function will not create any render targets for GPU composition for that display. The buffer
   // collection info is also returned back to the caller via an output parameter
-  // |num_render_targets| is 0. Otherwise, a valid handle to return the buffer collection data is
+  // `num_render_targets` is 0. Otherwise, a valid handle to return the buffer collection data is
   // required.
   // TODO(https://fxbug.dev/42137737): We need to figure out exactly how we want the display to
   // anchor to the Flatland hierarchy. Only called from the main thread.
@@ -152,6 +152,27 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   // Clamps the minimum value for all channels on all pixels on the display to this number.
   // Only called from the main thread.
   bool SetMinimumRgb(uint8_t minimum_rgb) FXL_LOCKS_EXCLUDED(lock_);
+
+  // Sets the power mode of `display_id`, synchronously. Returns `ZX_OK`, or one of the
+  // errors of `fuchsia.ui.display.singleton/DisplayPower`:
+  // - `ZX_ERR_NOT_FOUND` if this compositor or the coordinator does not have the display
+  // - `ZX_ERR_NOT_SUPPORTED` if the driver or hardware cannot do `mode`
+  // - `ZX_ERR_INTERNAL` for any other failure.
+  //
+  // On `kOff`, frames applied before this call will never be acknowledged by a vsync, so
+  // their release fences are signaled and their frame-presented callbacks invoked now;
+  // then a solid black config is committed, so that the panel shows black rather than the
+  // last frame when it is powered on again. The dropped configs and flushed fences are
+  // shared by all displays.
+  //
+  // Only called from the main thread.
+  zx_status_t SetDisplayPowerMode(display::DisplayId display_id,
+                                  fuchsia_hardware_display_types::PowerMode mode)
+      FXL_LOCKS_EXCLUDED(lock_);
+
+  // False for a display this compositor does not have. Only called from the main
+  // thread.
+  bool IsDisplayDark(display::DisplayId display_id) const;
 
   display::CoordinatorProxy* GetDisplayCoordinatorForTest() { return &display_coordinator_; }
 
@@ -198,12 +219,18 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
 
     // Keeps track of display mode that needs to be set before next `ApplyConfig()`.
     std::optional<display::WireDisplayMode> updated_display_mode;
+
+    // True after `SetDisplayPowerMode(kOff)` succeeded for this display, until another
+    // mode succeeds. While true, a vsync for an unknown config stamp is expected
+    // (see `OnVsync()`).
+    bool is_dark = false;
   };
 
   // Notifies the compositor that a vsync has occurred, in response to a display configuration
   // applied by the compositor.  It is the compositor's responsibility to signal any release fences
-  // corresponding to the frame identified by |frame_number|.
-  void OnVsync(zx::time_monotonic timestamp, display::WireConfigStamp displayed_config_stamp);
+  // corresponding to the frame identified by `frame_number`.
+  void OnVsync(display::DisplayId display_id, zx::time_monotonic timestamp,
+               display::WireConfigStamp displayed_config_stamp);
 
   fpromise::promise<std::vector<allocation::ImageMetadata>> AllocateDisplayRenderTargets(
       bool use_protected_memory, uint32_t num_render_targets, const fuchsia_math::SizeU& size,
@@ -211,7 +238,7 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
       fuchsia_sysmem2::BufferCollectionInfo* out_collection_info = nullptr)
       FXL_LOCKS_EXCLUDED(lock_);
 
-  // Generates a new FrameEventData struct to be used with a render target on a display.
+  // Generates a new `FrameEventData` struct to be used with a render target on a display.
   FrameEventData NewFrameEventData() FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Used when we're forced to fall back to GPU rendering.
@@ -226,12 +253,12 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   // be completed.
   bool SetRenderDataOnDisplay(const RenderData& data) FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  // Calls SetRenderData for each item in |render_data_list| and applies direct-to-display color
-  // conversion. Return false if this fails for any RenderData.
+  // Calls `SetRenderData` for each item in `render_data_list` and applies direct-to-display color
+  // conversion. Return false if this fails for any `RenderData`.
   bool TryDirectToDisplay(std::span<const RenderData> render_data_list, uint64_t frame_number,
                           uint64_t trace_flow_id) FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  // Sets the provided layers onto the display referenced by the given display_id.
+  // Sets the provided layers onto the display referenced by the given `display_id`.
   void SetDisplayLayers(display::DisplayId display_id, const std::span<display::LayerId>& layers)
       FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
@@ -240,15 +267,15 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
                        const std::array<float, 4>& color, const types::BlendMode& blend_mode)
       FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  // Takes a ResolvedLayer and directly composites it to a hardware layer on the display.
+  // Takes a `ResolvedLayer` and directly composites it to a hardware layer on the display.
   void ApplyLayerImage(const display::LayerId& layer_id, const ResolvedLayer& layer,
                        const display::EventId& wait_id) FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  // Applies the config to the display coordinator and record the corresponding ConfigStamp, so that
-  // we can observe Vsync events to know when this config was actually displayed.
+  // Applies the config to the display coordinator and record the corresponding `ConfigStamp`, so
+  // that we can observe Vsync events to know when this config was actually displayed.
   //
-  // This should only be called after CheckConfig() has verified that the config is okay, since
-  // ApplyConfig does not return any errors.
+  // This should only be called after `CheckConfig()` has verified that the config is okay, since
+  // `ApplyConfig()` does not return any errors.
   zx::result<> ApplyConfig(uint64_t frame_number, uint64_t trace_flow_id)
       FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
@@ -268,12 +295,12 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
       FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // This mutex protects access to class members that are accessed on main thread and the Flatland
-  // threads. All the methods of this class are run of |main_dispatcher_| except for
-  // ImportBufferImage() and ReleaseBufferImage(), where the shared data structures are guarded by
-  // this.
+  // threads. All the methods of this class are run of `main_dispatcher_` except for
+  // `ImportBufferImage()` and `ReleaseBufferImage()`, where the shared data structures are guarded
+  // by this.
   //
   // TODO(https://fxbug.dev/42120738): Convert this to a lock-free structure. This is a unique
-  // case since we are talking to a FIDL interface (display_coordinator_) through a lock.
+  // case since we are talking to a FIDL interface (`display_coordinator_`) through a lock.
   // We either need lock-free threadsafe FIDL bindings, multiple channels to the display
   // coordinator, or something else.
   mutable std::mutex lock_;
@@ -284,9 +311,9 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   // Thin proxy to optimize communication with `fuchsia.hardware.display/Coordinator`.
   display::CoordinatorProxy& display_coordinator_ FXL_GUARDED_BY(lock_);
 
-  // Maps a buffer collection ID to a BufferCollection in the same domain as the token with
-  // display constraints set. This is used as a bridge between ImportBufferCollection() and
-  // ImportBufferImage() calls, so that we can check if the existing allocation is
+  // Maps a buffer collection ID to a `BufferCollection` in the same domain as the token with
+  // display constraints set. This is used as a bridge between `ImportBufferCollection()` and
+  // `ImportBufferImage()` calls, so that we can check if the existing allocation is
   // display-compatible.
   std::unordered_map<allocation::GlobalBufferCollectionId,
                      fidl::SyncClient<fuchsia_sysmem2::BufferCollection>>
@@ -319,26 +346,26 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   std::unordered_map<display::DisplayId, DisplayEngineData> display_engine_data_map_;
   ReleaseFenceManager release_fence_manager_;
 
-  // Stores information about the last ApplyConfig() call to display.
+  // Stores information about the last `ApplyConfig()` call to display.
   struct ApplyConfigInfo {
     display::WireConfigStamp config_stamp;
     uint64_t frame_number;
     uint64_t trace_flow_id;
   };
 
-  // The next ConfigStamp value used in an ApplyConfig() call.
+  // The next `ConfigStamp` value used in an `ApplyConfig()` call.
   display::WireConfigStamp next_config_stamp_{1};
 
   // A queue storing all display frame configurations that are applied but not yet shown on the
   // display device.
   std::deque<ApplyConfigInfo> pending_apply_configs_;
 
-  // The last frame number called in RenderFrame(), this number is use assert the frame number is
+  // The last frame number called in `RenderFrame()`, this number is use assert the frame number is
   // strictly increasing.
   std::optional<uint64_t> last_frame_number_;
 
-  // Stores the ConfigStamp information of the latest frame shown on the display. If no frame
-  // has been presented, its value will be nullopt.
+  // Stores the `ConfigStamp` information of the latest frame shown on the display. If no frame
+  // has been presented, its value will be `nullopt`.
   std::optional<display::WireConfigStamp> last_presented_config_stamp_ = std::nullopt;
 
   fidl::WireClient<fuchsia_sysmem2::Allocator> sysmem_allocator_;

@@ -30,6 +30,9 @@ uint32_t CodecPacket::packet_index() const {
 }
 
 void CodecPacket::SetBuffer(const CodecBuffer* buffer) {
+  if (buffer == buffer_) {
+    return;
+  }
   if (buffer) {
     buffer_keep_alive_ = buffer->GetKeepAlive();
     buffer_ = buffer;
@@ -85,6 +88,13 @@ void CodecPacket::SetFree(bool is_free) {
 }
 
 bool CodecPacket::is_free() const { return is_free_; }
+
+void CodecPacket::SetQueued(bool is_queued) {
+  ZX_DEBUG_ASSERT(is_queued_ != is_queued);
+  is_queued_ = is_queued;
+}
+
+bool CodecPacket::is_queued() const { return is_queued_; }
 
 void CodecPacket::SetIsNew(bool is_new) { is_new_ = is_new; }
 

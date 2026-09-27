@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use core::convert::Infallible as Never;
 use core::num::NonZeroU16;
 
 use net_types::Witness as _;
@@ -157,7 +156,7 @@ where
     BT: UdpBindingsTypes,
 {
     type TcpProps<'a>
-        = Never
+        = !
     where
         Self: 'a;
 

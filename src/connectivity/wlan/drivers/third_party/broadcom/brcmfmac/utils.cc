@@ -16,12 +16,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <fuchsia/wlan/ieee80211/cpp/fidl.h>
-
-#include <algorithm>
-#include <string>
-#include <vector>
-
 #include "brcmu_utils.h"
 #include "debug.h"
 #include "linuxisms.h"

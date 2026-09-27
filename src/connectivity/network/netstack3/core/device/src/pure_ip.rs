@@ -4,7 +4,6 @@
 
 //! A pure IP device, capable of directly sending/receiving IPv4 & IPv6 packets.
 
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 
 use lock_order::lock::{OrderedLockAccess, OrderedLockRef};
@@ -12,7 +11,7 @@ use log::debug;
 use net_types::ip::{Ip, IpVersion, Ipv4, Ipv6, Mtu};
 use netstack3_base::sync::{Mutex, RwLock};
 use netstack3_base::{
-    BroadcastIpExt, ChecksumOffloadSpec, CoreTimerContext, Device, DeviceIdContext,
+    BroadcastIpExt, ChecksumOffloadSpec, CoreTimerContext, Device, DeviceIdContext, GsoInfo,
     NetworkParsingContext, NetworkSerializer, ReceivableFrameMeta, RecvFrameContext,
     RecvIpFrameMeta, ResourceCounterContext, SendFrameError, SendFrameErrorReason,
     SendableFrameMeta, TimerContext, TxMetadataBindingsTypes, WeakDeviceIdentifier,
@@ -127,7 +126,7 @@ impl DeviceStateSpec for PureIpDevice {
     type Counters = PureIpDeviceCounters;
     const IS_LOOPBACK: bool = false;
     const DEBUG_TYPE: &'static str = "PureIP";
-    type TimerId<D: WeakDeviceIdentifier> = Never;
+    type TimerId<D: WeakDeviceIdentifier> = !;
 
     fn new_device_state<
         CC: CoreTimerContext<Self::TimerId<CC::WeakDeviceId>, BC> + DeviceIdContext<Self>,
@@ -163,6 +162,8 @@ pub struct PureIpDeviceReceiveFrameMetadata<D> {
     pub ip_version: IpVersion,
     /// The parsing context for the received packet.
     pub parsing_context: NetworkParsingContext,
+    /// GSO metadata if the frame was coalesced from multiple segments.
+    pub gso_info: Option<GsoInfo>,
 }
 
 impl DeviceReceiveFrameSpec for PureIpDevice {
@@ -207,7 +208,7 @@ where
         bindings_ctx: &mut BC,
         buffer: B,
     ) {
-        let Self { device_id, ip_version, parsing_context } = self;
+        let Self { device_id, ip_version, parsing_context, gso_info } = self;
 
         core_ctx.add_both_usize(&device_id, buffer.len(), |counters: &DeviceCounters| {
             &counters.recv_bytes
@@ -236,6 +237,7 @@ where
                         None,
                         DeviceIpLayerMetadata::default(),
                         parsing_context,
+                        gso_info,
                     ),
                     buffer,
                 )
@@ -251,6 +253,7 @@ where
                         None,
                         DeviceIpLayerMetadata::default(),
                         parsing_context,
+                        gso_info,
                     ),
                     buffer,
                 )

@@ -409,6 +409,7 @@ template("gvisor_test_package") {
   }
 
   _container_config_component = "${target_name}_config"
+
   starnix_container_config_component(_container_config_component) {
     config = _container_config
   }
@@ -416,6 +417,7 @@ template("gvisor_test_package") {
   _container_config_shard_label = "${_container_config_component}_shard"
   _container_config_shard =
       "${target_gen_dir}/${_container_config_shard_label}.cml"
+
   starnix_container_config_offers(_container_config_shard_label) {
     output = _container_config_shard
     offer_from = "#config"
@@ -427,6 +429,7 @@ template("gvisor_test_package") {
   }
 
   _bin_resource_label = "${target_name}_bin"
+
   resource(_bin_resource_label) {
     sources = [ "${gvisor_prebuilt_directory}/stripped/${_binary}" ]
     outputs = [ _binary_path ]
@@ -468,6 +471,7 @@ template("gvisor_test_package") {
   }
 
   _component_label = target_name + "_component"
+
   fuchsia_test_component(_component_label) {
     forward_variables_from(invoker, "*")
     component_name = _component_name
@@ -535,6 +539,7 @@ template("gvisor_tests_group") {
   ]
   foreach(test_name, gvisor_tests) {
     _label = "starnix_gvisor_${test_name}${_suffix}"
+
     gvisor_test_package(_label) {
       forward_variables_from(invoker, _to_forward)
       component_name = test_name
@@ -545,6 +550,7 @@ template("gvisor_tests_group") {
 
   foreach(test_name, gvisor_tests_run_as_root) {
     _label = "starnix_gvisor_${test_name}${_suffix}"
+
     gvisor_test_package(_label) {
       forward_variables_from(invoker, _to_forward)
       component_name = test_name
@@ -555,6 +561,7 @@ template("gvisor_tests_group") {
 
   foreach(test, gvisor_tests_custom_manifest) {
     _label = "starnix_gvisor_${test.test_name}${_suffix}"
+
     gvisor_test_package(_label) {
       forward_variables_from(invoker, _to_forward)
       component_name = test.test_name
@@ -576,6 +583,7 @@ template("gvisor_tests_group") {
 
   foreach(test, gvisor_tests_container_config) {
     _label = "starnix_gvisor_${test.test_name}${_suffix}"
+
     gvisor_test_package(_label) {
       forward_variables_from(invoker, _to_forward)
       component_name = test.test_name

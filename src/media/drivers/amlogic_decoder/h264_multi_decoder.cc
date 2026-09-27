@@ -16,6 +16,7 @@
 #include <optional>
 
 #include <fbl/algorithm.h>
+#include <safemath/checked_math.h>
 
 #include "decoder_instance.h"
 #include "h264_utils.h"
@@ -647,17 +648,23 @@ zx_status_t H264MultiDecoder::InitializeBuffers() {
 void H264MultiDecoder::ResetHardware() {
   TRACE_DURATION("media", "H264MultiDecoder::ResetHardware");
 
-  if (!WaitForRegister(std::chrono::milliseconds(100), [this]() {
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  if (!WaitForRegister(std::chrono::milliseconds(1000), [this]() {
         return !(DcacDmaCtrl::Get().ReadFrom(owner_->dosbus()).reg_value() & 0x8000);
       })) {
     DECODE_ERROR("Waiting for DCAC DMA timed out");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return;
   }
 
-  if (!WaitForRegister(std::chrono::milliseconds(100), [this]() {
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  if (!WaitForRegister(std::chrono::milliseconds(1000), [this]() {
         return !(LmemDmaCtrl::Get().ReadFrom(owner_->dosbus()).reg_value() & 0x8000);
       })) {
     DECODE_ERROR("Waiting for LMEM DMA timed out");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return;
   }
 
@@ -1181,6 +1188,13 @@ bool H264MultiDecoder::InitializeRefPics(
       continue;
     }
 
+    // Backstop check to prevent stack-buffer-overflow out-of-bounds write of ref_list
+    // if the calling/parsing code has bugs or we somehow process a list with >= 32 elements.
+    ZX_DEBUG_ASSERT(ref_index < 32);
+    if (ref_index >= 32) {
+      break;
+    }
+
     // Offset into AncNCanvasAddr registers.
     uint32_t canvas_index = internal_picture->index;
     constexpr uint32_t kFrameFlag = 0x3;
@@ -1622,8 +1636,22 @@ void H264MultiDecoder::HandleSliceHeadDone() {
     slice->num_ref_idx_active_override_flag = true;
     slice->num_ref_idx_l0_active_minus1 =
         params_.data[HardwareRenderParams::kNumRefIdxL0ActiveMinus1];
+    if (slice->num_ref_idx_l0_active_minus1 >= 32) {
+      LogEvent(media_metrics::
+                   StreamProcessorEvents2MigratedMetricDimensionEvent_NumRefIdxDefaultActiveError);
+      LOG(ERROR, "slice->num_ref_idx_l0_active_minus1 >= 32");
+      OnFatalError();
+      return;
+    }
     slice->num_ref_idx_l1_active_minus1 =
         params_.data[HardwareRenderParams::kNumRefIdxL1ActiveMinus1];
+    if (slice->num_ref_idx_l1_active_minus1 >= 32) {
+      LogEvent(media_metrics::
+                   StreamProcessorEvents2MigratedMetricDimensionEvent_NumRefIdxDefaultActiveError);
+      LOG(ERROR, "slice->num_ref_idx_l1_active_minus1 >= 32");
+      OnFatalError();
+      return;
+    }
     // checked above
     ZX_DEBUG_ASSERT(slice_nalu.nal_unit_type != media::H264NALU::kCodedSliceExtension);
     // Each cmd is 2 uint16_t in src, and src has room for 33 commands so that the list of commands
@@ -2090,13 +2118,17 @@ void H264MultiDecoder::HandleSliceHeadDone() {
 
   // Wait for the hardware to finish processing its current mbs.  Normally this should be quick, but
   // wait a while to avoid potential spurious timeout (none observed at 100ms).
-  if (!SpinWaitForRegister(std::chrono::milliseconds(400), [&] {
+  //
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  if (!SpinWaitForRegister(std::chrono::milliseconds(1000), [&] {
         return !H264CoMbRwCtl::Get().ReadFrom(owner_->dosbus()).busy();
       })) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_TimeoutWaitingForHwError);
     LOG(ERROR, "Failed to wait for rw register nonbusy");
     OnFatalError();
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return;
   }
 
@@ -2449,9 +2481,26 @@ void H264MultiDecoder::InitializedFrames(std::vector<CodecFrame> frames, uint32_
       return;
     }
 
+    const size_t vmo_size = io_buffer_size(&frame->buffer, 0);
+    const safemath::CheckedNumeric<uint32_t> y_plane_bytes =
+        safemath::CheckedNumeric<uint32_t>(stride) * coded_height;
+    const safemath::CheckedNumeric<uint32_t> uv_plane_bytes =
+        safemath::CheckedNumeric<uint32_t>(stride) * (coded_height / 2);
+    const safemath::CheckedNumeric<uint32_t> total_vmo_bytes = y_plane_bytes + uv_plane_bytes;
+    if (!total_vmo_bytes.IsValid() || vmo_size < total_vmo_bytes.ValueOrDie()) {
+      LogEvent(
+          media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_InitializationError);
+      // ValueOrDefault() returns StrictNumeric<uint32_t>, which needs an explicit cast for variadic
+      // LOG().
+      LOG(ERROR, "Insufficient frame vmo bytes: vmo_size %zu < required %u", vmo_size,
+          static_cast<uint32_t>(total_vmo_bytes.ValueOrDefault(0)));
+      CallErrorHandler();
+      return;
+    }
+
     // Flush so that there are no dirty CPU cache lines that would potentially overwrite HW-written
     // data.
-    io_buffer_cache_flush(&frame->buffer, 0, io_buffer_size(&frame->buffer, 0));
+    io_buffer_cache_flush(&frame->buffer, 0, vmo_size);
     BarrierAfterFlush();
 
     frame->hw_width = coded_width;
@@ -2459,7 +2508,7 @@ void H264MultiDecoder::InitializedFrames(std::vector<CodecFrame> frames, uint32_
     frame->coded_width = coded_width;
     frame->coded_height = coded_height;
     frame->stride = stride;
-    frame->uv_plane_offset = stride * coded_height;
+    frame->uv_plane_offset = y_plane_bytes.ValueOrDie();
     frame->display_width = pending_display_width_;
     frame->display_height = pending_display_height_;
     frame->index = i;

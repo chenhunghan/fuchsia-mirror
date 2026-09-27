@@ -16,6 +16,7 @@ from honeydew.affordances_capable import FuchsiaDeviceIpChange
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx.types import (
+    FfxArgs,
     MachineFormat,
     MonitorTargetInfo,
     TargetInfoData,
@@ -61,77 +62,53 @@ class FFX:
     """Provides methods for Host-(Fuchsia)Target interactions via FFX.
 
     Args:
-        query: Fuchsia device name or (possibly unresolved) IP address.
-        config_data: Configuration associated with FFX.
-        name: Optional human-readable name of the target for logging purposes.
-        use_monitor_state: True to use ffx monitor for target status, False
-            otherwise. When True, the "name" arg is mandatory.
-        shared_data: Shared data (if any) needed while running FFX commands.
-        device_ip_change: Object that implements FuchsiaDeviceIpChange to handle Fuchsia device
-            IP changes.
+        args: Arguments for FFX initialization.
 
     Raises:
+        ValueError: If query is a resolved IP address and device_ip_change is not provided.
+        FfxMonitorNotSupportedError: If use_monitor_state is True and no running monitor is
+            detected.
+        FfxMonitorRequiresNameError: If use_monitor_state is True and name is not provided.
         FfxConnectionError: In case of failed to check FFX connection.
         FfxCommandError: In case of failure.
-        FfxMonitorRequiresNameError: If this method is called when name is not provided.
     """
 
     def __init__(
         self,
-        query: str,
-        config_data: ffx_config.FfxConfigData,
-        name: str | None = None,
-        use_monitor_state: bool = False,
-        shared_data: str | None = None,
-        device_ip_change: FuchsiaDeviceIpChange | None = None,
+        args: FfxArgs,
     ) -> None:
-        self._config_data: ffx_config.FfxConfigData = config_data
+        self._config_data: ffx_config.FfxConfigData = args.config_data
 
-        self._query: str = query
-        self._name: str | None = name
+        self._query: str = args.query
+        self._name: str | None = args.name
 
         # Try parsing the query as an address. If it parses successfully, store it. Otherwise,
         # we will resolve it on demand.
         try:
             self._target_addr: custom_types.TargetAddr | None = (
-                custom_types.TargetAddr.from_str(query)
+                custom_types.TargetAddr.from_str(args.query)
             )
         except ValueError:
             self._target_addr = None
 
         if (
             isinstance(self._target_addr, custom_types.IpPort)
-            and device_ip_change is None
+            and args.device_ip_change is None
         ):
             raise ValueError(
                 "Pass 'device_ip_change' argument also when 'query' is a resolved target address"
             )
 
-        self._device_ip_change: FuchsiaDeviceIpChange | None = device_ip_change
+        self._device_ip_change: FuchsiaDeviceIpChange | None = (
+            args.device_ip_change
+        )
         if self._device_ip_change:
             self._device_ip_change.register_for_on_device_ip_change(
                 fn=self._on_device_ip_change
             )
 
-        if shared_data is None:
-            # Use the logs_dir, which is guaranteed to exist. It is okay
-            # for shared_data to be unpopulated, so this is a reasonable
-            # default.
-            shared_data = self.config.logs_dir
-        self._shared_data = shared_data
-
-        # Ensure shared_data directory exists
-        try:
-            Path(self._shared_data).mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            _LOGGER.error(
-                "Failed to create shared_data directory %s: %s",
-                self._shared_data,
-                e,
-            )
-            raise
-        self._use_monitor = use_monitor_state
-        if use_monitor_state:
+        self._use_monitor = args.use_monitor_state
+        if args.use_monitor_state:
             if not self._check_running_monitor():
                 raise ffx_errors.FfxMonitorNotSupportedError(
                     "No running monitor detected."
@@ -150,11 +127,6 @@ class FFX:
         return self._name if self._name else self._query
 
     @properties.PersistentProperty
-    def shared_data(self) -> str:
-        """Returns the shared_data used when running FFX commands."""
-        return self._shared_data
-
-    @properties.PersistentProperty
     def config(self) -> ffx_config.FfxConfigData:
         """Returns the FFX configuration associated with this instance of FFX
         object.
@@ -163,6 +135,16 @@ class FFX:
             FFXConfig
         """
         return self._config_data
+
+    @properties.PersistentProperty
+    def serial_number(self) -> str | None:
+        """Returns the device serial number from FFX target show.
+
+        Returns:
+            Serial number if available, else None.
+        """
+        target_info = self.get_target_information()
+        return target_info.device.serial_number
 
     # FFX monitor session management:
     # For infra runs, ffx monitor session is started and managed by botanist.
@@ -803,9 +785,6 @@ class FFX:
 
         # Inject configuration via command line arguments
         ffx_args.extend(self.config.get_config_args())
-
-        # "-c shared_data=<dir>" will be required, once ffx-strict is being used.
-        ffx_args.extend(["-c", json.dumps({"shared_data": self._shared_data})])
 
         return [self.config.binary_path] + ffx_args + cmd
 

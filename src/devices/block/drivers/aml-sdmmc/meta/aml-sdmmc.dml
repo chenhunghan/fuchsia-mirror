@@ -12,6 +12,7 @@
         { service: "fuchsia.hardware.power.PowerTokenService" },
         { service: "fuchsia.hardware.sdmmc.SdmmcService" },
         { service: "fuchsia.hardware.sdmmc.SdmmcMetadata" },
+        { service: "fuchsia.hardware.sdio.Metadata" },
     ],
     use: [
         {
@@ -83,6 +84,10 @@
         },
         {
             service: "fuchsia.hardware.sdmmc.SdmmcMetadata",
+            from: "self",
+        },
+        {
+            service: "fuchsia.hardware.sdio.Metadata",
             from: "self",
         },
     ],

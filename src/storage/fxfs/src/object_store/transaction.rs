@@ -10,8 +10,8 @@ use crate::object_handle::INVALID_OBJECT_ID;
 use crate::object_store::allocator::{AllocatorItem, Reservation};
 use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::object_record::{
-    FxfsKey, FxfsKeyV49, ObjectItem, ObjectItemV56, ObjectKey, ObjectKeyData, ObjectValue,
-    ProjectProperty,
+    BytesAndNodes, FxfsKey, FxfsKeyV49, ObjectItem, ObjectItemV56, ObjectKey, ObjectKeyData,
+    ObjectValue, ProjectProperty,
 };
 use crate::object_store::{AttributeId, AttributeKey, ProjectId};
 use crate::serialized_types::{Migrate, Versioned, migrate_to_version};
@@ -705,6 +705,33 @@ impl<'a> Transaction<'a> {
         self.add_with_object(object_id, mutation, AssocObj::None)
     }
 
+    /// Adds `delta` to a `BytesAndNodes` merge mutation for `key`, folding into any delta already
+    /// staged in this transaction.  Mutations in a transaction are deduplicated by `ObjectKey`
+    /// alone, so adding a second delta for the same key would otherwise replace the first.
+    pub fn merge_bytes_and_nodes(
+        &mut self,
+        store_object_id: u64,
+        key: ObjectKey,
+        delta: BytesAndNodes,
+    ) {
+        let delta = match self.get_object_mutation(store_object_id, key.clone()) {
+            Some(ObjectStoreMutation {
+                item: Item { value: ObjectValue::BytesAndNodes { bytes, nodes }, .. },
+                ..
+            }) => delta + BytesAndNodes { bytes: *bytes, nodes: *nodes },
+            _ => delta,
+        };
+        if delta.is_zero() {
+            self.remove(store_object_id, Mutation::merge_object(key, ObjectValue::None));
+        } else {
+            self.add_with_object_internal(
+                store_object_id,
+                Mutation::merge_object(key, delta.into()),
+                AssocObj::None,
+            );
+        }
+    }
+
     /// Removes a mutation that matches `mutation`.
     pub fn remove(&mut self, object_id: u64, mutation: Mutation) {
         let txn_mutation = TxnMutation { object_id, mutation, associated_object: AssocObj::None };
@@ -726,6 +753,33 @@ impl<'a> Transaction<'a> {
     /// Adds a mutation with an associated object. If the mutation already exists, it is replaced
     /// and the old mutation is returned.
     pub fn add_with_object(
+        &mut self,
+        object_id: u64,
+        mutation: Mutation,
+        associated_object: AssocObj<'a>,
+    ) -> Option<Mutation> {
+        debug_assert!(
+            !matches!(
+                mutation,
+                Mutation::ObjectStore(ObjectStoreMutation {
+                    item: ObjectItem {
+                        key: ObjectKey {
+                            data: ObjectKeyData::Project { property: ProjectProperty::Usage, .. },
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                })
+            ),
+            "Use merge_bytes_and_nodes"
+        );
+        self.add_with_object_internal(object_id, mutation, associated_object)
+    }
+
+    /// Adds a mutation with an associated object. If the mutation already exists, it is replaced
+    /// and the old mutation is returned.
+    fn add_with_object_internal(
         &mut self,
         object_id: u64,
         mutation: Mutation,
@@ -1606,6 +1660,7 @@ mod tests {
         ObjectMutationIterator, Options, TxnMutation,
     };
     use crate::filesystem::FxFilesystem;
+    use crate::object_store::{BytesAndNodes, ObjectKey};
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
     use futures::channel::oneshot::channel;
@@ -2173,5 +2228,57 @@ mod tests {
 
         // Dropping obj_iter for object 2 should have drained all object 2 mutations as well.
         assert!(ObjectMutationIterator::new(&mut iter).is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_merge_bytes_and_nodes() {
+        let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let root_store = fs.root_store();
+        let store_id = root_store.store_object_id();
+        let mut t = root_store
+            .new_transaction(lock_keys![], Options::default())
+            .await
+            .expect("new_transaction failed");
+
+        let key = ObjectKey::project_usage(
+            root_store.root_directory_object_id(),
+            crate::object_store::ProjectId::new(1).unwrap(),
+        );
+
+        // Initial delta.
+        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 100, nodes: 2 });
+        let mutation = t.get_object_mutation(store_id, key.clone()).expect("mutation expected");
+        assert_eq!(mutation.op, super::Operation::Merge);
+        assert_eq!(
+            mutation.item.value,
+            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 100, nodes: 2 }
+        );
+
+        // Second delta for the same key folds into the first rather than replacing it.
+        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 50, nodes: 1 });
+        let mutation = t.get_object_mutation(store_id, key.clone()).expect("mutation expected");
+        assert_eq!(mutation.op, super::Operation::Merge);
+        assert_eq!(
+            mutation.item.value,
+            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 150, nodes: 3 }
+        );
+
+        // Negative delta brings it back down.
+        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: -50, nodes: -1 });
+        let mutation = t.get_object_mutation(store_id, key.clone()).expect("mutation expected");
+        assert_eq!(mutation.op, super::Operation::Merge);
+        assert_eq!(
+            mutation.item.value,
+            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 100, nodes: 2 }
+        );
+
+        // Folding to zero removes the mutation completely.
+        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: -100, nodes: -2 });
+        assert!(t.get_object_mutation(store_id, key.clone()).is_none());
+
+        // Calling with (0, 0) when no mutation exists is a no-op.
+        t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 0, nodes: 0 });
+        assert!(t.get_object_mutation(store_id, key.clone()).is_none());
     }
 }

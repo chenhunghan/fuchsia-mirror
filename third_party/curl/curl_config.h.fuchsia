@@ -9,11 +9,17 @@
 /* define "1" to use built-in CA store of SSL library */
 #define CURL_CA_FALLBACK 1
 
+/* If native CA store is enabled */
+/* #undef CURL_CA_NATIVE */
+
 /* Location of default ca path */
 /* #undef CURL_CA_PATH */
 
 /* If safe CA bundle search is enabled */
 /* #undef CURL_CA_SEARCH_SAFE */
+
+/* curl_debug_global_mem debug build */
+/* #undef CURL_DEBUG_GLOBAL_MEM */
 
 /* Default SSL backend */
 /* #undef CURL_DEFAULT_SSL_BACKEND */
@@ -75,6 +81,9 @@
 /* disable HTTP authentication */
 /* #undef CURL_DISABLE_HTTP_AUTH */
 
+/* to disable HTTP Message Signatures support */
+#define CURL_DISABLE_HTTPSIG 1
+
 /* to disable IMAP */
 /* #undef CURL_DISABLE_IMAP */
 
@@ -105,9 +114,6 @@
 /* disable netrc parsing */
 /* #undef CURL_DISABLE_NETRC */
 
-/* to disable NTLM support */
-#define CURL_DISABLE_NTLM 1
-
 /* if the OpenSSL configuration won't be loaded automatically */
 /* #undef CURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG */
 
@@ -132,9 +138,6 @@
 /* disable DNS shuffling */
 /* #undef CURL_DISABLE_SHUFFLE_DNS */
 
-/* to disable SMB/CIFS */
-/* #undef CURL_DISABLE_SMB */
-
 /* to disable SMTP */
 /* #undef CURL_DISABLE_SMTP */
 
@@ -153,8 +156,17 @@
 /* disable WebSockets */
 /* #undef CURL_DISABLE_WEBSOCKETS */
 
+/* to enable NTLM */
+/* #undef CURL_ENABLE_NTLM */
+
+/* to enable SMB/CIFS */
+/* #undef CURL_ENABLE_SMB */
+
 /* Definition to make a library symbol externally visible. */
 #define CURL_EXTERN_SYMBOL __attribute__((__visibility__("default")))
+
+/* MIT Kerberos version */
+/* #undef CURL_KRB5_VERSION */
 
 /* cpu-machine-OS */
 #if defined(__Fuchsia__)
@@ -175,9 +187,6 @@
 
 /* Define to 1 if you have the 'accept4' function. */
 /* #undef HAVE_ACCEPT4 */
-
-/* Define to 1 if symbol `ADDRESS_FAMILY' exists */
-/* #undef HAVE_ADDRESS_FAMILY */
 
 /* Define to 1 if you have the alarm function. */
 #define HAVE_ALARM 1
@@ -222,6 +231,9 @@
 /* Define to 1 if you have the fseeko declaration */
 #define HAVE_DECL_FSEEKO 1
 
+/* if you have the function DES_ecb_encrypt */
+#define HAVE_DES_ECB_ENCRYPT 1
+
 /* if you have <dirent.h> */
 #define HAVE_DIRENT_H 1
 
@@ -257,9 +269,6 @@
 
 /* fsetxattr() takes 6 args */
 /* #undef HAVE_FSETXATTR_6 */
-
-/* Define to 1 if you have the ftruncate function. */
-#define HAVE_FTRUNCATE 1
 
 /* Define to 1 if you have a working getaddrinfo function. */
 #define HAVE_GETADDRINFO 1
@@ -318,9 +327,6 @@
 /* Define to 1 if you have a working gmtime_r function. */
 #define HAVE_GMTIME_R 1
 
-/* if you have the function gnutls_srp_verifier */
-/* #undef HAVE_GNUTLS_SRP */
-
 /* Define to 1 if you have the <gsasl.h> header file. */
 /* #undef HAVE_GSASL_H */
 
@@ -336,8 +342,14 @@
 /* Define to 1 if you have the <gssapi/gssapi_krb5.h> header file. */
 /* #undef HAVE_GSSAPI_GSSAPI_KRB5_H */
 
+/* if you have Apple GSS Framework */
+/* #undef HAVE_GSSAPPLE */
+
 /* if you have GNU GSS */
 /* #undef HAVE_GSSGNU */
+
+/* Define to 1 if you have the 'gss_set_neg_mechs' function. */
+/* #undef HAVE_GSS_SET_NEG_MECHS */
 
 /* Define to 1 if you have the <idn2.h> header file. */
 /* #undef HAVE_IDN2_H */
@@ -347,12 +359,6 @@
 
 /* Define to 1 if you have the 'if_nametoindex' function. */
 #define HAVE_IF_NAMETOINDEX 1
-
-/* Define to 1 if you have an IPv6 capable working inet_ntop function. */
-#define HAVE_INET_NTOP 1
-
-/* Define to 1 if you have an IPv6 capable working inet_pton function. */
-#define HAVE_INET_PTON 1
 
 /* Define to 1 if you have the <inttypes.h> header file. */
 #define HAVE_INTTYPES_H 1
@@ -457,6 +463,9 @@
 /* Define to 1 if you have the <netinet/in.h> header file. */
 #define HAVE_NETINET_IN_H 1
 
+/* Define to 1 if you have the <netinet/ip.h> header file. */
+#define HAVE_NETINET_IP_H 1
+
 /* Define to 1 if you have the <netinet/tcp.h> header file. */
 #define HAVE_NETINET_TCP_H 1
 
@@ -493,10 +502,6 @@
 
 /* Define to 1 if you have the <openssl/rsa.h> header file. */
 #define HAVE_OPENSSL_RSA_H 1
-
-/* if you have the functions SSL_CTX_set_srp_username and
-   SSL_CTX_set_srp_password */
-/* #undef HAVE_OPENSSL_SRP */
 
 /* Define to 1 if you have the <openssl/ssl.h> header file. */
 #define HAVE_OPENSSL_SSL_H 1
@@ -541,9 +546,6 @@
 
 /* Define to 1 if you have the 'sched_yield' function. */
 #define HAVE_SCHED_YIELD 1
-
-/* Define to 1 if you have the select function. */
-#define HAVE_SELECT 1
 
 /* Define to 1 if you have the send function. */
 #define HAVE_SEND 1
@@ -810,6 +812,9 @@
 /* if AmiSSL is in use */
 /* #undef USE_AMISSL */
 
+/* to use Apple fast UDP (SYS_recvmsg_x, SYS_sendmsg_x) */
+/* #undef USE_APPLE_FAST_UDP */
+
 /* if AppleIDN */
 /* #undef USE_APPLE_IDN */
 
@@ -889,11 +894,6 @@
 
 /* if SSL session export support is available */
 /* #undef USE_SSLS_EXPORT */
-
-
-
-/* Use TLS-SRP authentication */
-/* #undef USE_TLS_SRP */
 
 /* Use Unix domain sockets */
 #define USE_UNIX_SOCKETS 1

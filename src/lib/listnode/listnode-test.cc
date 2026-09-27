@@ -14,7 +14,7 @@ typedef struct list_elem {
 } list_elem_t;
 
 void expect_list_sorted(list_node_t* list, int count) {
-  EXPECT_EQ(list_length(list), static_cast<unsigned int>(count));
+  EXPECT_EQ(list_length(list), static_cast<size_t>(count));
   int index = 0;
   list_elem_t* entry = NULL;
   list_for_every_entry (list, entry, list_elem_t, node) {

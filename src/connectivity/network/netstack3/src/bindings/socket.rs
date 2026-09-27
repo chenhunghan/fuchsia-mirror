@@ -4,7 +4,6 @@
 
 //! Socket features exposed by netstack3.
 
-use std::convert::Infallible as Never;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 use std::panic::Location;
@@ -561,7 +560,7 @@ pub(crate) trait IntoErrno: Sized + Debug + Into<Error> {
     }
 }
 
-impl IntoErrno for Never {
+impl IntoErrno for ! {
     fn to_errno(&self) -> Errno {
         match *self {}
     }
@@ -663,8 +662,6 @@ impl IntoErrno for udp::SendToError {
             Self::RemotePortUnset => Errno::Einval,
             Self::RemoteUnexpectedlyMapped => Errno::Enetunreach,
             Self::RemoteUnexpectedlyNonMapped => Errno::Eafnosupport,
-            Self::SendBufferFull => Errno::Eagain,
-            Self::InvalidLength => Errno::Emsgsize,
         }
     }
 }
@@ -678,8 +675,6 @@ impl IntoErrno for udp::SendError {
             Self::IpSock(err) => err.to_errno(),
             Self::NotWriteable => Errno::Epipe,
             Self::RemotePortUnset => Errno::Edestaddrreq,
-            Self::SendBufferFull => Errno::Eagain,
-            Self::InvalidLength => Errno::Emsgsize,
         }
     }
 }

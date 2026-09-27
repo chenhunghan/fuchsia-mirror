@@ -57,8 +57,11 @@ sufficient progress.
 ### Progress requirements
 
 In order for the RCU state machine to make progress, the program using
-`fuchsia-rcu` must periodically call `rcu_synchronize`. Otherwise, memory
+`fuchsia-rcu` must periodically call `rcu_run_callbacks`. Otherwise, memory
 allocated during `RcuBox::set` will never be freed.
+
+One way to do this is with a dedicated thread which alternates between calling
+`rcu_advancer_wait_for_work` and `rcu_run_callbacks`.
 
 ## Low-level interface
 
@@ -122,15 +125,23 @@ readers have completed.
 The interface for progressing the RCU state machine is as follows:
 
 ```rust
+fn rcu_run_callbacks() -> bool
+fn rcu_advancer_wait_for_work()
+fn rcu_advancer_wake()
 fn rcu_synchronize()
 ```
 
-Clients must call at least one of these functions periodically to ensure that
-callbacks scheduled with `rcu_call()` eventually happen.
+Clients must call `rcu_run_callbacks` periodically to ensure that callbacks
+scheduled with `rcu_call()` eventually happen. Clients should use
+`rcu_advancer_wait_for_work()` to block until there are callbacks ready to be run,
+and `rcu_advancer_wake()` to wake the advancer thread when shutting down.
 
-The `rcu_synchronize()` function blocks until the RCU state machine has advanced
-sufficiently to call all the callbacks that were scheduled prior to calling
-`rcu_synchronize()`.
+The `rcu_synchronize()` function blocks until all in-flight read operations
+prior to calling `rcu_synchronize()` have completed. Note that `rcu_synchronize()`
+does not advance the state machine itself; it registers a completion callback
+and waits for it to be run. Progress requires calling `rcu_run_callbacks`
+(for instance, via a dedicated background thread). If `rcu_run_callbacks`
+is never called, `rcu_synchronize()` will block indefinitely.
 
 ## State Machine
 
@@ -151,7 +162,7 @@ that they have desired synchronization properties.
 
 The RCU state machine starts in the *Idle* state. In this state, readers can
 begin read operations, which are counted using the `read_counters`. The state
-machine remains in this state until the next call to `rcu_synchronize`.
+machine remains in this state until the next call to `rcu_run_callbacks`.
 
 There are no preconditions for leaving the *Idle* state. The post condition for
 leaving the *Idle* state is that the `callback_chain` has been moved to the
@@ -175,7 +186,7 @@ The postcondition for leaving the *Waiting* state is that the front entry in the
 queue) and the state machine is in the *Idle* state.
 
 After leaving the *Waiting* state, the set of callbacks removed from the
-`waiting_callbacks` queue run, potentially on a different thread.
+`waiting_callbacks` queue run on the thread that called `rcu_run_callbacks`.
 
 ### Operations
 
@@ -233,13 +244,13 @@ In this sequence, there are three atomic operations with `Ordering::SeqCst`:
 
  1. Synchronization point `[A]` in `rcu_read_lock()`.
  2. Synchronization point `[C1]` the first time through the *Waiting* state in
-    `rcu_synchronize()`.
+    `rcu_run_callbacks()`.
  3. Synchronization point `[C2]` the second time through the *Waiting* state in
-    `rcu_synchronize()`.
+    `rcu_run_callbacks()`.
 
 The memory model guarantees that these three operations happen in a single total
-order. The mutex that protects the `rcu_control_block` ensures that `[C1]` is
-always before `[C2]` in the single total order. The argument for correctness is
+order. The mutex that protects `waiting_callbacks` ensures that `[C1]` is always
+before `[C2]` in the single total order. The argument for correctness is
 different depending on whether `[A]` is before or after `[C1]` in the single
 total order.
 
@@ -259,8 +270,8 @@ the *Waiting* state the second time.
 
 We will show the _happens-before_ relation for the following synchronization
 points, in order: `[F]` in `rcu_replace_pointer()`, `[G]` in `rcu_call()`, `[H]`
-in the *Idle* state of `rcu_synchronize()`, `[C1]` in the *Waiting* state
-of `rcu_synchronize()`, `[A]` in `rcu_read_lock()`, and `[D]` in
+in the *Idle* state of `rcu_run_callbacks()`, `[C1]` in the *Waiting* state
+of `rcu_run_callbacks()`, `[A]` in `rcu_read_lock()`, and `[D]` in
 `rcu_read_pointer()`:
 
  * `[F]` _happens-before_ `[G]` because `[F]` is _sequenced-before_ `[G]`.
@@ -320,7 +331,7 @@ zero, then there are no active readers.
     `compiler_fence(Ordering::SeqCst)`. This barrier prevents the compiler from
     reordering the critical section outside the counter increments.
 
-2.  **Writer-Side**: `rcu_synchronize()` (specifically `has_active_readers`)
+2.  **Writer-Side**: `rcu_grace_period()` (specifically `has_active_readers`)
     issues a system barrier (`zx_membarrier_sync_process_data`).
 
 The pairing works as follows:
@@ -335,7 +346,7 @@ The pairing works as follows:
     2.  `CompilerBarrier`.
     3.  Increment `end` (RSEQ).
 
--   `rcu_synchronize()` (checking for quiescence):
+-   `rcu_grace_period()` (checking for quiescence):
     1.  Sum all `end` counters (negated).
     2.  System barrier (`zx_membarrier_sync_process_data`).
     3.  Sum all `begin` counters (positive).

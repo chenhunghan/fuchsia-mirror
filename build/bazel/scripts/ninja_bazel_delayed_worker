@@ -12,7 +12,7 @@ FUCHSIA_DIR="$(realpath "$SCRIPT_DIR/../../..")"
 # Source platform.sh to get PREBUILT_PYTHON3_DIR
 source "${FUCHSIA_DIR}/tools/devshell/lib/platform.sh"
 
-exec "${PREBUILT_PYTHON3_DIR}/bin/python3.11" -S "${FUCHSIA_DIR}/build/bazel/scripts/bazel_ninja_delayed_actions.py" \
+exec "${PREBUILT_PYTHON3}" -S "${FUCHSIA_DIR}/build/bazel/scripts/bazel_ninja_delayed_actions.py" \
   --build-dir \
   "$(pwd)" \
   --delayed-actions-request \

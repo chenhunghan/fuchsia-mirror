@@ -35,3 +35,8 @@ pub const fn round_down(val: usize) -> usize {
 pub const fn round_up(val: usize) -> usize {
     (val + MASK) & !MASK
 }
+
+#[inline]
+pub const fn is_page_rounded(val: usize) -> bool {
+    is_aligned(val)
+}

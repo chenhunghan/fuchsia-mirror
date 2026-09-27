@@ -1,0 +1,19 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    use: [
+        {
+            config: "fuchsia.driver.devicetree.EnabledNodes",
+            key: "enabled_nodes",
+            type: "vector",
+            max_count: 50,
+            element: {
+                type: "string",
+                max_size: 100,
+            },
+            availability: "optional",
+            default: [],
+        },
+    ],
+}

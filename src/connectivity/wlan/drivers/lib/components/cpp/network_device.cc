@@ -316,6 +316,7 @@ void NetworkDevice::PrepareVmo(netdriver::wire::NetworkDeviceImplPrepareVmoReque
   const zx_status_t status = [&]() {
     uint64_t size = 0;
     const uint8_t id = request->id;
+    ZX_ASSERT(id < std::size(vmo_addrs_));
     zx::vmo& vmo = request->vmo;
     zx_status_t status = vmo.get_size(&size);
     if (status != ZX_OK) {
@@ -342,6 +343,7 @@ void NetworkDevice::PrepareVmo(netdriver::wire::NetworkDeviceImplPrepareVmoReque
 void NetworkDevice::ReleaseVmo(netdriver::wire::NetworkDeviceImplReleaseVmoRequest* request,
                                fdf::Arena& arena, ReleaseVmoCompleter::Sync& completer) {
   const uint8_t id = request->id;
+  ZX_ASSERT(id < std::size(vmo_addrs_));
   callbacks_->NetDevReleaseVmo(id);
   zx_status_t status =
       zx::vmar::root_self()->unmap(reinterpret_cast<zx_vaddr_t>(vmo_addrs_[id]), vmo_lengths_[id]);

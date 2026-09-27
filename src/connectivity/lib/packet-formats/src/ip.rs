@@ -245,6 +245,9 @@ pub trait IpPacket<B: SplitByteSlice, I: IpExt>:
     where
         B: SplitByteSliceMut;
 
+    /// The length of the header in bytes, including options/extension headers.
+    fn header_len(&self) -> usize;
+
     /// Get the body.
     fn body(&self) -> &[u8];
 
@@ -307,6 +310,9 @@ impl<B: SplitByteSlice> IpPacket<B, Ipv4> for Ipv4Packet<B> {
     {
         Ipv4Packet::set_ttl(self, ttl)
     }
+    fn header_len(&self) -> usize {
+        Ipv4Packet::header_len(self)
+    }
     fn body(&self) -> &[u8] {
         Ipv4Packet::body(self)
     }
@@ -358,6 +364,9 @@ impl<B: SplitByteSlice> IpPacket<B, Ipv6> for Ipv6Packet<B> {
         B: SplitByteSliceMut,
     {
         Ipv6Packet::set_hop_limit(self, ttl)
+    }
+    fn header_len(&self) -> usize {
+        Ipv6Packet::header_len(self)
     }
     fn body(&self) -> &[u8] {
         Ipv6Packet::body(self)

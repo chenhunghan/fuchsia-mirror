@@ -82,6 +82,7 @@ fn bench_forward_minimum<B: Bencher>(b: &mut B, frame_size: usize) {
             B::black_box(RecvEthernetFrameMeta {
                 device_id: eth_device.clone(),
                 parsing_context: NetworkParsingContext::default(),
+                gso_info: None,
             }),
             B::black_box(Buf::new(&mut buf[..], range.clone())),
         ));

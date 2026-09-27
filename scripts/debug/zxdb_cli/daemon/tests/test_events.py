@@ -197,6 +197,51 @@ class TestDaemonEvents(unittest.IsolatedAsyncioTestCase):
         assert daemon.threads[1].process is not None
         self.assertEqual(daemon.threads[1].process.id, 1234)
 
+    async def test_thread_event_is_stopped(self) -> None:
+        daemon = Daemon(port=None)
+        await daemon.event_queue.put(
+            {
+                "event": "thread",
+                "body": {
+                    "reason": "started",
+                    "threadId": 1,
+                    "processId": 1234,
+                    "isStopped": True,
+                },
+            }
+        )
+        await daemon.event_queue.put(
+            {
+                "event": "thread",
+                "body": {
+                    "reason": "started",
+                    "threadId": 2,
+                    "processId": 1234,
+                    "isStopped": False,
+                },
+            }
+        )
+        await daemon.event_queue.put(
+            {
+                "event": "thread",
+                "body": {
+                    "reason": "started",
+                    "threadId": 3,
+                    "processId": 1234,
+                },
+            }
+        )
+        await daemon.event_queue.put({"type": READER_STOPPED_EVENT})
+
+        await daemon._process_events()
+
+        self.assertIn(1, daemon.threads)
+        self.assertTrue(daemon.threads[1].is_stopped)
+        self.assertIn(2, daemon.threads)
+        self.assertFalse(daemon.threads[2].is_stopped)
+        self.assertIn(3, daemon.threads)
+        self.assertFalse(daemon.threads[3].is_stopped)
+
     async def test_thread_event_exited_evicts_thread(self) -> None:
         daemon = Daemon(port=None)
         daemon.get_or_create_thread(1, process_id=1234).is_stopped = True

@@ -363,6 +363,14 @@ pub trait Layer<K, V>: Send + Sync {
         MaybeContainsKey::Maybe
     }
 
+    /// Whether the bloom filter for the layer file is consulted or not.  If this is false, then
+    /// `maybe_contains_key` will always return `MaybeContainsKey::Maybe`.
+    /// Note that the persistent layer file may still have a bloom filter, but it might be ignored
+    /// (e.g. for a layer file on an older version).
+    fn has_bloom_filter(&self) -> bool {
+        false
+    }
+
     /// This is similar to `maybe_contains_key` except that there *must* be a `key` and possible
     /// state where this will indicate the key is missing i.e. *always* returning
     /// `Existence::MaybeExists` is *not* a correct implementation.  If an implementation has a low

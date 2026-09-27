@@ -60,6 +60,7 @@ type PinState = struct {
 type DevicePinStates = struct {
     name string:MAX_DEVICE_NAME_LEN;
     states vector<PinState>:MAX;
+    id uint32;
 };
 
 @serializable

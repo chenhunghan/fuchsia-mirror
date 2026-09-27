@@ -19,6 +19,15 @@ constexpr size_t kBusTransactionInitiatorDispatcherStateSize = 56;
 constexpr size_t kBusTransactionInitiatorDispatcherStateAlign = 8;
 constexpr size_t kBusTransactionInitiatorDispatcherStateOffset = 48;
 
+// Size, alignment, and offset for ClockDispatcherState.
+constexpr size_t kClockDispatcherStateSize = 232;
+constexpr size_t kClockDispatcherStateAlign = 8;
+constexpr size_t kClockDispatcherStateOffset = 48;
+
+// Size and alignment for ClockDispatcher.
+constexpr size_t kClockTransformationStorageSize = 112;
+constexpr size_t kClockTransformationStorageAlign = 8;
+
 // Size, alignment, and offset for CounterDispatcherState.
 constexpr size_t kCounterDispatcherStateSize = 64;
 constexpr size_t kCounterDispatcherStateAlign = 8;
@@ -114,6 +123,14 @@ constexpr size_t kDpcStorageAlign = 8;
 // Size and alignment for WaitSignalObserver.
 constexpr size_t kWaitSignalObserverSize = 72;
 constexpr size_t kWaitSignalObserverAlign = 8;
+
+// Size and alignment for RootJobSignalObserver.
+constexpr size_t kRootJobSignalObserverSize = 48;
+constexpr size_t kRootJobSignalObserverAlign = 8;
+
+// Size and alignment for RootJobObserver (Rust state).
+constexpr size_t kRootJobObserverStorageSize = 80;
+constexpr size_t kRootJobObserverStorageAlign = 8;
 
 // Size, alignment, and offset for WaitSignalObserverState.
 constexpr size_t kWaitSignalObserverStorageSize = 32;

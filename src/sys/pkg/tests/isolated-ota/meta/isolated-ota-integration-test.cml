@@ -15,6 +15,12 @@
     program: {
         binary: "bin/isolated_ota_integration_test",
     },
+    children: [
+        {
+            name: "http-client",
+            url: "#meta/http-client.cm",
+        },
+    ],
     use: [
         {
             protocol: [
@@ -27,8 +33,37 @@
             from: "#netstack",
         },
         {
-            protocol: [ "fuchsia.net.name.Lookup" ],
+            protocol: [ "fuchsia.net.http.Loader" ],
+            from: "#http-client",
+        },
+    ],
+    offer: [
+        {
+            config: [
+                "fuchsia.http-client.StopOnIdleTimeoutMillis",
+                "fuchsia.http-client.TcpReceiveBufferSizeBytes",
+            ],
+            from: "void",
+            to: "#http-client",
+            availability: "optional",
+        },
+        {
+            protocol: "fuchsia.posix.socket.Provider",
+            from: "#netstack",
+            to: "#http-client",
+        },
+        {
+            protocol: "fuchsia.net.name.Lookup",
             from: "#dns_resolver",
+            to: "#http-client",
+        },
+        {
+            protocol: [
+                "fuchsia.net.http.Loader",
+                "fuchsia.pkg.http.Client",
+            ],
+            from: "#http-client",
+            to: "#realm_builder",
         },
 
         // fuchsia_hyper::new_https_client fails if there isn't a file at /config/ssl/cert.pem, but
@@ -38,21 +73,10 @@
         {
             directory: "pkg",
             from: "framework",
+            as: "root-ssl-certificates",
+            to: "#http-client",
             rights: [ "r*" ],
-            path: "/config/ssl",
             subdir: "fake-ssl-certs",
-        },
-    ],
-    offer: [
-        {
-            protocol: "fuchsia.posix.socket.Provider",
-            from: "#netstack",
-            to: "#realm_builder",
-        },
-        {
-            protocol: "fuchsia.net.name.Lookup",
-            from: "#dns_resolver",
-            to: "#realm_builder",
         },
     ],
     facets: {

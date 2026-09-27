@@ -10,10 +10,12 @@
 
 #include <cmath>
 #include <iostream>
+#include <unordered_map>
 
 #include "src/ui/examples/escher/common/demo.h"
 #include "src/ui/lib/escher/flatland/rectangle_compositor.h"
 #include "src/ui/lib/escher/forward_declarations.h"
+#include "src/ui/lib/escher/vk/impl/framebuffer.h"
 #include "src/ui/lib/escher/vk/shader_program.h"
 
 class RainfallScene;
@@ -44,6 +46,7 @@ class RainfallDemo : public Demo {
 
   escher::TexturePtr default_texture_;
   escher::TexturePtr depth_buffer_;
+  std::unordered_map<const escher::Image*, escher::impl::FramebufferPtr> framebuffer_cache_;
 
   uint32_t current_scene_ = 0;
   std::vector<std::unique_ptr<RainfallScene>> demo_scenes_;

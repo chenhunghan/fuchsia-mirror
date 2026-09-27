@@ -12,7 +12,6 @@ if (is_host) {
 
     deps = [
       "//src/developer/ffx/config:lib",
-      "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:serde",
       "//third_party/rust_crates:serde_json",
       "//third_party/rust_crates:sha2",
@@ -21,6 +20,7 @@ if (is_host) {
 
     test_deps = [
       "//src/developer/ffx/config:lib",
+      "//src/lib/fuchsia",
       "//third_party/rust_crates:tempfile",
     ]
 

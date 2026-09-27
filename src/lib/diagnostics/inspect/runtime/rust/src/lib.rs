@@ -7,6 +7,8 @@
 
 use fidl::AsHandleRef;
 use fidl::endpoints::ClientEnd;
+use fidl_fuchsia_inspect as finspect;
+use fuchsia_async as fasync;
 use fuchsia_component_client::connect_to_protocol;
 use fuchsia_inspect::Inspector;
 use log::error;
@@ -14,7 +16,6 @@ use pin_project::pin_project;
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
-use {fidl_fuchsia_inspect as finspect, fuchsia_async as fasync};
 
 #[cfg(fuchsia_api_level_at_least = "HEAD")]
 pub use finspect::EscrowToken;
@@ -158,9 +159,14 @@ pub fn publish(
         .map(|handle| handle.new_child_with_name("inspect_runtime::publish"))
         .unwrap_or_else(|| fasync::Scope::new_with_name("inspect_runtime::publish"));
 
-    if let Some(TreeServerHandle { client_koid: client, stream }) = tree {
+    if let Some(TreeServerHandle { client_koid: client, stream, inspect_sink }) = tree {
         service::spawn_tree_server_with_stream(inspector.clone(), vmo_preference, stream, &scope);
-        return Some(PublishedInspectController::new(inspector.clone(), scope, client));
+        return Some(PublishedInspectController::new(
+            inspector.clone(),
+            scope,
+            client,
+            inspect_sink,
+        ));
     }
 
     let tree = service::spawn_tree_server(inspector.clone(), vmo_preference, &scope);
@@ -182,7 +188,7 @@ pub fn publish(
         return None;
     }
 
-    Some(PublishedInspectController::new(inspector.clone(), scope, tree_koid))
+    Some(PublishedInspectController::new(inspector.clone(), scope, tree_koid, inspect_sink))
 }
 
 /// Options for fetching a VMO that was previously escrowed.
@@ -231,6 +237,7 @@ pub struct FetchEscrowResult {
 pub struct TreeServerHandle {
     client_koid: zx::Koid,
     stream: finspect::TreeRequestStream,
+    inspect_sink: finspect::InspectSinkProxy,
 }
 
 /// Fetches a VMO that was previously escrowed.
@@ -250,18 +257,21 @@ pub async fn fetch_escrow(
 
     let FetchEscrowOptions { inspect_sink_client, should_replace_with_tree } = options;
 
+    let inspect_sink = match inspect_sink_client {
+        Some(client) => client.into_proxy(),
+        None => connect_to_protocol::<finspect::InspectSinkMarker>()?,
+    };
+
     let (tree, handle) = if should_replace_with_tree {
         let (client, stream) = fidl::endpoints::create_request_stream::<finspect::TreeMarker>();
         // unwrap: safe since we have a valid tree handle coming from above.
         let client_koid = client.as_handle_ref().koid().unwrap();
-        (Some(client), Some(TreeServerHandle { client_koid, stream }))
+        (
+            Some(client),
+            Some(TreeServerHandle { client_koid, stream, inspect_sink: inspect_sink.clone() }),
+        )
     } else {
         (None, None)
-    };
-
-    let inspect_sink = match inspect_sink_client {
-        Some(client) => client.into_proxy(),
-        None => connect_to_protocol::<finspect::InspectSinkMarker>()?,
     };
 
     let vmo = inspect_sink
@@ -286,6 +296,7 @@ pub struct PublishedInspectController {
     scope: fasync::scope::Join,
     inspector: Inspector,
     tree_koid: zx::Koid,
+    inspect_sink: finspect::InspectSinkProxy,
 }
 
 #[cfg(fuchsia_api_level_at_least = "HEAD")]
@@ -322,8 +333,13 @@ pub enum EscrowError {
 }
 
 impl PublishedInspectController {
-    fn new(inspector: Inspector, scope: fasync::Scope, tree_koid: zx::Koid) -> Self {
-        Self { inspector, scope: scope.join(), tree_koid }
+    fn new(
+        inspector: Inspector,
+        scope: fasync::Scope,
+        tree_koid: zx::Koid,
+        inspect_sink: finspect::InspectSinkProxy,
+    ) -> Self {
+        Self { inspector, scope: scope.join(), tree_koid, inspect_sink }
     }
 
     /// Escrows a frozen copy of the VMO of the associated Inspector replacing the current live
@@ -331,17 +347,10 @@ impl PublishedInspectController {
     /// This will not capture lazy nodes or properties.
     #[cfg(fuchsia_api_level_at_least = "HEAD")]
     pub async fn escrow_frozen(self, opts: EscrowOptions) -> Result<EscrowToken, EscrowError> {
-        let inspect_sink = match opts.inspect_sink {
-            Some(proxy) => proxy,
-            None => match connect_to_protocol::<finspect::InspectSinkMarker>() {
-                Ok(inspect_sink) => inspect_sink,
-                Err(err) => {
-                    return Err(EscrowError::SpawnTreeServer(err));
-                }
-            },
-        };
+        let Self { scope, inspector, tree_koid, inspect_sink } = self;
+        let inspect_sink = opts.inspect_sink.unwrap_or(inspect_sink);
         let (ep0, ep1) = zx::EventPair::create();
-        let vmo = match self.inspector.frozen_vmo_copy() {
+        let vmo = match inspector.frozen_vmo_copy() {
             Ok(vmo) => vmo,
             Err(err) => {
                 return Err(EscrowError::GetFrozenVmo(err));
@@ -351,12 +360,13 @@ impl PublishedInspectController {
             vmo: Some(vmo),
             name: opts.name,
             token: Some(EscrowToken { token: ep0 }),
-            tree: Some(self.tree_koid.raw_koid()),
+            tree: Some(tree_koid.raw_koid()),
             ..Default::default()
         }) {
             return Err(EscrowError::Escrow(err));
         }
-        self.scope.await;
+        drop(inspect_sink);
+        scope.await;
         Ok(EscrowToken { token: ep1 })
     }
 
@@ -364,7 +374,7 @@ impl PublishedInspectController {
     ///
     /// The future resolves when no more serving tasks are running.
     pub async fn cancel(self) {
-        let Self { scope, inspector: _, tree_koid: _ } = self;
+        let Self { scope, inspector: _, tree_koid: _, inspect_sink: _ } = self;
         let scope = pin!(scope);
         scope.cancel().await;
     }
@@ -470,7 +480,7 @@ mod tests {
         let (client, server) = zx::Channel::create();
         let inspector = Inspector::default();
         inspector.root().record_string("hello", "world");
-        let _inspect_sink_server_task = publish(
+        let inspect_sink_server_task = publish(
             &inspector,
             PublishOptions::default()
                 .on_inspect_sink_client(ClientEnd::<finspect::InspectSinkMarker>::new(client)),
@@ -489,6 +499,7 @@ mod tests {
             }
         );
 
+        drop(inspect_sink_server_task);
         assert!(request_stream.next().await.is_none());
     }
 
@@ -512,9 +523,8 @@ mod tests {
             payload: finspect::InspectSinkPublishRequest { tree: Some(tree), .. }, ..}) => tree
         );
 
-        assert!(request_stream.next().await.is_none());
-
         controller.cancel().await;
+        assert!(request_stream.next().await.is_none());
         fidl::AsyncChannel::from_channel(tree.into_channel())
             .on_closed()
             .await
@@ -541,13 +551,8 @@ mod tests {
                 panic!("unexpected request: {other:?}");
             }
         };
-        let (proxy, mut request_stream) =
-            fidl::endpoints::create_proxy_and_stream::<finspect::InspectSinkMarker>();
         let (client_token, request) = futures::future::join(
-            controller.escrow_frozen(EscrowOptions {
-                name: Some("test".into()),
-                inspect_sink: Some(proxy),
-            }),
+            controller.escrow_frozen(EscrowOptions::default().name("test")),
             request_stream.next(),
         )
         .await;
@@ -584,6 +589,7 @@ mod tests {
                 panic!("unexpected request: {other:?}");
             }
         };
+        assert!(request_stream.next().await.is_none());
     }
 
     #[cfg(fuchsia_api_level_at_least = "HEAD")]

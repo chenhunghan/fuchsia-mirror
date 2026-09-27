@@ -19,12 +19,6 @@ from honeydew.affordances.connectivity.wlan import wlan_policy
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )
-from honeydew.affordances.connectivity.wlan.utils.types import (
-    ClientStateSummary,
-    NetworkConfig,
-    NetworkIdentifier,
-    NetworkState,
-)
 from honeydew.affordances.location import Location
 from honeydew.errors import NotSupportedError
 from honeydew.transports.ffx import ffx as ffx_transport
@@ -49,12 +43,6 @@ _TEST_CREDENTIAL_PSK = f_wlan_policy.Credential(
     psk=list(bytes.fromhex(_TEST_PSK))
 )
 
-_TEST_NETWORK_CONFIG_NONE = NetworkConfig(
-    ssid=_TEST_SSID,
-    security_type=f_wlan_policy.SecurityType.NONE,
-    credential_type="None",
-    credential_value="",
-)
 _TEST_NETWORK_CONFIG_NONE_FIDL = f_wlan_policy.NetworkConfig(
     id_=f_wlan_policy.NetworkIdentifier(
         ssid=_TEST_SSID_BYTES,
@@ -63,12 +51,6 @@ _TEST_NETWORK_CONFIG_NONE_FIDL = f_wlan_policy.NetworkConfig(
     credential=_TEST_CREDENTIAL_NONE,
 )
 
-_TEST_NETWORK_CONFIG_PASSWORD = NetworkConfig(
-    ssid=_TEST_SSID,
-    security_type=f_wlan_policy.SecurityType.WPA2,
-    credential_type="Password",
-    credential_value=_TEST_PASSWORD,
-)
 _TEST_NETWORK_CONFIG_PASSWORD_FIDL = f_wlan_policy.NetworkConfig(
     id_=f_wlan_policy.NetworkIdentifier(
         ssid=_TEST_SSID_BYTES,
@@ -77,12 +59,6 @@ _TEST_NETWORK_CONFIG_PASSWORD_FIDL = f_wlan_policy.NetworkConfig(
     credential=_TEST_CREDENTIAL_PASSWORD,
 )
 
-_TEST_NETWORK_CONFIG_PSK = NetworkConfig(
-    ssid=_TEST_SSID,
-    security_type=f_wlan_policy.SecurityType.WPA2,
-    credential_type="Psk",
-    credential_value=_TEST_PSK,
-)
 _TEST_NETWORK_CONFIG_PSK_FIDL = f_wlan_policy.NetworkConfig(
     id_=f_wlan_policy.NetworkIdentifier(
         ssid=_TEST_SSID_BYTES,
@@ -390,9 +366,9 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             networks,
             [
-                _TEST_NETWORK_CONFIG_NONE,
-                _TEST_NETWORK_CONFIG_PASSWORD,
-                _TEST_NETWORK_CONFIG_PSK,
+                _TEST_NETWORK_CONFIG_NONE_FIDL,
+                _TEST_NETWORK_CONFIG_PASSWORD_FIDL,
+                _TEST_NETWORK_CONFIG_PSK_FIDL,
             ],
         )
 
@@ -408,7 +384,7 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
                     state=f_wlan_policy.WlanClientState.CONNECTIONS_ENABLED,
                     networks=[],
                 ),
-                ClientStateSummary(
+                f_wlan_policy.ClientStateSummary(
                     state=f_wlan_policy.WlanClientState.CONNECTIONS_ENABLED,
                     networks=[],
                 ),
@@ -428,16 +404,16 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     ],
                 ),
-                ClientStateSummary(
+                f_wlan_policy.ClientStateSummary(
                     state=f_wlan_policy.WlanClientState.CONNECTIONS_ENABLED,
                     networks=[
-                        NetworkState(
-                            network_identifier=NetworkIdentifier(
-                                ssid="Google Guest",
-                                security_type=f_wlan_policy.SecurityType.WPA2,
+                        f_wlan_policy.NetworkState(
+                            id_=f_wlan_policy.NetworkIdentifier(
+                                ssid=list(str.encode("Google Guest")),
+                                type_=f_wlan_policy.SecurityType.WPA2,
                             ),
-                            connection_state=f_wlan_policy.ConnectionState.CONNECTING,
-                            disconnect_status=None,
+                            state=f_wlan_policy.ConnectionState.CONNECTING,
+                            status=None,
                         )
                     ],
                 ),
@@ -448,7 +424,7 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
                     state=f_wlan_policy.WlanClientState.CONNECTIONS_DISABLED,
                     networks=[],
                 ),
-                ClientStateSummary(
+                f_wlan_policy.ClientStateSummary(
                     state=f_wlan_policy.WlanClientState.CONNECTIONS_DISABLED,
                     networks=[],
                 ),
@@ -493,7 +469,7 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
             networks=[
                 f_wlan_policy.NetworkState(
                     id_=f_wlan_policy.NetworkIdentifier(
-                        ssid=b"ssid1",
+                        ssid=list(b"ssid1"),
                         type_=f_wlan_policy.SecurityType.NONE,
                     ),
                     state=f_wlan_policy.ConnectionState.CONNECTED,
@@ -534,7 +510,7 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
 
         push_task = asyncio.create_task(push_updates())
 
-        def condition(update: ClientStateSummary) -> bool:
+        def condition(update: f_wlan_policy.ClientStateSummary) -> bool:
             return (
                 update.state
                 == f_wlan_policy.WlanClientState.CONNECTIONS_ENABLED
@@ -837,7 +813,7 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
             self.wlan_policy_obj,
             "get_status",
             mock.AsyncMock(
-                return_value=ClientStateSummary(
+                return_value=f_wlan_policy.ClientStateSummary(
                     state=f_wlan_policy.WlanClientState.CONNECTIONS_ENABLED,
                     networks=[],
                 )
@@ -898,7 +874,7 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
                     self.wlan_policy_obj,
                     "get_status",
                     mock.AsyncMock(
-                        return_value=ClientStateSummary(
+                        return_value=f_wlan_policy.ClientStateSummary(
                             state=f_wlan_policy.WlanClientState.CONNECTIONS_ENABLED,
                             networks=[],
                         )

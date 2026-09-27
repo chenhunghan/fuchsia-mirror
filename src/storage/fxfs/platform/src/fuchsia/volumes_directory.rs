@@ -1205,7 +1205,7 @@ mod tests {
     use std::time::Duration;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
-    use storage_units::{BlockSize, PAGE_SIZE};
+    use storage_units::{BlockSize, page_size};
     use vfs::execution_scope::ExecutionScope;
     use vfs::temp_clone::{TempClonable, unblock};
     use zx::Status;
@@ -2876,7 +2876,7 @@ mod tests {
         )
         .await;
 
-        file.resize((PAGE_SIZE * 2).into()).await.expect("resize (FIDL)").expect("resize failed");
+        file.resize((page_size() * 2).into()).await.expect("resize (FIDL)").expect("resize failed");
         // The above resize creates zero pages which aren't dirty pages and don't contribute to the
         // dirty bytes count but still need to be flushed. The first write below will cross the
         // `max_dirty_bytes_when_critical` threshold but `minimize_memory` won't flush the file
@@ -2906,7 +2906,7 @@ mod tests {
         // One call to get dirty bytes over 0, the second to force a flush during mark_dirty.
         vmo.write(&buf, 0).expect("Writing to create dirty bytes");
         let before = fixture.volumes_directory().pager_dirty_bytes_count.load();
-        vmo.write(&buf, PAGE_SIZE.get()).expect("Writing to force a flush during mark_dirty");
+        vmo.write(&buf, page_size().get()).expect("Writing to force a flush during mark_dirty");
         // This is still the page size because we forced a flush of the first write during the
         // second write.
         assert_eq!(fixture.volumes_directory().pager_dirty_bytes_count.load(), before,);

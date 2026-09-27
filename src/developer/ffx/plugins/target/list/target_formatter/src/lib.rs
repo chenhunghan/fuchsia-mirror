@@ -44,9 +44,15 @@ const PADDING_SPACES: usize = 4;
 
 const DEFAULT_SSH_PORT: u16 = 22;
 
-pub fn port_str(ta: TargetAddr) -> String {
+/// Formats a [`TargetAddr`] into a string representation for display in target listings.
+///
+/// For network addresses (`TargetAddr::Net`), defaults unspecified ports (`0`)
+/// to the standard SSH port (`22`). For non-network target addresses (such as
+/// VSock, USB, or UART), returns the address formatted directly via [`Display`](std::fmt::Display).
+pub fn port_str(ta: &TargetAddr) -> String {
     match ta {
-        TargetAddr::Net(mut addr) => {
+        TargetAddr::Net(addr) => {
+            let mut addr = *addr;
             let mut port = addr.port();
             if port == 0 {
                 port = DEFAULT_SSH_PORT;
@@ -54,13 +60,25 @@ pub fn port_str(ta: TargetAddr) -> String {
             addr.set_port(port);
             addr.to_string()
         }
-        TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => format!("{ta}"),
+        TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => format!("{ta}"),
     }
 }
 
-pub fn port_str_scoped(ta: TargetAddr) -> Result<String> {
+/// Formats a [`TargetAddr`] into a scoped string representation for display in target listings.
+///
+/// For network addresses (`TargetAddr::Net`), resolves IPv6 link-local interface
+/// scopes into lexical interface names (e.g. `%eth0`) and defaults unspecified
+/// ports to `22`. For non-network addresses (VSock, USB, or UART), returns the
+/// address's standard string representation.
+///
+/// # Errors
+///
+/// Returns [`FormatterError::InvalidInterfaceId`] if an IPv6 link-local address
+/// contains an interface scope ID that cannot be mapped to a valid network interface.
+pub fn port_str_scoped(ta: &TargetAddr) -> Result<String> {
     match ta {
-        TargetAddr::Net(mut addr) => {
+        TargetAddr::Net(addr) => {
+            let mut addr = *addr;
             let mut port = addr.port();
             if port == 0 {
                 port = DEFAULT_SSH_PORT;
@@ -69,7 +87,7 @@ pub fn port_str_scoped(ta: TargetAddr) -> Result<String> {
             let ssaddr = ScopedSocketAddr::from_socket_addr(addr)?;
             Ok(ssaddr.to_string())
         }
-        TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => Ok(ta.to_string()),
+        TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => Ok(ta.to_string()),
     }
 }
 
@@ -234,6 +252,7 @@ fn matches_addr_type(addr: &TargetAddr, ty: AddressTypes) -> bool {
         }
         TargetAddr::VSockCtx(_) => ty.contains(AddressTypes::VSOCK),
         TargetAddr::UsbCtx(_) => ty.contains(AddressTypes::USB),
+        TargetAddr::Uart(_) => ty.contains(AddressTypes::UART),
     }
 }
 
@@ -286,18 +305,19 @@ impl TryFrom<TargetInfo> for AddressesTarget {
     type Error = FormatterError;
 
     fn try_from(t: TargetInfo) -> Result<Self> {
-        // Prefer Usb or Vsock connections
+        // Prefer direct local connections (Usb or Vsock) over network,
+        // but fall back to priority-sorted addresses (Net, then Uart).
         if let Some(addr) = t
             .addresses
             .iter()
             .find(|x| matches!(x, TargetAddr::UsbCtx(_) | TargetAddr::VSockCtx(_)))
         {
-            return Ok(Self(*addr));
+            return Ok(Self(addr.clone()));
         }
         if t.addresses.is_empty() {
             return Err(FormatterError::EmptyAddresses);
         }
-        Ok(Self(t.addresses[0]))
+        Ok(Self(t.addresses[0].clone()))
     }
 }
 
@@ -317,7 +337,7 @@ impl TryFrom<Vec<TargetInfo>> for AddressesTargetFormatter {
 
 impl TargetFormatter for AddressesTargetFormatter {
     fn lines(&self) -> Result<Vec<String>> {
-        Ok(self.targets.iter().map(|t| port_str(t.0)).collect())
+        Ok(self.targets.iter().map(|t| port_str(&t.0)).collect())
     }
 }
 
@@ -337,7 +357,7 @@ impl TryFrom<Vec<TargetInfo>> for AddressesWithLexicalScopeTargetFormatter {
 
 impl TargetFormatter for AddressesWithLexicalScopeTargetFormatter {
     fn lines(&self) -> Result<Vec<String>> {
-        self.targets.iter().map(|t| port_str_scoped(t.0)).collect()
+        self.targets.iter().map(|t| port_str_scoped(&t.0)).collect()
     }
 }
 
@@ -580,12 +600,18 @@ macro_rules! make_structs_and_support_functions {
     };
 }
 
+/// Represents a target connection address in structured, machine-readable JSON output.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "type")]
 pub enum JsonTargetAddress {
+    /// An IPv4 or IPv6 network address with an associated SSH port.
     Ip { ip: String, ssh_port: u16 },
+    /// A virtual socket (VSock) context ID.
     VSock { cid: u32 },
+    /// A USB device context ID.
     Usb { cid: u32 },
+    /// A physical or virtual UART serial device endpoint.
+    Uart { endpoint: String },
 }
 
 impl From<TargetAddr> for JsonTargetAddress {
@@ -599,6 +625,7 @@ impl From<TargetAddr> for JsonTargetAddress {
             },
             TargetAddr::VSockCtx(cid) => JsonTargetAddress::VSock { cid: *cid },
             TargetAddr::UsbCtx(cid) => JsonTargetAddress::Usb { cid: *cid },
+            TargetAddr::Uart(endpoint) => JsonTargetAddress::Uart { endpoint: endpoint.clone() },
         }
     }
 }
@@ -1517,7 +1544,7 @@ mod test {
     async fn test_address_target() {
         let mut t = make_target(make_ip_v4_addr(0));
         let usb_addr = make_usb_addr(1);
-        t.addresses.push(usb_addr);
+        t.addresses.push(usb_addr.clone());
         let addr_target = AddressesTarget::try_from(t).unwrap();
         assert_eq!(addr_target.0, usb_addr);
     }
@@ -1582,7 +1609,7 @@ mod test {
     fn test_port_str_scoped_invalid_interface() {
         // Use an absurdly high scope ID that shouldn't map to a real interface.
         let addr = TargetAddr::new(std_ip!("fe80::1"), 999999, 8080);
-        let res = port_str_scoped(addr);
+        let res = port_str_scoped(&addr);
         assert!(res.is_err());
         assert!(matches!(res.unwrap_err(), FormatterError::InvalidInterfaceId(_)));
     }

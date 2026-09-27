@@ -32,6 +32,7 @@ rustc_library("sys") {
 rustc_bindgen_golden("async_sys_bindgen_golden") {
   headers = [
     "//sdk/lib/async/include/lib/async/dispatcher.h",
+    "//sdk/lib/async/include/lib/async/irq.h",
     "//sdk/lib/async/include/lib/async/paged_vmo.h",
     "//sdk/lib/async/include/lib/async/receiver.h",
     "//sdk/lib/async/include/lib/async/sequence_id.h",

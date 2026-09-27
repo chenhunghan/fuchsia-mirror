@@ -36,6 +36,7 @@ group("netstack-for-tests") {
   testonly = true
   deps = [ "netstack3:component-dropin" ]
 }
+
 group("netstack-debug-for-tests") {
   testonly = true
   deps = [ "netstack3:component-debug-dropin" ]
@@ -46,7 +47,6 @@ fuchsia_package("netstack2") {
   deps = [ _netstack2_component ]
   visibility = [
     ":*",
-    "//bundles/assembly/*",
     "//src/connectivity/network/tests/benchmarks/socket-loopback:*",
   ]
 }
@@ -59,21 +59,6 @@ network_unified_binary_regular_and_gub_packages("netstack3") {
     # the component for all DHCPv4 functionality.
     "dhcpv4/client/bindings:component",
     "netstack3:component",
-  ]
-
-  # Handled by assembly.
-  validate_structured_config = false
-
-  visibility = [
-    ":*",
-    "//bundles/assembly/*",
-  ]
-}
-
-network_unified_binary_regular_and_gub_packages("netstack-migration") {
-  gub_deps = [
-    "netstack-proxy:component",
-    "stack-migration:component",
   ]
 
   # Handled by assembly.
@@ -127,13 +112,11 @@ group("tests") {
     "mdns:tests",
     "net-cli:tests",
     "netlink:tests",
-    "stack-migration:tests",
 
     # Ensure this target doesn't rot. This dependency can be removed if the
     # target becomes load bearing elsewhere.
     "netstack:component-with-tracing-dropin",
     "netstack:tests",
-    "netstack-proxy:tests",
     "netstack3:tests",
     "testing:tests",
     "tests",

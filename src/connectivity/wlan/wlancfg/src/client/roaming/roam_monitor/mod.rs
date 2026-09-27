@@ -221,7 +221,7 @@ mod test {
         roam_data_sender.send_signal_report_ind(ind).expect("error sending signal report");
 
         // Verify that roam sender packages trigger data and sends to roam monitor receiver.
-        assert_matches!(receiver.try_next(), Ok(Some(RoamTriggerData::SignalReportInd(data))) => {
+        assert_matches!(receiver.try_recv(), Ok(RoamTriggerData::SignalReportInd(data)) => {
             assert_eq!(ind, data);
         });
     }
@@ -274,19 +274,19 @@ mod test {
             RoamTriggerDataOutcome::RoamSearch { .. } => {
                 // Verify metric was sent for upcoming roam scan
                 assert_matches!(
-                    test_values.telemetry_receiver.try_next(),
-                    Ok(Some(TelemetryEvent::PolicyRoamScan { .. }))
+                    test_values.telemetry_receiver.try_recv(),
+                    Ok(TelemetryEvent::PolicyRoamScan { .. })
                 );
                 // Verify that a roam search request was sent after monitor responded true.
                 assert_matches!(
-                    test_values.connection_selection_request_receiver.try_next(),
-                    Ok(Some(_))
+                    test_values.connection_selection_request_receiver.try_recv(),
+                    Ok(_)
                 );
             }
             RoamTriggerDataOutcome::Noop => {
                 // Verify that no roam search was triggered after monitor responded false.
                 assert_matches!(
-                    test_values.connection_selection_request_receiver.try_next(),
+                    test_values.connection_selection_request_receiver.try_recv(),
                     Err(_)
                 );
             }
@@ -348,7 +348,7 @@ mod test {
 
         // Respond via the connection selection requester
         let candidate = generate_random_scanned_candidate();
-        assert_matches!(test_values.connection_selection_request_receiver.try_next(), Ok(Some(ConnectionSelectionRequest::RoamSelection { responder, .. })) => {
+        assert_matches!(test_values.connection_selection_request_receiver.try_recv(), Ok(ConnectionSelectionRequest::RoamSelection { responder, .. }) => {
             // Respond with a roam candidate
             responder.send(Some(candidate.clone())).expect("failed to send");
         });
@@ -358,20 +358,20 @@ mod test {
 
         // Verify metric was sent for upcoming roam scan
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::PolicyRoamScan { .. }))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::PolicyRoamScan { .. })
         );
 
         if response_to_should_send_roam_request && roaming_mode == RoamingMode::CanRoam {
             // Verify that a roam request is sent if the should_send_roam_request method returns
             // true.
-            assert_matches!(test_values.roam_request_receiver.try_next(), Ok(Some(selection)) => {
+            assert_matches!(test_values.roam_request_receiver.try_recv(), Ok(selection) => {
                 assert_eq!(selection.candidate, candidate);
             });
         } else {
             // Verify that no roam request is sent if the should_send_roam_request method returns
             // false, regardless of the roaming mode.
-            assert_matches!(test_values.roam_request_receiver.try_next(), Err(_));
+            assert_matches!(test_values.roam_request_receiver.try_recv(), Err(_));
         }
     }
 
@@ -470,13 +470,13 @@ mod test {
 
         // Respond via the connection selection requester
         let candidate = generate_random_scanned_candidate();
-        assert_matches!(connection_selection_request_receiver.try_next(), Ok(Some(ConnectionSelectionRequest::RoamSelection { responder, .. })) => {
+        assert_matches!(connection_selection_request_receiver.try_recv(), Ok(ConnectionSelectionRequest::RoamSelection { responder, .. }) => {
             // Respond with a roam candidate
             responder.send(Some(candidate.clone())).expect("failed to send");
         });
 
         assert_matches!(exec.run_until_stalled(serve_fut), Poll::Pending);
-        assert_matches!(roam_request_receiver.try_next(), Ok(Some(selection)) => {
+        assert_matches!(roam_request_receiver.try_recv(), Ok(selection) => {
             assert_eq!(selection.candidate, candidate);
         });
     }

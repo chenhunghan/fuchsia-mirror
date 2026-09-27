@@ -6,7 +6,10 @@
         }
     },
     "ffx": {
-        "subtool-search-paths": "$BUILD_DIR/host-tools",
+        "subtool-search-paths": [
+            "$BUILD_DIR/host-tools",
+            "$FUCHSIA_DIR/prebuilt/tools/gdoctor"
+        ],
         "ui": {
             "mode": "text",
             "overrides": {}

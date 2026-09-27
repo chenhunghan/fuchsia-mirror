@@ -55,6 +55,12 @@ FFI_ALWAYS_INLINE JobDispatcher* cpp_job_dispatcher_get_root_job() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE JobDispatcher* cpp_job_dispatcher_create_root_job() {
+  auto root = JobDispatcher::CreateRootJob();
+  return fbl::ExportToRawPtr(&root);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE JobDispatcher* cpp_job_dispatcher_parent(const JobDispatcher* job) {
   auto parent = const_cast<JobDispatcher*>(job)->parent();
   return fbl::ExportToRawPtr(&parent);

@@ -147,9 +147,8 @@ class CommandBuffer : public Reffable {
     return impl_->Submit(queue, std::move(callback));
   }
 
-  // Wraps vkCmdBeginRenderPass(). Uses |info| to obtain a cached VkRenderPass
-  // and VkFramebuffer.
-  void BeginRenderPass(const RenderPassInfo& info);
+  // Wraps vkCmdBeginRenderPass().
+  void BeginRenderPass(impl::FramebufferPtr framebuffer);
 
   // Wraps vkCmdEndRenderPass().
   void EndRenderPass();

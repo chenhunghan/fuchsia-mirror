@@ -12,7 +12,7 @@ use ffx_writer::{MachineWriter, ToolIO as _};
 use fho::{FfxMain, FfxTool, Result, return_user_error, user_error};
 use std::io::Write;
 
-#[derive(FfxTool)]
+#[derive(Debug, FfxTool)]
 pub struct StopTool {
     #[command]
     cmd: StopCommand,
@@ -53,12 +53,10 @@ impl FfxMain for StopTool {
                 .await
                 .map_err(|e| user_error!("{e}"))?;
 
-            if let Some(op_name) = op.name {
-                gce.client
-                    .wait_for_zone_operation(&instance.project, &instance.zone, &op_name)
-                    .await
-                    .map_err(|e| user_error!("{e}"))?;
-            }
+            gce.client
+                .wait_for_zone_operation(&instance.project, &instance.zone, &op)
+                .await
+                .map_err(|e| user_error!("{e}"))?;
             if !writer.is_machine() {
                 writeln!(writer, "Instance '{}' stopped.", instance.name)?;
             }
@@ -77,12 +75,10 @@ impl FfxMain for StopTool {
                 .await
                 .map_err(|e| user_error!("{e}"))?;
 
-            if let Some(op_name) = op.name {
-                gce.client
-                    .wait_for_zone_operation(&instance.project, &instance.zone, &op_name)
-                    .await
-                    .map_err(|e| user_error!("{e}"))?;
-            }
+            gce.client
+                .wait_for_zone_operation(&instance.project, &instance.zone, &op)
+                .await
+                .map_err(|e| user_error!("{e}"))?;
             if !writer.is_machine() {
                 writeln!(writer, "Instance '{}' deleted.", instance.name)?;
             }

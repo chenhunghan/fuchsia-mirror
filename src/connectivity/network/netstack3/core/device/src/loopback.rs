@@ -5,7 +5,6 @@
 //! The loopback device.
 
 use alloc::vec::Vec;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use derivative::Derivative;
 
@@ -82,7 +81,7 @@ impl DeviceStateSpec for LoopbackDevice {
     type External<BT: DeviceLayerTypes> = BT::LoopbackDeviceState;
     type CreationProperties = LoopbackCreationProperties;
     type Counters = EthernetDeviceCounters;
-    type TimerId<D: WeakDeviceIdentifier> = Never;
+    type TimerId<D: WeakDeviceIdentifier> = !;
 
     fn new_device_state<
         CC: CoreTimerContext<Self::TimerId<CC::WeakDeviceId>, BC> + DeviceIdContext<Self>,
@@ -352,6 +351,7 @@ where
                         Some(local_frame_dst),
                         ip_layer_metadata,
                         NetworkParsingContext::new(ChecksumRxOffloading::FullyOffloaded),
+                        None,
                     ),
                     buf,
                 );
@@ -376,6 +376,7 @@ where
                         Some(local_frame_dst),
                         ip_layer_metadata,
                         NetworkParsingContext::new(ChecksumRxOffloading::FullyOffloaded),
+                        None,
                     ),
                     buf,
                 );
@@ -559,5 +560,5 @@ where
 impl DeviceReceiveFrameSpec for LoopbackDevice {
     // Loopback never receives frames from bindings, so make it impossible to
     // instantiate it.
-    type FrameMetadata<D> = Never;
+    type FrameMetadata<D> = !;
 }

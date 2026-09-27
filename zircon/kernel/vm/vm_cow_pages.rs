@@ -77,6 +77,115 @@ impl<'a> DeferredOps<'a> {
     }
 }
 
+/// `PriorityChanger` is a transaction object for changing the high priority count of `VmCowPages`
+/// objects. The high priority count is used to manage page reclamation. This object ensures that a
+/// `DeferredOps` object is created against the correct `VmCowPages`, which might be an ancestor of
+/// `target`. `PriorityChanger` does the following:
+///
+/// * Manages the lifetime of `VmCowPages` to ensure they last until the
+/// priority change operation, by holding a `RefPtr`.
+/// * Handles the construction of the `DeferredOps` object.
+/// * Clarifies which operations need to be done within the `VmCowPages` lock and which need to
+///   happen without the lock being held.
+/// * Presents a high-level API to `VmMapping` and `VmObjectPaged`.
+/// * Handles traversing up the `VmCowPages` hierarchy to ensure that high priority status is
+/// propagated.
+///
+/// Callers should prefer `VmMapping::SetMemoryPriorityLocked`,
+/// `VmMapping::set_memory_priority_default_locked_object`, or
+/// `VmMapping::set_memory_priority_high_already_positive_locked_object`, if applicable.
+///
+/// To change the high priority count of a `VmCowPages`, you should first construct the
+/// `PriorityChanger` object. Then,
+/// * If `delta` < 0, you must immediately call one of the change methods (such as
+///   [`change_high_priority_count_locked`](Self::change_high_priority_count_locked)), which
+///   change the high priority count of `target`.
+/// * If `delta` > 0, you must call an applicable prepare method to set up the prerequisites for the
+///   priority change operation, then call one of the change methods.
+///
+/// This struct is not thread-safe.
+#[pin_data(PinnedDrop)]
+#[repr(transparent)]
+pub struct PriorityChanger<'a> {
+    opaque: Opaque<bindings::PriorityChanger>,
+    phantom: PhantomData<&'a VmCowPages>,
+}
+
+unsafe_pinned_drop_ffi!(PriorityChanger<'_>, bindings::cpp_priority_changer_destroy);
+
+impl<'a> PriorityChanger<'a> {
+    /// Construct a priority changer to change the high priority count of `target`. When `delta` is
+    /// positive, we go towards high priority. When it's negative, we move towards default
+    /// priority.
+    ///
+    /// The constructor may be called with or without `target`'s lock being held.
+    ///
+    /// The caller must ensure that `target` remains valid during the lifetime of `PriorityChanger`.
+    ///
+    /// `delta != 0` is required (`delta == 0` does not do anything meaningful).
+    /// Before dropping this object, a change method (such as `change_high_priority_count_locked`)
+    /// must be called, and the object must be dropped without holding `target`'s lock.
+    pub fn new(cow: &'a VmCowPages, delta: i64) -> impl PinInit<Self> {
+        pin_init_ffi!(bindings::cpp_priority_changer_construct, cow.as_raw(), delta)
+    }
+
+    pub fn as_raw(self: Pin<&mut Self>) -> *mut bindings::PriorityChanger {
+        // SAFETY: Obtaining a raw pointer to `opaque` does not move the pinned object.
+        unsafe { self.get_unchecked_mut().opaque.get() }
+    }
+
+    /// Returns a reference to the target `VmCowPages`'s lock.
+    pub fn lock(&self) -> &'a VmCowPagesLock {
+        // SAFETY: `cpp_priority_changer_lock` returns `&target_->lock_`, a subobject of the
+        // target `VmCowPages`. The C++ `Lock<CriticalMutex>` is layout-compatible with
+        // `KMutex<VmCowPagesLockClass, RawCriticalMutex>`.
+        unsafe { &*bindings::cpp_priority_changer_lock(self.opaque.get()).cast::<VmCowPagesLock>() }
+    }
+
+    /// This method must be called *without* holding `target`'s `VmCowPages` lock. In addition, the
+    /// caller must not hold a `PriorityChanger` or `DeferredOps` on any other `VmCowPages` in
+    /// `target`'s hierarchy.
+    pub fn prepare_may_not_already_be_high_priority(self: Pin<&mut Self>) {
+        // TODO(ethanws): Find a way for the caller to annotate their guarantee that they
+        // don't hold the lock.
+
+        // SAFETY: `self.as_raw()` points to a live `PriorityChanger`, guaranteed by
+        // `Pin<&mut Self>` and its exclusive borrow.
+        unsafe {
+            bindings::cpp_priority_changer_prepare_may_not_already_be_high_priority(self.as_raw());
+        }
+    }
+
+    /// This method may be called if `target` already has a `high_priority_count_` > 0.
+    ///
+    /// This method must be called with `target`'s lock held.
+    pub fn prepare_is_already_high_priority_locked(
+        self: Pin<&mut Self>,
+        _token: &LockToken<'_, VmCowPagesLockClass>,
+    ) {
+        // SAFETY: `self.as_raw()` points to a live `PriorityChanger`, guaranteed by
+        // `Pin<&mut Self>` and its exclusive borrow.
+        unsafe {
+            bindings::cpp_priority_changer_prepare_is_already_high_priority_locked(self.as_raw());
+        }
+    }
+
+    /// Increments or decrements the priority count of this VMO. The high priority count is used to
+    /// control any page reclamation, and applies to the whole VMO, including its parents. The count
+    /// is never allowed to go negative and so callers must only subtract what they have already
+    /// added. Further, callers are required to remove any additions before the VMO is destroyed.
+    pub fn change_high_priority_count_locked(
+        self: Pin<&mut Self>,
+        _token: &LockToken<'_, VmCowPagesLockClass>,
+    ) {
+        // SAFETY: `self.as_raw()` points to a live `PriorityChanger`, guaranteed by `Pin<&mut Self>`
+        // and its exclusive borrow.
+        unsafe {
+            bindings::cpp_priority_changer_change_high_priority_count_locked(self.as_raw());
+        }
+    }
+}
+
 /// Used to track dirty_state in the vm_page_t.
 ///
 /// The transitions between the three states can roughly be summarized as follows:

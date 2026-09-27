@@ -256,10 +256,13 @@ func (t *genericFuchsiaTarget) StartSerialServer() error {
 	return nil
 }
 
+// DefaultConnectionTimeout is the default timeout for resolving the IP address or connecting via SSH.
+const DefaultConnectionTimeout = 2 * time.Minute
+
 // ResolveIP uses mDNS to resolve the IPv6 and IPv4 addresses of the
 // target. It then caches the results so future requests are fast.
 func (t *genericFuchsiaTarget) ResolveIP() error {
-	timeout := 2 * time.Minute
+	timeout := DefaultConnectionTimeout
 	if t.connectionTimeout != 0 {
 		timeout = t.connectionTimeout
 	}

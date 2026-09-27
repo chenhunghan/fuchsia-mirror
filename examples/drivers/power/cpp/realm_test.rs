@@ -102,13 +102,13 @@ async fn test_power_driver() -> Result<()> {
         })
         .await?;
 
-    let proxy = receiver.try_next()?.ok_or_else(|| anyhow::anyhow!("missing proxy"))?.into_proxy();
+    let proxy = receiver.try_recv()?.into_proxy();
     // Invoke suspend
     proxy.before_suspend().await?;
     // Invoke resume
     proxy.after_resume().await?;
 
-    echo_receiver.try_next()?.ok_or_else(|| anyhow::anyhow!("echo not called"))?;
+    echo_receiver.try_recv()?;
 
     Ok(())
 }
@@ -138,8 +138,8 @@ async fn test_power_driver_suspend_disabled() -> Result<()> {
         })
         .await?;
 
-    assert!(receiver.try_next().is_err());
-    echo_receiver.try_next()?.ok_or_else(|| anyhow::anyhow!("echo not called"))?;
+    assert!(receiver.try_recv().is_err());
+    echo_receiver.try_recv()?;
 
     Ok(())
 }
@@ -165,7 +165,7 @@ async fn test_suspend_enabled_but_no_sag() -> Result<()> {
         })
         .await?;
 
-    assert!(echo_receiver.try_next().is_err());
+    assert!(echo_receiver.try_recv().is_err());
 
     Ok(())
 }

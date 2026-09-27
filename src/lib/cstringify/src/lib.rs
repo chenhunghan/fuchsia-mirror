@@ -10,13 +10,11 @@
 #[macro_export]
 macro_rules! cstringify {
     ($x:path) => {
-        // Safety: The concat!() adds a nul byte, and a Rust path cannot contain a nul byte.
-        // The latter is true because https://doc.rust-lang.org/reference/identifiers.html excludes
-        // Unicode control characters from identifiers, and U+0000 is a control character.
-        unsafe {
-            ::core::ffi::CStr::from_bytes_with_nul_unchecked(
-                concat!(stringify!($x), "\0").as_bytes(),
-            )
+        const {
+            match ::core::ffi::CStr::from_bytes_with_nul(concat!(stringify!($x), "\0").as_bytes()) {
+                ::core::result::Result::Ok(s) => s,
+                ::core::result::Result::Err(_) => ::core::panic!("path contains a nul byte"),
+            }
         }
     };
 }
@@ -46,5 +44,10 @@ mod tests {
     #[test]
     fn compatible_with_const() {
         const _TEST_STRING: &'static ffi::CStr = cstringify!(foo);
+    }
+
+    #[test]
+    fn cstringify_qualified_path() {
+        assert_eq!(cstringify!(foo::bar).to_bytes(), b"foo::bar");
     }
 }

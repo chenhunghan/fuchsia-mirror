@@ -15,7 +15,40 @@
         { service: "fuchsia.hardware.cqhci.Service" },
         { service: "fuchsia.hardware.power.PowerTokenService" },
         { service: "fuchsia.hardware.rpmb.Service" },
-        { service: "fuchsia.hardware.sdio.Service" },
+        {
+            service: "fuchsia.hardware.sdio.Service",
+            metadata: {
+                id: "fuchsia.hardware.sdio.Metadata",
+                schema: {
+                    $schema: "http://json-schema.org/draft-07/schema#",
+                    title: "SdioMetadata",
+                    type: "object",
+                    properties: {
+                        functions: {
+                            type: "array",
+                            items: { $ref: "#/definitions/SdioFunctionMetadataEntry" },
+                        },
+                    },
+                    required: [ "functions" ],
+                    definitions: {
+                        SdioFunctionMetadataEntry: {
+                            type: "object",
+                            properties: {
+                                function: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                id: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                            },
+                            required: [ "function" ],
+                        },
+                    },
+                },
+            },
+        },
         { service: "fuchsia.hardware.sdio.DriverService" },
         { service: "fuchsia.driver.compat.Service" },
     ],
@@ -52,6 +85,11 @@
         {
             name: "default",
             service: "fuchsia.hardware.sdmmc.SdmmcMetadata",
+            generate_bind_rule: false,
+        },
+        {
+            name: "default",
+            service: "fuchsia.hardware.sdio.Metadata",
             generate_bind_rule: false,
         },
         {

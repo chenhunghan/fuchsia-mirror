@@ -4,9 +4,7 @@
 
 use errors::{FfxError, IntoExitCode};
 use ffx_config::{ConfigLevel, ConfigSource};
-use fidl_fuchsia_developer_ffx::{
-    DaemonError, OpenTargetError, TargetConnectionError, TunnelError,
-};
+use fidl_fuchsia_developer_ffx::{OpenTargetError, TargetConnectionError, TunnelError};
 use traceable_error::TraceableError;
 
 /// Describes the source of a target specifier.
@@ -162,24 +160,6 @@ pub const BUG_REPORT_URL: &str =
 /// Into trait.
 #[derive(thiserror::Error, Clone, Debug)]
 pub enum FfxTargetError {
-    //#[error("{}", .0)]
-    // Error(#[source] anyhow::Error, i32 /* Error status code */),
-    #[cfg(not(target_os = "fuchsia"))]
-    #[error("{}", match .err {
-            DaemonError::Timeout => format!("Timeout attempting to reach target {}", target_string(.target)),
-            DaemonError::ShutdownTimeout => match .target {
-                Some(spec) if !spec.is_empty() => format!("Timeout waiting for device to shut down. Device \"{spec}\" is still responsive."),
-                _ => "Timeout waiting for device to shut down. The device is still responsive.".to_string(),
-            },
-            DaemonError::TargetCacheEmpty => format!("No devices found."),
-            DaemonError::TargetAmbiguous => format!("Target specification {} matched multiple targets. Use `ffx target list` to list known targets, and use a more specific target query.", target_string(.target)),
-            DaemonError::TargetNotFound => format!("Target {} was not found.", target_string(.target)),
-            DaemonError::ProtocolNotFound => "The requested ffx service was not found. Run `ffx doctor --restart-daemon`.".to_string(),
-            DaemonError::ProtocolOpenError => "The requested ffx service failed to open. Run `ffx doctor --restart-daemon`.".to_string(),
-            DaemonError::BadProtocolRegisterState => "The requested service could not be registered. Run `ffx doctor --restart-daemon`.".to_string(),
-        })]
-    DaemonError { err: DaemonError, target: Option<String> },
-
     #[cfg(not(target_os = "fuchsia"))]
     #[error("{}", format_open_target_error(.err, .target, .targets, .target_source))]
     OpenTargetError {
@@ -226,10 +206,6 @@ pub enum FfxTargetError {
         target: Option<String>,
         logs: Option<String>,
     },
-
-    #[cfg(not(target_os = "fuchsia"))]
-    #[error("Communication with the daemon failed: {error}. Target: {}", target_string(.target))]
-    DaemonCommunicationError { target: Option<String>, error: std::sync::Arc<fidl::Error> },
 }
 
 pub fn target_string(matcher: &Option<String>) -> String {
@@ -239,46 +215,9 @@ pub fn target_string(matcher: &Option<String>) -> String {
     }
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
-pub enum DaemonProtocolError {
-    #[error(
-        "The daemon protocol '{svc_name}' did not match any protocols on the daemon\nIf you are not developing this plugin or the protocol it connects to, then this is a bug\nPlease report it at https://fxbug.dev/new/ffx+User+Bug."
-    )]
-    ProtocolNotFound { svc_name: String },
-
-    #[error(
-        "The daemon protocol '{svc_name}' failed to open on the daemon.\nIf you are developing the protocol, there may be an internal failure when invoking the start\nfunction. See the ffx.daemon.log for details at `ffx config get log.dir -p sub`.\nIf you are NOT developing this plugin or the protocol it connects to, then this is a bug.\nPlease report it at https://fxbug.dev/new/ffx+User+Bug."
-    )]
-    ProtocolOpenError { svc_name: String },
-
-    #[error(
-        "While attempting to open the daemon protocol '{svc_name}', received an unexpected error:\n{unexpected:?}\nThis is not intended behavior and is a bug.\nPlease report it at https://fxbug.dev/new/ffx+User+Bug."
-    )]
-    Unexpected { svc_name: String, unexpected: DaemonError },
-}
-
-/// Convenience function for converting protocol connection requests into more
-/// diagnosable/actionable errors for the user.
-pub fn map_daemon_error(svc_name: &str, err: DaemonError) -> DaemonProtocolError {
-    match err {
-        DaemonError::ProtocolNotFound => {
-            DaemonProtocolError::ProtocolNotFound { svc_name: svc_name.to_string() }
-        }
-        DaemonError::ProtocolOpenError => {
-            DaemonProtocolError::ProtocolOpenError { svc_name: svc_name.to_string() }
-        }
-        unexpected => {
-            DaemonProtocolError::Unexpected { svc_name: svc_name.to_string(), unexpected }
-        }
-    }
-}
-
 impl IntoExitCode for FfxTargetError {
     fn exit_code(&self) -> i32 {
         match self {
-            FfxTargetError::DaemonError { err, .. } => {
-                i32::try_from(err.into_primitive()).unwrap_or(1)
-            }
             FfxTargetError::OpenTargetError { err, .. } => {
                 i32::try_from(err.into_primitive()).unwrap_or(1)
             }
@@ -288,16 +227,12 @@ impl IntoExitCode for FfxTargetError {
             FfxTargetError::TargetConnectionError { err, .. } => {
                 i32::try_from(err.into_primitive()).unwrap_or(1)
             }
-            FfxTargetError::DaemonCommunicationError { .. } => 1,
         }
     }
 }
 impl Into<FfxError> for FfxTargetError {
     fn into(self) -> FfxError {
         match self {
-            FfxTargetError::DaemonError { ref target, .. } => {
-                FfxError::DaemonError { err: Box::new(self.clone()), target: target.clone() }
-            }
             FfxTargetError::OpenTargetError { ref target, .. } => FfxError::OpenTargetError {
                 err: Box::new(self.clone()),
                 target: target.clone(),
@@ -313,9 +248,6 @@ impl Into<FfxError> for FfxTargetError {
                     logs: logs.clone(),
                 }
             }
-            FfxTargetError::DaemonCommunicationError { ref target, .. } => {
-                FfxError::DaemonError { err: Box::new(self.clone()), target: target.clone() }
-            }
         }
     }
 }
@@ -327,11 +259,9 @@ impl TraceableError for FfxTargetError {
 
     fn layer_code(&self) -> String {
         let variant_str = match self {
-            Self::DaemonError { err, .. } => format!("DaemonError({:?})", err),
             Self::OpenTargetError { err, .. } => format!("OpenTargetError({:?})", err),
             Self::TunnelError { err, .. } => format!("TunnelError({:?})", err),
             Self::TargetConnectionError { err, .. } => format!("TargetConnectionError({:?})", err),
-            Self::DaemonCommunicationError { .. } => "DaemonCommunicationError".to_string(),
         };
         format!("target_errors::FfxTargetError::{}", variant_str)
     }
@@ -343,21 +273,6 @@ impl TraceableError for FfxTargetError {
 
 #[cfg(cw)]
 mod cw {
-    #[cfg(not(target_os = "fuchsia"))]
-    impl IntoExitCode for DaemonError {
-        fn exit_code(&self) -> i32 {
-            match self {
-                DaemonError::Timeout => 14,
-                DaemonError::TargetCacheEmpty => 15,
-                DaemonError::TargetAmbiguous => 16,
-                DaemonError::TargetNotFound => 17,
-                DaemonError::ProtocolNotFound => 20,
-                DaemonError::ProtocolOpenError => 21,
-                DaemonError::BadProtocolRegisterState => 22,
-            }
-        }
-    }
-
     #[cfg(not(target_os = "fuchsia"))]
     impl IntoExitCode for OpenTargetError {
         fn exit_code(&self) -> i32 {
@@ -405,21 +320,6 @@ mod cw {
 mod tests {
     use super::*;
     use regex::Regex;
-
-    #[test]
-    fn test_daemon_error_strings_containing_target_name() {
-        fn assert_contains_target_name(err: DaemonError) {
-            let name: Option<String> = Some("fuchsia-f00d".to_string());
-            assert!(
-                format!("{}", FfxTargetError::DaemonError { err, target: name.clone() })
-                    .contains(name.as_ref().unwrap())
-            );
-        }
-
-        assert_contains_target_name(DaemonError::Timeout);
-        assert_contains_target_name(DaemonError::TargetAmbiguous);
-        assert_contains_target_name(DaemonError::TargetNotFound);
-    }
 
     #[test]
     fn test_open_target_error_string_display() {
@@ -541,12 +441,16 @@ mod tests {
 
     #[test]
     fn test_traceable_error() {
-        let err = FfxTargetError::DaemonError {
-            err: DaemonError::Timeout,
+        let err = FfxTargetError::TargetConnectionError {
+            err: TargetConnectionError::Timeout,
             target: Some("test".to_string()),
+            logs: None,
         };
         assert_eq!(err.chain_codes().len(), 1);
-        assert_eq!(err.layer_code(), "target_errors::FfxTargetError::DaemonError(Timeout)");
+        assert_eq!(
+            err.layer_code(),
+            "target_errors::FfxTargetError::TargetConnectionError(Timeout)"
+        );
 
         let open_err = FfxTargetError::OpenTargetError {
             err: OpenTargetError::TargetNotFound,
@@ -559,13 +463,11 @@ mod tests {
             "target_errors::FfxTargetError::OpenTargetError(TargetNotFound)"
         );
 
-        let comm_err = FfxTargetError::DaemonCommunicationError {
-            error: std::sync::Arc::new(fidl::Error::ExtraBytes),
-            target: None,
-        };
+        let tunnel_err =
+            FfxTargetError::TunnelError { err: TunnelError::CouldNotListen, target: None };
         assert_eq!(
-            comm_err.layer_code(),
-            "target_errors::FfxTargetError::DaemonCommunicationError"
+            tunnel_err.layer_code(),
+            "target_errors::FfxTargetError::TunnelError(CouldNotListen)"
         );
     }
 }

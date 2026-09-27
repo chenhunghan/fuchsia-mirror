@@ -196,12 +196,7 @@ impl DefineSubsystemConfiguration<PowerConfig> for PowerManagementSubsystem {
             Config::new(
                 ConfigValueType::Bool,
                 serde_json::Value::Bool(
-                    // TODO(https://fxbug.dev/419601965): Stop using
-                    // config.storage_power_management_enabled here.
-                    (config.storage_power_management_enabled
-                        || context
-                            .board_config
-                            .provides_feature(BoardFeature::StoragePowerManagement))
+                    context.board_config.provides_feature(BoardFeature::StoragePowerManagement)
                         && context.board_config.provides_feature(BoardFeature::SuspendingToken),
                 ),
             ),

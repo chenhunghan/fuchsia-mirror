@@ -45,5 +45,8 @@ group("tests") {
 
 group("host_tests") {
   testonly = true
-  deps = [ "tests:host_tests" ]
+  deps = [
+    ":symbolize_test",
+    "tests:host_tests",
+  ]
 }

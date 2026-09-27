@@ -19,6 +19,7 @@
 #include <queue>
 
 #include <fbl/algorithm.h>
+#include <safemath/safe_math.h>
 #include <va/va.h>
 
 #include "buffer_pool.h"
@@ -56,6 +57,10 @@ class VaApiEncoderOutput {
 
 class CodecAdapterVaApiEncoder : public CodecAdapter {
  public:
+  static constexpr uint32_t kMaxInputWidth = 3840;
+  static constexpr uint32_t kMaxInputHeight = 3840;
+  static constexpr uint32_t kMaxInputWidthTimesHeight = 3840 * 2160;
+
   CodecAdapterVaApiEncoder(std::mutex& lock, CodecAdapterEvents* codec_adapter_events);
 
   ~CodecAdapterVaApiEncoder() override;
@@ -114,7 +119,7 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
     input_queue_.Push(CodecInputItem::FormatDetails(per_stream_override_format_details));
   }
 
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override {
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override {
     TRACE_INSTANT("codec_runner", "Media:PacketReceived", TRACE_SCOPE_THREAD);
     input_queue_.Push(CodecInputItem::Packet(packet));
   }
@@ -253,10 +258,15 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
       bmc.cpu_domain_supported() = true;
       ZX_ASSERT(display_size_.width() > 0);
       ZX_ASSERT(display_size_.height() > 0);
+      ZX_ASSERT(coded_size_.width() > 0);
+      ZX_ASSERT(coded_size_.height() > 0);
 
       // The encoder doesn't support splitting output across buffers.
+      // HandleInputFormatChange() validates that coded_size_ produces an
+      // encode bitstream buffer size that fits in uint32_t before coded_size_
+      // is set.
       bmc.min_size_bytes() =
-          static_cast<uint32_t>(media::GetEncodeBitstreamBufferSize(coded_size_));
+          safemath::checked_cast<uint32_t>(media::GetEncodeBitstreamBufferSize(coded_size_));
     } else {
       ZX_DEBUG_ASSERT(port == kInputPort);
       constraints.min_buffer_count_for_camping() = 1;
@@ -278,12 +288,12 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
       // might be able to go bigger than that as long as the other dimension is
       // smaller to compensate, we don't really need to enable any larger than
       // 4k's width in either dimension, so we don't.
-      image_constraints.max_size() = {3840, 3840};
+      image_constraints.max_size() = {kMaxInputWidth, kMaxInputHeight};
       image_constraints.min_bytes_per_row() = 16;
 
       // no hard-coded max stride, at least for now
       ZX_DEBUG_ASSERT(!image_constraints.max_bytes_per_row().has_value());
-      image_constraints.max_width_times_height() = 3840 * 2160;
+      image_constraints.max_width_times_height() = kMaxInputWidthTimesHeight;
       image_constraints.size_alignment() = {2, 2};
       image_constraints.bytes_per_row_divisor() = 2;
       image_constraints.start_offset_divisor() = 1;
@@ -355,7 +365,7 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
   // Loops for the lifetime of a stream.
   void ProcessInputLoop();
 
-  bool ProcessPacket(CodecPacket* packet);
+  bool ProcessPacket(const CodecPacket* packet);
   // Releases any resources from the just-ended stream.
   void CleanUpAfterStream();
 

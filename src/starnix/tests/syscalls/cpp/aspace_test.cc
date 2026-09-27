@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <errno.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -28,6 +30,10 @@
 #define HIGHEST_MAPPABLE_ADDRESS ((uintptr_t)(1ULL << 37))
 #endif
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
 struct TestAddress {
   uintptr_t address;
   bool upper_bound;
@@ -50,9 +56,17 @@ class AspaceTest : public testing::TestWithParam<TestAddress> {
 TEST_P(AspaceTest, RangeFault) {
   // Create a read-only mapping at the target address.
   const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  // With only 8 bits of stack ASLR on arch32, this page is sometimes the live stack, so use
+  // MAP_FIXED_NOREPLACE: replacing the stack would kill the test. See
+  // https://fxbug.dev/563359856.
   void* mapped = mmap(reinterpret_cast<void*>(test_mapping_base_address()), page_size, PROT_READ,
-                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, 0, 0);
-  ASSERT_NE(mapped, MAP_FAILED);
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, 0, 0);
+  if (GetParam().upper_bound && mapped == MAP_FAILED && errno == EEXIST) {
+    GTEST_SKIP() << "The page below the upper bound of the address space is already mapped, which "
+                    "happens when stack ASLR picks an offset of 0 pages.";
+  }
+  ASSERT_NE(mapped, MAP_FAILED) << strerror(errno);
+  ASSERT_EQ(test_mapping_base_address(), reinterpret_cast<uintptr_t>(mapped));
   int pipefd[2];
   SAFE_SYSCALL(pipe(pipefd));
   char buf[] = {'a'};

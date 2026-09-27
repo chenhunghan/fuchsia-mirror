@@ -6,6 +6,7 @@ use crate::task::idr::{Idr, IdrGuard};
 use crate::task::memory_attribution::MemoryAttributionLifecycleEvent;
 use crate::task::{ProcessGroup, Task, ThreadGroup};
 use fuchsia_rcu::{RcuDroppable, RcuOptionBox, RcuReadScope, RcuWeak};
+use starnix_sync::PidTableLock;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::{errno, error, pid_t};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -152,7 +153,7 @@ pub struct PidTable {
     last_pid: AtomicI32,
 
     /// The tasks in this table, organized by pid_t using an IDR radix tree.
-    idr: Idr<PidEntry>,
+    idr: Idr<PidEntry, PidTableLock>,
 
     /// Used to notify thread group changes.
     thread_group_notifier: RcuOptionBox<std::sync::mpsc::Sender<MemoryAttributionLifecycleEvent>>,
@@ -181,7 +182,7 @@ impl std::fmt::Debug for PidTable {
 /// to the PID table while allowing concurrent lock-free reads.
 pub struct PidTableGuard<'a> {
     table: &'a PidTable,
-    idr: IdrGuard<'a, PidEntry>,
+    idr: IdrGuard<'a, PidEntry, PidTableLock>,
 }
 
 impl<'a> std::ops::Deref for PidTableGuard<'a> {

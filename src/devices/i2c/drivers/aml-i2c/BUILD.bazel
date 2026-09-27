@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "@rules_fuchsia//fuchsia:defs.bzl",
     "fuchsia_cc_driver",
@@ -12,6 +11,7 @@ load(
     "fuchsia_package",
     "fuchsia_unittest_package",
 )
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -28,17 +28,17 @@ fuchsia_driver_bind_bytecode(
     ],
 )
 
-cc_library(
+fx_cc_library(
     name = "common",
     srcs = [
         "aml-i2c.cc",
         "aml-i2c.h",
         "aml-i2c-regs.h",
     ],
+    build_flags = ["//build/config/fuchsia:enable_zircon_asserts"],
     defines = [
         "_ALL_SOURCE",
     ],
-    features = ["enable_zircon_asserts"],
     deps = [
         "//src/devices/lib/amlogic",
         "@fuchsia_sdk//fidl/fuchsia.hardware.amlogic.metadata:fuchsia.hardware.amlogic.metadata_cpp",

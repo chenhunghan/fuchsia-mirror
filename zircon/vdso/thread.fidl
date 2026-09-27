@@ -573,6 +573,7 @@ closed protocol Thread {
     /// #include <zircon/syscalls.h>
     ///
     /// zx_status_t zx_thread_set_rseq(zx_handle_t vmo, uint64_t offset, uint64_t size);
+    /// ```
     ///
     /// ## Description
     ///

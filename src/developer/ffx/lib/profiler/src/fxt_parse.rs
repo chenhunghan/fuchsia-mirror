@@ -6,7 +6,7 @@ use crate::parse::{
     BacktraceDetails, ModuleDetails, ModuleWithMmapDetails, Pid, RawSample, SymbolizeError, Tid,
     UnsymbolizedSamples,
 };
-use ffx_symbolize::{MappingDetails, MappingFlags};
+use ffx_symbolize::{AddressType, MappingDetails, MappingFlags};
 use fxt::TraceRecord;
 use fxt::profiler::ProfilerRecord;
 use fxt::session::SessionParser;
@@ -59,7 +59,19 @@ impl UnsymbolizedSamples {
                         let tid = Tid(backtrace.thread.0);
                         let handler = unsymbolized.handlers.entry(pid).or_default();
                         let backtraces = handler.backtrace_records.entry(tid).or_default();
-                        let details = backtrace.data.into_iter().map(BacktraceDetails).collect();
+                        // The leaf frame (index 0) represents the precise execution point
+                        // where the thread was sampled, whereas subsequent frames (indices > 0)
+                        // are return addresses representing call sites.
+                        let details = backtrace
+                            .data
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, addr)| {
+                                let address_type =
+                                    if idx == 0 { AddressType::Exact } else { AddressType::Return };
+                                BacktraceDetails::new(addr, address_type)
+                            })
+                            .collect();
                         backtraces.push(details);
                     }
                 },
@@ -341,11 +353,17 @@ mod tests {
             backtrace_records: HashMap::from([
                 (
                     Tid(2616),
-                    vec![vec![BacktraceDetails(0x43dc387f8e10), BacktraceDetails(0x2b069ffa16c)]],
+                    vec![vec![
+                        BacktraceDetails::new(0x43dc387f8e10, AddressType::Exact),
+                        BacktraceDetails::new(0x2b069ffa16c, AddressType::Return),
+                    ]],
                 ),
                 (
                     Tid(1226),
-                    vec![vec![BacktraceDetails(0x43dc387f8e10), BacktraceDetails(0x3a656c4c85e)]],
+                    vec![vec![
+                        BacktraceDetails::new(0x43dc387f8e10, AddressType::Exact),
+                        BacktraceDetails::new(0x3a656c4c85e, AddressType::Return),
+                    ]],
                 ),
             ]),
             ..Default::default()
@@ -388,11 +406,14 @@ mod tests {
             backtrace_records: HashMap::from([(
                 Tid(4209),
                 vec![
-                    vec![BacktraceDetails(0x401c0cd1dcea), BacktraceDetails(0x3bfd834db94)],
                     vec![
-                        BacktraceDetails(0x401c0cd1dcea),
-                        BacktraceDetails(0x3bfd834db94),
-                        BacktraceDetails(0x3bfd834e80b),
+                        BacktraceDetails::new(0x401c0cd1dcea, AddressType::Exact),
+                        BacktraceDetails::new(0x3bfd834db94, AddressType::Return),
+                    ],
+                    vec![
+                        BacktraceDetails::new(0x401c0cd1dcea, AddressType::Exact),
+                        BacktraceDetails::new(0x3bfd834db94, AddressType::Return),
+                        BacktraceDetails::new(0x3bfd834e80b, AddressType::Return),
                     ],
                 ],
             )]),

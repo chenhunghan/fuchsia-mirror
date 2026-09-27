@@ -29,11 +29,6 @@
     ],
     offer: [
         {
-            directory: "root-ssl-certificates",
-            from: "parent",
-            to: "#realm_builder",
-        },
-        {
             storage: "data",
             from: "parent",
             to: "#realm_builder",
@@ -41,8 +36,7 @@
         {
             protocol: [
                 "fuchsia.metrics.MetricEventLoggerFactory",
-                "fuchsia.net.name.Lookup",
-                "fuchsia.posix.socket.Provider",
+                "fuchsia.net.http.Loader",
                 "fuchsia.process.Launcher",
             ],
             from: "parent",

@@ -17,7 +17,10 @@ use crate::util::testing::{run_until_completion, run_while};
 use anyhow::{Error, format_err};
 use assert_matches::assert_matches;
 use fidl::endpoints::{create_proxy, create_request_stream};
+use fidl_fuchsia_wlan_common as fidl_common;
 use fidl_fuchsia_wlan_device_service::DeviceWatcherEvent;
+use fidl_fuchsia_wlan_policy as fidl_policy;
+use fidl_fuchsia_wlan_sme as fidl_sme;
 use fuchsia_async::{self as fasync, TestExecutor};
 use fuchsia_inspect::{self as inspect};
 use futures::channel::mpsc;
@@ -30,10 +33,6 @@ use std::convert::Infallible;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use wlan_common::test_utils::ExpectWithin;
-use {
-    fidl_fuchsia_wlan_common as fidl_common, fidl_fuchsia_wlan_policy as fidl_policy,
-    fidl_fuchsia_wlan_sme as fidl_sme,
-};
 
 pub const TEST_AP_IFACE_ID: u16 = 43;
 pub const TEST_PHY_ID: u16 = 41;
@@ -112,6 +111,7 @@ fn test_setup(
         inspect::Inspector::default().root().create_child("phy_manager"),
         telemetry_sender.clone(),
         recovery_sender,
+        Arc::new(wlan_power_manager_testing::TestPowerManager::new()),
     )));
     let (defect_sender, defect_receiver) = mpsc::channel(DEFECT_CHANNEL_SIZE);
     let (iface_manager, iface_manager_service) = create_iface_manager(
@@ -203,6 +203,21 @@ fn add_phy(exec: &mut TestExecutor, test_values: &mut TestValues) {
     let add_phy_event = DeviceWatcherEvent::OnPhyAdded { phy_id: TEST_PHY_ID };
     let add_phy_fut = device_monitor::handle_event(&listener, add_phy_event);
     let mut add_phy_fut = pin!(add_phy_fut);
+
+    let power_token_req = run_while(
+        exec,
+        &mut add_phy_fut,
+        test_values.external_interfaces.monitor_service_stream.next(),
+    );
+    assert_matches!(
+        power_token_req,
+        Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetPowerElementDependencyToken {
+            phy_id: TEST_PHY_ID, responder
+        })) => {
+            let token = zx::Event::create();
+            assert!(responder.send(Ok(token)).is_ok());
+        }
+    );
 
     let device_monitor_req = run_while(
         exec,

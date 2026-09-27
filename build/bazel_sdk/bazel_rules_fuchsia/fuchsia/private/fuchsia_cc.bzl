@@ -9,7 +9,11 @@ Drop in replacements for cc_binary and cc_test:
  - fuchsia_cc_test
 """
 
-load("@fuchsia_rules_common//:utils.bzl", "find_cc_toolchain")
+load(
+    "@fuchsia_rules_common//:utils.bzl",
+    "find_cc_toolchain",
+    "get_runfiles_shared_lib_binary_info",
+)
 load(
     "@fuchsia_rules_common//debug_symbols:providers.bzl",
     "FuchsiaDebugSymbolInfo",
@@ -26,6 +30,7 @@ load(":fuchsia_component.bzl", "fuchsia_test_component")
 load(
     ":providers.bzl",
     "FuchsiaPackageResourcesInfo",
+    "FuchsiaUnstrippedBinariesInfo",
     "FuchsiaUnstrippedBinaryInfo",
 )
 load(":utils.bzl", "forward_providers")
@@ -128,6 +133,24 @@ def _fuchsia_cc_impl(ctx):
     else:
         target_out = target_in
 
+    unstripped_binaries = [
+        FuchsiaUnstrippedBinaryInfo(
+            dest = install_root + ctx.attr.bin_name,
+            unstripped_file = target_out,
+        ),
+    ] + get_runfiles_shared_lib_binary_info(
+        # TODO(https://fxbug.dev/532024842): Consider collecting from @rules_cc providers instead.
+        runfiles = ctx.attr.native_target[DefaultInfo].default_runfiles,
+        exclude_libs = [
+            # target_in might be a shared library, but exclude it since it was
+            # already added above.
+            target_in.basename,
+            # Filter libfdio.so since it is already added unconditionally to the
+            # package via the implicit_deps attribute.
+            "libfdio.so",
+        ],
+    )
+
     # Forward CC providers along with metadata for packaging.
     return forward_providers(
         ctx,
@@ -137,10 +160,7 @@ def _fuchsia_cc_impl(ctx):
     ) + [
         ctx.attr.clang_debug_symbols[FuchsiaDebugSymbolInfo],
         FuchsiaPackageResourcesInfo(resources = resources),
-        FuchsiaUnstrippedBinaryInfo(
-            dest = install_root + ctx.attr.bin_name,
-            unstripped_file = target_out,
-        ),
+        FuchsiaUnstrippedBinariesInfo(binaries = unstripped_binaries),
     ]
 
 fuchsia_cc = rule(
@@ -184,13 +204,14 @@ fuchsia_cc = rule(
         ),
         "implicit_deps": attr.label_list(
             doc = """Implicit resources/libraries to include within the resulting package.""",
-            default = ["@fuchsia_sdk//pkg/fdio"],
+            default = ["@fuchsia_sdk//pkg/fdio:dist"],
         ),
         "data": attr.label_list(
             doc = "Packaged files needed by this target at runtime.",
             providers = [
                 [FuchsiaPackageResourcesInfo],
                 [FuchsiaUnstrippedBinaryInfo],
+                [FuchsiaUnstrippedBinariesInfo],
             ],
         ),
         "restricted_symbols": attr.label(

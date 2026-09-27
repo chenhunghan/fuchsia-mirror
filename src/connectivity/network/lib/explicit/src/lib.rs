@@ -14,7 +14,6 @@
 #![no_std]
 #![warn(missing_docs)]
 
-use core::convert::Infallible as Never;
 use core::task::Poll;
 
 /// An extension trait adding functionality to [`Result`].
@@ -63,7 +62,6 @@ impl<T> PollExt<T> for Poll<T> {
 ///
 /// # Example
 /// ```
-/// use core::convert::Infallible as Never;
 ///
 /// /// Provides guaranteed winning lottery numbers.
 /// trait LotteryOracle {
@@ -76,11 +74,11 @@ impl<T> PollExt<T> for Poll<T> {
 ///   // the option _could_ hold.
 ///
 ///   /// Uninstantiable type that implements [`LotteryOracle`].
-///   struct UninstantiableOracle(Never);
+///   struct UninstantiableOracle(!);
 ///
 ///   /// Enable use with [`UnreachableExt`].
-///   impl AsRef<Never> for UninstantiableOracle {
-///     fn as_ref(&self) -> Never {
+///   impl AsRef<!> for UninstantiableOracle {
+///     fn as_ref(&self) -> ! {
 ///       &self.0
 ///     }
 ///   }
@@ -99,7 +97,7 @@ impl<T> PollExt<T> for Poll<T> {
 /// # Implementing
 ///
 /// This trait is blanket-implemented for any type that can be used to construct
-/// an instance of [`Never`]. To use it, simply implement [`AsRef<Never>`].
+/// an instance of `!`. To use it, simply implement [`AsRef<!>`].
 pub trait UnreachableExt: sealed::Sealed {
     /// A method that can't be called.
     ///
@@ -112,14 +110,13 @@ pub trait UnreachableExt: sealed::Sealed {
     fn uninstantiable_unreachable<T>(&self) -> T;
 }
 
-impl<N: AsRef<Never>> UnreachableExt for N {
+impl<N: AsRef<!>> UnreachableExt for N {
     fn uninstantiable_unreachable<T>(&self) -> T {
         match *self.as_ref() {}
     }
 }
 
 mod sealed {
-    use core::convert::Infallible as Never;
 
     /// `EqType<T>` indicates that the implementer is equal to `T`.
     ///
@@ -132,5 +129,5 @@ mod sealed {
     /// Trait that can only be implemented within this crate.
     pub trait Sealed {}
 
-    impl<T: AsRef<Never>> Sealed for T {}
+    impl<T: AsRef<!>> Sealed for T {}
 }

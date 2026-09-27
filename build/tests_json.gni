@@ -2,6 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/testing/device_types.gni")
+import("//build/testing/environments.gni")
+import("//build/testing/platforms.gni")
+
 # Pretends to generate the tests.json and makes it available as a build api.
 #
 # Parameters:
@@ -30,10 +34,15 @@ template("tests_json") {
     output = "${root_build_dir}/tests.json"
     product_bundle_test_groups =
         "${target_out_dir}/${target_name}/product_bundle_test_groups.json"
+    environments = "${target_out_dir}/${target_name}/all_test_environments.json"
+    default_environments =
+        "${target_out_dir}/${target_name}/default_test_environments.json"
   }
 
   targets = {
     product_bundle_test_groups = "${target_name}_product_bundle_test_groups"
+    environments = "${target_name}_environments"
+    default_environments = "${target_name}_default_environments"
   }
 
   generated_file(targets.product_bundle_test_groups) {
@@ -44,8 +53,49 @@ template("tests_json") {
     output_conversion = "json"
   }
 
+  _allowed_device_types = allowed_device_types
+  _allowed_host_device_types = allowed_host_device_types
+
+  # All the environments and platform constants, so that build_tests_json.py
+  # can validate and resolve test environments.
+  generated_file(targets.environments) {
+    testonly = true
+    outputs = [ files.environments ]
+    output_conversion = "json"
+
+    contents = {
+      platforms = test_platforms
+      host_env = {
+        dimensions = {
+          cpu = host_cpu
+          os = "Linux"
+        }
+      }
+    }
+  }
+
+  # The builder-set defaults for test environments and allowed device types.
+  generated_file(targets.default_environments) {
+    testonly = true
+    outputs = [ files.default_environments ]
+    output_conversion = "json"
+
+    contents = {
+      target_cpu = target_cpu
+      default_environments = basic_envs
+      allowed_device_types = []
+      allowed_device_types = _allowed_device_types
+      allowed_host_device_types = []
+      allowed_host_device_types = _allowed_host_device_types
+    }
+  }
+
   action(target_name) {
-    deps = [ ":${targets.product_bundle_test_groups}" ]
+    deps = [
+      ":${targets.default_environments}",
+      ":${targets.environments}",
+      ":${targets.product_bundle_test_groups}",
+    ]
     testonly = true
     script = "//build/scripts/no_op.sh"
     outputs = [ files.output ]

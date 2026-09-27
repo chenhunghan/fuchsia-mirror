@@ -8,7 +8,6 @@
 #include <fidl/fuchsia.io/cpp/markers.h>
 #include <fidl/fuchsia.storage.blobfs/cpp/wire.h>
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fidl/cpp/wire/channel.h>
 #include <lib/fidl/cpp/wire/connect_service.h>

@@ -19,28 +19,26 @@ use fidl_fuchsia_net_ext::{self as fnet_ext, FromExt as _, IntoExt as _};
 use fidl_fuchsia_net_routes as fnet_routes;
 use fidl_fuchsia_net_routes_admin as fnet_routes_admin;
 use fidl_fuchsia_net_routes_ext as fnet_routes_ext;
-use fuchsia_async::net::DatagramSocket;
 use fuchsia_async::{DurationExt as _, TimeoutExt as _};
 use futures::future::TryFutureExt as _;
 use futures::stream::{self, StreamExt as _, TryStreamExt as _};
 use net_declare::{fidl_ip_v4, fidl_ip_v4_with_prefix, fidl_mac, net_subnet_v4};
 use net_types::ethernet::Mac;
 use net_types::ip::{Ip, Ipv4};
-use netemul::{DEFAULT_MTU, DhcpClient, InterfaceConfig, RealmUdpSocket as _};
+use netemul::{InterfaceConfig, RealmUdpSocket as _};
 use netstack_testing_common::interfaces::{self, TestInterfaceExt as _};
 use netstack_testing_common::realms::{
-    DhcpClientVersion, KnownServiceProvider, Netstack, NetstackAndDhcpClient, NetstackVersion,
-    TestSandboxExt as _, constants,
+    KnownServiceProvider, Netstack, Netstack3, OutOfStack, TestSandboxExt as _, constants,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, Result, annotate,
     dhcpv4 as dhcpv4_helper,
 };
 use netstack_testing_macros::netstack_test;
-use packet::{InnerPacketBuilder, NoOpSerializationContext, ParsablePacket as _, Serializer};
+use packet::{InnerPacketBuilder, NoOpSerializationContext, Serializer};
 use packet_formats::arp::{ArpOp, ArpPacketBuilder};
 use packet_formats::ethernet::EtherType;
-use sockaddr::{EthernetSockaddr, IntoSockAddr as _, TryToSockaddrLl as _};
+use sockaddr::{EthernetSockaddr, IntoSockAddr as _};
 use test_case::test_case;
 
 const DEFAULT_NETWORK_NAME: &str = "net1";
@@ -101,12 +99,11 @@ struct TestServerConfig<'a> {
 struct TestNetstackRealmConfig<'a> {
     clients: &'a [DhcpTestEndpointConfig<'a>],
     servers: &'a mut [TestServerConfig<'a>],
-    netstack_version: NetstackVersion,
 }
 
 const DEBUG_PRINT_INTERVAL: Duration = Duration::from_secs(10);
 
-async fn assert_client_acquires_addr<D: DhcpClient>(
+async fn assert_client_acquires_addr(
     client_realm: &netemul::TestRealm<'_>,
     client_interface: &netemul::TestInterface<'_>,
     expected_acquired: fidl_fuchsia_net::Subnet,
@@ -126,7 +123,7 @@ async fn assert_client_acquires_addr<D: DhcpClient>(
         fidl_fuchsia_net_interfaces_ext::InterfaceState::<(), _>::Unknown(client_interface.id());
     for cycle in 0..cycles {
         // Enable the interface and assert that binding fails before the address is acquired.
-        client_interface.stop_dhcp::<D>().await.expect("failed to stop DHCP");
+        client_interface.stop_dhcp::<OutOfStack>().await.expect("failed to stop DHCP");
         client_interface.set_link_up(true).await.expect("failed to bring link up");
         assert_matches::assert_matches!(
             bind(&client_realm, expected_acquired).await,
@@ -136,7 +133,7 @@ async fn assert_client_acquires_addr<D: DhcpClient>(
                     .raw_os_error() == Some(libc::EADDRNOTAVAIL)
         );
 
-        client_interface.start_dhcp::<D>().await.expect("failed to start DHCP");
+        client_interface.start_dhcp::<OutOfStack>().await.expect("failed to start DHCP");
 
         let valid_until = annotate(
             assert_interface_assigned_addr(
@@ -177,7 +174,7 @@ async fn assert_client_acquires_addr<D: DhcpClient>(
 
         // Set interface online signal to down and wait for address to be removed.
         client_interface.set_link_up(false).await.expect("failed to bring link down");
-        client_interface.stop_dhcp::<D>().await.expect("failed to stop DHCP");
+        client_interface.stop_dhcp::<OutOfStack>().await.expect("failed to stop DHCP");
 
         annotate(
             fidl_fuchsia_net_interfaces_ext::wait_interface_with_id(
@@ -284,20 +281,11 @@ struct Settings<'a> {
 }
 
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-#[variant(CLIENT, NetstackAndDhcpClient)]
 #[test_case(true; "remove dhcp address")]
 #[test_case(false; "remove non-dhcp address")]
-async fn removing_acquired_address_stops_dhcp<SERVER: Netstack, CLIENT: NetstackAndDhcpClient>(
-    name: &str,
-    remove_dhcp_address: bool,
-) {
-    const ETH_P_ALL_BE: u16 = (libc::ETH_P_ALL as u16).to_be();
-    const ETH_P_IP_BE: u16 = (libc::ETH_P_IP as u16).to_be();
+async fn removing_acquired_address_stops_dhcp(name: &str, remove_dhcp_address: bool) {
     const STATIC_ADDRESS: fidl_fuchsia_net::Ipv4AddressWithPrefix =
         fidl_ip_v4_with_prefix!("192.0.2.1/24");
-    const DHCPV4_SERVER_PORT: u16 = 67;
-    const DHCPV4_CLIENT_PORT: u16 = 68;
     const SHORT_LEASE_LENGTH_SECS: u32 = 20;
 
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
@@ -316,7 +304,6 @@ async fn removing_acquired_address_stops_dhcp<SERVER: Netstack, CLIENT: Netstack
                 network: &network,
             }],
             servers: &mut [],
-            netstack_version: CLIENT::Netstack::VERSION,
         },
         TestNetstackRealmConfig {
             clients: &[],
@@ -354,14 +341,11 @@ async fn removing_acquired_address_stops_dhcp<SERVER: Netstack, CLIENT: Netstack
                     options: &mut [],
                 },
             }],
-            netstack_version: SERVER::VERSION,
         },
     ];
 
-    let dhcp_objects =
-        test_dhcp::<CLIENT::DhcpClient>(name, &sandbox, &mut netstack_config, 1, false).await;
-    let TestDhcpRealmAndInterfaces { realm: client_realm, client_ifaces, server_ifaces: _ } =
-        &dhcp_objects[0];
+    let dhcp_objects = test_dhcp(name, &sandbox, &mut netstack_config, 1, false).await;
+    let TestDhcpRealmAndInterfaces { realm: _, client_ifaces, server_ifaces: _ } = &dhcp_objects[0];
     let TestDhcpRealmAndInterfaces { realm: server_realm, client_ifaces: _, server_ifaces: _ } =
         &dhcp_objects[1];
     let client_iface = &client_ifaces[0];
@@ -375,93 +359,20 @@ async fn removing_acquired_address_stops_dhcp<SERVER: Netstack, CLIENT: Netstack
             .expect("send address removal request")
             .expect("remove DHCP acquired address"),
     );
-    match CLIENT::DhcpClient::DHCP_CLIENT_VERSION {
-        DhcpClientVersion::OutOfStack => {
-            let dhcp_stopped_fut = async {
-                client_iface.wait_dhcp_out_of_stack_stopped().await;
-                assert!(remove_dhcp_address, "DHCP should not have stopped");
-            };
-            let timeout = if remove_dhcp_address {
-                ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT
-            } else {
-                ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT
-            };
-            dhcp_stopped_fut
-                .on_timeout(timeout.after_now(), || {
-                    assert!(!remove_dhcp_address, "DHCP should have stopped");
-                })
-                .await;
-        }
-        DhcpClientVersion::InStack => {
-            assert!(
-                client.disable().await.expect("send disable request").expect("disable interface")
-            );
-            let socket = client_realm
-                .packet_socket(fidl_fuchsia_posix_socket_packet::Kind::Network)
-                .await
-                .expect("get packet socket");
-            let sockaddr = libc::sockaddr_ll {
-                sll_family: u16::try_from(libc::AF_PACKET).unwrap(),
-                sll_protocol: ETH_P_ALL_BE, // Only ETH_P_ALL receives RX.
-                sll_ifindex: i32::try_from(client_iface.id()).unwrap(),
-                sll_hatype: 0,
-                sll_pkttype: 0,
-                sll_halen: 0,
-                sll_addr: [0; 8],
-            };
-            socket.bind(&sockaddr.into_sockaddr()).expect("bind packet socket to client interface");
-            assert!(client.enable().await.expect("send enable request").expect("enable interface"));
-            let socket = DatagramSocket::new_from_socket(socket).unwrap();
-            let dhcp_running_fut = async {
-                let mut buf = [0; DEFAULT_MTU as usize];
-                loop {
-                    let (n, sockaddr) =
-                        socket.recv_from(&mut buf).await.expect("recvfrom packet socket");
-                    let data = &buf[..n];
-
-                    let sockaddr = sockaddr.try_to_sockaddr_ll().unwrap();
-                    if sockaddr.sll_protocol != ETH_P_IP_BE {
-                        // Ignore non-IPv4 packets.
-                        continue;
-                    }
-
-                    let (mut ipv4_body, src_ip, dst_ip, proto, _ttl) =
-                        packet_formats::testutil::parse_ip_packet::<net_types::ip::Ipv4>(data)
-                            .expect("error parsing IPv4 packet");
-                    if proto
-                        != packet_formats::ip::Ipv4Proto::Proto(packet_formats::ip::IpProto::Udp)
-                    {
-                        // Ignore non-UDP packets.
-                        continue;
-                    }
-
-                    let udp_v4_packet = packet_formats::udp::UdpPacket::parse(
-                        &mut ipv4_body,
-                        packet_formats::udp::UdpParseArgs::new(src_ip, dst_ip),
-                    )
-                    .expect("error parsing UDP datagram");
-
-                    // Look for packets that are sent across the DHCP-specific ports.
-                    let src_port = udp_v4_packet.src_port().expect("missing src port").get();
-                    let dst_port = udp_v4_packet.dst_port().get();
-                    if src_port == DHCPV4_CLIENT_PORT || dst_port == DHCPV4_SERVER_PORT {
-                        break;
-                    }
-                }
-                assert!(!remove_dhcp_address, "DHCP should not be running");
-            };
-            let timeout = if remove_dhcp_address {
-                ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT
-            } else {
-                ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT
-            };
-            dhcp_running_fut
-                .on_timeout(timeout.after_now(), || {
-                    assert!(remove_dhcp_address, "DHCP should be running");
-                })
-                .await;
-        }
+    let dhcp_stopped_fut = async {
+        client_iface.wait_dhcp_out_of_stack_stopped().await;
+        assert!(remove_dhcp_address, "DHCP should not have stopped");
     };
+    let timeout = if remove_dhcp_address {
+        ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT
+    } else {
+        ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT
+    };
+    dhcp_stopped_fut
+        .on_timeout(timeout.after_now(), || {
+            assert!(!remove_dhcp_address, "DHCP should have stopped");
+        })
+        .await;
 
     // Stop the DHCP client server. It will try to respond to the RENEW request
     // which will fail if it races with interface removal during teardown.
@@ -472,15 +383,11 @@ async fn removing_acquired_address_stops_dhcp<SERVER: Netstack, CLIENT: Netstack
 }
 
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-#[variant(CLIENT, NetstackAndDhcpClient)]
-async fn acquire_with_dhcpd_bound_device<SERVER: Netstack, CLIENT: NetstackAndDhcpClient>(
-    name: &str,
-) {
+async fn acquire_with_dhcpd_bound_device(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let network = DhcpTestNetwork::new(DEFAULT_NETWORK_NAME, &sandbox);
 
-    let _ = test_dhcp::<CLIENT::DhcpClient>(
+    let _ = test_dhcp(
         name,
         &sandbox,
         &mut [
@@ -494,7 +401,6 @@ async fn acquire_with_dhcpd_bound_device<SERVER: Netstack, CLIENT: NetstackAndDh
                     network: &network,
                 }],
                 servers: &mut [],
-                netstack_version: CLIENT::Netstack::VERSION,
             },
             TestNetstackRealmConfig {
                 clients: &[],
@@ -514,7 +420,6 @@ async fn acquire_with_dhcpd_bound_device<SERVER: Netstack, CLIENT: NetstackAndDh
                         options: &mut [],
                     },
                 }],
-                netstack_version: SERVER::VERSION,
             },
         ],
         1,
@@ -525,14 +430,7 @@ async fn acquire_with_dhcpd_bound_device<SERVER: Netstack, CLIENT: NetstackAndDh
 
 // Regression test for https://fxbug.dev/42081372.
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-#[variant(CLIENT, NetstackAndDhcpClient)]
-async fn does_not_crash_with_overlapping_subnet_route<
-    SERVER: Netstack,
-    CLIENT: NetstackAndDhcpClient,
->(
-    name: &str,
-) {
+async fn does_not_crash_with_overlapping_subnet_route(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let network = DhcpTestNetwork::new(DEFAULT_NETWORK_NAME, &sandbox);
 
@@ -548,7 +446,6 @@ async fn does_not_crash_with_overlapping_subnet_route<
                 network: &network,
             }],
             servers: &mut [],
-            netstack_version: CLIENT::Netstack::VERSION,
         },
         TestNetstackRealmConfig {
             clients: &[],
@@ -566,12 +463,10 @@ async fn does_not_crash_with_overlapping_subnet_route<
                     options: &mut [],
                 },
             }],
-            netstack_version: SERVER::VERSION,
         },
     ];
 
-    let realms_and_interfaces =
-        test_dhcp::<CLIENT::DhcpClient>(name, &sandbox, &mut netstack_configs, 1, false).await;
+    let realms_and_interfaces = test_dhcp(name, &sandbox, &mut netstack_configs, 1, false).await;
     let (client_realm, client_interfaces) = match &realms_and_interfaces[..] {
         [
             TestDhcpRealmAndInterfaces { realm, client_ifaces, server_ifaces: _ },
@@ -671,8 +566,6 @@ async fn does_not_crash_with_overlapping_subnet_route<
 }
 
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-#[variant(CLIENT, NetstackAndDhcpClient)]
 // The common case: Verify that the client successfully enters renewal after
 // having observed the address become assigned.
 #[test_case(1, 10; "renew_after_assigned")]
@@ -680,10 +573,7 @@ async fn does_not_crash_with_overlapping_subnet_route<
 // the client enters renewal, the client handles it gracefully (deferring
 // renewal, until the address becomes available).
 #[test_case(5, 2; "renew_before_assigned")]
-async fn acquire_then_renew_with_dhcpd_bound_device<
-    SERVER: Netstack,
-    CLIENT: NetstackAndDhcpClient,
->(
+async fn acquire_then_renew_with_dhcpd_bound_device(
     name: &str,
     num_dad_transmits: u16,
     renew_seconds: u32,
@@ -701,7 +591,7 @@ async fn acquire_then_renew_with_dhcpd_bound_device<
         ..Default::default()
     }));
 
-    let _ = test_dhcp::<CLIENT::DhcpClient>(
+    let _ = test_dhcp(
         name,
         &sandbox,
         &mut [
@@ -715,7 +605,6 @@ async fn acquire_then_renew_with_dhcpd_bound_device<
                     network: &network,
                 }],
                 servers: &mut [],
-                netstack_version: CLIENT::Netstack::VERSION,
             },
             TestNetstackRealmConfig {
                 clients: &[],
@@ -737,7 +626,6 @@ async fn acquire_then_renew_with_dhcpd_bound_device<
                         )],
                     },
                 }],
-                netstack_version: SERVER::VERSION,
             },
         ],
         1,
@@ -769,14 +657,7 @@ fn next_candidate_addr(prev: fidl_fuchsia_net::Subnet) -> fidl_fuchsia_net::Subn
 }
 
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-#[variant(CLIENT, NetstackAndDhcpClient)]
-async fn acquire_with_dhcpd_bound_device_dup_addr<
-    SERVER: Netstack,
-    CLIENT: NetstackAndDhcpClient,
->(
-    name: &str,
-) {
+async fn acquire_with_dhcpd_bound_device_dup_addr(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let network = DhcpTestNetwork::new(DEFAULT_NETWORK_NAME, &sandbox);
 
@@ -786,7 +667,7 @@ async fn acquire_with_dhcpd_bound_device_dup_addr<
     // and restart DHCP.
     let expected_addr = next_candidate_addr(dup_addr.clone());
 
-    let _ = test_dhcp::<CLIENT::DhcpClient>(
+    let _ = test_dhcp(
         name,
         &sandbox,
         &mut [
@@ -802,7 +683,6 @@ async fn acquire_with_dhcpd_bound_device_dup_addr<
                     network: &network,
                 }],
                 servers: &mut [],
-                netstack_version: CLIENT::Netstack::VERSION,
             },
             TestNetstackRealmConfig {
                 clients: &[],
@@ -828,7 +708,6 @@ async fn acquire_with_dhcpd_bound_device_dup_addr<
                         options: &mut [],
                     },
                 }],
-                netstack_version: SERVER::VERSION,
             },
         ],
         1,
@@ -853,7 +732,7 @@ struct TestDhcpRealmAndInterfaces<'a> {
 ///        -- Start DHCP servers on each server endpoint
 ///        -- Start DHCP clients on each client endpoint and verify that they acquire the expected
 ///           addresses
-fn test_dhcp<'a, D: DhcpClient>(
+fn test_dhcp<'a>(
     test_name: &'a str,
     sandbox: &'a netemul::TestSandbox,
     netstack_configs: &'a mut [TestNetstackRealmConfig<'a>],
@@ -864,18 +743,16 @@ fn test_dhcp<'a, D: DhcpClient>(
         let dhcp_objects = stream::iter(netstack_configs.iter_mut())
             .enumerate()
             .then(|(id, netstack)| async move {
-                let TestNetstackRealmConfig { servers, clients, netstack_version } = netstack;
+                let TestNetstackRealmConfig { servers, clients } = netstack;
                 let netstack_realm = sandbox.create_realm(
                         format!("netstack_realm_{}_{}", test_name, id),
                         &[
-                            KnownServiceProvider::Netstack(*netstack_version),
+                            KnownServiceProvider::Netstack(Netstack3::VERSION),
                             KnownServiceProvider::DhcpServer { persistent: false },
                             KnownServiceProvider::FakeClock,
                             KnownServiceProvider::SecureStash,
-                        ].into_iter().chain(match D::DHCP_CLIENT_VERSION {
-                            DhcpClientVersion::InStack => None,
-                            DhcpClientVersion::OutOfStack => Some(KnownServiceProvider::DhcpClient),
-                        }).collect::<Vec<_>>(),
+                            KnownServiceProvider::DhcpClient,
+                        ],
                     )
                     .expect("failed to create netstack realm");
                 let netstack_realm_ref = &netstack_realm;
@@ -1047,7 +924,7 @@ fn test_dhcp<'a, D: DhcpClient>(
                         .expect("add neighbor entry");
                 }
 
-                assert_client_acquires_addr::<D>(
+                assert_client_acquires_addr(
                     &netstack_realm,
                     &client,
                     *expected_acquired,
@@ -1188,16 +1065,9 @@ fn param_name(param: &fidl_fuchsia_net_dhcp::Parameter) -> fidl_fuchsia_net_dhcp
 // clear_leases() function is triggered, which will cause a panic if the server is in an
 // inconsistent state.
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-#[variant(CLIENT, NetstackAndDhcpClient)]
-async fn acquire_persistent_dhcp_server_after_restart<
-    SERVER: Netstack,
-    CLIENT: NetstackAndDhcpClient,
->(
-    name: &str,
-) {
+async fn acquire_persistent_dhcp_server_after_restart(name: &str) {
     let mode = PersistenceMode::Persistent;
-    acquire_dhcp_server_after_restart::<SERVER, CLIENT>(&format!("{}_{}", name, mode), mode).await
+    acquire_dhcp_server_after_restart(&format!("{}_{}", name, mode), mode).await
 }
 
 // An ephemeral dhcp server cannot become inconsistent with its persistent state because it has
@@ -1205,16 +1075,9 @@ async fn acquire_persistent_dhcp_server_after_restart<
 // configuration.  This test verifies that an ephemeral dhcp server will return an error if run
 // after restarting.
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-#[variant(CLIENT, NetstackAndDhcpClient)]
-async fn acquire_ephemeral_dhcp_server_after_restart<
-    SERVER: Netstack,
-    CLIENT: NetstackAndDhcpClient,
->(
-    name: &str,
-) {
+async fn acquire_ephemeral_dhcp_server_after_restart(name: &str) {
     let mode = PersistenceMode::Ephemeral;
-    acquire_dhcp_server_after_restart::<SERVER, CLIENT>(&format!("{}_{}", name, mode), mode).await
+    acquire_dhcp_server_after_restart(&format!("{}_{}", name, mode), mode).await
 }
 
 /// Polls until the DHCP server port is available.
@@ -1240,14 +1103,11 @@ async fn wait_for_dhcp_server_port(realm: &netemul::TestRealm<'_>) {
     }
 }
 
-async fn acquire_dhcp_server_after_restart<SERVER: Netstack, CLIENT: NetstackAndDhcpClient>(
-    name: &str,
-    mode: PersistenceMode,
-) {
+async fn acquire_dhcp_server_after_restart(name: &str, mode: PersistenceMode) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
 
     let server_realm = sandbox
-        .create_netstack_realm_with::<SERVER, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("{}_server", name),
             &[
                 match mode {
@@ -1265,12 +1125,9 @@ async fn acquire_dhcp_server_after_restart<SERVER: Netstack, CLIENT: NetstackAnd
         .expect("failed to create server realm");
 
     let client_realm = sandbox
-        .create_netstack_realm_with::<CLIENT::Netstack, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("{}_client", name),
-            match CLIENT::DhcpClient::DHCP_CLIENT_VERSION {
-                DhcpClientVersion::InStack => None,
-                DhcpClientVersion::OutOfStack => Some(&KnownServiceProvider::DhcpClient),
-            },
+            Some(&KnownServiceProvider::DhcpClient),
         )
         .expect("failed to create client realm");
 
@@ -1319,7 +1176,7 @@ async fn acquire_dhcp_server_after_restart<SERVER: Netstack, CLIENT: NetstackAnd
             .expect("failed to call dhcp/Server.StartServing")
             .map_err(zx::Status::err_from_raw)
             .expect("dhcp/Server.StartServing returned error");
-        assert_client_acquires_addr::<CLIENT::DhcpClient>(
+        assert_client_acquires_addr(
             &client_realm,
             &client_ep,
             dhcpv4_helper::DEFAULT_TEST_CONFIG.expected_acquired(),
@@ -1423,24 +1280,22 @@ async fn acquire_dhcp_server_after_restart<SERVER: Netstack, CLIENT: NetstackAnd
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dhcp_server_persistence_mode_persistent<N: Netstack>(name: &str) {
+async fn dhcp_server_persistence_mode_persistent(name: &str) {
     let mode = PersistenceMode::Persistent;
-    test_dhcp_server_persistence_mode::<N>(&format!("{}_{}", name, mode), mode).await
+    test_dhcp_server_persistence_mode(&format!("{}_{}", name, mode), mode).await
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dhcp_server_persistence_mode_ephemeral<N: Netstack>(name: &str) {
+async fn dhcp_server_persistence_mode_ephemeral(name: &str) {
     let mode = PersistenceMode::Ephemeral;
-    test_dhcp_server_persistence_mode::<N>(&format!("{}_{}", name, mode), mode).await
+    test_dhcp_server_persistence_mode(&format!("{}_{}", name, mode), mode).await
 }
 
-async fn test_dhcp_server_persistence_mode<N: Netstack>(name: &str, mode: PersistenceMode) {
+async fn test_dhcp_server_persistence_mode(name: &str, mode: PersistenceMode) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
 
     let server_realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("{}_server", name),
             &[
                 match mode {
@@ -1527,8 +1382,7 @@ async fn test_dhcp_server_persistence_mode<N: Netstack>(name: &str, mode: Persis
 // if it detects a conflict after it's been assigned. After forfeiting, it
 // should acquire a new address.
 #[netstack_test]
-#[variant(SERVER, Netstack)]
-async fn forfeit_address_on_conflict<SERVER: Netstack>(name: &str) {
+async fn forfeit_address_on_conflict(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let network = DhcpTestNetwork::new(DEFAULT_NETWORK_NAME, &sandbox);
 
@@ -1551,7 +1405,6 @@ async fn forfeit_address_on_conflict<SERVER: Netstack>(name: &str) {
                 network: &network,
             }],
             servers: &mut [],
-            netstack_version: NetstackVersion::Netstack3,
         },
         TestNetstackRealmConfig {
             clients: &[],
@@ -1569,19 +1422,11 @@ async fn forfeit_address_on_conflict<SERVER: Netstack>(name: &str) {
                     options: &mut [],
                 },
             }],
-            netstack_version: SERVER::VERSION,
         },
     ];
 
     // Drive the network until the DHCP client acquires `conflicting_addr`.
-    let dhcp_objects = test_dhcp::<netstack_testing_common::realms::OutOfStack>(
-        name,
-        &sandbox,
-        &mut realms,
-        1,
-        false,
-    )
-    .await;
+    let dhcp_objects = test_dhcp(name, &sandbox, &mut realms, 1, false).await;
     let (client_objects, server_objects) = assert_matches!(
         &dhcp_objects[..],
         [client_objects, server_objects] => (client_objects, server_objects)

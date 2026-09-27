@@ -27,6 +27,7 @@
 #include "src/ui/lib/escher/third_party/granite/vk/command_buffer.h"
 #include "src/ui/lib/escher/util/fuchsia_utils.h"
 #include "src/ui/lib/escher/util/image_utils.h"
+#include "src/ui/lib/escher/vk/impl/framebuffer.h"
 #include "src/ui/scenic/lib/flatland/image_formats.h"
 #include "src/ui/scenic/lib/utils/shader_warmup.h"
 
@@ -229,7 +230,6 @@ VkRenderer::VkRenderer(escher::EscherWeakPtr escher)
       readback_collections_(4, &pool_resource_),
       texture_map_(64, &pool_resource_),
       render_target_map_(8, &pool_resource_),
-      depth_target_map_(8, &pool_resource_),
       readback_image_map_(4, &pool_resource_),
       pending_textures_(&pool_resource_),
       pending_render_targets_(&pool_resource_),
@@ -551,9 +551,20 @@ bool VkRenderer::ImportRenderTargetImage(const allocation::ImageMetadata& metada
   image->set_swapchain_layout(vk::ImageLayout::eColorAttachmentOptimal);
   auto depth_texture = CreateDepthTexture(escher_.get(), image);
 
+  auto output_image_view = escher::ImageView::New(image);
+  auto framebuffer = compositor_.CreateFramebuffer(output_image_view, depth_texture);
+
+  if (!framebuffer) {
+    FX_LOGS(ERROR) << "Could not create framebuffer.";
+    return false;
+  }
+
   std::scoped_lock lock(lock_);
-  render_target_map_[metadata.identifier] = image;
-  depth_target_map_[metadata.identifier] = std::move(depth_texture);
+  render_target_map_[metadata.identifier] = RenderTarget{
+      .image = std::move(image),
+      .framebuffer = std::move(framebuffer),
+      .color_conversion_framebuffer = nullptr,
+  };
   pending_render_targets_.insert(metadata.identifier);
   return true;
 }
@@ -640,7 +651,6 @@ void VkRenderer::ReleaseBufferImage(allocation::GlobalImageId image_id) {
     pending_textures_.erase(image_id);
   } else if (render_target_map_.find(image_id) != render_target_map_.end()) {
     render_target_map_.erase(image_id);
-    depth_target_map_.erase(image_id);
     readback_image_map_.erase(image_id);
     pending_render_targets_.erase(image_id);
   }
@@ -800,22 +810,43 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   std::pmr::monotonic_buffer_resource resource(stack_buffer.data(), stack_buffer.size());
 
   std::pmr::unordered_map<GlobalImageId, escher::TexturePtr> local_texture_map(&resource);
-  std::pmr::unordered_map<GlobalImageId, escher::ImagePtr> local_render_target_map(&resource);
-  std::pmr::unordered_map<GlobalImageId, escher::TexturePtr> local_depth_target_map(&resource);
+  std::pmr::unordered_map<GlobalImageId, RenderTarget> local_render_target_map(&resource);
   std::pmr::unordered_map<GlobalImageId, escher::ImagePtr> local_readback_image_map(&resource);
   std::pmr::set<GlobalImageId> local_pending_textures(&resource);
   std::pmr::set<GlobalImageId> local_pending_render_targets(&resource);
   {
     TRACE_DURATION("gfx", "LockAndCopyDataStructs");
     std::scoped_lock lock(lock_);
+
+    if (render_args.apply_color_conversion) {
+      auto it = render_target_map_.find(render_target.identifier);
+      if (it != render_target_map_.end() && !it->second.color_conversion_framebuffer) {
+        escher::ImagePtr matching_transient_image = nullptr;
+        const auto& target_image = it->second.image;
+        for (const auto& [id, rt] : render_target_map_) {
+          if (rt.color_conversion_framebuffer) {
+            auto candidate =
+                escher::RectangleCompositor::GetTransientImage(rt.color_conversion_framebuffer);
+            if (escher::RectangleCompositor::CanShareTransientImage(candidate, target_image)) {
+              matching_transient_image = std::move(candidate);
+              break;
+            }
+          }
+        }
+        auto output_image_view = escher::ImageView::New(target_image);
+        auto depth_texture = CreateDepthTexture(escher_.get(), target_image);
+        it->second.color_conversion_framebuffer = compositor_.CreateColorConversionFramebuffer(
+            std::move(output_image_view), std::move(depth_texture),
+            std::move(matching_transient_image));
+      }
+    }
+
     local_texture_map.reserve(texture_map_.size());
     local_render_target_map.reserve(render_target_map_.size());
-    local_depth_target_map.reserve(depth_target_map_.size());
     local_readback_image_map.reserve(readback_image_map_.size());
 
     local_texture_map.insert(texture_map_.begin(), texture_map_.end());
     local_render_target_map.insert(render_target_map_.begin(), render_target_map_.end());
-    local_depth_target_map.insert(depth_target_map_.begin(), depth_target_map_.end());
     local_readback_image_map.insert(readback_image_map_.begin(), readback_image_map_.end());
 
     // `reserve()` is only necessary for unordered containers (like above), not these ordered sets.
@@ -831,7 +862,7 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   FX_DCHECK(local_render_target_map.find(render_target.identifier) !=
             local_render_target_map.end());
   const bool render_in_protected_mode =
-      local_render_target_map.at(render_target.identifier)->use_protected_memory();
+      local_render_target_map.at(render_target.identifier).image->use_protected_memory();
 
   // Escher's frame class acts as a command buffer manager that we use to create a
   // command buffer and submit it to the device queue once we are done.
@@ -855,9 +886,9 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   }
   for (auto target_id : local_pending_render_targets) {
     FX_DCHECK(local_render_target_map.find(target_id) != local_render_target_map.end());
-    const auto target = local_render_target_map.at(target_id);
+    const auto& target = local_render_target_map.at(target_id);
     command_buffer->impl()->TransitionImageLayout(
-        target, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal,
+        target.image, vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal,
         VK_QUEUE_FAMILY_FOREIGN_EXT, escher_->device()->vk_main_queue_family());
   }
 
@@ -921,10 +952,15 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   }
   TRACE_DURATION_END("gfx", "VkRenderer::Render[transform_display_list]");
 
-  // Grab the output image and use it to generate a depth texture. The depth texture needs to
-  // be the same width and height as the output image.
-  const auto output_image = local_render_target_map.at(render_target.identifier);
-  const auto depth_texture = local_depth_target_map.at(render_target.identifier);
+  // Grab the output image and framebuffer.
+  const auto& target = local_render_target_map.at(render_target.identifier);
+  const auto& output_image = target.image;
+  const auto& framebuffer =
+      render_args.apply_color_conversion ? target.color_conversion_framebuffer : target.framebuffer;
+  if (!framebuffer) {
+    FX_LOGS(ERROR) << "Framebuffer is null; skipping render.";
+    return;
+  }
 
   // Transition to eColorAttachmentOptimal for rendering.  Note the src queue family is FOREIGN,
   // since we assume that this image was previously presented to the display controller.
@@ -934,19 +970,20 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
                                                 escher_->device()->vk_main_queue_family());
 
   // Now the compositor can finally draw.
-  compositor_.DrawBatch(command_buffer, normalized_rects, textures, color_data, output_image,
-                        depth_texture, render_args.apply_color_conversion);
+  compositor_.DrawBatch(command_buffer, normalized_rects, textures, color_data, framebuffer);
 
   if (render_args.display_frame_number.has_value()) {
     // Prepare string and positioning for frame counter overlay.
     const uint64_t frame_number = render_args.display_frame_number.value();
 
     constexpr int32_t kGlyphScale = 4;
+    constexpr int32_t kXOffsetFromCenter = 100;
     const auto frame_number_string = std::to_string(frame_number);
-    const int32_t x_offset = (static_cast<int32_t>(output_image->width()) -
-                              (static_cast<int32_t>(frame_number_string.length()) * kGlyphScale *
-                               static_cast<int32_t>(escher::DebugFont::kGlyphWidth))) /
-                             2;
+    const int32_t x_offset = ((static_cast<int32_t>(output_image->width()) -
+                               (static_cast<int32_t>(frame_number_string.length()) * kGlyphScale *
+                                static_cast<int32_t>(escher::DebugFont::kGlyphWidth))) /
+                              2) +
+                             kXOffsetFromCenter;
 
     // Transition the output image layout so that we can blit into it.
     command_buffer->impl()->TransitionImageLayout(

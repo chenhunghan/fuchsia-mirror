@@ -1617,7 +1617,7 @@ mod tests {
             state.start_authenticating(&mut sta).await.expect_err("should fail authenticating");
 
         // Verify no event was queued up in the timer.
-        assert!(m.time_stream.try_next().is_err());
+        assert!(m.time_stream.try_recv().is_err());
 
         // Verify MLME-CONNECT.confirm message was sent.
         let msg = m
@@ -3870,7 +3870,7 @@ mod tests {
         ))));
 
         let (_, timed_event, _) =
-            m.time_stream.try_next().unwrap().expect("Should have scheduled signal report timeout");
+            m.time_stream.try_recv().expect("Should have scheduled signal report timeout");
         let state = state.on_timed_event(&mut sta, timed_event.event).await;
 
         let signal_ind = m
@@ -3901,7 +3901,7 @@ mod tests {
         let state = state.on_mac_frame(&mut sta, &beacon[..], rx_info, 0.into()).await;
 
         let (_, timed_event, _) =
-            m.time_stream.try_next().unwrap().expect("Should have scheduled signal report timeout");
+            m.time_stream.try_recv().expect("Should have scheduled signal report timeout");
         let _state = state.on_timed_event(&mut sta, timed_event.event).await;
 
         let signal_ind = m

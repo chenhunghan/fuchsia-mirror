@@ -399,27 +399,47 @@ void Reader::InnerParseNumericOrArrayProperty(ParsedNode* parent, const Block* b
       auto array_format = ArrayBlockFormatToDisplay(
           ArrayBlockPayload::Flags::Get<ArrayBlockFormat>(block->payload.u64));
 
+      // When copying any array, do so element by element to prevent reading past
+      // the end of the array, and to support any future in which we have non-contiguous arrays.
       if (entry_type == BlockType::kIntValue) {
         std::vector<int64_t> values;
         values.reserve(count);
-        const int64_t* start = GetArraySlot<const int64_t>(block, 0);
-        std::copy(start, start + count, std::back_inserter(values));
+
+        for (size_t i = 0; i < count; i++) {
+          const auto* slot = GetArraySlot<const int64_t>(block, i);
+          if (slot == nullptr) {
+            break;
+          }
+          values.push_back(*slot);
+        }
 
         parent_node->add_property(
             PropertyValue(std::move(name.value()), IntArrayValue(std::move(values), array_format)));
       } else if (entry_type == BlockType::kUintValue) {
         std::vector<uint64_t> values;
         values.reserve(count);
-        const uint64_t* start = GetArraySlot<const uint64_t>(block, 0);
-        std::copy(start, start + count, std::back_inserter(values));
+
+        for (size_t i = 0; i < count; i++) {
+          const auto* slot = GetArraySlot<const uint64_t>(block, i);
+          if (slot == nullptr) {
+            break;
+          }
+          values.push_back(*slot);
+        }
 
         parent_node->add_property(PropertyValue(std::move(name.value()),
                                                 UintArrayValue(std::move(values), array_format)));
       } else if (entry_type == BlockType::kDoubleValue) {
         std::vector<double> values;
         values.reserve(count);
-        const double* start = GetArraySlot<const double>(block, 0);
-        std::copy(start, start + count, std::back_inserter(values));
+
+        for (size_t i = 0; i < count; i++) {
+          const auto* slot = GetArraySlot<const double>(block, i);
+          if (slot == nullptr) {
+            break;
+          }
+          values.push_back(*slot);
+        }
 
         parent_node->add_property(PropertyValue(std::move(name.value()),
                                                 DoubleArrayValue(std::move(values), array_format)));

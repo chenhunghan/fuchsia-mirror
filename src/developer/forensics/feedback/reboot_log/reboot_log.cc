@@ -7,6 +7,7 @@
 #include <lib/fit/defer.h>
 #include <lib/syslog/cpp/macros.h>
 
+#include <algorithm>
 #include <utility>
 
 #include "src/developer/forensics/feedback/reboot_log/final_shutdown_info.h"
@@ -118,7 +119,7 @@ void ExtractZirconRebootInfo(const std::string& path, HwShutdownReason* out_hw_r
   }
 
   *content = file_content;
-  (*content)->erase(std::find((*content)->begin(), (*content)->end(), '\0'), (*content)->end());
+  (*content)->erase(std::remove((*content)->begin(), (*content)->end(), '\0'), (*content)->end());
 
   const std::vector<std::string_view> lines =
       fxl::SplitString(content->value(), "\n", fxl::WhiteSpaceHandling::kTrimWhitespace,

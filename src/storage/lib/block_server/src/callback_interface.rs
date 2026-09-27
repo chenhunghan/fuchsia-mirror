@@ -351,7 +351,7 @@ struct DecodedRequests {
 
 impl Default for DecodedRequests {
     fn default() -> Self {
-        Self { requests: unsafe { MaybeUninit::uninit().assume_init() }, count: 0 }
+        Self { requests: [const { MaybeUninit::uninit() }; MAX_REQUESTS], count: 0 }
     }
 }
 

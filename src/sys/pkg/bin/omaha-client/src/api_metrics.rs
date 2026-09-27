@@ -112,7 +112,7 @@ mod tests {
         let (mut reporter, mut receiver) = CobaltApiMetricsReporter::new_mock();
         reporter.emit_event(ApiEvent::UpdateManagerConnection);
         assert_eq!(
-            receiver.try_next().unwrap().unwrap(),
+            receiver.try_recv().unwrap(),
             MetricEvent {
                 metric_id: registry::UPDATE_MANAGER_CONNECTION_MIGRATED_METRIC_ID,
                 event_codes: vec![
@@ -128,7 +128,7 @@ mod tests {
         let (mut reporter, mut receiver) = CobaltApiMetricsReporter::new_mock();
         reporter.emit_event(ApiEvent::UpdateChannelControlSetTarget);
         assert_eq!(
-            receiver.try_next().unwrap().unwrap(),
+            receiver.try_recv().unwrap(),
             MetricEvent {
                 metric_id: registry::UPDATE_CHANNEL_CONTROL_SET_TARGET_MIGRATED_METRIC_ID,
                 event_codes: vec![
@@ -145,7 +145,7 @@ mod tests {
         let (mut reporter, mut receiver) = CobaltApiMetricsReporter::new_mock();
         reporter.emit_event(ApiEvent::UpdateManagerCheckNowResult(Ok(())));
         assert_eq!(
-            receiver.try_next().unwrap().unwrap(),
+            receiver.try_recv().unwrap(),
             MetricEvent {
                 metric_id: registry::UPDATE_MANAGER_CHECK_NOW_MIGRATED_METRIC_ID,
                 event_codes: vec![

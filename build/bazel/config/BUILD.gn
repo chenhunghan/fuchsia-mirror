@@ -18,7 +18,11 @@ generated_file("bazel_args_json") {
     # This should not be necessary but just in case.
     _config_name = "${current_os}_${current_cpu}"
   }
+
+  # LINT.IfChange(bazel_args_json_path)
   outputs = [ "$root_build_dir/bazel_args/${_config_name}.json" ]
+
+  # LINT.ThenChange(//build/bazel/scripts/workspace_utils.py:bazel_args_json_path)
   contents = bazel_args
   output_conversion = "json"
 }
@@ -31,4 +35,46 @@ generated_file("global_args.json") {
     rust_sysroot = rebased_rustc_prefix
   }
   output_conversion = "json"
+}
+
+# Generate a JSON file describing the list of default GN config() labels
+# for various types of C++ and Rust targets.
+generated_file("bazel_default_configs_json") {
+  if (is_host) {
+    _config_name = "host"
+  } else if (is_fuchsia) {
+    _config_name = "fuchsia"
+  } else {
+    _config_name = "${current_os}_${current_cpu}"
+  }
+  outputs = [ "$root_build_dir/bazel_default_configs/${_config_name}.json" ]
+  output_conversion = "json"
+
+  # Keep these definitions in sync with the set_defaults() calls in
+  # //build/config/BUILDCONFIG.gn
+  contents = {
+    # LINT.IfChange(DefaultConfigsJsonSchema)
+
+    # List of configs that apply to all C++ targets
+    cxx_common = default_common_binary_configs
+
+    # List of extra configs that apply to C++ executables.
+    cxx_executable_extra =
+        default_executable_configs - default_common_binary_configs
+
+    # List of extra configs that apply to C++ shared libraries.
+    cxx_shared_library_extra =
+        default_shared_library_configs - default_common_binary_configs
+
+    # List of configs that apply to all Rust targets.
+    rust_common = default_common_binary_configs
+
+    # List of extra configs that apply to Rust executables.
+    rust_executable_extra = []
+
+    # List of extra configs that apply to Rust shared libraries.
+    rust_shared_library_extra = []
+
+    # LINT.ThenChange(//build/bazel/scripts/bazel_build_flags.py:DefaultConfigsJsonSchema)
+  }
 }

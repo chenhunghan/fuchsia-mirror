@@ -21,7 +21,10 @@ source_set("constants") {
 source_set("secret_data") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
-  sources = [ "//third_party/tink-cc/src/tink/util/secret_data.h" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/util/secret_data.cc",
+    "//third_party/tink-cc/src/tink/util/secret_data.h",
+  ]
   public_deps = [
     ":secret_data_internal_class",
     "//third_party/abseil-cpp/absl/base:core_headers",

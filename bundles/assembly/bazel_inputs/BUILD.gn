@@ -595,7 +595,6 @@ export_fuchsia_package_to_bazel(
 
 group("core_realm") {
   deps = [
-    "//bundles/assembly/bazel_inputs/src/developer/build_info:build-info-service",
     "//bundles/assembly/bazel_inputs/src/developer/forensics:pkg",
     "//bundles/assembly/bazel_inputs/src/devices/serial/drivers/serial:package",
     "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-cache",
@@ -998,23 +997,12 @@ group("full_drivers") {
 }
 
 group("starnix_support") {
-  deps = [
-    ":starnix_support.bootfs_files_package.bazel_input",
-    "//bundles/assembly/bazel_inputs/src/starnix/runner:starnix_package",
-  ]
+  deps =
+      [ "//bundles/assembly/bazel_inputs/src/starnix/runner:starnix_package" ]
 }
 
 group("erofs_support") {
   deps = [ "//bundles/assembly/bazel_inputs/src/storage/erofs" ]
-}
-
-fuchsia_package("starnix_support.bootfs_files_package") {
-  deps = [ "//src/starnix/config:bootfs" ]
-}
-
-export_fuchsia_package_to_bazel(
-    "starnix_support.bootfs_files_package.bazel_input") {
-  package = ":starnix_support.bootfs_files_package"
 }
 
 group("usb_adb_function") {
@@ -1029,20 +1017,15 @@ group("fastbootd_usb_support") {
 }
 
 group("nanohub_support") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:google_backlight",
-    "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:google_display",
-    "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:google_nanohub",
-    "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:sockettunnel",
-  ]
+  deps = []
 }
 
 group("fastrpc_support") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/starnix/modules/fastrpc:google_fastrpc" ]
+  deps = []
 }
 
 group("hvdcp_opti_support") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/starnix/modules/hvdcp_opti" ]
+  deps = []
 }
 
 group("testing_support_bootstrap") {
@@ -1292,11 +1275,6 @@ group("vsock_service_bootstrap") {
   deps = [ "//bundles/assembly/bazel_inputs/src/paravirtualization/vsock:vsock_service" ]
 }
 
-group("netstack2") {
-  deps =
-      [ "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack2" ]
-}
-
 group("netstack3") {
   deps = []
 }
@@ -1322,18 +1300,6 @@ group("socket-proxy-disabled") {
 
 group("socket_proxy_packages") {
   deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/policy/socket-proxy:package" ]
-}
-
-group("netstack_migration") {
-  deps = []
-}
-
-group("netstack_migration_packages") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack-migration" ]
-}
-
-group("netstack_migration_packages_gub") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack-migration_gub" ]
 }
 
 group("network_tun") {

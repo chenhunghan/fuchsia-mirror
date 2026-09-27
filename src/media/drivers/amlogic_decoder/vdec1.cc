@@ -85,12 +85,16 @@ zx_status_t Vdec1::LoadFirmware(InternalBuffer& buffer) {
     TRACE_DURATION("media", "SpinWaitForRegister");
 
     // Measured spin wait time is around 5 microseconds on sherlock, so it makes sense to SpinWait.
-    if (!SpinWaitForRegister(std::chrono::milliseconds(100), [this] {
+    // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+    if (!SpinWaitForRegister(std::chrono::milliseconds(1000), [this] {
           return (ImemDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000) == 0;
         })) {
       DECODE_ERROR("Failed to load microcode, ImemDmaCtrl %d, ImemDmaAdr 0x%x",
                    ImemDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value(),
                    ImemDmaAdr::Get().ReadFrom(mmio()->dosbus).reg_value());
+
+      // This will quarantine currently-pinned VMOs.
+      ZX_PANIC("wait failed: %d", __LINE__);
 
       BarrierBeforeRelease();
       return ZX_ERR_TIMED_OUT;
@@ -271,17 +275,23 @@ void Vdec1::StopDecoding() {
   Mpsr::Get().FromValue(0).WriteTo(mmio()->dosbus);
   Cpsr::Get().FromValue(0).WriteTo(mmio()->dosbus);
 
-  if (!WaitForRegister(std::chrono::milliseconds(100), [this] {
+  // 100ms is observed to be long enough here, but given ZX_PANIC if this times out, wait longer.
+  if (!WaitForRegister(std::chrono::milliseconds(1000), [this] {
         return (ImemDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000) == 0;
       })) {
     DECODE_ERROR("Failed to wait for IMEM DMA completion");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return;
   }
 
-  if (!WaitForRegister(std::chrono::milliseconds(100), [this] {
+  // 100ms is observed to be long enough here, but given ZX_PANIC if this times out, wait longer.
+  if (!WaitForRegister(std::chrono::milliseconds(1000), [this] {
         return (LmemDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000) == 0;
       })) {
     DECODE_ERROR("Failed to wait for LMEM DMA completion");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return;
   }
 
@@ -301,6 +311,7 @@ void Vdec1::StopDecoding() {
 
 void Vdec1::WaitForIdle() {
   auto timeout = std::chrono::milliseconds(100);
+  auto longer_timeout = std::chrono::milliseconds(1000);
   LOG(DEBUG, "MdecPicDcStatus wait...");
   if (!WaitForRegister(timeout, [this] {
         return MdecPicDcStatus::Get().ReadFrom(mmio()->dosbus).reg_value() == 0;
@@ -345,9 +356,13 @@ void Vdec1::WaitForIdle() {
     }
   }
   LOG(DEBUG, "DcacDmaCtrl wait...");
-  WaitForRegister(timeout, [this] {
-    return !(DcacDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000);
-  });
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  if (!WaitForRegister(longer_timeout, [this] {
+        return !(DcacDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000);
+      })) {
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
+  }
   LOG(DEBUG, "DcacDmaCtrl wait done.");
 }
 
@@ -459,11 +474,14 @@ zx_status_t Vdec1::SaveInputContext(InputContext* context) {
       .FromValue(truncate_to_32(context->buffer->phys_base()))
       .WriteTo(mmio()->dosbus);
   VldMemSwapCtrl::Get().FromValue(0).set_enable(true).set_save(true).WriteTo(mmio()->dosbus);
-  bool finished = SpinWaitForRegister(std::chrono::milliseconds(100), [this]() {
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  bool finished = SpinWaitForRegister(std::chrono::milliseconds(1000), [this]() {
     return !VldMemSwapCtrl::Get().ReadFrom(mmio()->dosbus).in_progress();
   });
   if (!finished) {
     DECODE_ERROR("Timed out in VDec1::SaveInputContext");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return ZX_ERR_TIMED_OUT;
   }
   VldMemSwapCtrl::Get().FromValue(0).WriteTo(mmio()->dosbus);
@@ -495,11 +513,14 @@ zx_status_t Vdec1::RestoreInputContext(InputContext* context) {
       .FromValue(truncate_to_32(context->buffer->phys_base()))
       .WriteTo(mmio()->dosbus);
   VldMemSwapCtrl::Get().FromValue(0).set_enable(true).set_save(false).WriteTo(mmio()->dosbus);
-  bool finished = SpinWaitForRegister(std::chrono::milliseconds(100), [this]() {
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  bool finished = SpinWaitForRegister(std::chrono::milliseconds(1000), [this]() {
     return !VldMemSwapCtrl::Get().ReadFrom(mmio()->dosbus).in_progress();
   });
   if (!finished) {
     DECODE_ERROR("Timed out in VDec1::RestoreInputContext");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return ZX_ERR_TIMED_OUT;
   }
   VldMemSwapCtrl::Get().FromValue(0).WriteTo(mmio()->dosbus);

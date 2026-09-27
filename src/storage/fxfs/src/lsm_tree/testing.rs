@@ -6,6 +6,8 @@ use crate::lsm_tree::types::{
     DefaultOrdLowerBound, DefaultOrdUpperBound, FuzzyHash, LayerKey, MergeType, OrdLowerBound,
     OrdUpperBound, SortByU64,
 };
+use crate::serialized_types::serialized_key::{KeyDeserializer, KeySerializer, SerializeKey};
+use crate::serialized_types::varint::Buffer;
 use crate::serialized_types::{
     LATEST_VERSION, Version, Versioned, VersionedLatest, versioned_type,
 };
@@ -103,16 +105,17 @@ impl SortByU64 for i32 {
     }
 }
 
-impl crate::serialized_types::serialized_key::SerializeKey for i32 {
-    fn serialize_key_to<B: crate::serialized_types::varint::Buffer>(
+impl SerializeKey for i32 {
+    type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
+
+    fn serialize_key_to<'a, B: Buffer>(
         &self,
-        serializer: &mut crate::serialized_types::serialized_key::KeySerializer<'_, B>,
-    ) {
-        serializer.write_u64(crate::lsm_tree::types::SortByU64::get_leading_u64(self));
+        mut serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
+        serializer.write_u64(self.get_leading_u64());
+        serializer
     }
-    fn deserialize_key_from(
-        deserializer: &mut crate::serialized_types::serialized_key::KeyDeserializer<'_>,
-    ) -> Result<Self, anyhow::Error> {
+    fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, anyhow::Error> {
         let val = deserializer.read_u64()?;
         Ok((val as i64 + i32::MIN as i64) as i32)
     }

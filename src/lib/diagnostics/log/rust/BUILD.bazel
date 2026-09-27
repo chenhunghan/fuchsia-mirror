@@ -1,0 +1,115 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+LIB_SRCS = [
+    "src/fuchsia/filter.rs",
+    "src/fuchsia/mod.rs",
+    "src/fuchsia/sink.rs",
+    "src/fuchsia_28/filter.rs",
+    "src/fuchsia_28/mod.rs",
+    "src/fuchsia_28/sink.rs",
+    "src/lib.rs",
+    "src/portable/mod.rs",
+]
+
+# @bazel2gn:transformer=deps
+LIB_PROC_MACRO_DEPS = select({
+    "@platforms//os:fuchsia": ["//third_party/rust_crates/vendor:paste"],
+    "//conditions:default": [],
+})
+
+# @bazel2gn:transformer=deps
+LIB_DEPS = [
+    "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+    "//src/lib/diagnostics/log/types",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates/vendor:log",
+    "//third_party/rust_crates/vendor:thiserror",
+] + select({
+    "@platforms//os:fuchsia": [
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        # Empty stub in Bazel; an expect_includes() target in GN that checks
+        # dependent components for `syslog/client.shard.cml` in their manifest.
+        "//sdk/lib/syslog:client_includes",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/log/encoding/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component/client",
+        "//src/lib/fuchsia-runtime",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+    "//conditions:default": ["//third_party/rust_crates/vendor:chrono"],
+})
+
+rustc_library(
+    name = "rust",
+    srcs = LIB_SRCS,
+    crate_name = "diagnostics_log",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = LIB_PROC_MACRO_DEPS,
+    visibility = ["//:__subpackages__"],
+    deps = LIB_DEPS,
+)
+
+# Variant of the standard `"rust"` library that does not include PA_LOG_SINK
+# support. This exists mostly to support driver libraries that don't use
+# this feature are forbidden from linking the symbol zx_take_startup_handle.
+rustc_library(
+    name = "no_startup_handle",
+    srcs = LIB_SRCS,
+    crate_features = ["no_startup_handle"],
+    crate_name = "driver_diagnostics_log",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = LIB_PROC_MACRO_DEPS,
+    visibility = ["//:__subpackages__"],
+    deps = LIB_DEPS,
+)
+
+rustc_test(
+    name = "diagnostics_log_lib_test",
+    srcs = LIB_SRCS,
+    # We use a single thread for host tests to enable setting the global static
+    # test logger per test case without overwriting it when tests run
+    # concurrently. For Fuchsia we don't need to do this since we run each test
+    # case as a process.
+    #
+    # This reaches the test binary under `bazel test` and is synced to GN's
+    # rustc_test() args. If this target is ever exposed to the host test runner
+    # via wrap_host_rust_test(), repeat the flag in that macro's `test_args`:
+    # Bazel does not record a test rule's own `args` in providers.
+    args = select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": ["--test-threads=1"],
+    }),
+    edition = "2024",
+    proc_macro_deps = LIB_PROC_MACRO_DEPS,
+    # Conditioned on the same constraint as LIB_DEPS above. Using a different
+    # condition here (such as :is_host_os) would let the two selects disagree
+    # when building for an OS that is neither Fuchsia nor the host, pairing the
+    # portable backend with Fuchsia-only test deps.
+    #
+    # The tests also use fuchsia-async and futures directly. They are not
+    # repeated here because Bazel rejects duplicate labels in a label_list and
+    # LIB_DEPS already provides them on Fuchsia.
+    deps = LIB_DEPS + select({
+        "@platforms//os:fuchsia": [
+            "//src/diagnostics/lib/ring-buffer",
+            "//src/lib/diagnostics/log/rust/fidl:fuchsia.diagnostics.crasher_rust",
+            "//src/lib/diagnostics/reader/rust",
+            "//src/lib/fuchsia",
+            "//src/lib/fuchsia-component-test",
+            "//src/lib/test_util",
+            "//src/sys/lib/moniker",
+            "//third_party/rust_crates/vendor:assert_matches",
+        ],
+        "//conditions:default": ["//third_party/rust_crates/vendor:regex"],
+    }),
+)

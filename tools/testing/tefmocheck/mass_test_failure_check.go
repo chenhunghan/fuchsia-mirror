@@ -38,3 +38,7 @@ func (c MassTestFailureCheck) DebugText() string {
 It's unlikely that any one test is to blame. Rather the device or OS probably had a low level problem.`,
 		c.MaxFailed)
 }
+
+func (c MassTestFailureCheck) FailureReason() string {
+	return fmt.Sprintf("More than %d tests failed.", c.MaxFailed)
+}

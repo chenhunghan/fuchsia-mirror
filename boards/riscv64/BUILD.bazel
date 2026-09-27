@@ -37,7 +37,6 @@ fuchsia_board_configuration(
     provided_features = [
         # keep-sorted start
         "fuchsia::driver_framework_v2_support",
-        "fuchsia::network_require_netstack3",
         # TODO: b/299320231 - Remove when ring is supported on riscv64.
         "fuchsia::soft_crypto",
         "fuchsia::usb_host",

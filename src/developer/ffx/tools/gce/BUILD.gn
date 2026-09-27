@@ -15,6 +15,7 @@ rustc_library("lib") {
     "//src/developer/ffx/lib/discovery:lib",
     "//src/developer/ffx/lib/fho:lib",
     "//src/developer/ffx/lib/gce:lib",
+    "//src/developer/ffx/lib/pbms:lib",
     "//src/developer/ffx/lib/writer:lib",
     "//src/lib/fuchsia-async",
     "//third_party/rust_crates:argh",
@@ -22,9 +23,14 @@ rustc_library("lib") {
     "//third_party/rust_crates:log",
     "//third_party/rust_crates:prettytable-rs",
     "//third_party/rust_crates:serde",
+    "//third_party/rust_crates:tempfile",
   ]
 
-  test_deps = [ "//third_party/rust_crates:serde_json" ]
+  test_deps = [
+    "//build/sdk/meta:rust",
+    "//src/lib/fuchsia",
+    "//third_party/rust_crates:serde_json",
+  ]
 
   sources = [
     "src/args.rs",
@@ -33,6 +39,7 @@ rustc_library("lib") {
     "src/subtools/mod.rs",
     "src/subtools/serial.rs",
     "src/subtools/show.rs",
+    "src/subtools/start.rs",
     "src/subtools/stop.rs",
   ]
 }

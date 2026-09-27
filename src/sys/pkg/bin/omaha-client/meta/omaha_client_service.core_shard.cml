@@ -30,14 +30,6 @@
         },
         {
             protocol: [
-                "fuchsia.net.name.Lookup",
-                "fuchsia.posix.socket.Provider",
-            ],
-            from: "#network",
-            to: "#system-update",
-        },
-        {
-            protocol: [
                 "fuchsia.feedback.ComponentDataRegister",
                 "fuchsia.feedback.CrashReporter",
             ],

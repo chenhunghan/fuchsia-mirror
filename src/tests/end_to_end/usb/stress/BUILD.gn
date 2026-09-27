@@ -11,12 +11,18 @@ if (is_host) {
     libraries = [
       "//src/testing/end_to_end/honeydew",
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
+      "//src/tests/end_to_end/usb/lib:usb_lib",
     ]
     params = {
       num_iterations = 10
       disconnect_duration_sec = 10
+
+      # Toggle the host's USB `authorized` attribute instead of using a
+      # physical power hub at desk
+      # //src/tests/end_to_end/usb/lib/disconnect/udev.sh for host udev
+      use_virtual_usb_hub = true
     }
-    local_config_source = "UsbVirtualDisconnectTestbed.yaml"
+
     environments = [ sorrel_env ]
     timeout_secs = 600
   }
@@ -26,6 +32,7 @@ if (is_host) {
     libraries = [
       "//src/testing/end_to_end/honeydew",
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
+      "//src/tests/end_to_end/usb/lib:usb_lib",
     ]
     params = {
       num_usb_disconnects = 5
@@ -47,6 +54,7 @@ if (is_host) {
     libraries = [
       "//src/testing/end_to_end/honeydew",
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
+      "//src/tests/end_to_end/usb/lib:usb_lib",
     ]
     params = {
       num_usb_disconnects = 100
@@ -75,16 +83,17 @@ if (is_host) {
     environments = [ sorrel_env ]
     timeout_secs = 900
   }
+
   python_mobly_test("usb_fastboot_loop_test") {
-    main_source = "test_usb_disconnect.py"
+    main_source = "test_fastboot_loop.py"
     libraries = [
       "//src/testing/end_to_end/honeydew",
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
+      "//src/tests/end_to_end/usb/lib:usb_lib",
     ]
     params = {
       num_iterations = 5
       disconnect_duration_sec = 1
-      fastboot_loop = true
     }
     local_config_source = "UsbDisconnectTestbed.yaml"
     environments = [
@@ -119,6 +128,7 @@ if (is_host) {
     environments = [ sorrel_env ]
     timeout_secs = 1200
   }
+
   python_mobly_test("adb_random_stress_test") {
     main_source = "test_adb_random_stress.py"
     libraries = [

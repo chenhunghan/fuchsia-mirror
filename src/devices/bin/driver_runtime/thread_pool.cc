@@ -7,6 +7,7 @@
 #include <fidl/fuchsia.scheduler/cpp/wire.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/zx/thread.h>
+#include <zircon/threads.h>
 
 #include "dispatcher_coordinator.h"
 #include "dispatcher_internals.h"
@@ -15,6 +16,9 @@
 namespace driver_runtime {
 
 void ThreadPool::ThreadWakeupPrologue() {
+  if (is_unmanaged_) {
+    return;
+  }
   zx_instant_mono_t entry_time = zx_clock_get_monotonic();
   std::pair<zx_koid_t, std::atomic_int64_t*> task_entry_slot =
       thread_context::GetTaskEntryTimeSlot();
@@ -48,6 +52,9 @@ void ThreadPool::ThreadWakeupPrologue() {
 }
 
 void ThreadPool::ThreadWakeupEpilogue() {
+  if (is_unmanaged_) {
+    return;
+  }
   thread_context::GetTaskEntryTimeSlot().second->store(0);
   --threads_entered_;
 }
@@ -142,11 +149,33 @@ zx_status_t ThreadPool::AddThreadLocked() {
     name += ":";
     name += scheduler_role();
   }
-  zx_status_t status = loop_.StartThread(name.c_str());
+  thrd_t thread;
+  zx_status_t status = loop_.StartThread(name.c_str(), &thread);
   if (status == ZX_OK) {
     num_threads_++;
+    zx_info_handle_basic_t info;
+    zx_status_t info_status = zx_object_get_info(thrd_get_zx_handle(thread), ZX_INFO_HANDLE_BASIC,
+                                                 &info, sizeof(info), nullptr, nullptr);
+    ZX_DEBUG_ASSERT(info_status == ZX_OK);
+    if (info_status == ZX_OK) {
+      spawned_threads_.emplace_back(info.koid, std::move(name));
+    } else {
+      LOGF(WARNING, "Failed to get thread info for '%s': %d", name.c_str(), info_status);
+    }
   }
   return status;
+}
+
+void ThreadPool::DumpThreads(std::vector<ThreadInfo>* out_threads) const {
+  fbl::AutoLock al(&lock_);
+  out_threads->reserve(out_threads->size() + spawned_threads_.size());
+  for (const auto& [koid, name] : spawned_threads_) {
+    out_threads->push_back(ThreadInfo{
+        .koid = koid,
+        .name = name,
+        .scheduler_role = scheduler_role_,
+    });
+  }
 }
 
 zx_status_t ThreadPool::OnDispatcherSealed() {
@@ -209,8 +238,6 @@ void ThreadPool::Reset() {
 
   loop_.Quit();
   loop_.JoinThreads();
-  loop_.ResetQuit();
-  loop_.RunUntilIdle();
 
   {
     fbl::AutoLock al(&lock_);
@@ -218,7 +245,25 @@ void ThreadPool::Reset() {
     num_threads_ = 0;
     allow_sync_call_dispatchers_ = 0;
     num_dispatchers_ = 0;
+    // |thread_entry_time_slots_| stores raw pointers into the worker threads' thread_local
+    // |g_task_entry_time| variables, which are destroyed when |loop_.JoinThreads()| completes.
+    // Clear the vector without dereferencing |slot.second| to avoid a Use-After-Free.
+    thread_entry_time_slots_.clear();
+    spawned_threads_.clear();
+    stalled_ = false;
   }
+
+  loop_.ResetQuit();
+  loop_.RunUntilIdle();
+
+  // If |loop_.RunUntilIdle()| executed any tasks, |ThreadWakeupPrologue()| ran on the calling
+  // thread and pushed the calling thread's slot into |thread_entry_time_slots_|. Remove it and
+  // reset the calling thread's TLS slot back to -1.
+  {
+    fbl::AutoLock al(&lock_);
+    thread_entry_time_slots_.clear();
+  }
+  thread_context::GetTaskEntryTimeSlot().second->store(-1);
 }
 
 void ThreadPool::CacheUnboundIrq(std::unique_ptr<AsyncIrq> irq) {

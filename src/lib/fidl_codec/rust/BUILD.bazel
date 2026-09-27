@@ -1,0 +1,106 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fidl_codec",
+    srcs = [
+        "src/decode.rs",
+        "src/encode.rs",
+        "src/error.rs",
+        "src/handle.rs",
+        "src/handle/classic.rs",
+        "src/lib.rs",
+        "src/library.rs",
+        "src/transaction.rs",
+        "src/util.rs",
+        "src/value.rs",
+    ],
+    crate_features = ["classic"],
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:serde_derive",
+    ],
+    visibility = ["//src:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/fidl-data-zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_constants",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_library(
+    name = "fidl_codec_fdomain",
+    srcs = [
+        "src/decode.rs",
+        "src/encode.rs",
+        "src/error.rs",
+        "src/handle.rs",
+        "src/handle/fdomain.rs",
+        "src/lib.rs",
+        "src/library.rs",
+        "src/transaction.rs",
+        "src/util.rs",
+        "src/value.rs",
+    ],
+    crate_features = ["fdomain"],
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:serde_derive",
+    ],
+    visibility = ["//src:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/fidl-data-zx",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_constants",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_library(
+    name = "fidl_codec_pure",
+    srcs = [
+        "src/decode.rs",
+        "src/encode.rs",
+        "src/error.rs",
+        "src/handle.rs",
+        "src/handle/pure.rs",
+        "src/lib.rs",
+        "src/library.rs",
+        "src/transaction.rs",
+        "src/util.rs",
+        "src/value.rs",
+    ],
+    crate_features = ["pure"],
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:serde_derive",
+    ],
+    visibility = ["//src:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/fidl-data-zx",
+        "//src/lib/fidl/rust_constants",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

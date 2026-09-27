@@ -5,6 +5,9 @@
 use anyhow::Error;
 use fidl::endpoints::DiscoverableProtocolMarker;
 use fidl_fuchsia_bluetooth_bredr::{ProfileMarker, ProfileProxy};
+use fidl_fuchsia_bluetooth_gatt as fbgatt;
+use fidl_fuchsia_bluetooth_gatt2 as fbgatt2;
+use fidl_fuchsia_bluetooth_le as fble;
 use fidl_fuchsia_bluetooth_sys::{
     AccessMarker, AccessProxy, BootstrapMarker, BootstrapProxy, ConfigurationMarker,
     ConfigurationProxy, HostWatcherMarker, HostWatcherProxy, PairingMarker, PairingProxy,
@@ -19,10 +22,6 @@ use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use log::info;
 use realmbuilder_mock_helpers::provide_bt_gap_uses;
-use {
-    fidl_fuchsia_bluetooth_gatt as fbgatt, fidl_fuchsia_bluetooth_gatt2 as fbgatt2,
-    fidl_fuchsia_bluetooth_le as fble,
-};
 
 const BT_GAP_URL: &str = "fuchsia-pkg://fuchsia.com/bt-gap-smoke-test#meta/bt-gap.cm";
 
@@ -274,6 +273,57 @@ async fn bt_gap_component_topology() {
         )
         .await
         .expect("Failed adding temp storage route to SecureStore component");
+
+    // Add the bt-gap configuration capabilities to the realm.
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.LePrivacy".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.LeBackgroundScanning".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(false)),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.LeSecurityMode".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::String("Mode1".into())),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.BredrConnectable".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.BredrSecurityMode".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::String("Mode4".into())),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.bluetooth.LePrivacy"))
+                .capability(Capability::configuration("fuchsia.bluetooth.LeBackgroundScanning"))
+                .capability(Capability::configuration("fuchsia.bluetooth.LeSecurityMode"))
+                .capability(Capability::configuration("fuchsia.bluetooth.BredrConnectable"))
+                .capability(Capability::configuration("fuchsia.bluetooth.BredrSecurityMode"))
+                .from(Ref::self_())
+                .to(&bt_gap),
+        )
+        .await
+        .unwrap();
+
     let test_topology = builder.build().await.unwrap();
 
     // If the routing is correctly configured, we expect one of each `Event` to be sent (so, in

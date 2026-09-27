@@ -21,7 +21,29 @@ use zx::Vmo;
 const CRASH_PRODUCT_NAME: &str = "FuchsiaHeapProfile";
 const CRASH_PROGRAM_NAME: &str = "memory_sampler";
 const CRASH_SIGNATURE: &str = "fuchsia-memory-profile";
-const MAX_CONCURRENT_PROFILES: usize = 10;
+/// The extension given to attached profiles.
+///
+/// Profiles are `gzip`-compressed protocol buffers; see
+/// `profile_builder::profile_to_vmo`.
+const PROFILE_ATTACHMENT_EXTENSION: &str = ".pb.gz";
+/// The number of profiles held in the queue awaiting filing.
+///
+/// A report can carry at most `MAX_NUM_ATTACHMENTS_PER_CRASH_REPORT`
+/// profiles, so holding that many lets a single report be filled
+/// completely; below it, capacity is wasted.
+///
+/// This is deliberately a separate constant from the number of
+/// attachments per report, even though the two are currently equal:
+/// this one bounds memory, whereas the other is a property of the
+/// crash reporting API. It is sound to hold more profiles than a
+/// single report can carry, since the surplus is filed by the
+/// following report; what constrains it is the memory held by the
+/// queued profiles, not the capacity of a report.
+///
+/// Note: `futures::mpsc::channel` grants every sender a slot in
+/// addition to this shared buffer, so the effective bound is this
+/// value plus the number of connected processes.
+const MAX_CONCURRENT_PROFILES: usize = MAX_NUM_ATTACHMENTS_PER_CRASH_REPORT as usize;
 const MIN_DURATION_BETWEEN_SNAPSHOTS_HOURS: zx::MonotonicDuration =
     zx::MonotonicDuration::from_hours(1);
 
@@ -47,9 +69,10 @@ impl ProfileReport {
 /// to never file more than a crash report per hour.
 ///
 /// Note: Attached final profiles, are grouped by process name, then
-/// numbered. E.g. if there are two final profiles for "process 1" and
-/// one profile for "process 2", then they will be named "process
-/// 1_final_0", "process 1_final_1" and "process 2_final_0". Partial
+/// numbered, and carry the `PROFILE_ATTACHMENT_EXTENSION` extension.
+/// E.g. if there are two final profiles for "process 1" and one profile
+/// for "process 2", then they will be named "process 1_final_0.pb.gz",
+/// "process 1_final_1.pb.gz" and "process 2_final_0.pb.gz". Partial
 /// profiles are numbered by their index; currently no further effort
 /// is done to distinguish partial profiles from different processes
 /// that share the same name.
@@ -71,12 +94,19 @@ async fn file_report(
         .flat_map(|(_, profiles)| profiles.enumerate())
         .map(|(i, profile_report)| {
             let (key, profile, size) = match profile_report {
-                ProfileReport::Final { process_name, profile, size } => {
-                    (format!("{}_final_{}", process_name, i), profile, size)
-                }
-                ProfileReport::Partial { process_name, profile, size, iteration } => {
-                    (format!("{}_partial_{}", process_name, iteration), profile, size)
-                }
+                ProfileReport::Final { process_name, profile, size } => (
+                    format!("{}_final_{}{}", process_name, i, PROFILE_ATTACHMENT_EXTENSION),
+                    profile,
+                    size,
+                ),
+                ProfileReport::Partial { process_name, profile, size, iteration } => (
+                    format!(
+                        "{}_partial_{}{}",
+                        process_name, iteration, PROFILE_ATTACHMENT_EXTENSION
+                    ),
+                    profile,
+                    size,
+                ),
             };
             Ok(Attachment { key, value: Buffer { vmo: profile, size } })
         })
@@ -140,6 +170,7 @@ mod test {
     use fidl_fuchsia_feedback::{CrashReporterMarker, CrashReporterRequest};
     use futures::{FutureExt, try_join};
     use itertools::assert_equal;
+    use std::task::Poll;
 
     fn handle_crash_reporter_request(request: CrashReporterRequest) -> CrashReport {
         match request {
@@ -151,14 +182,18 @@ mod test {
     }
 
     /// Converts an `Attachment` back to a `ProfileReport`.
-    /// Note: this function assumes the following format for `Attachment::key`:
-    ///   - `<process_name>_final_<index>` if it is a complete report.
-    ///   - `<process_name>_partial_<iteration>` if it is a partial report.
+    /// Note: this function assumes the following format for `Attachment::key`,
+    /// where `<ext>` is `PROFILE_ATTACHMENT_EXTENSION`:
+    ///   - `<process_name>_final_<index><ext>` if it is a complete report.
+    ///   - `<process_name>_partial_<iteration><ext>` if it is a partial report.
     fn retrieve_profile_from_attachment(attachment: Attachment) -> ProfileReport {
         let Attachment { key, value, .. } = attachment;
         let profile = value.vmo;
         let size = value.size;
-        let (prefix_key, index) = key.rsplit_once('_').unwrap();
+        let stem = key
+            .strip_suffix(PROFILE_ATTACHMENT_EXTENSION)
+            .unwrap_or_else(|| panic!("Attachment name misses the profile extension: {}", key));
+        let (prefix_key, index) = stem.rsplit_once('_').unwrap();
         let (process_name, suffix) = prefix_key.rsplit_once('_').unwrap();
         let is_final = match suffix {
             "final" => true,
@@ -231,6 +266,13 @@ mod test {
 
         assert_eq!(report.program_name, Some(CRASH_PROGRAM_NAME.to_string()));
         assert_eq!(report.crash_signature, Some(CRASH_SIGNATURE.to_string()));
+        // Note: spelled out, rather than derived from
+        // `PROFILE_ATTACHMENT_EXTENSION`, because the point is to pin
+        // the extension that `pprof` tooling expects.
+        assert!(
+            report.attachments.as_ref().unwrap().iter().all(|a| a.key.ends_with(".pb.gz")),
+            "Attachments should be named after the profile format."
+        );
         let attachments: Vec<(String, Vec<u8>, u64)> = report
             .attachments
             .unwrap()
@@ -292,6 +334,10 @@ mod test {
 
         assert_eq!(report.program_name, Some(CRASH_PROGRAM_NAME.to_string()));
         assert_eq!(report.crash_signature, Some(CRASH_SIGNATURE.to_string()));
+        assert!(
+            report.attachments.as_ref().unwrap().iter().all(|a| a.key.ends_with(".pb.gz")),
+            "Attachments should be named after the profile format."
+        );
         let attachments: Vec<(String, Vec<u8>, u64, usize)> = report
             .attachments
             .unwrap()
@@ -321,7 +367,6 @@ mod test {
 
     #[test]
     fn test_crash_reporter_task_rate_limiting() {
-        use std::task::Poll;
         let mut executor = fuchsia_async::TestExecutor::new_with_fake_time();
         // Setup the crash reporter task.
         let (client, mut request_stream) = create_proxy_and_stream::<CrashReporterMarker>();
@@ -424,5 +469,39 @@ mod test {
             _ => panic!("Expected profile to be processed after another 1 hour elapsed"),
         }
         assert!(executor.run_until_stalled(&mut task).is_pending());
+    }
+
+    #[test]
+    fn test_report_can_be_filled_to_capacity() {
+        let mut executor = fuchsia_async::TestExecutor::new_with_fake_time();
+        let (client, mut request_stream) = create_proxy_and_stream::<CrashReporterMarker>();
+        let (mut sender, mut task) = setup_crash_reporter_task(client);
+
+        // Note: driven by the number of attachments a report can
+        // carry, rather than by the depth of the queue, so that this
+        // still holds if the queue is later sized to hold more
+        // profiles than a single report can take.
+        let attachments_per_report = MAX_NUM_ATTACHMENTS_PER_CRASH_REPORT as usize;
+        let size = 42;
+        for iteration in 0..attachments_per_report {
+            sender
+                .try_send(ProfileReport::Partial {
+                    process_name: "test_process".to_string(),
+                    size,
+                    profile: create_vmo_with_some_data(size as usize),
+                    iteration,
+                })
+                .expect("Queue should hold a full report worth of profiles.");
+        }
+
+        assert!(executor.run_until_stalled(&mut task).is_pending());
+        let report = match executor.run_until_stalled(&mut request_stream.next()) {
+            Poll::Ready(Some(Ok(request))) => handle_crash_reporter_request(request),
+            _ => panic!("Expected the queued profiles to be filed."),
+        };
+
+        // Every queued profile has to be filed by this report:
+        // whatever is left over waits a further hour.
+        assert_eq!(attachments_per_report, report.attachments.unwrap().len());
     }
 }

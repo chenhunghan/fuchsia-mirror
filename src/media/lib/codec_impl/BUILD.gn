@@ -40,6 +40,7 @@ _codec_impl_internal_sources = [
   "decryptor_adapter.cc",
   "fake_map_range.cc",
   "log.cc",
+  "utils.h",
 ]
 
 _codec_impl_internal_public = [
@@ -130,6 +131,20 @@ source_set("codec_impl") {
   ]
   public_deps = [
     ":codec_impl_internal_no_dynamic",
+    "//src/lib/fxl",
+  ]
+}
+
+# Non-driver variant with dynamic buffer support enabled
+# (CODEC_IMPL_INTERNAL_ENABLE_DYNAMIC_BUFFERS=1), used by unit tests and
+# components that exercise dynamic buffer lifetimes.
+source_set("codec_impl_dynamic") {
+  sources = [
+    "dispatcher_via_async_loop.cc",
+    "log_via_fprintf.cc",
+  ]
+  public_deps = [
+    ":codec_impl_internal_dynamic",
     "//src/lib/fxl",
   ]
 }

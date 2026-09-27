@@ -6,15 +6,15 @@ use std::fmt;
 use std::num::ParseIntError;
 use thiserror::Error;
 
-// Client response with a single packet no greater than 64 bytes. The first four bytes of the
+// Client response with a single packet no greater than 1024 bytes. The first four bytes of the
 // response are “OKAY”, “FAIL”, “DATA”, or “INFO”. Additional bytes may contain an (ascii)
 // informative message.
 #[derive(PartialEq, Clone)]
 pub enum Reply {
-    // INFO -> the remaining 60 bytes are an informative message (providing progress or diagnostic
+    // INFO -> the remaining 1020 bytes are an informative message (providing progress or diagnostic
     // messages).
     Info(String),
-    // FAIL -> the requested command failed. The remaining 60 bytes of the response (if present)
+    // FAIL -> the requested command failed. The remaining 1020 bytes of the response (if present)
     // provide a textual failure message to present to the user.
     Fail(String),
     // OKAY -> the requested command completed successfully.
@@ -26,7 +26,14 @@ pub enum Reply {
 }
 
 const MIN_REPLY_LENGTH: usize = 4;
-const MAX_REPLY_LENGTH: usize = 64;
+/// According to the fastboot specification this should be negotiated based on
+/// the speed of the device
+///
+/// Max packet size must be 64 bytes for full-speed, 512 bytes for high-speed
+/// and 1024 bytes for Super Speed USB.
+///
+/// But we are leaving it at the maximum size to maximize compatibility
+const MAX_REPLY_LENGTH: usize = 1024;
 const DATA_SIZE_LENGTH: usize = 8;
 
 #[derive(Debug, Error)]
@@ -169,6 +176,16 @@ mod test {
             reply_with_overflow.is_err(),
             "Messages over {} bytes should throw an error",
             MAX_REPLY_LENGTH - MIN_REPLY_LENGTH
+        );
+
+        // Verify that a message longer than the legacy 64-byte limit (e.g. 66 bytes) parses.
+        let msg_66_bytes = b"INFOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let reply_66_bytes = Reply::try_from(&msg_66_bytes[..]).unwrap();
+        assert_eq!(
+            reply_66_bytes,
+            Reply::Info(
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string()
+            )
         );
     }
 

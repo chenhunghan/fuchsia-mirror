@@ -122,8 +122,7 @@ pub mod inspect {
 /// Methods for dealing with ICMP sockets.
 pub mod icmp {
     pub use netstack3_icmp_echo::{
-        IcmpEchoBindingsContext, IcmpEchoBindingsTypes, IcmpEchoSettings, IcmpSocketId,
-        ReceiveIcmpEchoError,
+        IcmpEchoBindingsContext, IcmpEchoBindingsTypes, IcmpSocketId, ReceiveIcmpEchoError,
     };
 }
 
@@ -209,8 +208,9 @@ pub mod socket {
     };
 
     pub use netstack3_base::socket::{
-        AddrIsMappedError, NotDualStackCapableError, ReusePortOption, SetDualStackEnabledError,
-        SharingDomain, ShutdownType, SocketCookie, SocketWritableListener, StrictlyZonedAddr,
+        AddrIsMappedError, NotDualStackCapableError, ReusePortOption, SendBufferFullError,
+        SendBufferSpace, SendBufferTracking, SetDualStackEnabledError, SharingDomain, ShutdownType,
+        SocketCookie, SocketWritableListener, StrictlyZonedAddr,
     };
 
     pub use netstack3_base::{
@@ -264,8 +264,8 @@ pub mod types {
 pub mod udp {
     pub use netstack3_udp::{
         ReceiveUdpError, SendError, SendToError, UdpBindingsTypes, UdpPacketMeta,
-        UdpReceiveBindingsContext, UdpRemotePort, UdpSettings, UdpSocketDiagnosticTuple,
-        UdpSocketDiagnostics, UdpSocketId,
+        UdpReceiveBindingsContext, UdpRemotePort, UdpSocketDiagnosticTuple, UdpSocketDiagnostics,
+        UdpSocketId,
     };
 }
 
@@ -275,10 +275,11 @@ pub use inspect::Inspector;
 pub use marker::{BindingsContext, BindingsTypes, CoreContext, IpBindingsContext, IpExt};
 pub use netstack3_base::{
     ChecksumOffloadResult, ChecksumOffloadSpec, ChecksumRxOffloading, CtxPair,
-    DeferredResourceRemovalContext, EventContext, InstantBindingsTypes, InstantContext,
-    MapDerefExt, MatcherBindingsTypes, NetworkParsingContext, NetworkSerializationContext,
-    ProtocolSpecificOffloadSpec, ReferenceNotifiers, RngContext, SettingsContext,
-    SocketDiagnosticsSeed, TimerBindingsTypes, TimerContext, TxMetadata, TxMetadataBindingsTypes,
+    DeferredResourceRemovalContext, EventContext, GsoInfo, InstantBindingsTypes, InstantContext,
+    Ipv4IdMode, MapDerefExt, MatcherBindingsTypes, NetworkParsingContext,
+    NetworkSerializationContext, ProtocolSpecificOffloadSpec, ReferenceNotifiers, RngContext,
+    SettingsContext, SocketDiagnosticsSeed, TimerBindingsTypes, TimerContext, TxMetadata,
+    TxMetadataBindingsTypes,
 };
 pub use netstack3_datagram::PendingDatagramSocketError;
 pub use state::{StackState, StackStateBuilder};

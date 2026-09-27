@@ -15,7 +15,6 @@ rustc_library("mapping") {
     "src/file.rs",
     "src/lib.rs",
     "src/page_request.rs",
-    "src/pager.rs",
     "src/protocol.rs",
     "src/reader.rs",
     "src/testing.rs",

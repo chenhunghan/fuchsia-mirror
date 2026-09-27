@@ -19,7 +19,6 @@
 //! [type-length-value]: https://en.wikipedia.org/wiki/Type-length-value
 
 use core::borrow::Borrow;
-use core::convert::Infallible as Never;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 use core::ops::Deref;
@@ -911,8 +910,8 @@ mod tests {
         TooFewRecords,
     }
 
-    impl From<Never> for DummyRecordErr {
-        fn from(err: Never) -> DummyRecordErr {
+    impl From<!> for DummyRecordErr {
+        fn from(err: !) -> DummyRecordErr {
             match err {}
         }
     }
@@ -1632,7 +1631,7 @@ pub mod options {
     }
 
     /// An error encountered while parsing an option or sequence of options.
-    pub trait OptionParseError: From<Never> {
+    pub trait OptionParseError: From<!> {
         /// An error encountered while parsing a sequence of options.
         ///
         /// If an error is encountered while parsing a sequence of [`Options`],
@@ -1651,8 +1650,8 @@ pub mod options {
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub struct OptionParseErr;
 
-    impl From<Never> for OptionParseErr {
-        fn from(err: Never) -> OptionParseErr {
+    impl From<!> for OptionParseErr {
+        fn from(err: !) -> OptionParseErr {
             match err {}
         }
     }
@@ -1909,8 +1908,8 @@ pub mod options {
             Option,
         }
 
-        impl From<Never> for AlwaysErrorErr {
-            fn from(err: Never) -> AlwaysErrorErr {
+        impl From<!> for AlwaysErrorErr {
+            fn from(err: !) -> AlwaysErrorErr {
                 match err {}
             }
         }

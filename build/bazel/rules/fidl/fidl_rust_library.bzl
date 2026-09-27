@@ -33,7 +33,7 @@ def fidl_rust_library(
     """
 
     _fidl_rust_library_flavor("fidl", name, fidl_library_name, fidl_ir_json, deps, contains_drivers, testonly, visibility)
-    _fidl_rust_library_flavor("common", name, fidl_library_name, fidl_ir_json, deps, contains_drivers, testonly, ["//visibility:private"])
+    _fidl_rust_library_flavor("common", name, fidl_library_name, fidl_ir_json, deps, contains_drivers, testonly, visibility)
     _fidl_rust_library_flavor("fdomain", name, fidl_library_name, fidl_ir_json, deps, contains_drivers, testonly, visibility)
     _fidl_rust_library_flex("fidl", name, fidl_library_name, testonly, visibility)
     _fidl_rust_library_flex("fdomain", name, fidl_library_name, testonly, visibility)
@@ -178,10 +178,15 @@ def _fidlgen_rust_impl(ctx):
         fail("'use_common' must be empty if and only if `common` is True.")
 
     ir = ctx.file.fidl_ir_json
+    rustfmt_config = ctx.file._rustfmt_config
 
     rust_toolchain = ctx.toolchains["@rules_rust//rust:toolchain_type"]
     rustfmt = rust_toolchain.rustfmt
 
+    # The config must be passed explicitly: otherwise rustfmt searches for it
+    # in the working directory's ancestors, so local actions (whose execroot
+    # is inside the Fuchsia checkout) find //rustfmt.toml while remote actions
+    # use rustfmt's defaults, making the output depend on where it ran.
     arguments = [
         "--json",
         ir.path,
@@ -189,6 +194,8 @@ def _fidlgen_rust_impl(ctx):
         ctx.outputs.out.path,
         "--rustfmt",
         rustfmt.path,
+        "--rustfmt-config",
+        rustfmt_config.path,
     ]
 
     if ctx.attr.contains_drivers:
@@ -203,7 +210,7 @@ def _fidlgen_rust_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._fidlgen_tool,
         arguments = arguments,
-        inputs = [ir, rustfmt],
+        inputs = [ir, rustfmt, rustfmt_config],
         tools = rust_toolchain.all_files,
         outputs = [ctx.outputs.out],
         mnemonic = "FidlGenRust",
@@ -244,6 +251,11 @@ _fidlgen_rust = rule(
             executable = True,
             cfg = "exec",
             default = "@//tools/fidl/fidlgen_rust",
+        ),
+        "_rustfmt_config": attr.label(
+            doc = "rustfmt configuration used to format the generated code.",
+            allow_single_file = True,
+            default = "@//:rustfmt.toml",
         ),
         "out": attr.output(
             doc = "Output filename.",

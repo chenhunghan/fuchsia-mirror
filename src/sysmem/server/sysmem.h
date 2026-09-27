@@ -50,8 +50,15 @@ struct Settings {
   uint64_t max_allocation_size = UINT64_MAX;
 };
 
-// The fuchsia_hardware_sysmem::Sysmem protocol is used by the securemem driver and by external
-// heaps such as goldfish.
+// The fuchsia_hardware_sysmem::Sysmem protocol is a privileged backend registration protocol used
+// ONLY by the securemem driver (RegisterSecureMem) and by external heap drivers such as goldfish
+// (RegisterHeap).
+//
+// Normal sysmem clients (including almost all drivers) use fuchsia_sysmem2::Allocator instead.
+//
+// Security model: Callers with access to fuchsia_hardware_sysmem::Sysmem are trusted. Access
+// control is enforced by Component Framework capability routing (only drivers that specifically and
+// legitimately need to register a heap or securemem may declare `use` of this protocol).
 class Sysmem final : public MemoryAllocator::Owner,
                      public fidl::Server<fuchsia_hardware_sysmem::Sysmem> {
  public:
@@ -302,6 +309,19 @@ class Sysmem final : public MemoryAllocator::Owner,
   // Checks we're on the one loop_ thread.
   mutable std::optional<fit::thread_checker> loop_checker_;
   fidl::ServerBindingGroup<fuchsia_hardware_sysmem::Sysmem>& BindingsForTest() { return bindings_; }
+
+  bool is_allocator_present_for_testing(const fuchsia_sysmem2::Heap& heap)
+      __TA_REQUIRES(*loop_checker_) {
+    return allocators_.find(heap) != allocators_.end();
+  }
+  bool is_secure_allocator_present_for_testing(const fuchsia_sysmem2::Heap& heap)
+      __TA_REQUIRES(*loop_checker_) {
+    return secure_allocators_.find(heap) != secure_allocators_.end();
+  }
+  void add_secure_allocator_id_for_testing(const fuchsia_sysmem2::Heap& heap)
+      __TA_REQUIRES(*loop_checker_) {
+    secure_allocators_[heap] = nullptr;
+  }
 
   const UsagePixelFormatCost& usage_pixel_format_cost() {
     ZX_DEBUG_ASSERT(usage_pixel_format_cost_.has_value());

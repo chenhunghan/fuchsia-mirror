@@ -56,7 +56,7 @@ fn main() -> Result<()> {
 
     let container_manifest = generate_container_manifest(&cmd.container_name, &mounts, &features);
     let default_command_manifest =
-        generate_default_command_cml(&input_archive.default_command(), &input_archive.environ());
+        generate_default_command_cml(&input_archive.default_command()?, &input_archive.environ());
 
     std::fs::write(&cmd.container_manifest, container_manifest)?;
     std::fs::write(&cmd.default_command_manifest, default_command_manifest)?;
@@ -64,9 +64,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Generates the manifest for the image's default command.
+///
+/// `command` must not be empty; `DockerArchive::default_command` guarantees this.
 fn generate_default_command_cml(command: &[&str], environ: &[&str]) -> Vec<u8> {
-    let binary = command[0];
-    let args = &command[1..];
+    let (binary, args) = command.split_first().expect("default command is never empty");
 
     let cml = json!({
         "program": {

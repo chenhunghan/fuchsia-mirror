@@ -2865,14 +2865,18 @@ pub mod tests {
             let client = BinderProcessFixture::new(current_task, &device);
 
             // Register an object with the owner.
-            let guard = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &owner.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             // Keep a weak reference to the object.
             let weak_object = Arc::downgrade(&guard.binder_object);
@@ -2943,14 +2947,18 @@ pub mod tests {
             let receiver = BinderProcessFixture::new(current_task, &device);
 
             // Register an object with the owner.
-            let guard = sender.proc.lock().find_or_register_object(
-                &sender.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = sender
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &sender.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             // Insert a handle to the object in the client. This also retains a strong reference.
             let handle = receiver
@@ -2987,14 +2995,18 @@ pub mod tests {
             let receiver = BinderProcessFixture::new(current_task, &device);
 
             // Register an object with the sender.
-            let guard = sender.proc.lock().find_or_register_object(
-                &sender.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = sender
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &sender.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             // Insert a handle to the object in the receiver. This also retains a strong reference.
             let handle = receiver
@@ -3033,14 +3045,18 @@ pub mod tests {
             let client = BinderProcessFixture::new(current_task, &device);
 
             // Register an object with the owner.
-            let guard = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &owner.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             // Insert a handle to the object in the client. This also retains a strong reference.
             let handle = client
@@ -4613,14 +4629,18 @@ pub mod tests {
             let client = BinderProcessFixture::new(current_task, &device);
 
             // Register an object with the owner.
-            let guard = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &owner.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             // Insert a handle to the object in the client. This also retains a strong reference.
             let handle = client
@@ -4672,14 +4692,18 @@ pub mod tests {
             let client = BinderProcessFixture::new(current_task, &device);
 
             // Register an object with the owner.
-            let guard = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &owner.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             // Insert a handle to the object in the receiver. This also retains a strong reference.
             let handle = client
@@ -4741,14 +4765,18 @@ pub mod tests {
             let client = BinderProcessFixture::new(current_task, &device);
 
             // Register an object with the owner.
-            let guard = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &owner.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             // Insert a handle to the object in the receiver. This also retains a strong reference.
             let handle = client
@@ -4803,14 +4831,18 @@ pub mod tests {
             let owner = BinderProcessFixture::new(current_task, &device);
             let client = BinderProcessFixture::new(current_task, &device);
 
-            let guard = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                LocalBinderObject {
-                    weak_ref_addr: UserAddress::from(0x0000000000000001),
-                    strong_ref_addr: UserAddress::from(0x0000000000000002),
-                },
-                BinderObjectFlags::empty(),
-            );
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(
+                    &owner.thread,
+                    LocalBinderObject {
+                        weak_ref_addr: UserAddress::from(0x0000000000000001),
+                        strong_ref_addr: UserAddress::from(0x0000000000000002),
+                    },
+                    BinderObjectFlags::empty(),
+                )
+                .expect("find_or_register_object");
 
             let handle = client
                 .proc
@@ -5029,19 +5061,19 @@ pub mod tests {
             };
 
             // Register the object once.
-            let _guard1 = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                local,
-                BinderObjectFlags::empty(),
-            );
+            let _guard1 = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
 
             // Register the same object again. This will find the existing object
             // and call `inc_strong_unchecked`, which triggered the deadlock.
-            let _guard2 = owner.proc.lock().find_or_register_object(
-                &owner.thread,
-                local,
-                BinderObjectFlags::empty(),
-            );
+            let _guard2 = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
         })
         .await;
     }
@@ -5119,6 +5151,441 @@ pub mod tests {
             // Clean up: notify event and join blocked thread.
             event.notify();
             blocked_thread.join().unwrap();
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn handle_thread_read_lazy_refcount_cancellation() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let owner = BinderProcessFixture::new(current_task, &device);
+            let client = BinderProcessFixture::new(current_task, &device);
+
+            let local_obj = LocalBinderObject {
+                weak_ref_addr: UserAddress::from(0x7000),
+                strong_ref_addr: UserAddress::from(0x8000),
+            };
+
+            // 1. Owner registers object.
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local_obj, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
+
+            // Client receives handle for transaction.
+            let handle = client
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+            // Verify AcquireRef is in owner.thread command queue.
+            assert_matches!(
+                owner.thread.lock().command_queue.commands.front(),
+                Some(QueuedCommand { command: Command::AcquireRef(o), .. }) if *o == local_obj
+            );
+
+            // 2. Client drops its strong reference before owner reads AcquireRef.
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                    handle,
+                )
+                .unwrap();
+
+            // Enqueue a subsequent command (TransactionComplete) so handle_thread_read has work
+            // to return after discarding the cancelled AcquireRef.
+            owner.thread.lock().command_queue.push_back(Command::TransactionComplete.into());
+
+            // 3. Owner calls handle_thread_read.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let context = owner.context(current_task);
+            let bytes_read = device
+                .handle_thread_read(
+                    &context,
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("thread read succeeds");
+
+            // Verify that the command read by userspace is BR_TRANSACTION_COMPLETE (4 bytes),
+            // NOT BR_ACQUIRE! The transient AcquireRef was discarded.
+            assert_eq!(
+                bytes_read,
+                std::mem::size_of::<starnix_uapi::binder_driver_return_protocol>()
+            );
+            let return_proto: starnix_uapi::binder_driver_return_protocol =
+                current_task.read_object(read_buffer_addr.into()).unwrap();
+            assert_eq!(
+                return_proto,
+                starnix_uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE
+            );
+
+            // Verify that the object was removed from owner's object table.
+            assert!(owner.proc.lock().objects.get(&local_obj.weak_ref_addr).is_none());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn handle_thread_read_lazy_inc_ref_cancellation_delivers_pending_release() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let owner = BinderProcessFixture::new(current_task, &device);
+            let client = BinderProcessFixture::new(current_task, &device);
+
+            let local_obj = LocalBinderObject {
+                weak_ref_addr: UserAddress::from(0x7000),
+                strong_ref_addr: UserAddress::from(0x8000),
+            };
+
+            // 1. Owner registers object.
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local_obj, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
+
+            let handle = client
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+            // 2. Owner reads AcquireRef and acknowledges it.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let context = owner.context(current_task);
+            let _bytes_read = device
+                .handle_thread_read(
+                    &context,
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("thread read succeeds");
+            let return_proto: starnix_uapi::binder_driver_return_protocol =
+                current_task.read_object(read_buffer_addr.into()).unwrap();
+            assert_eq!(return_proto, starnix_uapi::binder_driver_return_protocol_BR_ACQUIRE);
+            owner
+                .proc
+                .handle_refcount_operation_done(
+                    starnix_uapi::binder_driver_command_protocol_BC_ACQUIRE_DONE,
+                    local_obj,
+                )
+                .unwrap();
+
+            // 3. Client acquires weak ref (like BpBinder does).
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                    handle,
+                )
+                .unwrap();
+
+            // 4. Client drops both strong ref and weak ref.
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                    handle,
+                )
+                .unwrap();
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+                    handle,
+                )
+                .unwrap();
+
+            // 5. Owner reads next command:
+            // IncRef was transient (weak_count dropped to 0 before IncRef was read).
+            // But strong_count had HasRef(0) waiting for weak_count to finish waiting ack!
+            // When IncRef is cancelled, strong_count must deliver BR_RELEASE!
+            let _bytes_read = device
+                .handle_thread_read(
+                    &context,
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("thread read succeeds");
+            let return_proto: starnix_uapi::binder_driver_return_protocol =
+                current_task.read_object(read_buffer_addr.into()).unwrap();
+            assert_eq!(return_proto, starnix_uapi::binder_driver_return_protocol_BR_RELEASE);
+
+            // Verify object is now completely cleaned up.
+            assert!(owner.proc.lock().objects.get(&local_obj.weak_ref_addr).is_none());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn handle_thread_read_lazy_refcount_cancellation_race_with_deferred_inc_weak() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let owner = BinderProcessFixture::new(current_task, &device);
+            let client = BinderProcessFixture::new(current_task, &device);
+
+            let local_obj = LocalBinderObject {
+                weak_ref_addr: UserAddress::from(0x7000),
+                strong_ref_addr: UserAddress::from(0x8000),
+            };
+
+            // 1. Owner registers object.
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local_obj, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
+
+            // Client receives handle for transaction. AcquireRef is enqueued for owner.
+            let handle = client
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+            // 2. Client drops its strong reference before owner reads AcquireRef.
+            // strong_count becomes WaitingAck(0).
+            let obj = owner.proc.lock().objects.get(&local_obj.weak_ref_addr).cloned().unwrap();
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                    handle,
+                )
+                .unwrap();
+
+            // Client acquires a weak reference, simulating the race where inc_deferred() has
+            // occurred (weak_count is NoRef(1)) while apply_deferred_refcounts has not yet run.
+            let mut deferred_actions = RefCountActions::default();
+            let weak_guard = obj.inc_weak(&mut deferred_actions);
+
+            // 3. Owner calls handle_thread_read.
+            // AcquireRef is cancelled. But weak_count was NoRef(1)!
+            // With the fix:
+            // - weak_count.apply_deferred_inc() transitions weak_count to WaitingAck(1)
+            //   and unblocks IncRef.
+            // - The object is NOT removed from owner's object table.
+            // - IncRef is returned to userspace (BR_INCREFS).
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let context = owner.context(current_task);
+            let bytes_read = device
+                .handle_thread_read(
+                    &context,
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("thread read succeeds");
+
+            assert_eq!(
+                bytes_read,
+                std::mem::size_of::<starnix_uapi::binder_driver_return_protocol>()
+                    + std::mem::size_of::<starnix_uapi::binder_ptr_cookie>()
+            );
+            let return_proto: starnix_uapi::binder_driver_return_protocol =
+                current_task.read_object(read_buffer_addr.into()).unwrap();
+            assert_eq!(return_proto, starnix_uapi::binder_driver_return_protocol_BR_INCREFS);
+
+            // Object is still in owner's object table because it has an active weak ref!
+            assert!(owner.proc.lock().objects.get(&local_obj.weak_ref_addr).is_some());
+
+            // 4. Deferred actions from inc_weak can safely run without double-enqueueing IncRef.
+            deferred_actions.release(());
+
+            // 5. Owner acknowledges INCREFS.
+            owner
+                .proc
+                .handle_refcount_operation_done(
+                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
+                    local_obj,
+                )
+                .unwrap();
+
+            // 6. Drop the weak guard. Now weak_count drops to 0, and the object is cleaned up.
+            let mut drop_actions = RefCountActions::default();
+            weak_guard.release(&mut drop_actions);
+            drop_actions.release(());
+
+            // Verify owner reads BR_DECREFS and object is cleaned up.
+            let _bytes_read = device
+                .handle_thread_read(
+                    &context,
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("thread read succeeds");
+            let return_proto: starnix_uapi::binder_driver_return_protocol =
+                current_task.read_object(read_buffer_addr.into()).unwrap();
+            assert_eq!(return_proto, starnix_uapi::binder_driver_return_protocol_BR_DECREFS);
+
+            assert!(owner.proc.lock().objects.get(&local_obj.weak_ref_addr).is_none());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn handle_thread_read_lazy_acquire_ref_cancellation_delivers_pending_decref() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let owner = BinderProcessFixture::new(current_task, &device);
+            let client = BinderProcessFixture::new(current_task, &device);
+
+            let local_obj = LocalBinderObject {
+                weak_ref_addr: UserAddress::from(0x7000),
+                strong_ref_addr: UserAddress::from(0x8000),
+            };
+
+            // 1. Owner registers object (AcquireRef queued on owner.thread).
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local_obj, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
+
+            let handle = client
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+            // 2. Client acquires a weak ref (IncRef queued on owner.proc) and owner acknowledges
+            // BC_INCREFS_DONE (so weak_count is HasRef(1), while strong_count is still WaitingAck).
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                    handle,
+                )
+                .unwrap();
+            assert_matches!(
+                owner.proc.lock().command_queue.pop_front(),
+                Some(QueuedCommand { command: Command::IncRef(o), .. }) if o == local_obj
+            );
+            owner
+                .proc
+                .handle_refcount_operation_done(
+                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
+                    local_obj,
+                )
+                .unwrap();
+
+            // 3. Client drops both strong ref and weak ref before owner reads AcquireRef.
+            // strong_count becomes WaitingAck(0), and weak_count becomes HasRef(0) (deferring
+            // DecRef until strong_count finishes waiting for ack).
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                    handle,
+                )
+                .unwrap();
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+                    handle,
+                )
+                .unwrap();
+
+            // 4. Owner calls handle_thread_read:
+            // AcquireRef is lazily cancelled, which unblocks weak_count's deferred DecRef and
+            // writes BR_DECREFS directly to the read buffer.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let context = owner.context(current_task);
+            let _bytes_read = device
+                .handle_thread_read(
+                    &context,
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("thread read succeeds");
+            let return_proto: starnix_uapi::binder_driver_return_protocol =
+                current_task.read_object(read_buffer_addr.into()).unwrap();
+            assert_eq!(return_proto, starnix_uapi::binder_driver_return_protocol_BR_DECREFS);
+
+            // Verify object is now completely cleaned up.
+            assert!(owner.proc.lock().objects.get(&local_obj.weak_ref_addr).is_none());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn handle_thread_read_lazy_sequential_acquire_and_inc_ref_cancellation() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let owner = BinderProcessFixture::new(current_task, &device);
+            let client = BinderProcessFixture::new(current_task, &device);
+
+            let local_obj = LocalBinderObject {
+                weak_ref_addr: UserAddress::from(0x7000),
+                strong_ref_addr: UserAddress::from(0x8000),
+            };
+
+            // 1. Owner registers object (AcquireRef queued on owner.thread).
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local_obj, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
+
+            let handle = client
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+            // 2. Client acquires weak ref (IncRef queued on owner.proc).
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                    handle,
+                )
+                .unwrap();
+
+            // 3. Client drops both strong ref and weak ref before owner reads either command.
+            // Both strong_count and weak_count are now WaitingAck(0).
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                    handle,
+                )
+                .unwrap();
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+                    handle,
+                )
+                .unwrap();
+
+            // Enqueue TransactionComplete after IncRef on the process command queue.
+            owner.proc.lock().command_queue.push_back(Command::TransactionComplete.into());
+
+            // 4. Owner calls handle_thread_read once:
+            // The loop sequentially cancels AcquireRef (from thread queue) and IncRef (from
+            // process queue), removes the object from owner's object table, and returns
+            // BR_TRANSACTION_COMPLETE in a single call.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let context = owner.context(current_task);
+            let bytes_read = device
+                .handle_thread_read(
+                    &context,
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("thread read succeeds");
+
+            assert_eq!(
+                bytes_read,
+                std::mem::size_of::<starnix_uapi::binder_driver_return_protocol>()
+            );
+            let return_proto: starnix_uapi::binder_driver_return_protocol =
+                current_task.read_object(read_buffer_addr.into()).unwrap();
+            assert_eq!(
+                return_proto,
+                starnix_uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE
+            );
+
+            assert!(owner.proc.lock().objects.get(&local_obj.weak_ref_addr).is_none());
         })
         .await;
     }

@@ -53,15 +53,18 @@ fuchsia_rust_driver("bt-transport-uart-rust-driver") {
     "//sdk/lib/driver/component/rust",
     "//sdk/lib/driver/runtime/rust/fidl",
     "//sdk/rust/zx",
+    "//src/devices/bind/fuchsia:fuchsia_rust",
     "//src/lib/fidl/rust_next/fidl_next",
     "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
   ]
 
   test_deps = [
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/lib/driver/runtime/rust",
     "//src/lib/fuchsia",
-    "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-sync",
   ]
 }

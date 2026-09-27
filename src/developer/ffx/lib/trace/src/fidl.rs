@@ -404,6 +404,7 @@ impl<'a, 'b> FidlMessage<'a, 'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zerocopy::IntoBytes;
     use zx_types::*;
 
     /// Format a Handle (and similar) for display to the user.
@@ -468,15 +469,7 @@ mod tests {
             let new_handle = fidl_codec_pure::NullableHandle::from_raw(
                 (self.object_info_bytes.len() / INFO_SIZE) as zx_handle_t,
             );
-            let mut bytes = [0u8; INFO_SIZE];
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    &info as *const zx_info_handle_basic_t as *const u8,
-                    bytes.as_mut_ptr(),
-                    INFO_SIZE,
-                );
-            }
-            self.object_info_bytes.extend_from_slice(bytes.as_slice());
+            self.object_info_bytes.extend_from_slice(info.as_bytes());
             new_handle
         }
     }

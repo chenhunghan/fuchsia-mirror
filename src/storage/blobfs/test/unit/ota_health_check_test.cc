@@ -2,12 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/storage/blobfs/service/ota_health_check.h"
-
-#include <fidl/fuchsia.update.verify/cpp/common_types.h>
-#include <fidl/fuchsia.update.verify/cpp/markers.h>
-#include <fuchsia/hardware/block/driver/c/banjo.h>
-#include <lib/fidl/cpp/wire/channel.h>
 #include <zircon/assert.h>
 #include <zircon/errors.h>
 
@@ -32,17 +26,12 @@
 namespace blobfs {
 namespace {
 
-namespace fuv = ::fuchsia_update_verify;
-
 constexpr uint32_t kBlockSize = 512;
 constexpr uint32_t kNumBlocks = 400 * kBlobfsBlockSize / kBlockSize;
 
-class OtaHealthCheckServiceTest : public testing::Test {
+class BlobfsVerifyHealthTest : public testing::Test {
  protected:
-  void SetUp() override {
-    EXPECT_EQ(ZX_OK, setup_.CreateFormatMount(kNumBlocks, kBlockSize));
-    svc_ = fbl::MakeRefCounted<OtaHealthCheckService>(setup_.dispatcher(), *setup_.blobfs());
-  }
+  void SetUp() override { EXPECT_EQ(ZX_OK, setup_.CreateFormatMount(kNumBlocks, kBlockSize)); }
 
   fbl::RefPtr<Blob> InstallBlob(const TestDeliveryBlob& delivery_blob) {
     auto blob = CreateBlob(*setup_.blobfs(), delivery_blob);
@@ -69,7 +58,6 @@ class OtaHealthCheckServiceTest : public testing::Test {
         .command = {.opcode = BLOCK_OPCODE_READ, .flags = 0},
         .vmoid = buffer.vmoid(),
         .length = kBlobfsBlockSize / kBlockSize,
-        .vmo_offset = 0,
         .dev_offset = block * kBlobfsBlockSize / kBlockSize,
     };
     ASSERT_EQ(device->FifoTransaction(&request, 1), ZX_OK);
@@ -82,28 +70,18 @@ class OtaHealthCheckServiceTest : public testing::Test {
     request.command = {.opcode = BLOCK_OPCODE_WRITE, .flags = 0};
     ASSERT_EQ(device->FifoTransaction(&request, 1), ZX_OK);
 
-    // Remount and try and read the blob.
+    // Remount.
     EXPECT_EQ(ZX_OK, setup_.Mount(std::move(device)));
-    svc_ = fbl::MakeRefCounted<OtaHealthCheckService>(setup_.dispatcher(), *setup_.blobfs());
-  }
-
-  fidl::WireSyncClient<fuv::ComponentOtaHealthCheck> Client() {
-    auto endpoints = fidl::Endpoints<fuv::ComponentOtaHealthCheck>::Create();
-    EXPECT_EQ(svc_->ConnectService(endpoints.server.TakeChannel()), ZX_OK);
-    return fidl::WireSyncClient(std::move(endpoints.client));
   }
 
   BlobfsTestSetupWithThread setup_;
-  fbl::RefPtr<OtaHealthCheckService> svc_;  // References setup_.blobfs().
 };
 
-TEST_F(OtaHealthCheckServiceTest, EmptyFilesystemPassesChecks) {
-  fidl::WireSyncClient<fuv::ComponentOtaHealthCheck> client = Client();
-  auto result = client->GetHealthStatus();
-  ASSERT_TRUE(result.ok()) << result.error();
+TEST_F(BlobfsVerifyHealthTest, EmptyFilesystemPassesChecks) {
+  EXPECT_OK(setup_.blobfs()->VerifyHealth());
 }
 
-TEST_F(OtaHealthCheckServiceTest, PopulatedFilesystemPassesChecks) {
+TEST_F(BlobfsVerifyHealthTest, PopulatedFilesystemPassesChecks) {
   // Since only open files are validated, open a bunch of valid files.
   std::vector<fbl::RefPtr<Blob>> files;
   for (uint8_t i = 0; i < 10; ++i) {
@@ -111,23 +89,17 @@ TEST_F(OtaHealthCheckServiceTest, PopulatedFilesystemPassesChecks) {
     files.push_back(InstallBlob(delivery_blob));
   }
 
-  fidl::WireSyncClient<fuv::ComponentOtaHealthCheck> client = Client();
-  auto result = client->GetHealthStatus();
-  ASSERT_TRUE(result.ok()) << result.error();
-  EXPECT_EQ(result->health_status, fuv::HealthStatus::kHealthy);
+  EXPECT_OK(setup_.blobfs()->VerifyHealth());
 }
 
-TEST_F(OtaHealthCheckServiceTest, NullBlobPassesChecks) {
+TEST_F(BlobfsVerifyHealthTest, NullBlobPassesChecks) {
   auto delivery_blob = TestDeliveryBlob::CreateUncompressed(0);
   auto blob = InstallBlob(delivery_blob);
 
-  fidl::WireSyncClient<fuv::ComponentOtaHealthCheck> client = Client();
-  auto result = client->GetHealthStatus();
-  ASSERT_TRUE(result.ok()) << result.error();
-  EXPECT_EQ(result->health_status, fuv::HealthStatus::kHealthy);
+  EXPECT_OK(setup_.blobfs()->VerifyHealth());
 }
 
-TEST_F(OtaHealthCheckServiceTest, InvalidFileFailsChecks) {
+TEST_F(BlobfsVerifyHealthTest, InvalidFileFailsChecks) {
   auto delivery_blob = TestDeliveryBlob::CreateUncompressed(65536);
   InstallBlob(delivery_blob);
   CorruptBlob(delivery_blob.digest());
@@ -135,21 +107,15 @@ TEST_F(OtaHealthCheckServiceTest, InvalidFileFailsChecks) {
   auto blob = GetBlob(*setup_.blobfs(), delivery_blob.digest());
   ASSERT_OK(blob);
 
-  fidl::WireSyncClient<fuv::ComponentOtaHealthCheck> client = Client();
-  auto result = client->GetHealthStatus();
-  ASSERT_TRUE(result.ok()) << result.error();
-  EXPECT_EQ(result->health_status, fuv::HealthStatus::kUnhealthy);
+  EXPECT_STATUS(setup_.blobfs()->VerifyHealth(), ZX_ERR_IO_DATA_INTEGRITY);
 }
 
-TEST_F(OtaHealthCheckServiceTest, InvalidButClosedFilePassesChecks) {
+TEST_F(BlobfsVerifyHealthTest, InvalidButClosedFilePassesChecks) {
   auto delivery_blob = TestDeliveryBlob::CreateUncompressed(65536);
   InstallBlob(delivery_blob);
   CorruptBlob(delivery_blob.digest());
 
-  fidl::WireSyncClient<fuv::ComponentOtaHealthCheck> client = Client();
-  auto result = client->GetHealthStatus();
-  ASSERT_TRUE(result.ok()) << result.error();
-  EXPECT_EQ(result->health_status, fuv::HealthStatus::kHealthy);
+  EXPECT_OK(setup_.blobfs()->VerifyHealth());
 }
 
 }  // namespace

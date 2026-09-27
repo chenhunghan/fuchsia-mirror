@@ -216,7 +216,7 @@ inspect::Inspector Dwc3Metrics::RecordMetrics(fdf::MmioBuffer* mmio, Dwc3* dwc3)
     if (dwc3->ep0_.buffer) {
       ep0_state_node.RecordUint("buffer_size", dwc3->ep0_.buffer->size());
       ep0_state_node.RecordUint("buffer_phys", dwc3->ep0_.buffer->phys());
-      if (dwc3->ep0_.buffer->virt()) {
+      if (dwc3->ep0_.buffer->virt() && dwc3->ep0_.buffer->size() >= 16) {
         auto* ptr = reinterpret_cast<const uint8_t*>(dwc3->ep0_.buffer->virt());
         ep0_state_node.RecordString(
             "buffer_virt_first_16_bytes",

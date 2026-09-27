@@ -1,0 +1,52 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "dwmac_bind",
+    composite_name: "dwmac",
+    include: [
+        "//sdk/lib/driver/compat/compat.shard.cml",
+        "driver/platform-device.shard.cml",
+    ],
+    program: {
+        colocate: "true",
+        compat: "driver/dwmac.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+    },
+    capabilities: [
+        { service: "fuchsia.hardware.network.driver.Service" },
+    ],
+    use: [
+        {
+            name: "eth-board",
+            service: "fuchsia.hardware.ethernet.board.Service",
+            primary: true,
+            bind: { service: "fuchsia.hardware.ethernet.board.Service" },
+        },
+        {
+            name: "default",
+            service: "fuchsia.boot.metadata.MacAddressMetadata",
+            generate_bind_rule: false,
+        },
+        {
+            name: "pdev",
+            bind: {
+                one_of: [
+                    { compat: "amlogic,meson-g12a-dwmac" },
+                    {
+                        protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                        vid: "fuchsia.designware.platform.BIND_PLATFORM_DEV_VID.DESIGNWARE",
+                        did: "fuchsia.designware.platform.BIND_PLATFORM_DEV_DID.ETH_MAC",
+                        rules: { "fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID": 0 },
+                    },
+                ],
+            },
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.network.driver.Service",
+            from: "self",
+        },
+    ],
+}

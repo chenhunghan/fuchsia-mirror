@@ -101,6 +101,7 @@ function prepare_bazel_workspace {
   sed '/default_applicable_licenses/d' "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/BUILD.bazel" > "${workspace_dir}/BUILD.bazel"
   ln -s "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/MODULE.bazel" "${workspace_dir}/MODULE.bazel"
   ln -s "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/crate_annotations.bzl" "${workspace_dir}/crate_annotations.bzl"
+  ln -s "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/crate_annotation_overwrites.bzl" "${workspace_dir}/crate_annotation_overwrites.bzl"
 
   ln -s "${FUCHSIA_DIR}/prebuilt/third_party/bazel/linux-x64/bazel-real" "${workspace_dir}/bazel"
   ln -s "${FUCHSIA_DIR}/prebuilt/third_party/buildifier/linux-x64/buildifier" "${workspace_dir}/buildifier"
@@ -202,6 +203,14 @@ trap "rm -rf ${TMP}" EXIT
   cd $VENDOR_DIR
   $(preserve_files $TMP 'LICENSE')
 )
+
+# Generate Bazel crate annotations from Cargo.toml and validate manual overrides.
+"${FUCHSIA_DIR}/scripts/fuchsia-vendored-python" \
+  "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/generate_crate_annotations.py" \
+  --cargo-toml "${FUCHSIA_DIR}/third_party/rust_crates/Cargo.toml" \
+  --annotation-overwrites "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/crate_annotation_overwrites.bzl" \
+  --output "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/crate_annotations.bzl" \
+  --buildifier "${FUCHSIA_DIR}/prebuilt/third_party/buildifier/linux-x64/buildifier"
 
 bazel_workspace="${TMP}/bazel_workspace"
 mkdir "${bazel_workspace}"

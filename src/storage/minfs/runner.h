@@ -6,7 +6,9 @@
 #define SRC_STORAGE_MINFS_RUNNER_H_
 
 #ifdef __Fuchsia__
+#include <fidl/fuchsia.fs/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/fidl/cpp/wire/channel.h>
 
 #include "src/storage/lib/vfs/cpp/managed_vfs.h"
 #endif
@@ -19,7 +21,12 @@
 namespace minfs {
 
 // A wrapper class around a "Minfs" object which manages the external FIDL connections.
-class Runner final : public PlatformVfs {
+class Runner final : public PlatformVfs
+#ifdef __Fuchsia__
+    ,
+                     public fidl::WireServer<fuchsia_fs::Admin>
+#endif
+{
  public:
   Runner(const Runner&) = delete;
   Runner& operator=(const Runner&) = delete;
@@ -37,6 +44,9 @@ class Runner final : public PlatformVfs {
   void OnNoConnections() final;
 
   zx::result<> ServeRoot(fidl::ServerEnd<fuchsia_io::Directory> root);
+
+  // fuchsia_fs::Admin implementation.
+  void Shutdown(ShutdownCompleter::Sync& completer) final;
 #endif
 
   void SetUnmountCallback(fit::closure on_unmount) { on_unmount_ = std::move(on_unmount); }
@@ -50,7 +60,7 @@ class Runner final : public PlatformVfs {
   bool IsReadonly() const __TA_EXCLUDES(vfs_lock_);
 
 #ifdef __Fuchsia__
-  async_dispatcher_t* dispatcher_;
+  fidl::ServerBindingGroup<fuchsia_fs::Admin> admin_bindings_;
 #endif
 
   std::unique_ptr<Minfs> minfs_;

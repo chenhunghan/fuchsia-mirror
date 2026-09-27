@@ -99,7 +99,7 @@ zx_status_t AudioInput::RecordToCompletion(AudioSink& sink, Duration duration) {
   if (!loop) {
     std::get<float>(duration) = std::clamp(std::get<float>(duration), MIN_DURATION, MAX_DURATION);
     printf("Recording for %.1f seconds\n", std::get<float>(duration));
-    frames_expected = std::lround(frame_rate_ * std::get<float>(duration));
+    frames_expected = std::lround(static_cast<double>(frame_rate_) * std::get<float>(duration));
     bytes_expected = frame_sz_ * frames_expected;
   }
 
@@ -133,7 +133,7 @@ zx_status_t AudioInput::RecordToCompletion(AudioSink& sink, Duration duration) {
     if (loop) {
       consumed = static_cast<uint32_t>(safe_read) - (static_cast<uint32_t>(safe_read) % frame_sz_);
     } else {
-      consumed = std::min(safe_read, bytes_expected);
+      consumed = static_cast<uint32_t>(std::min(safe_read, bytes_expected));
     }
     uint32_t increment = fbl::round_down(consumed - produced, frame_sz_);
 

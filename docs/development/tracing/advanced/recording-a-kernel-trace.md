@@ -70,6 +70,7 @@ need to capture a trace.
   ```posix-terminal
   ktrace start {{ '<var>0xfff</var>' }}
   ... do something ...
+  ```
 
 1. Stop the trace:
 

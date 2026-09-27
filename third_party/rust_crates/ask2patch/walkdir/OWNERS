@@ -15,4 +15,3 @@ include /tools/auto_owners/OWNERS
 include /tools/cargo-gnaw/OWNERS
 include /tools/pbtool/OWNERS
 include /tools/testgen/OWNERS
-include /tools/update_crates/OWNERS

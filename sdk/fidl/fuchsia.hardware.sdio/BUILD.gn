@@ -34,7 +34,10 @@ if (is_host) {
 }
 
 fidl("fuchsia.hardware.sdio") {
-  sources = [ "sdio.fidl" ]
+  sources = [
+    "metadata.fidl",
+    "sdio.fidl",
+  ]
   sdk_area = "Drivers"
   sdk_category = "partner"
   contains_drivers = true

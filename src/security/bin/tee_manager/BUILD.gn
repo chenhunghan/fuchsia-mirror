@@ -145,7 +145,4 @@ cc_test_executable("optee_smoke_test_bin") {
     ":test_common",
     "//sdk/lib/fit",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }

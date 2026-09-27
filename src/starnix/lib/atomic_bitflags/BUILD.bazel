@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "atomic_bitflags",
+    srcs = ["src/lib.rs"],
+    crate_name = "atomic_bitflags",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:paste",
+    ],
+    version = "0.1.0",
+    with_unit_tests = True,
+    deps = [
+        "//third_party/rust_crates/vendor:bitflags",
+    ],
+)

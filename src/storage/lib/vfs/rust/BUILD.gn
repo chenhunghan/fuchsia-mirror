@@ -182,6 +182,7 @@ if (is_host) {
     deps += [
       "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
       "//src/lib/fdomain/client:flex_fdomain",
+      "//src/lib/fuchsia-emulated-handle",
     ]
 
     test_deps += [

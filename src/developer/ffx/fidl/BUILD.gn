@@ -40,17 +40,13 @@ if (is_host) {
 
 fidl("fuchsia.developer.ffx") {
   sources = [
-    "daemon.fidl",
     "echo.fidl",
-    "fastboot.fidl",
-    "mdns.fidl",
     "overview.fidl",
     "target.fidl",
-    "testing.fidl",
-    "tracing.fidl",
     "tunnel.fidl",
   ]
   visibility = [
+    ":*",
     "//build/sdk/meta:*",
     "//src/developer/ffx/*",
     "//src/sys/pkg/lib/*",
@@ -60,12 +56,9 @@ fidl("fuchsia.developer.ffx") {
   ]
   public_deps = [
     "//sdk/fidl/fuchsia.buildinfo",
-    "//sdk/fidl/fuchsia.developer.ffxdaemonlifecycle",
     "//sdk/fidl/fuchsia.developer.remotecontrol",
     "//sdk/fidl/fuchsia.io",
     "//sdk/fidl/fuchsia.net",
-    "//sdk/fidl/fuchsia.tracing.controller",
-    "//sdk/fidl/fuchsia.version",
     "//zircon/vdso/zx",
   ]
 }

@@ -128,7 +128,13 @@ unsafe impl Wire for Handle {
 impl Handle {
     /// Encodes a handle as present in an output.
     pub fn set_encoded_present(out: &mut MaybeUninit<Self>) {
-        munge!(let Self { encoded } = out);
+        // SAFETY: `out` is a valid mutable reference to a `MaybeUninit<Handle>`.
+        // Destructuring it via `munge!` only projects a pointer to `MaybeUninit<Uint32>`
+        // and does not read uninitialized memory.
+        let encoded = unsafe {
+            munge!(let Self { encoded } = out);
+            encoded
+        };
         encoded.write(wire::Uint32(u32::MAX));
     }
 
@@ -189,13 +195,23 @@ unsafe impl<D: HandleDecoder + ?Sized> Decode<D> for Handle {
         decoder: &mut D,
         _: <Self as Constrained>::Constraint,
     ) -> Result<(), DecodeError> {
-        munge!(let Self { encoded } = slot.as_mut());
+        // SAFETY: `slot` is a valid `Slot` of `Handle`. Both `encoded` and `decoded` are
+        // 4-byte integer types with no invalid bit patterns.
+        let encoded = unsafe {
+            munge!(let Self { encoded } = slot.as_mut());
+            encoded
+        };
 
         match **encoded {
             0 => (),
             u32::MAX => {
                 let handle = decoder.take_raw_handle()?;
-                munge!(let Self { mut decoded } = slot);
+                // SAFETY: `slot` is a valid `Slot` of `Handle`. Destructuring it via `munge!`
+                // to write `decoded` is safe.
+                let mut decoded = unsafe {
+                    munge!(let Self { decoded } = slot);
+                    decoded
+                };
                 decoded.write(handle);
             }
             e => return Err(DecodeError::InvalidHandlePresence(e)),
@@ -238,7 +254,13 @@ impl OptionalHandle {
 
     /// Encodes a handle as absent in an output.
     pub fn set_encoded_absent(out: &mut MaybeUninit<Self>) {
-        munge!(let Self { handle: Handle { encoded } } = out);
+        // SAFETY: `out` is a valid mutable reference to a `MaybeUninit<OptionalHandle>`.
+        // Destructuring it via `munge!` only projects a pointer to `MaybeUninit<Uint32>`
+        // and does not read uninitialized memory.
+        let encoded = unsafe {
+            munge!(let Self { handle: Handle { encoded } } = out);
+            encoded
+        };
         encoded.write(wire::Uint32(0));
     }
 

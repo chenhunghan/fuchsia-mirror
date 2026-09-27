@@ -156,6 +156,29 @@ FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_get_handle_locked(
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_koid_t
+cpp_process_dispatcher_handle_table_koid(const ProcessDispatcher* process) {
+  return process->handle_table().get_koid();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_process_dispatcher_get_dispatcher_with_rights(
+    ProcessDispatcher* process, zx_handle_t handle_value, zx_obj_type_t type, zx_rights_t rights,
+    ffi::Uninitialized<fbl::RefPtr<Dispatcher>>* out_disp) {
+  fbl::RefPtr<Dispatcher> disp;
+  zx_status_t status =
+      process->handle_table().GetDispatcherWithRights(*process, handle_value, rights, &disp);
+  if (unlikely(status != ZX_OK)) {
+    return status;
+  }
+  if (unlikely(disp->get_type() != type)) {
+    return ZX_ERR_WRONG_TYPE;
+  }
+  out_disp->Initialize(ktl::move(disp));
+  return ZX_OK;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_info_process_t
 cpp_process_dispatcher_get_info(const ProcessDispatcher* process) {
   return process->GetInfo();

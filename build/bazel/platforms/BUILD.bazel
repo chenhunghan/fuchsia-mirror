@@ -11,6 +11,7 @@
 #
 #  - A separate output directory for generated artifacts.
 #  - An execution environment for generated binaries.
+#  - A separate set of configuration variable values.
 #
 # The `//build/bazel/platforms:common` platform is used for all targets
 # that do not generate os- or arch-specific binaries (e.g. Java bytecode,
@@ -26,6 +27,36 @@
 
 load("@fuchsia_build_config//:defs.bzl", "build_config")
 load("@fuchsia_build_info//:args.bzl", fuchsia_target_cpu = "target_cpu")
+load("@fuchsia_build_info//:platforms_flags.bzl", "platform_flags_map")
+
+# The platform_flags_map dictionary is generated from the content of
+# 'args.gn` and //build/bazel/config/bazel_args.gni and contains for
+# each platform defined in this file a set of 'flags' values which
+# will force the corresponding build_setting() target values and
+# --features list to match the desired configuration.
+#
+# These values are reset properly in each transition where the
+# --platforms value changes, including implicit transitions to the
+# "exec" platform that occur when building host tools that build
+# actions depend on.
+
+# LINT.IfChange(bazel_platforms_list)
+_flags_for_linux_x64 = platform_flags_map["linux_x64"]
+
+_flags_for_linux_arm64 = platform_flags_map["linux_arm64"]
+
+_flags_for_fuchsia_sdk_x64 = platform_flags_map["fuchsia_sdk_x64"]
+
+_flags_for_fuchsia_sdk_arm64 = platform_flags_map["fuchsia_sdk_arm64"]
+
+_flags_for_fuchsia_sdk_riscv64 = platform_flags_map["fuchsia_sdk_riscv64"]
+
+_flags_for_fuchsia_platform_x64 = platform_flags_map["fuchsia_platform_x64"]
+
+_flags_for_fuchsia_platform_arm64 = platform_flags_map["fuchsia_platform_arm64"]
+
+_flags_for_fuchsia_platform_riscv64 = platform_flags_map["fuchsia_platform_riscv64"]
+# LINT.ThenChange(//build/bazel/scripts/workspace_utils.py:bazel_platforms_list)
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -71,6 +102,7 @@ platform(
         "@platforms//cpu:x86_64",
         ":fuchsia_artifacts_build_with_sdk_rules",
     ],
+    flags = _flags_for_fuchsia_sdk_x64,
 )
 
 platform(
@@ -80,6 +112,7 @@ platform(
         "@platforms//cpu:arm64",
         ":fuchsia_artifacts_build_with_sdk_rules",
     ],
+    flags = _flags_for_fuchsia_sdk_arm64,
 )
 
 platform(
@@ -89,6 +122,7 @@ platform(
         "@platforms//cpu:riscv64",
         ":fuchsia_artifacts_build_with_sdk_rules",
     ],
+    flags = _flags_for_fuchsia_sdk_riscv64,
 )
 
 # The fuchsia_platform_$cpu platform definitions are used to
@@ -103,6 +137,7 @@ platform(
         "@platforms//cpu:x86_64",
         ":fuchsia_artifacts_build_without_sdk_rules",
     ],
+    flags = _flags_for_fuchsia_platform_x64,
 )
 
 platform(
@@ -112,6 +147,7 @@ platform(
         "@platforms//cpu:arm64",
         ":fuchsia_artifacts_build_without_sdk_rules",
     ],
+    flags = _flags_for_fuchsia_platform_arm64,
 )
 
 platform(
@@ -121,6 +157,7 @@ platform(
         "@platforms//cpu:riscv64",
         ":fuchsia_artifacts_build_without_sdk_rules",
     ],
+    flags = _flags_for_fuchsia_platform_riscv64,
 )
 
 # Host platform definitions.
@@ -139,6 +176,7 @@ platform(
         "OSFamily": "Linux",
         "Pool": build_config.rbe_pool_name,
     },
+    flags = _flags_for_linux_x64,
 )
 
 platform(
@@ -147,6 +185,7 @@ platform(
         "@platforms//os:linux",
         "@platforms//cpu:arm64",
     ],
+    flags = _flags_for_linux_arm64,
 )
 
 # TODO(https://fxbug.dev/484422864): Make these standalone platforms that use

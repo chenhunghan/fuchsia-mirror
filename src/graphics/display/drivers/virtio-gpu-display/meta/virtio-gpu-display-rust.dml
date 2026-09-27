@@ -1,0 +1,45 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "virtio-gpu-display",
+    composite_name: "virtio_gpu",
+    include: [ "driver_component/driver.shard.cml" ],
+    program: {
+        binary: "driver/virtio-gpu-display-rust.so",
+    },
+    capabilities: [
+        { service: "fuchsia.gpu.virtio.Service" },
+        { service: "fuchsia.hardware.display.engine.Service" },
+    ],
+    use: [
+        { protocol: "fuchsia.sysmem2.Allocator" },
+        {
+            name: "pci",
+            service: "fuchsia.hardware.pci.Service",
+            primary: true,
+            bind: {
+                service: "fuchsia.hardware.pci.Service",
+                rules: {
+                    "fuchsia.BIND_PCI_VID": "fuchsia.pci.BIND_PCI_VID.VIRTIO",
+                    "fuchsia.BIND_PCI_DID": "fuchsia.pci.BIND_PCI_DID.VIRTIO_DEV_TYPE_GPU",
+                },
+            },
+        },
+        {
+            name: "acpi",
+            availability: "optional",
+            bind: { protocol: "fuchsia.acpi.BIND_PROTOCOL.DEVICE" },
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.gpu.virtio.Service",
+            from: "self",
+        },
+        {
+            service: "fuchsia.hardware.display.engine.Service",
+            from: "self",
+        },
+    ],
+}

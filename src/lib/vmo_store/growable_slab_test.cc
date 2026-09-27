@@ -99,7 +99,7 @@ TYPED_TEST(GrowableSlabTest, PushGet) {
   constexpr Key kCapacity = 3;
   slab.GrowTo(kCapacity);
   for (Key i = 0; i < kCapacity; i++) {
-    auto key = slab.Push(i + 10);
+    auto key = slab.Push(static_cast<uint32_t>(i + 10));
     ASSERT_TRUE(key.has_value());
     ASSERT_EQ(slab.capacity(), kCapacity);
     ASSERT_EQ(slab.count(), i + 1);
@@ -107,7 +107,7 @@ TYPED_TEST(GrowableSlabTest, PushGet) {
 
     auto* value = slab.Get(*key);
     ASSERT_TRUE(value);
-    ASSERT_EQ(*value, i + 10);
+    ASSERT_EQ(*value, static_cast<uint32_t>(i + 10));
   }
 }
 
@@ -117,7 +117,7 @@ TYPED_TEST(GrowableSlabTest, PushNoSpace) {
   constexpr Key kCapacity = 3;
   slab.GrowTo(kCapacity);
   for (Key i = 0; i < kCapacity; i++) {
-    auto key = slab.Push(i + 10);
+    auto key = slab.Push(static_cast<uint32_t>(i + 10));
     ASSERT_TRUE(key.has_value());
   }
   auto key = slab.Push(1000);
@@ -131,7 +131,7 @@ TYPED_TEST(GrowableSlabTest, Free) {
   slab.GrowTo(kCapacity);
   std::vector<std::tuple<Key, uint32_t>> keys;
   for (Key i = 0; i < kCapacity; i++) {
-    uint32_t value = i + 10;
+    uint32_t value = static_cast<uint32_t>(i + 10);
     auto key = slab.Push(value);
     ASSERT_TRUE(key.has_value());
     keys.emplace_back(*key, value);
@@ -163,7 +163,7 @@ TYPED_TEST(GrowableSlabTest, PushFreeGet) {
   slab.GrowTo(kCapacity);
   std::vector<std::tuple<Key, uint32_t>> keys;
   for (Key i = 0; i < kCapacity; i++) {
-    uint32_t value = i + 10;
+    uint32_t value = static_cast<uint32_t>(i + 10);
     auto key = slab.Push(value);
     ASSERT_TRUE(key.has_value());
     keys.emplace_back(*key, value);
@@ -221,7 +221,7 @@ TYPED_TEST(GrowableSlabTest, Insert) {
   // end.
   for (Key i = 0; i < kCapacity; i++) {
     if (i != kReservedKey) {
-      ASSERT_OK(slab.Insert(i, i + 10));
+      ASSERT_OK(slab.Insert(i, static_cast<uint32_t>(i + 10)));
     }
   }
   ASSERT_EQ(slab.count(), kCapacity - 1);

@@ -8,6 +8,7 @@
 #include <lib/syslog/cpp/macros.h>
 
 #include <string>
+#include <string_view>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -969,6 +970,38 @@ FINAL REBOOT REASON (ROOT JOB TERMINATION))";
   std::string dlog;
   ASSERT_TRUE(files::ReadFileToString(previous_boot_kernel_log_path_, &dlog));
   EXPECT_EQ(dlog, "test dlog dump line1\ntest dlog dump line2");
+}
+
+TEST_F(RebootLogStrTest, Succeed_SetDlogWithEmbeddedNullCharacters) {
+  using namespace std::string_view_literals;
+  constexpr std::string_view kContents =
+      "HW REBOOT REASON (UNKNOWN)\n\n"
+      "ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)\n\n"
+      "UPTIME (ms)\n"
+      "1234\n"
+      "RUNTIME (ms)\n"
+      "1098\n\n"
+      "--- BEGIN DLOG DUMP ---\n"
+      "test dlog dump line1\0\n"
+      "test dlog dump line2\n\n"
+      "--- END DLOG DUMP ---\n\n"
+      "GRACEFUL SHUTDOWN ACTION: (REBOOT)\n"
+      "GRACEFUL REBOOT REASONS: (NONE)\n\n"
+      "FINAL REBOOT REASON (ROOT JOB TERMINATION)\0\0"sv;
+
+  WriteZirconRebootLogContents(std::string(kContents));
+  WriteGracefulShutdownInfoContents(
+      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+
+  const RebootLog reboot_log =
+      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
+
+  std::string dlog;
+  ASSERT_TRUE(files::ReadFileToString(previous_boot_kernel_log_path_, &dlog));
+  EXPECT_EQ(dlog, "test dlog dump line1\ntest dlog dump line2");
+  EXPECT_EQ(reboot_log.RebootLogStr().find('\0'), std::string::npos);
 }
 
 TEST_F(RebootLogStrTest, Succeed_EmptyDlog) {

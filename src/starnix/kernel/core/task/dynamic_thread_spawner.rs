@@ -375,6 +375,8 @@ impl RunningThread {
             std::thread::Builder::new()
                 .name("kthread-dynamic-worker".to_string())
                 .spawn(move || {
+                    let _rcu_registration = fuchsia_rcu::register_thread();
+
                     let result =
                         with_new_current_task(&system_task, debug_task_name, |current_task| {
                             while let Ok(f) = receiver.recv() {
@@ -418,6 +420,7 @@ impl RunningThread {
             std::thread::Builder::new()
                 .name("kthread-persistent-worker".to_string())
                 .spawn(move || {
+                    let _rcu_registration = fuchsia_rcu::register_thread();
                     let current_task = {
                         let Some(system_task) = system_task.upgrade() else {
                             return;

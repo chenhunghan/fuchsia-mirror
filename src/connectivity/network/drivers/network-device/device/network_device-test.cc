@@ -12,6 +12,7 @@
 #include <future>
 #include <limits>
 #include <thread>
+#include <unordered_map>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -90,8 +91,9 @@ class NetworkDeviceTest : public ::testing::Test {
   // manually.
   static constexpr zx::duration kTestEstimatorSampleInterval = zx::duration::infinite();
 
-  // Short timeout for negative assertions where an event should not occur.
-  static constexpr zx::duration kPositiveTimeout = zx::msec(10);
+  // Short timeout for negative assertions where an event should not occur, or for polling
+  // intervals.
+  static constexpr zx::duration kPollInterval = zx::msec(10);
 
   void SetUp() override {
     auto impl_dispatcher = fdf::UnsynchronizedDispatcher::Create(
@@ -348,6 +350,7 @@ class NetworkDeviceTest : public ::testing::Test {
         arena, netdriver::wire::Simple{
                    .alpha = kTestEstimatorAlpha,
                    .delay_budget = kTestEstimatorDelayBudget.get(),
+                   .intercept = 0,
                    .sample_interval = kTestEstimatorSampleInterval.get(),
                });
   }
@@ -384,13 +387,100 @@ class NetworkDeviceTest : public ::testing::Test {
     return zx::ok(std::move(vmo_configs));
   }
 
-  void TriggerTicksUntil(libsync::Completion& completion) {
-    while (!completion.signaled()) {
-      TriggerTimerTick();
-      if (completion.Wait(zx::deadline_after(kPositiveTimeout)) == ZX_OK) {
-        break;
+  class VmoTracker {
+   public:
+    explicit VmoTracker(FakeNetworkDeviceImpl& impl) : impl_(impl) {
+      impl_.set_prepare_vmo_handler(
+          [this](uint8_t id, const zx::vmo& vmo,
+                 FakeNetworkDeviceImpl::PrepareVmoCompleter::Sync& completer) {
+            fdf::Arena arena('NETD');
+            completer.buffer(arena).Reply(ZX_OK);
+            {
+              fbl::AutoLock lock(&lock_);
+              prepared_vmos_[id]++;
+            }
+            event_.Signal();
+            return true;
+          });
+      impl_.set_release_vmo_handler([this](uint8_t id) {
+        {
+          fbl::AutoLock lock(&lock_);
+          released_vmos_[id]++;
+        }
+        event_.Signal();
+      });
+    }
+
+    ~VmoTracker() {
+      impl_.set_prepare_vmo_handler(nullptr);
+      impl_.set_release_vmo_handler(nullptr);
+    }
+
+    size_t total_prepared_vmos() const {
+      fbl::AutoLock lock(&lock_);
+      return prepared_vmos_.size();
+    }
+
+    size_t total_released_vmos() const {
+      fbl::AutoLock lock(&lock_);
+      return released_vmos_.size();
+    }
+
+    size_t prepare_count(uint8_t id) const {
+      fbl::AutoLock lock(&lock_);
+      auto it = prepared_vmos_.find(id);
+      return it != prepared_vmos_.end() ? it->second : 0;
+    }
+
+    size_t release_count(uint8_t id) const {
+      fbl::AutoLock lock(&lock_);
+      auto it = released_vmos_.find(id);
+      return it != released_vmos_.end() ? it->second : 0;
+    }
+
+    [[nodiscard]] zx_status_t WaitUntilTotalPreparedVmosIs(size_t expected,
+                                                           zx::time deadline = TEST_DEADLINE) {
+      return WaitUntil([this, expected]() { return total_prepared_vmos() >= expected; }, deadline);
+    }
+
+    [[nodiscard]] zx_status_t WaitUntilTotalReleasedVmosIs(size_t expected,
+                                                           zx::time deadline = TEST_DEADLINE) {
+      return WaitUntil([this, expected]() { return total_released_vmos() >= expected; }, deadline);
+    }
+
+   private:
+    [[nodiscard]] zx_status_t WaitUntil(fit::function<bool()> predicate, zx::time deadline) {
+      while (true) {
+        event_.Reset();
+        if (predicate()) {
+          return ZX_OK;
+        }
+        if (zx_status_t status = event_.Wait(deadline); status != ZX_OK) {
+          return status;
+        }
       }
     }
+
+    FakeNetworkDeviceImpl& impl_;
+    mutable fbl::Mutex lock_;
+    std::unordered_map<uint8_t, size_t> prepared_vmos_ __TA_GUARDED(lock_);
+    std::unordered_map<uint8_t, size_t> released_vmos_ __TA_GUARDED(lock_);
+    libsync::Completion event_;
+  };
+
+  [[nodiscard]] zx_status_t TriggerTicksUntil(fit::function<bool()> predicate,
+                                              zx::time deadline = TEST_DEADLINE) {
+    while (!predicate()) {
+      if (zx::clock::get_monotonic() >= deadline) {
+        return ZX_ERR_TIMED_OUT;
+      }
+      TriggerTimerTick();
+      if (predicate()) {
+        return ZX_OK;
+      }
+      zx::nanosleep(std::min(deadline, zx::deadline_after(kPollInterval)));
+    }
+    return ZX_OK;
   }
 
  protected:
@@ -2132,15 +2222,7 @@ TEST_F(NetworkDeviceTest, RxBufferManagementSwitch) {
   zx::result vmo_configs = CreateTwoVmoConfigs();
   ASSERT_OK(vmo_configs);
 
-  libsync::Completion vmo1_prepared;
-  impl_.set_prepare_vmo_handler([&vmo1_prepared](uint8_t id, const zx::vmo& vmo, auto& completer) {
-    fdf::Arena arena('NETD');
-    completer.buffer(arena).Reply(ZX_OK);
-    if (id == 1) {
-      vmo1_prepared.Signal();
-    }
-    return true;
-  });
+  VmoTracker vmo_tracker(impl_);
 
   TestSession session;
   ASSERT_OK(OpenSession(&session, kDefaultDescriptorCount, kDefaultBufferLength,
@@ -2157,27 +2239,20 @@ TEST_F(NetworkDeviceTest, RxBufferManagementSwitch) {
   session.SendRx(2);
   session.SendRx(3);
 
-  // In Simple mode with no traffic, only VMO 0 is prepared.
-  EXPECT_FALSE(vmo1_prepared.signaled());
+  // In Simple mode with no traffic, only 1 VMO is prepared.
+  EXPECT_EQ(vmo_tracker.total_prepared_vmos(), 1u);
 
-  // Switch to Static mode -> should immediately prepare all VMOs including VMO 1.
+  // Switch to Static mode -> should immediately prepare all VMOs.
   UpdateRxBufferParams(netdriver::wire::RxBufferManagement::WithStatic_(netdriver::wire::Static{}));
-  EXPECT_OK(vmo1_prepared.Wait(TEST_DEADLINE));
-  impl_.set_prepare_vmo_handler(nullptr);
+  EXPECT_OK(vmo_tracker.WaitUntilTotalPreparedVmosIs(2));
 
-  libsync::Completion vmo1_released;
-  impl_.set_release_vmo_handler([&vmo1_released](uint8_t id) {
-    if (id == 1) {
-      vmo1_released.Signal();
-    }
-  });
-
-  // Switch back to Simple mode -> should allow excess VMO 1 to be dynamically released.
+  // Switch back to Simple mode -> should allow excess VMO to be dynamically released.
   UpdateRxBufferParams(DefaultSimpleRxBufferParams(arena));
 
-  // Emulate timer tick while VMO 1 buffers have not been returned. VMO 1 must not be released.
+  // Emulate timer tick while VMO 1 buffers have not been returned. No VMO must be released.
   TriggerTimerTick();
-  EXPECT_STATUS(vmo1_released.Wait(zx::deadline_after(kPositiveTimeout)), ZX_ERR_TIMED_OUT);
+  EXPECT_STATUS(vmo_tracker.WaitUntilTotalReleasedVmosIs(1, zx::deadline_after(kPollInterval)),
+                ZX_ERR_TIMED_OUT);
 
   // Return descriptors for VMO 1 back to the Rx queue so they are withheld for release.
   session.ResetDescriptor(4, 1, 0);
@@ -2189,12 +2264,39 @@ TEST_F(NetworkDeviceTest, RxBufferManagementSwitch) {
   session.SendRx(6);
   session.SendRx(7);
 
-  // Emulate timer ticks until candidate VMO 1 is released.
-  TriggerTicksUntil(vmo1_released);
+  // Emulate timer ticks until the excess VMO is released.
+  EXPECT_OK(TriggerTicksUntil([&vmo_tracker]() { return vmo_tracker.total_released_vmos() == 1; }));
+}
 
-  // Assert VMO 1 is dynamically released.
-  EXPECT_OK(vmo1_released.Wait(TEST_DEADLINE));
-  impl_.set_release_vmo_handler(nullptr);
+TEST_F(NetworkDeviceTest, RxBufferManagementIntercept) {
+  impl_.info().min_rx_buffers = 4;
+  ASSERT_OK(CreateDeviceWithPort13());
+
+  fdf::Arena arena('NETD');
+  // Each VMO holds 4 Rx buffers, so an intercept of 8 can only be satisfied by
+  // preparing both VMOs.
+  UpdateRxBufferParams(netdriver::wire::RxBufferManagement::WithSimple(
+      arena, netdriver::wire::Simple{
+                 .alpha = kTestEstimatorAlpha,
+                 .delay_budget = kTestEstimatorDelayBudget.get(),
+                 .intercept = 8,
+                 .sample_interval = kTestEstimatorSampleInterval.get(),
+             }));
+
+  zx::result vmo_configs = CreateTwoVmoConfigs();
+  ASSERT_OK(vmo_configs);
+
+  VmoTracker vmo_tracker(impl_);
+
+  TestSession session;
+  ASSERT_OK(OpenSession(&session, kDefaultDescriptorCount, kDefaultBufferLength,
+                        std::move(vmo_configs.value()), "session_a", netdev::wire::SessionFlags(),
+                        /*register_for_tx=*/false));
+  ASSERT_OK(AttachSessionPort(session, port13_));
+
+  // No traffic at all: the rate dependent term is zero, so the target is
+  // entirely determined by the intercept. Both VMOs must still be prepared.
+  EXPECT_OK(TriggerTicksUntil([&vmo_tracker]() { return vmo_tracker.total_prepared_vmos() == 2; }));
 }
 
 TEST_F(NetworkDeviceTest, RxBufferManagementMultipleRequests) {
@@ -2207,18 +2309,7 @@ TEST_F(NetworkDeviceTest, RxBufferManagementMultipleRequests) {
   zx::result vmo_configs = CreateTwoVmoConfigs();
   ASSERT_OK(vmo_configs);
 
-  std::atomic<int> prepare_vmo1_count = 0;
-  libsync::Completion vmo1_prepared;
-  impl_.set_prepare_vmo_handler(
-      [&prepare_vmo1_count, &vmo1_prepared](uint8_t id, const zx::vmo& vmo, auto& completer) {
-        fdf::Arena arena('NETD');
-        completer.buffer(arena).Reply(ZX_OK);
-        if (id == 1) {
-          prepare_vmo1_count++;
-          vmo1_prepared.Signal();
-        }
-        return true;
-      });
+  VmoTracker vmo_tracker(impl_);
 
   TestSession session;
   ASSERT_OK(OpenSession(&session, kDefaultDescriptorCount, kDefaultBufferLength,
@@ -2226,17 +2317,17 @@ TEST_F(NetworkDeviceTest, RxBufferManagementMultipleRequests) {
                         /*register_for_tx=*/false));
   ASSERT_OK(AttachSessionPort(session, port13_));
 
-  EXPECT_EQ(prepare_vmo1_count.load(), 0);
+  EXPECT_EQ(vmo_tracker.total_prepared_vmos(), 1u);
 
   // Call RequestRxSpace(8) 3 times rapidly.
   ASSERT_OK(impl_.client().buffer(arena)->RequestRxSpace(8).status());
   ASSERT_OK(impl_.client().buffer(arena)->RequestRxSpace(8).status());
   ASSERT_OK(impl_.client().buffer(arena)->RequestRxSpace(8).status());
 
-  EXPECT_OK(vmo1_prepared.Wait(TEST_DEADLINE));
-  impl_.set_prepare_vmo_handler(nullptr);
-  // Assert request deduplication: PrepareVmo(1) should be called exactly once.
-  EXPECT_EQ(prepare_vmo1_count.load(), 1);
+  EXPECT_OK(vmo_tracker.WaitUntilTotalPreparedVmosIs(2));
+  // Assert request deduplication: each VMO should be prepared exactly once.
+  EXPECT_EQ(vmo_tracker.prepare_count(0), 1u);
+  EXPECT_EQ(vmo_tracker.prepare_count(1), 1u);
 }
 
 TEST_F(NetworkDeviceTest, RxBufferManagementTxRegisteredVmo) {
@@ -2248,6 +2339,8 @@ TEST_F(NetworkDeviceTest, RxBufferManagementTxRegisteredVmo) {
 
   zx::result vmo_configs = CreateTwoVmoConfigs();
   ASSERT_OK(vmo_configs);
+
+  VmoTracker vmo_tracker(impl_);
 
   TestSession session;
   // Open session with register_for_tx = false in OpenSession (we explicitly RegisterForTx below).
@@ -2261,15 +2354,9 @@ TEST_F(NetworkDeviceTest, RxBufferManagementTxRegisteredVmo) {
                 ->RegisterForTx(fidl::VectorView<uint8_t>::FromExternal(&vmo1_id, 1))
                 .status());
 
-  libsync::Completion vmo1_released;
-  impl_.set_release_vmo_handler([&vmo1_released](uint8_t id) {
-    if (id == 1) {
-      vmo1_released.Signal();
-    }
-  });
-
-  // Request space for 8 buffers so VMO 1 is prepared.
+  // Request space for 8 buffers so both VMOs are prepared.
   ASSERT_OK(impl_.client().buffer(arena)->RequestRxSpace(8).status());
+  EXPECT_OK(vmo_tracker.WaitUntilTotalPreparedVmosIs(2));
 
   TriggerTimerTick();
 
@@ -2290,8 +2377,8 @@ TEST_F(NetworkDeviceTest, RxBufferManagementTxRegisteredVmo) {
   TriggerTimerTick();
 
   // Assert VMO 1 is NEVER released because it is registered for Tx.
-  EXPECT_STATUS(vmo1_released.Wait(zx::deadline_after(kPositiveTimeout)), ZX_ERR_TIMED_OUT);
-  impl_.set_release_vmo_handler(nullptr);
+  EXPECT_STATUS(vmo_tracker.WaitUntilTotalReleasedVmosIs(1, zx::deadline_after(kPollInterval)),
+                ZX_ERR_TIMED_OUT);
 }
 
 TEST_F(NetworkDeviceTest, RxBufferManagementPrepareError) {
@@ -2338,15 +2425,7 @@ TEST_F(NetworkDeviceTest, RxBufferManagementReleaseRxVmo) {
   zx::result vmo_configs = CreateTwoVmoConfigs();
   ASSERT_OK(vmo_configs);
 
-  libsync::Completion vmo1_prepared;
-  impl_.set_prepare_vmo_handler([&vmo1_prepared](uint8_t id, const zx::vmo& vmo, auto& completer) {
-    fdf::Arena arena('NETD');
-    completer.buffer(arena).Reply(ZX_OK);
-    if (id == 1) {
-      vmo1_prepared.Signal();
-    }
-    return true;
-  });
+  VmoTracker vmo_tracker(impl_);
 
   TestSession session;
   ASSERT_OK(OpenSession(&session, kDefaultDescriptorCount, kDefaultBufferLength,
@@ -2363,7 +2442,7 @@ TEST_F(NetworkDeviceTest, RxBufferManagementReleaseRxVmo) {
   session.SendRx(2);
   session.SendRx(3);
 
-  EXPECT_FALSE(vmo1_prepared.signaled());
+  EXPECT_EQ(vmo_tracker.total_prepared_vmos(), 1u);
 
   libsync::Completion vmo1_op_finished;
   SetEvtRxVmoOpFinishedHandler([&vmo1_op_finished](zx_status_t status) {
@@ -2372,22 +2451,14 @@ TEST_F(NetworkDeviceTest, RxBufferManagementReleaseRxVmo) {
     }
   });
 
-  // Request space for all 8 buffers so VMO 1 is prepared.
+  // Request space for all 8 buffers so the second VMO is prepared.
   ASSERT_OK(impl_.client().buffer(arena)->RequestRxSpace(8).status());
-  EXPECT_OK(vmo1_prepared.Wait(TEST_DEADLINE));
-  impl_.set_prepare_vmo_handler(nullptr);
+  EXPECT_OK(vmo_tracker.WaitUntilTotalPreparedVmosIs(2));
   EXPECT_OK(vmo1_op_finished.Wait(TEST_DEADLINE));
   SetEvtRxVmoOpFinishedHandler(nullptr);
 
   // Emulate a timer tick with no incoming traffic to decay target buffers.
   TriggerTimerTick();
-
-  libsync::Completion vmo1_released;
-  impl_.set_release_vmo_handler([&vmo1_released](uint8_t id) {
-    if (id == 1) {
-      vmo1_released.Signal();
-    }
-  });
 
   // Return descriptors for VMO 1 back to the Rx queue so they are withheld for release.
   session.ResetDescriptor(4, 1, 0);
@@ -2399,12 +2470,8 @@ TEST_F(NetworkDeviceTest, RxBufferManagementReleaseRxVmo) {
   session.SendRx(6);
   session.SendRx(7);
 
-  // Emulate timer ticks until candidate VMO 1 is released.
-  TriggerTicksUntil(vmo1_released);
-
-  // Assert VMO 1 is dynamically released while session is running.
-  EXPECT_OK(vmo1_released.Wait(TEST_DEADLINE));
-  impl_.set_release_vmo_handler(nullptr);
+  // Emulate timer ticks until the excess VMO is released while session is running.
+  EXPECT_OK(TriggerTicksUntil([&vmo_tracker]() { return vmo_tracker.total_released_vmos() == 1; }));
 }
 
 TEST_F(NetworkDeviceTest, RxBufferManagementRequestRxSpacePreparesVmo) {
@@ -2417,15 +2484,7 @@ TEST_F(NetworkDeviceTest, RxBufferManagementRequestRxSpacePreparesVmo) {
   zx::result vmo_configs = CreateTwoVmoConfigs();
   ASSERT_OK(vmo_configs);
 
-  libsync::Completion vmo1_prepared;
-  impl_.set_prepare_vmo_handler([&vmo1_prepared](uint8_t id, const zx::vmo& vmo, auto& completer) {
-    fdf::Arena arena('NETD');
-    completer.buffer(arena).Reply(ZX_OK);
-    if (id == 1) {
-      vmo1_prepared.Signal();
-    }
-    return true;
-  });
+  VmoTracker vmo_tracker(impl_);
 
   TestSession session;
   ASSERT_OK(OpenSession(&session, kDefaultDescriptorCount, kDefaultBufferLength,
@@ -2433,15 +2492,14 @@ TEST_F(NetworkDeviceTest, RxBufferManagementRequestRxSpacePreparesVmo) {
                         /*register_for_tx=*/false));
   ASSERT_OK(AttachSessionPort(session, port13_));
 
-  // At open session, only VMO 0 is prepared.
-  EXPECT_FALSE(vmo1_prepared.signaled());
+  // At open session, only 1 VMO is prepared.
+  EXPECT_EQ(vmo_tracker.total_prepared_vmos(), 1u);
 
-  // Calling RequestRxSpace(8) should cause VMO 1 to be prepared.
+  // Calling RequestRxSpace(8) should cause the second VMO to be prepared.
   ASSERT_OK(impl_.client().buffer(arena)->RequestRxSpace(8).status());
 
-  // Verify that PrepareVmo for VMO 1 was actually invoked!
-  EXPECT_OK(vmo1_prepared.Wait(TEST_DEADLINE));
-  impl_.set_prepare_vmo_handler(nullptr);
+  // Verify that both VMOs were prepared.
+  EXPECT_OK(vmo_tracker.WaitUntilTotalPreparedVmosIs(2));
 }
 
 TEST_F(NetworkDeviceTest, RxBufferManagementEndToEndSimulatedTraffic) {
@@ -2454,15 +2512,7 @@ TEST_F(NetworkDeviceTest, RxBufferManagementEndToEndSimulatedTraffic) {
   zx::result vmo_configs = CreateTwoVmoConfigs();
   ASSERT_OK(vmo_configs);
 
-  libsync::Completion vmo1_prepared;
-  impl_.set_prepare_vmo_handler([&vmo1_prepared](uint8_t id, const zx::vmo& vmo, auto& completer) {
-    fdf::Arena arena('NETD');
-    completer.buffer(arena).Reply(ZX_OK);
-    if (id == 1) {
-      vmo1_prepared.Signal();
-    }
-    return true;
-  });
+  VmoTracker vmo_tracker(impl_);
 
   TestSession session;
   ASSERT_OK(OpenSession(&session, kDefaultDescriptorCount, kDefaultBufferLength,
@@ -2479,8 +2529,8 @@ TEST_F(NetworkDeviceTest, RxBufferManagementEndToEndSimulatedTraffic) {
   session.SendRx(2);
   session.SendRx(3);
 
-  // Before traffic simulation, target is low (4 buffers), only VMO 0 is prepared.
-  EXPECT_FALSE(vmo1_prepared.signaled());
+  // Before traffic simulation, target is low (4 buffers), only 1 VMO is prepared.
+  EXPECT_EQ(vmo_tracker.total_prepared_vmos(), 1u);
 
   libsync::Completion vmo1_op_finished;
   SetEvtRxVmoOpFinishedHandler([&vmo1_op_finished](zx_status_t status) {
@@ -2490,26 +2540,18 @@ TEST_F(NetworkDeviceTest, RxBufferManagementEndToEndSimulatedTraffic) {
   });
 
   // Simulate 1,600 pps traffic -> target buffers = 8 -> automatically requests space & prepares
-  // VMO 1.
+  // the second VMO.
   UpdatePacketArrivalRate(1600);
 
   // Assert end-to-end VMO preparation triggered!
-  EXPECT_OK(vmo1_prepared.Wait(TEST_DEADLINE));
+  EXPECT_OK(vmo_tracker.WaitUntilTotalPreparedVmosIs(2));
   EXPECT_OK(vmo1_op_finished.Wait(TEST_DEADLINE));
-  impl_.set_prepare_vmo_handler(nullptr);
   SetEvtRxVmoOpFinishedHandler(nullptr);
 
   // Emulate timer ticks with no incoming traffic to decay target buffers.
   TriggerTimerTick();  // Clears out the peak packet rate.
   UpdatePacketArrivalRate(800);
   TriggerTimerTick();
-
-  libsync::Completion vmo1_released;
-  impl_.set_release_vmo_handler([&vmo1_released](uint8_t id) {
-    if (id == 1) {
-      vmo1_released.Signal();
-    }
-  });
 
   // Return descriptors for VMO 1 back to the Rx queue so they are withheld for release.
   session.ResetDescriptor(4, 1, 0);
@@ -2521,10 +2563,8 @@ TEST_F(NetworkDeviceTest, RxBufferManagementEndToEndSimulatedTraffic) {
   session.SendRx(6);
   session.SendRx(7);
 
-  // Emulate timer ticks until candidate VMO 1 is released.
-  TriggerTicksUntil(vmo1_released);
-
-  impl_.set_release_vmo_handler(nullptr);
+  // Emulate timer ticks until the excess VMO is released.
+  EXPECT_OK(TriggerTicksUntil([&vmo_tracker]() { return vmo_tracker.total_released_vmos() == 1; }));
 }
 
 TEST_F(NetworkDeviceTest, TxBadPorts) {

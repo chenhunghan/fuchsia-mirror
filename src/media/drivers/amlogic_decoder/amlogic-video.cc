@@ -565,14 +565,20 @@ void AmlogicVideo::SwapOutCurrentInstance() {
       }
     }
   }
+  QuiesceAndClearActiveInstance();
+}
+
+void AmlogicVideo::QuiesceAndClearActiveInstance() {
+  if (core_) {
+    core_->StopDecoding();
+    core_->WaitForIdle();
+  }
+  core_ = nullptr;
   video_decoder_ = nullptr;
   stream_buffer_ = nullptr;
-  core_->StopDecoding();
-  core_->WaitForIdle();
-
-  core_ = nullptr;
-  // Round-robin; place at the back of the line.
-  swapped_out_instances_.push_back(std::move(current_instance_));
+  if (current_instance_) {
+    swapped_out_instances_.push_back(std::move(current_instance_));
+  }
 }
 
 void AmlogicVideo::TryToReschedule() {
@@ -627,17 +633,15 @@ void AmlogicVideo::TryToReschedule() {
   SwapInCurrentInstance();
 }
 
-void AmlogicVideo::PowerOffForError() {
-  TRACE_DURATION("media", "AmlogicVideo::PowerOffForError");
-  ZX_DEBUG_ASSERT(core_);
-  core_ = nullptr;
-  swapped_out_instances_.push_back(std::move(current_instance_));
+void AmlogicVideo::SwapOutForFatalError() {
+  TRACE_DURATION("media", "AmlogicVideo::SwapOutForFatalError");
   VideoDecoder* video_decoder = video_decoder_;
-  video_decoder_ = nullptr;
-  stream_buffer_ = nullptr;
-  video_decoder->CallErrorHandler();
-  // CallErrorHandler should have marked the decoder as having a fatal error
-  // so it will never be rescheduled.
+  QuiesceAndClearActiveInstance();
+  if (video_decoder) {
+    video_decoder->CallErrorHandler();
+    // CallErrorHandler should have marked the decoder as having a fatal error
+    // so it will never be rescheduled.
+  }
   TryToReschedule();
 }
 
@@ -654,7 +658,7 @@ void AmlogicVideo::SwapInCurrentInstance() {
     zx_status_t status = video_decoder_->SetupProtection();
     if (status != ZX_OK) {
       DECODE_ERROR("Failed to setup protection: %d", status);
-      PowerOffForError();
+      SwapOutForFatalError();
       return;
     }
   }
@@ -673,7 +677,7 @@ void AmlogicVideo::SwapInCurrentInstance() {
     }
   } else {
     if (core_->RestoreInputContext(current_instance_->input_context()) != ZX_OK) {
-      PowerOffForError();
+      SwapOutForFatalError();
       return;
     }
   }
@@ -685,7 +689,7 @@ void AmlogicVideo::SwapInCurrentInstance() {
   if (status != ZX_OK) {
     // Probably failed to load the right firmware.
     DECODE_ERROR("Failed to initialize hardware: %d", status);
-    PowerOffForError();
+    SwapOutForFatalError();
     return;
   }
   video_decoder_->SwappedIn();

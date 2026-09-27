@@ -240,6 +240,9 @@
                 // exec_test
                 "ExecveatTest.MemfdScript",
 
+                // TODO(https://fxbug.dev/564606160)
+                "ExecTest.RunningBinaryIsNotWritable",
+
                 // Disable InterpreterScript because the script has the path /bin/bash which is not
                 // where bash is located on the Android system image.
                 "ExecTest.InterpreterScript",
@@ -281,10 +284,7 @@
                 "ElfTest.DataSegment",
                 "ElfTest.ELFInterpreter",
                 "ElfTest.ELFInterpreterRelative",
-                "ElfTest.ELFInterpreterWrongArch",
                 "ElfTest.ExtraMemPages",
-                "ElfTest.MissingPhdr",
-                "ElfTest.UnalignedOffset",
                 "ExecveTest.BrkAfterBinary",
                 "InterpreterScriptTest.Execute",
                 "InterpreterScriptTest.MaxRecursion",
@@ -295,6 +295,9 @@
                 "Cases/ElfInterpreterStaticTest.Test/0",
                 "Cases/ElfInterpreterStaticTest.Test/1",
                 "Cases/ElfInterpreterStaticTest.Test/2",
+
+                // TODO(https://fxbug.dev/564993581): Test checks IsRunningOnGvisor() and expects EINVAL rather than Linux's SIGSEGV.
+                "ElfTest.UnalignedOffset",
 
                 // TODO(https://fxbug.dev/528339136): Starnix does not support ARM64 memory tagging.
                 "TaggedAddressesTest.MemoryFault",
@@ -486,6 +489,13 @@
                 "MountTest.MountTmpfsMagicValIgnored",
                 "MountTest.MountWithStrictAtime",
                 "MountTest.OverlayfsDirectoryRenameInUserNamespace",
+
+                // TODO(https://fxbug.dev/565372315): Starnix tmpfs rejects mode=1777 and overlayfs lacks stacking limits.
+                "MountTest.OverlayfsRejectedAsUpperdir",
+                "MountTest.OverlayfsStackingDepthLimit",
+
+                // TODO(https://fxbug.dev/564605982)
+                "MountTest.OverlayfsSecurityCapabilityTranslatesRootID",
                 "MountTest.PropagateChildUmountEvent",
                 "MountTest.ReuseGroupIDs",
                 "MountTest.SlaveMaster",
@@ -602,6 +612,10 @@
                 "ProcPidFile.SubprocessZombie",
                 "ProcPidFile.SubprocessExited",
                 "ProcSelfMaps.AnonNameSharedAnon",
+
+                // TODO(https://fxbug.dev/564605906)
+                "ProcSelfAuxv.EntryPresence",
+                "ProcSelfAuxv.Platform",
                 "ProcTask.VerifyTaskChildren",
                 "ProcTask.VerifyTaskDirNlinks",
                 "ProcSysKernel.RandomizeVaSpace",
@@ -692,6 +706,14 @@
                 // ptrace tests
                 "PtraceTest.ChangeRegSetInOptSyscall",
                 "PtraceTest.Sysemu_PokeUser",
+
+                // pty_test
+                // TODO(https://fxbug.dev/564607149)
+                "JobControlTest.GetSessionId",
+                "JobControlTest.GetSessionIdAfterRelease",
+                "JobControlTest.GetSessionIdMasterOutsideSession",
+                "JobControlTest.GetSessionIdNonControlling",
+                "JobControlTest.GetSessionIdNonLeader",
 
                 // rlimits_test
                 "RlimitTest.RlimitNProc",
@@ -804,6 +826,14 @@
                 "NetdeviceTest.EthtoolGetTSInfo",
 
                 // socket_netlink_route_test
+                // TODO(https://fxbug.dev/564917704)
+                "NetlinkRouteTest.BridgeAddUnnamed",
+                "NetlinkRouteTest.VethAddUnnamed",
+                "NetlinkRouteTest.VethAddUnnamedPeer",
+
+                // TODO(https://fxbug.dev/564606567)
+                "NetlinkRouteTest.VethAddRefusedPeerNetnsLeavesNothing",
+
                 // TODO(https://fxbug.dev/526323480): getsockopt(SOL_NETLINK, NETLINK_LIST_MEMBERSHIPS) is unimplemented.
                 "NetlinkRouteTest.ListMembershipsSizeProbe",
                 "NetlinkRouteTest.ListMembershipsLargeBuffer",
@@ -887,6 +917,11 @@
 
                 // stat_test
                 "StatTest.StatxMntId",
+
+                // TODO(https://fxbug.dev/564607312)
+                "All/StatxMountRootTest.*",
+                "StatTest.StatxMountRootAdvertisedOnRegularFile",
+                "StatTest.StatxMountRootOnRootDirectory",
 
                 // statfs_test
                 "FstatfsTest.BlocksFree",

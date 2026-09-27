@@ -14,9 +14,13 @@ namespace {
 // See https://source.android.com/docs/core/architecture/bootloader/boot-reason
 constexpr std::string_view kBootArgKey = "androidboot.bootreason";
 
+// Maps an `androidboot.bootreason` value, compared as a single string, to a ZBI reboot reason.
 struct RebootReasonMap {
   std::string_view reason;
   zbi_hw_reboot_reason_t value;
+  // If true, match any value starting with `reason` (e.g. "reboot,uvlo" matches
+  // "reboot,uvlo,pmic,sub"); otherwise the value must equal `reason` exactly.
+  bool is_prefix = false;
 };
 
 constexpr auto kRebootReasons = std::to_array<RebootReasonMap>({
@@ -37,7 +41,13 @@ constexpr auto kRebootReasons = std::to_array<RebootReasonMap>({
     {.reason = "reboot,cold", .value = ZBI_HW_REBOOT_REASON_COLD},
 
     {.reason = "watchdog", .value = ZBI_HW_REBOOT_REASON_WATCHDOG},
-    {.reason = "reboot,uvlo", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
+    {.reason = "reboot,uvlo", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_prefix = true},
+    {.reason = "reboot,ocp", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_prefix = true},
+    {.reason = "reboot,sys_ldo_ok,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_prefix = true},
+    {.reason = "reboot,smpl_timeout,pmic",
+     .value = ZBI_HW_REBOOT_REASON_BROWNOUT,
+     .is_prefix = true},
+    {.reason = "reboot,master_dc,reset", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
     {.reason = "reboot,longkey,s2", .value = ZBI_HW_REBOOT_REASON_USER_HARD_RESET},
 });
 
@@ -60,8 +70,8 @@ void RebootReasonItem::Init(const BootProperties& properties, const char* shim_n
     return;
   }
 
-  for (const auto& [reason, value] : kRebootReasons) {
-    if (reboot_reason == reason) {
+  for (const auto& [reason, value, is_prefix] : kRebootReasons) {
+    if (is_prefix ? reboot_reason.starts_with(reason) : reboot_reason == reason) {
       fprintf(log, "%s: INFO %.*s was <%.*s>.\n", shim_name, static_cast<int>(kBootArgKey.size()),
               kBootArgKey.data(), static_cast<int>(reboot_reason.size()), reboot_reason.data());
       set_payload(value);

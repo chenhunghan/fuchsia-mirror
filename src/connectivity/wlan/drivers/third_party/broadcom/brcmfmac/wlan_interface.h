@@ -125,6 +125,12 @@ class WlanInterface : public fidl::WireServer<fuchsia_wlan_fullmac::WlanFullmacI
                                  SetApfPacketFilterEnabledCompleter::Sync& completer) override;
   void GetApfPacketFilterEnabled(GetApfPacketFilterEnabledCompleter::Sync& completer) override;
 
+  // RSSI monitor extensions
+  void QueryRssiMonitorSupport(QueryRssiMonitorSupportCompleter::Sync& completer) override;
+  void StartRssiMonitor(StartRssiMonitorRequestView request,
+                        StartRssiMonitorCompleter::Sync& completer) override;
+  void StopRssiMonitor(StopRssiMonitorCompleter::Sync& completer) override;
+
   void on_fidl_error(fidl::UnbindInfo error) override {
     BRCMF_WARN("Fidl Error: %s", error.FormatDescription().c_str());
   }

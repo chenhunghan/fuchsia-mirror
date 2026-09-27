@@ -202,7 +202,7 @@ impl IncludeChecker {
         errors: &mut Vec<DocCheckError>,
     ) -> Result<()> {
         match element {
-            Element::Block(Tag::CodeBlock(_), _, _) | Element::CodeBlock(_, _, _) => {
+            Element::Block(Tag::CodeBlock(_), _, _) | Element::CodeBlock(..) => {
                 // Skip code blocks
             }
             Element::Block(_, children, _)

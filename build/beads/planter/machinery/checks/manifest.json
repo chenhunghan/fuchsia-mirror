@@ -1,0 +1,41 @@
+{
+    "version": 1,
+    "checks": [
+        {
+            "name": "migration_sanity",
+            "description": "Deterministic check for BUILD.bazel/BUILD.gn dual-build parity: rejects target-level # @bazel2gn:skip on convertible library/binary/reference targets, rejects convertible GN targets left above the BAZEL2GN SENTINEL in BUILD.gn, and verifies //pkg:verify_bazel2gn registration in //build/bazel2gn_verification_targets.gni",
+            "script_file": "migration_sanity.sh",
+            "enabled": true
+        },
+        {
+            "name": "visibility_audit",
+            "description": "Audits BUILD.bazel visibility attributes for package-level default_visibility, missing target visibility, overly narrow sprawling visibility lists (>15 entries across >=6 areas on globally-used platform libraries/test utilities that should use target-level //visibility:public or 2-3 level rollups), unjustified //visibility:public on narrow targets, redundant :__pkg__, disguised public wildcards, multi-domain umbrella wildcards, cross-area depth-2 wildcards, overbroad depth>=3 LCA wildcards, and false-positive rdeps",
+            "script_file": "visibility_audit.sh",
+            "enabled": true
+        },
+        {
+            "name": "build_only_scope",
+            "description": "Fails if the migration change (HEAD commit, uncommitted, or untracked files) modifies any non-build file (anything other than BUILD.gn/BUILD.bazel/BUILD/*.gni/*.bzl/MODULE.bazel). Migrations must not edit source code.",
+            "script_file": "build_only_scope.sh",
+            "enabled": true
+        },
+        {
+            "name": "lint_config_parity",
+            "description": "Flags lint-driven source edits (removed .clone(), added #[allow]/#[expect]/NOLINT, removed use imports, let _ =) in non-build files with file:line evidence, and warns when BUILD.bazel lint_config is outside //build/config/rust/lints (Bazel replaces default lints, GN appends).",
+            "script_file": "lint_config_parity.sh",
+            "enabled": true
+        },
+        {
+            "name": "shared_config_reuse",
+            "description": "Flags lint-config indirection and duplication in the change: new alias() targets that only re-export a rust_lint_config (or lint-named config), dict literals in changed BUILD.bazel/.bzl files that copy the default clippy/rustc lint entries owned by //build/config/rust/lints instead of loading its exported .bzl constants, dual-build lint_config labels without a same-named GN config() in the label's package (bazel2gn copies lint_config verbatim), and LINT.ThenChange references newly broken by moving lint dicts.",
+            "script_file": "shared_config_reuse.sh",
+            "enabled": true
+        },
+        {
+            "name": "build_verification",
+            "description": "Builds the change: `fx build` (GN targets and all GN dependents), `fx build --host //build:bazel2gn_verifications` (BUILD.gn/BUILD.bazel drift), and `fx bazel build --config=fuchsia_platform` / `--config=host` of `//<dir>:all` for every changed directory with a BUILD.bazel. Emits one ERROR finding with the relevant log lines per failing step. Set PLANTER_SKIP_BUILD=1 to skip.",
+            "script_file": "build_verification.sh",
+            "enabled": true
+        }
+    ]
+}

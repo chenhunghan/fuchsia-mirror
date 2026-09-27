@@ -7,6 +7,7 @@
 #include <lib/stdcompat/span.h>
 #include <lib/zx/result.h>
 #include <string.h>
+#include <zircon/compiler.h>
 #include <zircon/errors.h>
 
 #include <condition_variable>
@@ -23,7 +24,6 @@
 #include "src/lib/chunked-compression/chunked-archive.h"
 #include "src/lib/chunked-compression/compression-params.h"
 #include "src/lib/chunked-compression/status.h"
-#include "src/lib/fxl/synchronization/thread_annotations.h"
 
 namespace chunked_compression {
 namespace {
@@ -55,7 +55,7 @@ class TaskQueue {
   // for a task to be added. Returns |std::nullopt| if the |TaskQueue| has been terminated.
   //
   // Thread-safety analysis doesn't work with unique_lock.
-  std::optional<T> TakeTask() FXL_NO_THREAD_SAFETY_ANALYSIS {
+  std::optional<T> TakeTask() __TA_NO_THREAD_SAFETY_ANALYSIS {
     std::unique_lock lock(mutex_);
     for (;;) {
       if (terminated_) {
@@ -73,8 +73,8 @@ class TaskQueue {
  private:
   std::mutex mutex_;
   std::condition_variable condition_;
-  bool terminated_ FXL_GUARDED_BY(mutex_) = false;
-  std::deque<T> queue_ FXL_GUARDED_BY(mutex_);
+  bool terminated_ __TA_GUARDED(mutex_) = false;
+  std::deque<T> queue_ __TA_GUARDED(mutex_);
 };
 
 struct CompressFrameResponse {

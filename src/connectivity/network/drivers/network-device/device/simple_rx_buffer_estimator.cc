@@ -31,12 +31,13 @@ namespace network::internal {
 
 SimpleRxBufferEstimator::SimpleRxBufferEstimator(double alpha, zx::duration delay_budget,
                                                  zx::duration sample_interval,
-                                                 double variance_threshold)
+                                                 double variance_threshold, uint16_t intercept)
     : alpha_fixed_(static_cast<uint64_t>(alpha * static_cast<double>(1ull << kFracBits))),
       delay_budget_(delay_budget),
       sample_interval_(sample_interval),
       variance_threshold_fixed_(
-          static_cast<uint64_t>(variance_threshold * static_cast<double>(1ull << kFracBits))) {
+          static_cast<uint64_t>(variance_threshold * static_cast<double>(1ull << kFracBits))),
+      intercept_(intercept) {
   ZX_ASSERT(zx::timer::create(0, ZX_CLOCK_MONOTONIC, &timer_) == ZX_OK);
 }
 
@@ -68,7 +69,7 @@ void SimpleRxBufferEstimator::Update(uint64_t new_packets_per_second) {
 uint16_t SimpleRxBufferEstimator::CalculateTargetBuffers() const {
   uint64_t pps = packets_per_second_scaled_ >> kFracBits;
   int64_t delay_ns = delay_budget_.to_nsecs();
-  uint64_t calculated = (pps * delay_ns) / 1'000'000'000LL;
+  uint64_t calculated = ((pps * delay_ns) / 1'000'000'000LL) + intercept_;
   return static_cast<uint16_t>(
       std::min(calculated, static_cast<uint64_t>(std::numeric_limits<uint16_t>::max())));
 }
@@ -139,7 +140,12 @@ std::optional<SimpleRxBufferEstimator> RxBufferEstimatorFromFidl(
     if (variance_threshold == 0.0) {
       variance_threshold = kDefaultVarianceThreshold;
     }
-    return SimpleRxBufferEstimator(alpha, delay_budget, sample_interval, variance_threshold);
+    // Zero is a meaningful value for the intercept: it means the device does
+    // not park any buffers. There is no server-assigned default.
+    uint16_t intercept = simple.intercept();
+
+    return SimpleRxBufferEstimator(alpha, delay_budget, sample_interval, variance_threshold,
+                                   intercept);
   }
   ZX_ASSERT_MSG(management.Which() == netdriver::RxBufferManagement::Tag::kStatic,
                 "unknown Rx buffer management type");

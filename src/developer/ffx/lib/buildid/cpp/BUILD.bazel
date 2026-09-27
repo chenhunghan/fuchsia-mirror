@@ -16,9 +16,6 @@ cc_library(
         "linux.cc",
     ],
     hdrs = ["buildid.h"],
-    copts = [
-        "-Wno-conversion",
-    ],
     target_compatible_with = HOST_CONSTRAINTS,
     alwayslink = True,
 )

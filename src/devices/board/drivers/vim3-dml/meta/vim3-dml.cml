@@ -18,5 +18,17 @@
     use: [
         { service: "fuchsia.hardware.platform.bus.Service" },
         { protocol: "fuchsia.driver.framework.CompositeNodeManager" },
+        {
+            config: "fuchsia.driver.devicetree.EnabledNodes",
+            key: "enabled_nodes",
+            type: "vector",
+            max_count: 50,
+            element: {
+                type: "string",
+                max_size: 100,
+            },
+            availability: "optional",
+            default: [],
+        },
     ],
 }

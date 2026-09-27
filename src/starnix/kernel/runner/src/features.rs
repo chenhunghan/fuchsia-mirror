@@ -26,8 +26,8 @@ use starnix_modules_gralloc::gralloc_device_init;
 use starnix_modules_hvdcp_opti::hvdcp_opti_init;
 use starnix_modules_input::uinput::register_uinput_device;
 use starnix_modules_input::{
-    DEFAULT_KEYBOARD_DEVICE_ID, DEFAULT_MOUSE_DEVICE_ID, DEFAULT_TOUCH_DEVICE_ID, EventProxyMode,
-    InputDevice, new_input_relay,
+    DEFAULT_KEYBOARD_DEVICE_ID, DEFAULT_TOUCH_DEVICE_ID, EventProxyMode, InputDevice,
+    new_input_relay,
 };
 use starnix_modules_kgsl::kgsl_device_init;
 use starnix_modules_magma::magma_device_init;
@@ -561,7 +561,8 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
 
         touch_device.clone().register(kernel, DEFAULT_TOUCH_DEVICE_ID)?;
         keyboard_device.clone().register(kernel, DEFAULT_KEYBOARD_DEVICE_ID)?;
-        mouse_device.clone().register(kernel, DEFAULT_MOUSE_DEVICE_ID)?;
+        // Prefer to lazily register the mouse device on first mouse event, rather than on
+        // initialization here, to avoid drawing a cursor eagerly.
 
         let (input_events_relay, input_events_relay_handle) = new_input_relay();
         input_events_relay.start_relays(
@@ -574,10 +575,9 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
             registry_proxy,
             touch_device.open_files.clone(),
             keyboard_device.open_files.clone(),
-            mouse_device.open_files.clone(),
+            Some(mouse_device),
             Some(touch_device.inspect_status),
             Some(keyboard_device.inspect_status),
-            Some(mouse_device.inspect_status),
         );
 
         register_uinput_device(kernel, input_events_relay_handle)?;

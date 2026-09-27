@@ -10,6 +10,8 @@
 
 #include <limits>
 
+#include <safemath/checked_math.h>
+
 #include "src/media/drivers/amlogic_decoder/decoder_core.h"
 #include "src/media/drivers/amlogic_decoder/decoder_instance.h"
 #include "src/media/drivers/amlogic_decoder/stream_buffer.h"
@@ -83,10 +85,21 @@ zx_status_t Parser::InitializeEsParser(DecoderInstance* instance) {
 
   if (instance) {
     // Set up output fifo.
-    uint32_t buffer_address = truncate_to_32(instance->stream_buffer()->buffer().phys_base());
+    auto& buffer = instance->stream_buffer()->buffer();
+    safemath::CheckedNumeric<uint64_t> phys_base = buffer.phys_base();
+    safemath::CheckedNumeric<uint64_t> size = buffer.size();
+    safemath::CheckedNumeric<uint64_t> end_paddr = phys_base + size;
+    ZX_ASSERT_MSG(end_paddr.IsValid() && end_paddr.ValueOrDie() < 0x100000000ULL,
+                  "InitializeEsParser: stream buffer crosses 4GiB boundary: base 0x%lx, size %lu",
+                  static_cast<uint64_t>(phys_base.ValueOrDie()),
+                  static_cast<uint64_t>(size.ValueOrDie()));
+
+    uint64_t end_paddr_val = end_paddr.ValueOrDie();
+    uint32_t buffer_address = truncate_to_32(phys_base.ValueOrDie());
+
     ParserVideoStartPtr::Get().FromValue(buffer_address).WriteTo(owner_->mmio()->parser);
     ParserVideoEndPtr::Get()
-        .FromValue(truncate_to_32(buffer_address + instance->stream_buffer()->buffer().size() - 8))
+        .FromValue(truncate_to_32(end_paddr_val - 8))
         .WriteTo(owner_->mmio()->parser);
 
     ParserEsControl::Get()
@@ -165,13 +178,21 @@ zx_status_t Parser::InitializeEsParser(DecoderInstance* instance) {
 }
 
 void Parser::SetOutputLocation(zx_paddr_t paddr, uint32_t len) {
+  safemath::CheckedNumeric<uint64_t> end_paddr =
+      safemath::CheckedNumeric<uint64_t>(paddr) + safemath::CheckedNumeric<uint64_t>(len);
+  ZX_ASSERT_MSG(
+      end_paddr.IsValid() && end_paddr.ValueOrDie() <= std::numeric_limits<uint32_t>::max(),
+      "SetOutputLocation buffer touches or crosses 4GiB boundary: base 0x%lx, len %u", paddr, len);
+
+  uint64_t end_paddr_val = end_paddr.ValueOrDie();
   uint32_t buffer_start = truncate_to_32(paddr);
+
   ParserVideoStartPtr::Get().FromValue(buffer_start).WriteTo(owner_->mmio()->parser);
   // Prevent the parser from writing off the end of the buffer. Seems like it
   // probably needs to be 8-byte aligned.
   constexpr uint32_t kEndOfBufferOffset = 8;
   ParserVideoEndPtr::Get()
-      .FromValue(buffer_start + len - kEndOfBufferOffset)
+      .FromValue(truncate_to_32(end_paddr_val - kEndOfBufferOffset))
       .WriteTo(owner_->mmio()->parser);
   ParserVideoWp::Get().FromValue(buffer_start).WriteTo(owner_->mmio()->parser);
   // The read pointer isn't really used unless the output buffer wraps around.
@@ -187,13 +208,11 @@ void Parser::SetOutputLocation(zx_paddr_t paddr, uint32_t len) {
 
 void Parser::SyncFromDecoderInstance(DecoderInstance* instance) {
   StreamBuffer* buffer = instance->stream_buffer();
-  uint32_t buffer_phys_address = truncate_to_32(buffer->buffer().phys_base());
+  zx_paddr_t buffer_phys_address = buffer->buffer().phys_base();
   size_t buffer_size = buffer->buffer().size();
-  ZX_DEBUG_ASSERT(buffer_size <= std::numeric_limits<uint32_t>::max());
   uint32_t read_offset = instance->core()->GetReadOffset();
   uint32_t write_offset = instance->core()->GetStreamInputOffset();
-  SyncFromBufferParameters(buffer_phys_address, static_cast<uint32_t>(buffer_size), read_offset,
-                           write_offset);
+  SyncFromBufferParameters(buffer_phys_address, buffer_size, read_offset, write_offset);
 }
 
 void Parser::SyncToDecoderInstance(DecoderInstance* instance) {
@@ -203,17 +222,30 @@ void Parser::SyncToDecoderInstance(DecoderInstance* instance) {
       ParserVideoWp::Get().ReadFrom(owner_->mmio()->parser).reg_value());
 }
 
-void Parser::SyncFromBufferParameters(uint32_t buffer_phys_address, uint32_t buffer_size,
+void Parser::SyncFromBufferParameters(zx_paddr_t buffer_phys_address, uint64_t buffer_size,
                                       uint32_t read_offset, uint32_t write_offset) {
+  safemath::CheckedNumeric<uint64_t> end_paddr =
+      safemath::CheckedNumeric<uint64_t>(buffer_phys_address) +
+      safemath::CheckedNumeric<uint64_t>(buffer_size);
+  ZX_ASSERT_MSG(
+      end_paddr.IsValid() && end_paddr.ValueOrDie() <= std::numeric_limits<uint32_t>::max(),
+      "SyncFromBufferParameters buffer touches or crosses 4GiB boundary: base 0x%lx, size %lu",
+      buffer_phys_address, buffer_size);
+
+  uint64_t end_paddr_val = end_paddr.ValueOrDie();
   // Sync start and end pointers every time so using the same parser with multiple decoder instances
   // and/or for multiple purposes is less error-prone.
-  ParserVideoStartPtr::Get().FromValue(buffer_phys_address).WriteTo(owner_->mmio()->parser);
-  ParserVideoEndPtr::Get()
-      .FromValue(buffer_phys_address + buffer_size - 8)
+  ParserVideoStartPtr::Get()
+      .FromValue(truncate_to_32(buffer_phys_address))
       .WriteTo(owner_->mmio()->parser);
-  ParserVideoRp::Get().FromValue(read_offset + buffer_phys_address).WriteTo(owner_->mmio()->parser);
+  ParserVideoEndPtr::Get()
+      .FromValue(truncate_to_32(end_paddr_val - 8))
+      .WriteTo(owner_->mmio()->parser);
+  ParserVideoRp::Get()
+      .FromValue(truncate_to_32(buffer_phys_address + read_offset))
+      .WriteTo(owner_->mmio()->parser);
   ParserVideoWp::Get()
-      .FromValue(write_offset + buffer_phys_address)
+      .FromValue(truncate_to_32(buffer_phys_address + write_offset))
       .WriteTo(owner_->mmio()->parser);
   // Keeps bytes in the same order as they were input.
   ParserEsControl::Get()

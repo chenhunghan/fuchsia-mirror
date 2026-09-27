@@ -18,8 +18,8 @@
 
 namespace flatland {
 
-// ReleaseFenceManager is a helper which encapsulates the logic for signaling release fences, and
-// for invoking frame-presented callbacks according to the contract with FrameScheduler.
+// `ReleaseFenceManager` is a helper which encapsulates the logic for signaling release fences, and
+// for invoking frame-presented callbacks according to the contract with `FrameScheduler`.
 //
 // === Design Requirements for signaling client release fences ===
 //
@@ -31,15 +31,15 @@ namespace flatland {
 // Direct-scanout case: client images are directly read by the display controller, and so the fences
 // cannot be signaled until the *next* frame is displayed on-screen.
 //
-// ReleaseFenceManager handles these cases separately, in order to minimize the latency before
+// `ReleaseFenceManager` handles these cases separately, in order to minimize the latency before
 // clients can reuse their images.
 //
-// === Design Requirements for invoking FramePresentedCallback ===
+// === Design Requirements for invoking `FramePresentedCallback` ===
 //
-// The contract with FrameScheduler requires that these callbacks are invoked in the order that they
-// are received.  As a result, callback invocation may be delayed even though all of the information
-// required by the callback is known (i.e. render-finished time and frame-presented time), when an
-// earlier callback is not yet ready to invoke.
+// The contract with `FrameScheduler` requires that these callbacks are invoked in the order that
+// they are received.  As a result, callback invocation may be delayed even though all of the
+// information required by the callback is known (i.e. render-finished time and frame-presented
+// time), when an earlier callback is not yet ready to invoke.
 //
 // For example, this can happen when a GPU-composited frame misses a vsync because rendering is
 // still not finished, even though the subsequent direct-scanout frame is already on the screen.
@@ -49,33 +49,34 @@ namespace flatland {
 //
 // === Usage ===
 //
-// ReleaseFenceManager is very simple to use.  Each frame, the caller (typically DisplayCompositor)
-// calls either OnGpuCompositedFrame() or OnDirectScanoutFrame().  The caller has two other
-// responsibilities:
+// `ReleaseFenceManager` is very simple to use.  Each frame, the caller (typically
+// `DisplayCompositor`) calls either `OnGpuCompositedFrame()` or `OnDirectScanoutFrame()`.  The
+// caller has two other responsibilities:
 //
-// 1) for GPU-composited frames, to signal the |render_finished_event| (typically done via a Vulkan
+// 1) for GPU-composited frames, to signal the `render_finished_event` (typically done via a Vulkan
 //    semaphore).
 //
-// 2) to call OnVsync() when a frame is presented on the display
+// 2) to call `OnVsync()` when a frame is presented on the display
 //
 // === Thread Safety ===
 //
-// ReleaseFenceManager is not thread-safe; methods should only be called from the "main thread",
-// i.e. the same thread as used by the |dispatcher| passed to the constructor.  Due to the use
+// `ReleaseFenceManager` is not thread-safe; methods should only be called from the "main thread",
+// i.e. the same thread as used by the `dispatcher` passed to the constructor.  Due to the use
 // of this dispatcher, it is not safe to use from multiple threads even if externally
 // synchronized, e.g. via a mutex.
 class ReleaseFenceManager final {
  public:
-  // |dispatcher| is used for waiting on the |render_finished_fence| arg to OnCpuCompositedFrame().
+  // `dispatcher` is used for waiting on the `render_finished_fence` arg to
+  // `OnCpuCompositedFrame()`.
   explicit ReleaseFenceManager(async_dispatcher_t* dispatcher);
   ReleaseFenceManager(const ReleaseFenceManager&) = delete;
   ReleaseFenceManager(ReleaseFenceManager&&) = delete;
 
-  // Stores a record for a new GPU-composited frame.  |frame_number| must be one larger than the
-  // previous frame.  Later, when it is safe, signals |release_fences| (see class comment).
-  // Invokes |frame_presented_callback| when:
-  //   - |render_finished_fence| has been signaled, and:
-  //   - corresponding OnVsync() has been called, and:
+  // Stores a record for a new GPU-composited frame.  `frame_number` must be one larger than the
+  // previous frame.  Later, when it is safe, signals `release_fences` (see class comment).
+  // Invokes `frame_presented_callback` when:
+  //   - `render_finished_fence` has been signaled, and:
+  //   - corresponding `OnVsync()` has been called, and:
   //   - all previous callbacks have been invoked
   void OnGpuCompositedFrame(uint64_t frame_number, zx::event render_finished_fence,
                             std::vector<zx::event> release_fences,
@@ -83,19 +84,26 @@ class ReleaseFenceManager final {
                             std::vector<zx::counter> present_fences,
                             scheduling::FramePresentedCallback frame_presented_callback);
 
-  // Stores a record for a new direct-scanout frame.  |frame_number| must be one larger than the
-  // previous frame.  Later, when it is safe, signals |release_fences| (see class comment).
-  // Invokes |frame_presented_callback| when:
-  //   - corresponding OnVsync() has been called, and:
+  // Stores a record for a new direct-scanout frame.  `frame_number` must be one larger than the
+  // previous frame.  Later, when it is safe, signals `release_fences` (see class comment).
+  // Invokes `frame_presented_callback` when:
+  //   - corresponding `OnVsync()` has been called, and:
   //   - all previous callbacks have been invoked
   void OnDirectScanoutFrame(uint64_t frame_number, std::vector<zx::event> release_fences,
                             std::vector<zx::counter> release_counters,
                             std::vector<zx::counter> present_fences,
                             scheduling::FramePresentedCallback frame_presented_callback);
 
-  // Called when the specified frame has appeared on screen.  |frame_number| must monotonically
+  // Called when the specified frame has appeared on screen.  `frame_number` must monotonically
   // increase with each subsequent call (repeats are OK).
   void OnVsync(uint64_t frame_number, zx::time_monotonic timestamp);
+
+  // Treats every frame that has not been presented as presented at `timestamp`.
+  // Used when the display is powered off: no vsync will ever acknowledge those
+  // frames. Equivalent to `OnVsync()` for the newest frame, so a GPU-composited
+  // frame that is still rendering invokes its callback when rendering finishes,
+  // as usual.
+  void MarkAllFramesPresented(zx::time_monotonic timestamp);
 
   // For testing.  Return the number of frame records currently held by the manager.
   size_t frame_record_count() const { return frame_records_.size(); }
@@ -117,12 +125,12 @@ class ReleaseFenceManager final {
     scheduling::FramePresentedCallback frame_presented_callback;
 
     // Note the relative ordering of these two fields is important because
-    // during destruction we need to destruct the WaitOnce before closing
+    // during destruction we need to destruct the `WaitOnce` before closing
     // the handle its waiting on.
     zx::event render_finished_fence;
     std::unique_ptr<async::WaitOnce> render_finished_wait;
 
-    // Four conditions that must be met to erase the record.  See MaybeEraseFrameRecord() comment.
+    // Four conditions that must be met to erase the record.  See `MaybeEraseFrameRecord()` comment.
     bool next_frame_started = false;
     bool frame_presented = false;
     bool render_finished = false;
@@ -132,8 +140,8 @@ class ReleaseFenceManager final {
   using FrameRecordMap = std::map<uint64_t, std::unique_ptr<FrameRecord>>;
   using FrameRecordIterator = FrameRecordMap::iterator;
 
-  // Returns the record corresponding to |frame_number|, or none if no record exists.  The latter
-  // condition should only be true if |frame_number| is zero.
+  // Returns the record corresponding to `frame_number`, or none if no record exists.  The latter
+  // condition should only be true if `frame_number` is zero.
   FrameRecordIterator FindFrameRecord(uint64_t frame_number);
 
   std::unique_ptr<FrameRecord> NewGpuCompositionFrameRecord(
@@ -147,7 +155,8 @@ class ReleaseFenceManager final {
 
   // The strategy used for signaling release fences depends on whether the *previous* frame was
   // GPU-composited or direct-scanout, not the current frame. Therefore, we factor this into a
-  // separate method, which is called from both OnGpuCompositedFrame() and OnDirectScanoutFrame().
+  // separate method, which is called from both `OnGpuCompositedFrame()` and
+  // `OnDirectScanoutFrame()`.
   void SignalOrScheduleSignalForReleaseFences(uint64_t frame_number,
                                               FrameRecord& current_frame_record,
                                               std::vector<zx::event> release_fences,
@@ -155,7 +164,7 @@ class ReleaseFenceManager final {
 
   // In order to invoke the callback, rendering needs to be finished *and* the frame must be
   // presented, since both of these are needed to populate the timestamps in the callback arg (a
-  // scheduling::FrameRenderer:FrameTimings). Although rendering is guaranteed to happen before
+  // `scheduling::FrameRenderer:FrameTimings`). Although rendering is guaranteed to happen before
   // presentation, it's not guaranteed that we receive those notifications in that order.  This
   // method is a helper which allows us to invoke the callback ASAP, regardless of the order we
   // receive the notifications.
@@ -178,8 +187,8 @@ class ReleaseFenceManager final {
   // functioning of this class.
   void MaybeEraseFrameRecord(FrameRecordIterator it);
 
-  // Called from the async::WaitOnce handler on the |render_finished_fence| passed to
-  // |NewGpuCompositionFrameRecord()|.
+  // Called from the `async::WaitOnce` handler on the `render_finished_fence` passed to
+  // `NewGpuCompositionFrameRecord()`.
   void OnRenderFinished(uint64_t frame_number, zx::time timestamp);
 
   async_dispatcher_t* const dispatcher_;

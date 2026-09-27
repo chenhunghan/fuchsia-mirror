@@ -6,7 +6,6 @@
 
 use alloc::vec::Vec;
 use core::borrow::Borrow;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
@@ -25,7 +24,7 @@ use netstack3_base::socket::{
     ListenerAddrInfo, ListenerIpAddr, MaybeDualStack, NotDualStackCapableError, RemoveResult,
     ReusePortOption, SetDualStackEnabledError, SharingDomain, ShutdownType, SocketAddrType,
     SocketCookie, SocketIpAddr, SocketMapAddrSpec, SocketMapAddrStateSpec, SocketMapConflictPolicy,
-    SocketMapStateSpec, SocketWritableListener,
+    SocketMapStateSpec,
 };
 use netstack3_base::socketmap::{IterShadows as _, SocketMap, Tagged};
 use netstack3_base::sync::{RwLock, StrongRc};
@@ -34,8 +33,7 @@ use netstack3_base::{
     DeviceIdContext, Inspector, InspectorDeviceExt, InstantContext, IpSocketPropertiesMatcher,
     LocalAddressError, Mark, MarkDomain, Marks, MatcherBindingsTypes, NetworkParsingContext,
     PortAllocImpl, ReferenceNotifiers, RemoveResourceResultWithContext, ResourceCounterContext,
-    RngContext, SettingsContext, SocketError, StrongDeviceIdentifier, WeakDeviceIdentifier,
-    ZonedAddressError,
+    RngContext, SocketError, StrongDeviceIdentifier, WeakDeviceIdentifier, ZonedAddressError,
 };
 use netstack3_datagram::{
     self as datagram, BoundDatagramSocketMap, BoundSocketState as DatagramBoundSocketState,
@@ -53,13 +51,12 @@ use netstack3_datagram::{
     WrapOtherStackIpOptions, WrapOtherStackIpOptionsMut,
 };
 use netstack3_filter::{SocketIngressFilterResult, SocketOpsFilter, SocketOpsFilterBindingContext};
-use netstack3_hashmap::hash_map::DefaultHasher;
 use netstack3_ip::icmp::IcmpError;
 use netstack3_ip::socket::{
     IpSockCreateAndSendError, IpSockCreationError, IpSockSendError, SocketHopLimits,
 };
 use netstack3_ip::{
-    HopLimits, IpHeaderInfo, IpTransportContext, LocalDeliveryPacketInfo,
+    HopLimits, IpHeaderInfo, IpTransportContext, LocalDeliveryPacketInfo, MarksBindingsContext,
     MulticastMembershipHandler, ReceiveIpPacketMeta, SocketMetadata, TransparentLocalDelivery,
     TransportIpContext,
 };
@@ -69,13 +66,13 @@ use packet::{
 };
 use packet_formats::ip::{DscpAndEcn, IpProto, IpProtoExt, Ipv4Proto, Ipv6Proto};
 use packet_formats::udp::{UdpPacket, UdpPacketBuilder, UdpPacketRaw, UdpParseArgs};
+use siphasher::sip::SipHasher13;
 use thiserror::Error;
 
 use crate::internal::counters::{
     CombinedUdpCounters, UdpCounterContext, UdpCountersWithSocket, UdpCountersWithoutSocket,
 };
 use crate::internal::diagnostics::{UdpSocketDiagnostics, UdpSocketDiagnosticsSeed};
-use crate::internal::settings::UdpSettings;
 
 /// Convenience alias to make names shorter.
 pub(crate) type UdpBoundSocketMap<I, D, BT> = BoundDatagramSocketMap<I, D, Udp<BT>>;
@@ -134,7 +131,7 @@ pub struct UdpState<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
 }
 
 /// Uninstantiatable type for implementing [`DatagramSocketSpec`].
-pub struct Udp<BT>(PhantomData<BT>, Never);
+pub struct Udp<BT>(PhantomData<BT>, !);
 
 /// Produces an iterator over eligible receiving socket addresses.
 #[cfg(test)]
@@ -408,7 +405,7 @@ impl SocketMapAddrSpec for UdpAddrSpec {
 
 pub struct UdpSocketMapStateSpec<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes>(
     PhantomData<(I, D, BT)>,
-    Never,
+    !,
 );
 
 impl<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> SocketMapStateSpec
@@ -501,9 +498,7 @@ impl<BT: UdpBindingsTypes> DatagramSocketSpec for Udp<BT> {
     type SerializeError = UdpSerializeError;
 
     type ExternalData<I: Ip> = BT::ExternalData<I>;
-    type Settings = UdpSettings;
     type Counters<I: Ip> = UdpCountersWithSocket<I>;
-    type SocketWritableListener = BT::SocketWritableListener;
     type SendToken = BT::SendToken;
 
     fn ip_proto<I: IpProtoExt>() -> I::Proto {
@@ -515,8 +510,6 @@ impl<BT: UdpBindingsTypes> DatagramSocketSpec for Udp<BT> {
     ) -> I::DualStackBoundSocketId<D, Udp<BT>> {
         I::into_dual_stack_bound_socket_id(s.clone())
     }
-
-    const FIXED_HEADER_SIZE: usize = packet_formats::udp::HEADER_BYTES;
 
     fn make_packet<I: IpExt, B: BufferMut>(
         body: B,
@@ -825,7 +818,10 @@ impl<T> AddrState<T> {
                 } else if load_balanced.len() == 1 {
                     &load_balanced[0].id
                 } else {
-                    let mut hasher = DefaultHasher::new();
+                    // NB: The hasher must be deterministic across calls, so
+                    // that all the packets in a flow are delivered to the same
+                    // socket.
+                    let mut hasher = SipHasher13::new();
                     selector.hash(&mut hasher);
                     let index: usize = hasher.finish() as usize % load_balanced.len();
                     &load_balanced[index].id
@@ -1203,8 +1199,6 @@ pub trait UdpReceiveBindingsContext<I: IpExt, D: StrongDeviceIdentifier>: UdpBin
 pub trait UdpBindingsTypes: DatagramBindingsTypes + MatcherBindingsTypes + Sized + 'static {
     /// Opaque bindings data held by core for a given IP version.
     type ExternalData<I: Ip>: Debug + Send + Sync + 'static;
-    /// The listener notified when sockets' writable state changes.
-    type SocketWritableListener: SocketWritableListener + Debug + Send + Sync + 'static;
     /// A token representing resources allocated for an in-flight send operation.
     ///
     /// Core holds this token until the packet is either transmitted by the
@@ -1221,8 +1215,8 @@ pub trait UdpBindingsContext<I: IpExt, D: StrongDeviceIdentifier>:
     + ReferenceNotifiers
     + UdpBindingsTypes
     + SocketOpsFilterBindingContext<D>
-    + SettingsContext<UdpSettings>
     + MatcherBindingsTypes
+    + MarksBindingsContext
 {
 }
 impl<
@@ -1233,7 +1227,7 @@ impl<
         + ReferenceNotifiers
         + UdpBindingsTypes
         + SocketOpsFilterBindingContext<D>
-        + SettingsContext<UdpSettings>,
+        + MarksBindingsContext,
     D: StrongDeviceIdentifier,
 > UdpBindingsContext<I, D> for BC
 {
@@ -1488,7 +1482,7 @@ fn receive_ip_packet<
     info: &mut LocalDeliveryPacketInfo<I, H>,
     early_demux_socket: Option<DualStackUdpSocketId<I, CC::WeakDeviceId, BC>>,
 ) -> Result<(), (B, I::IcmpError)> {
-    let LocalDeliveryPacketInfo { meta, header_info, marks: _ } = info;
+    let LocalDeliveryPacketInfo { meta, header_info, marks } = info;
     let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context } = meta;
 
     trace_duration!("udp::receive_ip_packet");
@@ -1598,6 +1592,7 @@ fn receive_ip_packet<
             lookup_result,
             device,
             &meta,
+            marks,
             require_transparent,
             header_info,
             packet.clone(),
@@ -1629,6 +1624,7 @@ fn try_deliver<
     id: &UdpSocketId<I, CC::WeakDeviceId, BC>,
     device_id: &CC::DeviceId,
     meta: UdpPacketMeta<I>,
+    packet_marks: &Marks,
     require_transparent: bool,
     header_info: &H,
     packet: UdpPacket<&[u8]>,
@@ -1672,13 +1668,14 @@ fn try_deliver<
         let mut slices = [ip_prefix, ip_options, udp_header, data];
         let packet_buf = FragmentedByteSlice::new(&mut slices);
         let header_len = ip_prefix.len() + ip_options.len() + udp_header.len();
+        let marks = BC::update_ingress_marks(*packet_marks, state.options().marks());
         let filter_result = bindings_ctx.socket_ops_filter().on_ingress(
             WireI::VERSION,
             packet_buf,
             header_len,
             device_id,
             id.socket_info(),
-            state.options().marks(),
+            &marks,
         );
 
         match filter_result {
@@ -1719,6 +1716,7 @@ fn try_dual_stack_deliver<
     socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
     device_id: &CC::DeviceId,
     meta: &UdpPacketMeta<I>,
+    packet_marks: &Marks,
     require_transparent: bool,
     header_info: &H,
     packet: UdpPacket<&[u8]>,
@@ -1764,6 +1762,7 @@ fn try_dual_stack_deliver<
             &socket,
             device_id,
             meta,
+            packet_marks,
             require_transparent,
             header_info,
             packet,
@@ -1774,6 +1773,7 @@ fn try_dual_stack_deliver<
             &socket,
             device_id,
             meta,
+            packet_marks,
             require_transparent,
             header_info,
             packet,
@@ -2033,12 +2033,6 @@ pub enum SendToError {
     /// but the socket is dual stack enabled and bound to a mapped address.
     #[error("the remote ip was unexpectedly not an ipv4-mapped-ipv6 address")]
     RemoteUnexpectedlyNonMapped,
-    /// The socket's send buffer is full.
-    #[error("send buffer full")]
-    SendBufferFull,
-    /// Invalid message length.
-    #[error("invalid message length")]
-    InvalidLength,
 }
 
 /// The UDP socket API.
@@ -2149,18 +2143,16 @@ where
     pub fn create(&mut self) -> UdpApiSocketId<I, C>
     where
         <C::BindingsContext as UdpBindingsTypes>::ExternalData<I>: Default,
-        <C::BindingsContext as UdpBindingsTypes>::SocketWritableListener: Default,
     {
-        self.create_with(Default::default(), Default::default())
+        self.create_with(Default::default())
     }
 
     /// Creates a new unbound UDP socket with provided external data.
     pub fn create_with(
         &mut self,
         external_data: <C::BindingsContext as UdpBindingsTypes>::ExternalData<I>,
-        writable_listener: <C::BindingsContext as UdpBindingsTypes>::SocketWritableListener,
     ) -> UdpApiSocketId<I, C> {
-        self.datagram().create(external_data, writable_listener)
+        self.datagram().create(external_data)
     }
 
     /// Connect a UDP socket
@@ -2686,22 +2678,6 @@ where
         })
     }
 
-    /// Sets the send buffer maximum size to `size`.
-    pub fn set_send_buffer(&mut self, id: &UdpApiSocketId<I, C>, size: usize) {
-        self.datagram().set_send_buffer(id, size)
-    }
-
-    /// Returns the current maximum send buffer size.
-    pub fn send_buffer(&mut self, id: &UdpApiSocketId<I, C>) -> usize {
-        self.datagram().send_buffer(id)
-    }
-
-    /// Returns the currently available send buffer space on the socket.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn send_buffer_available(&mut self, id: &UdpApiSocketId<I, C>) -> usize {
-        self.datagram().send_buffer_available(id)
-    }
-
     /// Disconnects a connected UDP socket.
     ///
     /// `disconnect` removes an existing connected socket and replaces it with a
@@ -2805,8 +2781,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the socket is not connected or the packet cannot be
-    /// sent. On error, the original `body` is returned unmodified so that it
-    /// can be reused by the caller.
+    /// sent.
     pub fn send<B: BufferMut>(
         &mut self,
         id: &UdpApiSocketId<I, C>,
@@ -2819,8 +2794,6 @@ where
             match err {
                 DatagramSendError::NotConnected => Either::Right(ExpectedConnError),
                 DatagramSendError::NotWriteable => Either::Left(SendError::NotWriteable),
-                DatagramSendError::SendBufferFull => Either::Left(SendError::SendBufferFull),
-                DatagramSendError::InvalidLength => Either::Left(SendError::InvalidLength),
                 DatagramSendError::IpSock(err) => Either::Left(SendError::IpSock(err)),
                 DatagramSendError::SerializeError(err) => match err {
                     UdpSerializeError::RemotePortUnset => Either::Left(SendError::RemotePortUnset),
@@ -2867,8 +2840,6 @@ where
                     UdpSerializeError::RemotePortUnset => SendToError::RemotePortUnset,
                 },
                 datagram::SendToError::NotWriteable => SendToError::NotWriteable,
-                datagram::SendToError::SendBufferFull => SendToError::SendBufferFull,
-                datagram::SendToError::InvalidLength => SendToError::InvalidLength,
                 datagram::SendToError::Zone(e) => SendToError::Zone(e),
                 datagram::SendToError::CreateAndSend(e) => match e {
                     IpSockCreateAndSendError::Send(e) => SendToError::Send(e),
@@ -2926,12 +2897,6 @@ pub enum SendError {
     /// [`UdpRemotePort::Unset`] for the rationale.
     #[error("remote port unset")]
     RemotePortUnset,
-    /// The socket's send buffer is full.
-    #[error("send buffer is full")]
-    SendBufferFull,
-    /// Invalid message length.
-    #[error("invalid message length")]
-    InvalidLength,
 }
 
 impl<I: IpExt, BC: UdpBindingsContext<I, CC::DeviceId>, CC: StateContext<I, BC>>
@@ -3131,8 +3096,8 @@ pub(crate) mod testutils {
 
     use net_types::ip::{IpAddr, Ipv4, Ipv4Addr, Ipv4SourceAddr, Ipv6, Ipv6Addr, Ipv6SourceAddr};
     use netstack3_base::testutil::{
-        FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeSendToken, FakeSocketWritableListener,
-        FakeStrongDeviceId, FakeWeakDeviceId,
+        FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeSendToken, FakeStrongDeviceId,
+        FakeWeakDeviceId,
     };
     use netstack3_base::{CtxPair, ResourceCounterContext, UninstantiableWrapper};
     use netstack3_hashmap::HashMap;
@@ -3363,7 +3328,6 @@ pub(crate) mod testutils {
 
     impl<D: StrongDeviceIdentifier> UdpBindingsTypes for FakeUdpBindingsCtx<D> {
         type ExternalData<I: Ip> = ();
-        type SocketWritableListener = FakeSocketWritableListener;
         type SendToken = FakeSendToken;
     }
 
@@ -5449,8 +5413,7 @@ mod tests {
             receive_packet_on::<I>(core_ctx, bindings_ctx, MultipleDevicesId::B, early_demux_mode),
             Err(I::IcmpError::port_unreachable())
         );
-        let received = &bindings_ctx.state.socket_data::<I>();
-        assert_eq!(received, &HashMap::new());
+        assert_eq!(bindings_ctx.state.socket_data::<I>(), HashMap::new());
 
         // When unbound, the socket can receive packets on the other device.
         api.set_device(&socket, None).expect("clearing bound device failed");
@@ -5495,7 +5458,7 @@ mod tests {
     #[ip_test(I)]
     fn test_bind_conn_socket_device_fails<I: TestIpExt>() {
         set_logger_for_test();
-        let device_configs = HashMap::from(
+        let device_configs = HashMap::<_, _>::from(
             [(MultipleDevicesId::A, 1), (MultipleDevicesId::B, 2)].map(|(device, i)| {
                 (
                     device,
@@ -5849,6 +5812,41 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[ip_test(I)]
+    fn select_receiver_load_balances_deterministically<I: TestIpExt>() {
+        const NUM_SOCKETS: usize = 4;
+        const NUM_FLOWS: u16 = 100;
+
+        let state = AddrState::Shared {
+            priority: Vec::new(),
+            load_balanced: (0..NUM_SOCKETS)
+                .map(|id| LoadBalancedEntry {
+                    id,
+                    sharing_domain: SharingDomain::new(1),
+                    reuse_addr: false,
+                })
+                .collect(),
+        };
+        let selector = |src_port| SocketSelectorParams::<I, SpecifiedAddr<I::Addr>> {
+            src_ip: remote_ip::<I>().get(),
+            dst_ip: local_ip::<I>(),
+            src_port,
+            dst_port: LOCAL_PORT.get(),
+            _ip: IpVersionMarker::default(),
+        };
+
+        let selected = (0..NUM_FLOWS)
+            .map(|src_port| {
+                let selected = *state.select_receiver(selector(src_port));
+                // All the packets in a flow are delivered to the same socket.
+                assert_eq!(*state.select_receiver(selector(src_port)), selected);
+                selected
+            })
+            .collect::<HashSet<_>>();
+        // Different flows are spread across all the sockets.
+        assert_eq!(selected.len(), NUM_SOCKETS);
     }
 
     #[ip_test(I)]
@@ -7851,8 +7849,7 @@ mod tests {
         let mut primary_ids = Vec::new();
 
         let mut create_socket = || {
-            let primary =
-                datagram::testutil::create_primary_id((), Default::default(), &Default::default());
+            let primary = datagram::testutil::create_primary_id(());
             let id = UdpSocketId(PrimaryRc::clone_strong(&primary));
             primary_ids.push(primary);
             id
@@ -7912,8 +7909,7 @@ mod tests {
         let mut primary_ids = Vec::new();
 
         let mut create_socket = || {
-            let primary =
-                datagram::testutil::create_primary_id((), Default::default(), &Default::default());
+            let primary = datagram::testutil::create_primary_id(());
             let id = UdpSocketId(PrimaryRc::clone_strong(&primary));
             primary_ids.push(primary);
             id
@@ -7986,7 +7982,6 @@ mod tests {
             C::BindingsContext:
                 UdpBindingsContext<I, <C::CoreContext as DeviceIdContext<AnyDevice>>::DeviceId>,
             <C::BindingsContext as UdpBindingsTypes>::ExternalData<I>: Default,
-            <C::BindingsContext as UdpBindingsTypes>::SocketWritableListener: Default,
             <C::CoreContext as DeviceIdContext<AnyDevice>>::DeviceId:
                 netstack3_base::InterfaceProperties<
                         <C::BindingsContext as MatcherBindingsTypes>::DeviceClass,

@@ -41,6 +41,7 @@
 #include "fwil_types.h"
 #include "inspect/device_inspect.h"
 #include "linuxisms.h"
+#include "locks.h"
 #include "proto.h"
 #include "src/devices/lib/broadcom/commands.h"
 #include "workqueue.h"
@@ -250,6 +251,7 @@ zx_status_t brcmf_start_xmit(struct brcmf_pub* drvr,
                              cpp20::span<wlan::drivers::components::Frame> frames) {
   /* Can the device send data? */
   if (drvr->bus_if->state != BRCMF_BUS_UP) {
+    ScopedSharedReadLock lock(drvr->if_mutex);
     BRCMF_ERR("xmit rejected state=%d", drvr->bus_if->state);
     for (auto& frame : frames) {
       brcmf_if* ifp = brcmf_get_ifp(drvr, frame.PortId());
@@ -269,6 +271,7 @@ zx_status_t brcmf_start_xmit(struct brcmf_pub* drvr,
   int frames_per_port[fuchsia_hardware_network::kMaxPorts] = {0};
   uint8_t highest_port = 0;
   {
+    ScopedSharedReadLock lock(drvr->if_mutex);
     for (size_t i = 0; i < frames.size(); ++i) {
       auto& frame = frames[i];
       if (!brcmf_get_ifp(drvr, frame.PortId())) [[unlikely]] {
@@ -313,6 +316,7 @@ zx_status_t brcmf_start_xmit(struct brcmf_pub* drvr,
   {
     zx_status_t status = brcmf_tx_queue_frames(drvr, frames);
     if (status == ZX_OK) {
+      ScopedSharedReadLock lock(drvr->if_mutex);
       for (uint8_t port = 0; port <= highest_port; ++port) {
         brcmf_if* ifp = brcmf_get_ifp(drvr, port);
         if (!ifp) {
@@ -364,6 +368,8 @@ static zx_status_t brcmf_rx_hdrpull(struct brcmf_pub* drvr, wlan::drivers::compo
 }
 
 void brcmf_rx_frame(brcmf_pub* drvr, wlan::drivers::components::Frame&& frame, bool handle_event) {
+  ScopedSharedReadLock lock(drvr->if_mutex);
+
   struct brcmf_if* ifp = nullptr;
   if (frame.Size() > 0 && brcmf_rx_hdrpull(drvr, frame, &ifp) != ZX_OK) {
     BRCMF_DBG(TEMP, "hdrpull failed");
@@ -396,6 +402,8 @@ void brcmf_rx_frames(brcmf_pub* drvr, wlan::drivers::components::FrameContainer&
     return;
   }
 
+  ScopedSharedReadLock lock(drvr->if_mutex);
+
   struct brcmf_if* ifp = nullptr;
   for (auto& frame : frames) {
     if (frame.Size() == 0) {
@@ -424,14 +432,19 @@ void brcmf_rx_frames(brcmf_pub* drvr, wlan::drivers::components::FrameContainer&
 }
 
 void brcmf_rx_event(brcmf_pub* drvr, wlan::drivers::components::Frame&& frame) {
-  struct brcmf_if* ifp = nullptr;
-  if (brcmf_rx_hdrpull(drvr, frame, &ifp) != ZX_OK) {
-    BRCMF_ERR("Failed to pull event header");
-    return;
+  {
+    ScopedSharedReadLock lock(drvr->if_mutex);
+
+    struct brcmf_if* ifp = nullptr;
+    if (brcmf_rx_hdrpull(drvr, frame, &ifp) != ZX_OK) {
+      BRCMF_ERR("Failed to pull event header");
+      return;
+    }
+    ZX_ASSERT_MSG(ifp->drvr == drvr, "ifp->drvr and drvr pointer mismatch");
   }
 
   auto event = reinterpret_cast<brcmf_event*>(frame.Data());
-  brcmf_fweh_process_event(ifp->drvr, event, frame.Size());
+  brcmf_fweh_process_event(drvr, event, frame.Size());
 }
 
 void brcmf_txfinalize(struct brcmf_if* ifp, const struct ethhdr* eh, bool success) {
@@ -533,6 +546,12 @@ void brcmf_net_setcarrier(struct brcmf_if* ifp, bool on) {
 
 zx_status_t brcmf_add_if(struct brcmf_pub* drvr, int32_t bsscfgidx, int32_t ifidx, const char* name,
                          uint8_t* mac_addr, struct brcmf_if** if_out) {
+  ScopedSharedWriteLock lock(drvr->if_mutex);
+  return brcmf_add_if_locked(drvr, bsscfgidx, ifidx, name, mac_addr, if_out);
+}
+
+zx_status_t brcmf_add_if_locked(struct brcmf_pub* drvr, int32_t bsscfgidx, int32_t ifidx,
+                                const char* name, uint8_t* mac_addr, struct brcmf_if** if_out) {
   struct brcmf_if* ifp;
   struct net_device* ndev;
 
@@ -636,12 +655,22 @@ static void brcmf_del_if(struct brcmf_pub* drvr, int32_t bsscfgidx, bool rtnl_lo
 }
 
 void brcmf_remove_interface(struct brcmf_if* ifp, bool rtnl_locked) {
+  if (!ifp) {
+    return;
+  }
+
+  ScopedSharedWriteLock lock(ifp->drvr->if_mutex);
+  brcmf_remove_interface_locked(ifp->drvr, ifp, rtnl_locked);
+}
+
+void brcmf_remove_interface_locked(struct brcmf_pub* drvr, struct brcmf_if* ifp, bool rtnl_locked) {
   if (!ifp || WARN_ON(ifp->drvr->iflist[ifp->bsscfgidx] != ifp)) {
     return;
   }
+  ZX_ASSERT_MSG(drvr == ifp->drvr, "ifp->drvr and drvr pointer mismatch");
   BRCMF_DBG(TRACE, "Enter, bsscfgidx=%d, ifidx=%d", ifp->bsscfgidx, ifp->ifidx);
-  brcmf_proto_del_iface(ifp->drvr, ifp->ifidx);
-  brcmf_del_if(ifp->drvr, ifp->bsscfgidx, rtnl_locked);
+  brcmf_proto_del_iface(drvr, ifp->ifidx);
+  brcmf_del_if(drvr, ifp->bsscfgidx, rtnl_locked);
 }
 
 void brcmf_recovery_worker(WorkItem* work) {

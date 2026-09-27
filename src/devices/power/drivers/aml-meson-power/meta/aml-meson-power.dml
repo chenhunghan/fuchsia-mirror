@@ -1,0 +1,103 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "aml-meson-power",
+    program: {
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        service_connect_validation: "true",
+    },
+    capabilities: [
+        { service: "fuchsia.hardware.power.DomainMetadata" },
+        { service: "fuchsia.driver.compat.Service" },
+        {
+            driver_config: "fuchsia.hardware.power.DomainMetadata",
+            defs: {
+                Domain: {
+                    type: "object",
+                    properties: {
+                        id: { type: "uint32" },
+                        name: {
+                            type: "string",
+                            max_size: 64,
+                        },
+                        global_id: { type: "uint32" },
+                    },
+                },
+            },
+            properties: {
+                domains: {
+                    type: "vector",
+                    element: { ref: "#/Domain" },
+                    max_count: "MAX",
+                },
+            },
+        },
+    ],
+    use: [
+        { service: "fuchsia.driver.compat.Service" },
+        {
+            name: "pdev",
+            service: "fuchsia.hardware.platform.device.Service",
+            primary: true,
+            bind: {
+                one_of: [
+                    { compat: "amlogic,power" },
+                    {
+                        did: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.POWER",
+                        vid: "fuchsia.google.platform.BIND_PLATFORM_DEV_VID.GOOGLE",
+                        pid: "fuchsia.google.platform.BIND_PLATFORM_DEV_PID.ASTRO",
+                    },
+                    {
+                        did: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.POWER",
+                        vid: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_VID.AMLOGIC",
+                        pid: [
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.A311D",
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.A5",
+                        ],
+                    },
+                ],
+            },
+        },
+        {
+            name: "pwm-big-cluster",
+            service: "fuchsia.hardware.pwm.Service",
+            availability: "optional",
+            bind: {
+                one_of: [
+                    { match_name: true },
+                    {
+                        rules: { "fuchsia.amlogic.platform.PWM_ID": "fuchsia.amlogic.platform.PWM_ID.AO_D" },
+                    },
+                ],
+            },
+        },
+        {
+            name: "vreg-pwm-little",
+            service: "fuchsia.hardware.vreg.Service",
+            availability: "optional",
+            bind: { match_name: true },
+        },
+        {
+            name: "vreg-pwm-big",
+            service: "fuchsia.hardware.vreg.Service",
+            availability: "optional",
+            bind: { match_name: true },
+        },
+        {
+            name: "pin-control",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            availability: "optional",
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.power.DomainMetadata",
+            from: "self",
+        },
+        {
+            service: "fuchsia.driver.compat.Service",
+            from: "self",
+        },
+    ],
+}

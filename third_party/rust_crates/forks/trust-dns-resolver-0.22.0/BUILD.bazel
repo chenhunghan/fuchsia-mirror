@@ -57,6 +57,9 @@ rust_library(
     ],
     crate_root = "src/lib.rs",
     edition = "2018",
+    rustc_env = {
+        "CARGO_PKG_VERSION": "\"0.22.0\"",
+    },
     rustc_flags = [
         "--cap-lints=allow",
     ],
@@ -78,7 +81,7 @@ rust_library(
     deps = [
         "//third_party/rust_crates/forks/trust-dns-proto-0.22.0:trust_dns_proto",
         "//third_party/rust_crates/vendor/cfg-if-1.0.4:cfg_if",
-        "//third_party/rust_crates/vendor/futures-util-0.3.31:futures_util",
+        "//third_party/rust_crates/vendor/futures-util-0.3.34:futures_util",
         "//third_party/rust_crates/vendor/lazy_static-1.5.0:lazy_static",
         "//third_party/rust_crates/vendor/lru-cache-0.1.2:lru_cache",
         "//third_party/rust_crates/vendor/parking_lot-0.12.5:parking_lot",

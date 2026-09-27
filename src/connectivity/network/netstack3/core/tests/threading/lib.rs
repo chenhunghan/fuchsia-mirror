@@ -261,6 +261,7 @@ fn neighbor_resolution_and_send_queued_packets_atomic<I: TestIpExt>() {
                 RecvEthernetFrameMeta {
                     device_id,
                     parsing_context: NetworkParsingContext::default(),
+                    gso_info: None,
                 },
                 I::make_neighbor_confirmation(),
             );

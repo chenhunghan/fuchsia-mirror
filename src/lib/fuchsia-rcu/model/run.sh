@@ -12,7 +12,7 @@ g++ -std=c++11 -I"cdschecker/include" -L"cdschecker" -Wl,-rpath,"cdschecker" "rc
 if [ $? -eq 0 ]; then
     echo "Running rcu_test (with 120s timeout)..."
     if [ $# -eq 0 ]; then
-        timeout 120s "./rcu_test" -f 20
+        timeout 120s "./rcu_test" -m 2 -y -b 70
     else
         timeout 120s "./rcu_test" "$@"
     fi

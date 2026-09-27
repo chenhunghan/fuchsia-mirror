@@ -201,9 +201,12 @@ TEST_F(InspectDataBudgetTest, TestInspectBudget_MaxEntries) {
   // zip_size = min(floor(budget * 0.2), 3MB) + 512KB
   for (int i = 0; i < 12; i++) {
     const size_t budget = GetSizeInBytes().value();
-    const float compression_ratio = 0.2;
+    const double compression_ratio = 0.2;
     const size_t zip_size =
-        std::min<size_t>(std::floor(budget * compression_ratio), 3 * kMegabytes) + 512 * kKilobytes;
+        std::min<size_t>(
+            static_cast<size_t>(std::floor(static_cast<double>(budget) * compression_ratio)),
+            3 * kMegabytes) +
+        512 * kKilobytes;
     CalcBudget(zip_size);
   }
 

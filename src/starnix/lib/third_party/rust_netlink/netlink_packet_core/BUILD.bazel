@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "netlink_packet_core",
+    srcs = [
+        "src/buffer.rs",
+        "src/constants.rs",
+        "src/done.rs",
+        "src/error.rs",
+        "src/header.rs",
+        "src/lib.rs",
+        "src/message.rs",
+        "src/payload.rs",
+        "src/traits.rs",
+    ],
+    crate_name = "netlink_packet_core",
+    edition = "2024",
+    with_unit_tests = True,
+    deps = [
+        "//src/starnix/lib/third_party/rust_netlink/netlink_packet_utils",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:byteorder",
+    ],
+)

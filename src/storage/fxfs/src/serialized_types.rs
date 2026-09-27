@@ -76,5 +76,5 @@ mod tests;
 mod types;
 pub use types::{
     AES_JOURNAL_ENCRYPTION_VERSION, EARLIEST_SUPPORTED_VERSION, LATEST_VERSION,
-    get_type_fingerprints,
+    OLD_KEY_SERIALIZATION_VERSION, get_type_fingerprints,
 };

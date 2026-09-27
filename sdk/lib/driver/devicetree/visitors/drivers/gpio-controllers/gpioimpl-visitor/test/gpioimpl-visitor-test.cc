@@ -136,6 +136,7 @@ TEST(GpioImplVisitorTest, TestGpiosProperty) {
 
   const auto& dev_pin_states = *controller_metadata->device_pin_states();
   EXPECT_EQ(dev_pin_states[0].name(), "audio-ffffc000");
+  EXPECT_EQ(dev_pin_states[0].id(), 2u);
   ASSERT_EQ(dev_pin_states[0].states().size(), 2lu);
 
   EXPECT_EQ(dev_pin_states[0].states()[0].name(), "default");
@@ -255,7 +256,7 @@ TEST(GpioImplVisitorTest, TestGpiosProperty) {
       (*mgr_request_audio.parents2())[3].properties(), false));
   EXPECT_TRUE(fdf_devicetree::testing::CheckHasBindRules(
       {{fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE, "fuchsia.hardware.pin.PinStatesService"),
-        fdf::MakeAcceptBindRule(bind_fuchsia::ID, gpioA_id),
+        fdf::MakeAcceptBindRule(bind_fuchsia::ID, 2u),
         fdf::MakeAcceptBindRule(bind_fuchsia::NAME, std::string("audio-ffffc000"))}},
       (*mgr_request_audio.parents2())[3].bind_rules(), false));
 

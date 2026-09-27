@@ -1,0 +1,45 @@
+# Test that allocating multiple releasable resources (e.g., via malloc), using them,
+# and releasing all of them is accepted by the verifier and runs successfully.
+
+-- asm
+# Allocate first releasable memory buffer using malloc (helper 103).
+mov %r1, 8
+call 103
+jne %r0, 0, +2
+mov %r0, 1
+exit
+mov %r6, %r0
+
+# Allocate second releasable memory buffer using malloc (helper 103).
+mov %r1, 8
+call 103
+jne %r0, 0, +4
+# If second allocation fails, free the first buffer before exiting.
+mov %r1, %r6
+call 104
+mov %r0, 1
+exit
+mov %r7, %r0
+
+# Store values in both allocated buffers.
+mov %r8, 10
+stxdw [%r6], %r8
+mov %r8, 32
+stxdw [%r7], %r8
+
+# Read back the values.
+ldxdw %r8, [%r6]
+ldxdw %r9, [%r7]
+
+# Free both buffers using free (helper 104).
+mov %r1, %r6
+call 104
+mov %r1, %r7
+call 104
+
+# Return sum of the two values (10 + 32 = 42).
+mov %r0, %r8
+add %r0, %r9
+exit
+-- result
+42

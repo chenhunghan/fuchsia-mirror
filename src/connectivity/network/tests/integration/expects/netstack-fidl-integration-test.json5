@@ -12,7 +12,7 @@
         {
             type: "expect_failure_with_err_logs",
             matchers: [
-                "log_packets_ns3",
+                "log_packets",
             ],
         },
     ],

@@ -12,6 +12,7 @@
 #include <lib/zx/bti.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <variant>
 
 #include <third_party/android/platform/external/aac/libAACenc/include/aacenc_lib.h>
@@ -37,7 +38,7 @@ class CodecAdapterAacEncoder : public CodecAdapter {
 
   void CoreCodecQueueInputFormatDetails(
       const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override;
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
 
   void CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buffer) override;
@@ -138,6 +139,8 @@ class CodecAdapterAacEncoder : public CodecAdapter {
 
   // Should only be changed atomically.
   bool stream_active_ FXL_GUARDED_BY(lock_) = false;
+  bool output_reconfig_pending_ FXL_GUARDED_BY(lock_) = false;
+  std::condition_variable reconfig_cond_;
   std::optional<FormatConfiguration> format_configuration_ FXL_GUARDED_BY(lock_);
 
   // Buffers the user is in the process of adding.

@@ -160,6 +160,9 @@ mod tests {
         async fn perform_recovery(&mut self, _summary: RecoverySummary) {
             unimplemented!();
         }
+
+        async fn on_before_suspend(&mut self) {}
+        async fn on_after_resume(&mut self) {}
     }
 
     #[fuchsia::test]

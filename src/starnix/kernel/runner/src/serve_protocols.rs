@@ -22,7 +22,6 @@ use futures::{
     select,
 };
 use starnix_core::execution::{create_init_child_process, execute_task_with_prerun_result};
-use starnix_core::fs::devpts::create_main_and_replica;
 use starnix_core::fs::fuchsia::create_fuchsia_pipe;
 use starnix_core::task::dynamic_thread_spawner::SpawnRequestBuilder;
 use starnix_core::task::{CurrentTask, ExitStatus, Kernel, ProcessEntryRef};
@@ -31,6 +30,7 @@ use starnix_core::vfs::file_server::serve_file_at;
 use starnix_core::vfs::socket::VsockSocket;
 use starnix_core::vfs::{FdFlags, FileHandle};
 use starnix_logging::{log_error, log_warn};
+use starnix_modules_devpts::create_main_and_replica;
 use starnix_modules_framebuffer::Framebuffer;
 use starnix_task_command::TaskCommand;
 use starnix_uapi::auth::Credentials;

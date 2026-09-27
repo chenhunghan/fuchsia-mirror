@@ -20,7 +20,7 @@ ExponentialBackoff::ExponentialBackoff(zx::duration initial_delay, uint32_t retr
       retry_factor_(retry_factor),
       max_delay_(max_delay),
       max_delay_divided_by_factor_(max_delay_ / retry_factor_),
-      rng_(seed_generator()) {
+      rng_(static_cast<std::default_random_engine::result_type>(seed_generator())) {
   ZX_DEBUG_ASSERT(zx::duration() <= initial_delay_ && initial_delay_ <= max_delay_);
   ZX_DEBUG_ASSERT(0 < retry_factor_);
   ZX_DEBUG_ASSERT(zx::duration() <= max_delay_);

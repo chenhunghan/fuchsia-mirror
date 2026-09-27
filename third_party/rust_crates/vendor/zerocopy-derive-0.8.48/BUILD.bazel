@@ -57,6 +57,7 @@ rust_proc_macro(
     edition = "2021",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=zerocopy_derive_union_into_bytes",
     ],
     tags = [
         "cargo-bazel",
@@ -74,7 +75,7 @@ rust_proc_macro(
     }),
     version = "0.8.48",
     deps = [
-        "//third_party/rust_crates/vendor/proc-macro2-1.0.106:proc_macro2",
+        "//third_party/rust_crates/vendor/proc-macro2-1.0.107:proc_macro2",
         "//third_party/rust_crates/vendor/quote-1.0.47:quote",
         "//third_party/rust_crates/vendor/syn-2.0.119:syn",
     ],

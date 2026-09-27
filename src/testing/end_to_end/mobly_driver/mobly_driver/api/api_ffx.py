@@ -138,10 +138,12 @@ class FfxClient:
           isolate_dir: If provided, FFX isolate dir to run command in.
 
         Returns:
-          An optional string.
+          An optional string. None if the target reports no serial number.
 
         Raises:
-          CommandException if FFX command fails.
+          CommandException if FFX command fails. Note that ffx exits with a
+          non-zero status if `target_name` cannot be resolved, so an absent
+          target raises rather than returning None.
         """
         cmd = [self._ffx_path]
 
@@ -157,13 +159,16 @@ class FfxClient:
                 f"ssh.identities-only={str(self._identities_only).lower()}",
             ]
 
+        # `target_name` must be positional. The global `-t` flag only selects
+        # ffx's default target; it does not filter `target list` output, so
+        # with more than one device attached `-t` yields every device's
+        # serial, newline-joined.
         cmd += [
-            "-t",
-            target_name,
             "target",
             "list",
             "--format",
             "serials",
+            target_name,
         ]
         try:
             output = subprocess.check_output(cmd, timeout=15).decode().strip()

@@ -11,7 +11,7 @@ bt-gatt = { path = "../bt-gatt" }
 bt-common = { path = "../bt-common" }
 
 ### Others
-futures = "=0.3.31"
+futures = "=0.3.34"
 parking_lot = "0.12.5"
 thiserror = "2.0.18"
 

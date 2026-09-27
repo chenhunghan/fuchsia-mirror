@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -29,7 +30,7 @@ struct SubToolLocation {
     source: FfxToolSource,
     name: String,
     tool_path: PathBuf,
-    metadata_path: PathBuf,
+    metadata_path: Option<PathBuf>,
 }
 
 /// A subtool discovered in a user's workspace or sdk
@@ -108,8 +109,10 @@ impl ExternalSubToolSuite {
     /// This is used both by the main implementation of [`ExternalSubToolSuite::from_env`] and
     /// in tests to redirect to different subtool paths.
     fn with_tools_from(context: EnvironmentContext, subtool_paths: &[impl AsRef<Path>]) -> Self {
-        let workspace_tools =
-            find_workspace_tools(subtool_paths).map(|tool| (tool.name.to_owned(), tool)).collect();
+        let mut workspace_tools = HashMap::new();
+        for tool in find_workspace_tools(subtool_paths) {
+            workspace_tools.entry(tool.name.to_owned()).or_insert(tool);
+        }
         Self { context, workspace_tools }
     }
 
@@ -177,10 +180,9 @@ impl ToolSuite for ExternalSubToolSuite {
         let subtool_manifest: PathBuf =
             env.query(FFX_SUBTOOL_MANIFEST_CONFIG).build().get_file(env).unwrap_or_default();
 
-        // If the subtool manifest is configured, it use it to load the information for
-        // external subtools. Otherwise scan the directories. The manifest file is used when
-        // ffx is being run hermetically, and should not scan and read directories.
-        if subtool_manifest.exists() {
+        // If the subtool manifest is configured and we are running hermetically,
+        // use it exclusively to load external subtools without scanning directories.
+        if subtool_manifest.exists() && env.has_no_environment() {
             log::info!("Initializing ExternalSubToolSuite from {subtool_manifest:?} ");
             Ok(Self::with_tools_manifest(env.clone(), subtool_manifest))
         } else {
@@ -191,7 +193,19 @@ impl ToolSuite for ExternalSubToolSuite {
                 .get_file(env)
                 .unwrap_or_else(|_| vec![]);
             log::info!("Initializing ExternalSubToolSuite from {subtool_config:?}");
-            Ok(Self::with_tools_from(env.clone(), &get_subtool_paths(subtool_config)))
+            let mut suite = Self::with_tools_from(env.clone(), &get_subtool_paths(subtool_config));
+            // In non-hermetic environments, tools discovered via `ffx.subtool-search-paths`
+            // intentionally take precedence over `ffx.subtool-manifest` (which defaults to
+            // `$BUILD_DIR/ffx_tools.json` in build-level config). This allows runtime (`-c`)
+            // and user-level search path overrides to shadow build-manifest tools, while still
+            // registering any manifest-defined tools not present in the search paths.
+            if subtool_manifest.exists() {
+                let manifest_suite = Self::with_tools_manifest(env.clone(), subtool_manifest);
+                for (name, tool) in manifest_suite.workspace_tools {
+                    suite.workspace_tools.entry(name).or_insert(tool);
+                }
+            }
+            Ok(suite)
         }
     }
 
@@ -326,9 +340,13 @@ where
         .flatten()
 }
 
+fn is_executable(path: &Path) -> bool {
+    path.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
 impl SubToolLocation {
     /// Evaluate the given path for if it looks like a subtool based on filename and the
-    /// presence of a metadata file.
+    /// presence of a metadata file or executable binary.
     fn from_path(
         source: FfxToolSource,
         tool_path: &Path,
@@ -337,26 +355,48 @@ impl SubToolLocation {
         let file_name = tool_path.file_name()?.to_str()?;
         if let Some(suffix) = file_name.strip_prefix("ffx-") {
             let name = suffix.to_lowercase();
-            // require the presence of a metadata file
+            // Prefer the presence of a metadata file, or fall back to an executable binary
             if metadata_path.exists() {
                 let tool_path = tool_path.to_owned();
-                let metadata_path = metadata_path.to_owned();
+                let metadata_path = Some(metadata_path.to_owned());
                 return Some(SubToolLocation { source, name, tool_path, metadata_path });
+            } else if tool_path.extension().is_none() && is_executable(tool_path) {
+                let tool_path = tool_path.to_owned();
+                return Some(SubToolLocation { source, name, tool_path, metadata_path: None });
             }
         }
         None
     }
 
-    /// Loads the details of the metadata from the file to validate that it is a runnable
-    /// command with the current fho version and obtaining extra metadata from the metadata
-    /// file.
+    /// Loads the details of the metadata from the file (or by invoking `<tool> metadata`)
+    /// to validate that it is a runnable command with the current fho version and obtaining
+    /// extra metadata.
     ///
-    /// Doing this in two steps avoids reading files unnecessarily until we want to either
-    /// run one or list it.
+    /// Doing this in two steps avoids reading files or spawning processes unnecessarily
+    /// until we want to either run one or list it.
     fn validate_tool(&self) -> Option<FfxToolInfo> {
         // bail early if for whatever reason we can't read the metadata.
-        let metadata: FhoToolMetadata =
-            File::open(&self.metadata_path).ok().and_then(|f| serde_json::from_reader(f).ok())?;
+        let metadata: FhoToolMetadata = if let Some(metadata_path) = &self.metadata_path {
+            File::open(metadata_path).ok().and_then(|f| serde_json::from_reader(f).ok())?
+        } else {
+            // NOTE: Spawning `<tool> metadata` is a fallback for standalone prebuilt subtools
+            // (such as `gdoctor`) distributed without a sidecar `.json` metadata file.
+            // Standard subtools should always provide a `.json` metadata file because
+            // `command_list()` (e.g. `ffx help`) validates tools sequentially, and spawning
+            // many subprocesses would significantly degrade performance. Additionally,
+            // `ffx.subtool-search-paths` should only point to trusted tool directories so
+            // arbitrary `ffx-*` executables are not invoked unexpectedly.
+            let output = std::process::Command::new(&self.tool_path)
+                .arg("metadata")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            serde_json::from_slice(&output.stdout).ok()?
+        };
         // also if it requires an fho version we don't support
         metadata.is_supported()?;
         // ignore the tool if the metadata's name is incorrect
@@ -865,5 +905,66 @@ exit 1
             get_subtool_paths(vec![json!(["boom", "zoom"]), json!("loom")]),
             vec![PathBuf::from("boom"), PathBuf::from("zoom"), PathBuf::from("loom")]
         );
+    }
+
+    #[test]
+    fn check_executable_without_metadata_file() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let subtool_path = tempdir.path().join("ffx-exec-only");
+        let metadata = FhoToolMetadata::new("exec-only", "Executable subtool without json file");
+        let metadata_json = serde_json::to_string(&metadata).expect("serialize metadata");
+        {
+            let mut file = File::create(&subtool_path).expect("create subtool script");
+            writeln!(
+                file,
+                "#!/bin/sh\nif [ \"$1\" = \"metadata\" ]; then\n  echo '{metadata_json}'\nfi"
+            )
+            .expect("write script");
+        }
+        let mut perms = fs::metadata(&subtool_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&subtool_path, perms).expect("set permissions");
+
+        let info = FfxToolInfo {
+            source: FfxToolSource::Workspace,
+            name: metadata.name,
+            description: metadata.description,
+            path: Some(subtool_path.clone()),
+        };
+        assert_eq!(
+            check_ffx_tool(FfxToolSource::Workspace, &subtool_path),
+            Some(info),
+            "Executable subtool without .json file should be validated via `metadata` subcommand"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn check_subtool_search_path_precedence() {
+        let test_env = ffx_config::test_init().expect("test init");
+        let dir_high = tempfile::tempdir().expect("dir_high");
+        let dir_low = tempfile::tempdir().expect("dir_low");
+
+        let high_tool = create_mock_subtool(
+            dir_high.path(),
+            "ffx-dup",
+            Valid(FhoToolMetadata::new("dup", "high priority")),
+        );
+        create_mock_subtool(
+            dir_low.path(),
+            "ffx-dup",
+            Valid(FhoToolMetadata::new("dup", "low priority")),
+        );
+
+        let suite = ExternalSubToolSuite::with_tools_from(
+            test_env.context.clone(),
+            &[dir_high.path(), dir_low.path()],
+        );
+        let cmd = FfxCommandLine {
+            command: vec!["ffx".to_owned()],
+            ffx_args: vec![],
+            global: Ffx { subcommand: vec!["dup".to_owned()], ..Default::default() },
+        };
+        let found = suite.find_workspace_tool(&cmd).expect("should find workspace tool");
+        assert_eq!(found.path, high_tool, "Earlier search path should take precedence");
     }
 }

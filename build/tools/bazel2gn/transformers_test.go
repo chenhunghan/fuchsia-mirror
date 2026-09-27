@@ -79,6 +79,7 @@ func TestVisibilityConversion(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//path/to/foo:*",
 		"//path/to/bar:bar",
 	]
@@ -102,6 +103,7 @@ func TestVisibilityConversion(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//path/to/foo:*",
 		"//path/to/baz:baz",
 	]
@@ -122,6 +124,53 @@ func TestVisibilityConversion(t *testing.T) {
 	],  # @bazel2gn:skip
 )`,
 			wantGN: `go_library("test") {
+}`,
+		},
+		{
+			name: "same package is added to restricted visibility",
+			bazel: `rustc_library(
+	name = "test",
+	visibility = [
+		"//path/to/foo:__pkg__",
+		"//path/to/bar:__subpackages__",
+	],
+	with_unit_tests = True,
+)`,
+			wantGN: `rustc_library("test") {
+	visibility = [
+		":*",
+		"//path/to/foo:*",
+		"//path/to/bar/*",
+	]
+	with_unit_tests = true
+}`,
+		},
+		{
+			name: "empty visibility is same package only",
+			bazel: `go_library(
+	name = "test",
+	visibility = [],
+)`,
+			wantGN: `go_library("test") {
+	visibility = [
+		":*",
+	]
+}`,
+		},
+		{
+			name: "same package not duplicated when already covered",
+			bazel: `go_library(
+	name = "test",
+	visibility = [
+		":__subpackages__",
+		"//path/to/foo:__pkg__",
+	],
+)`,
+			wantGN: `go_library("test") {
+	visibility = [
+		"./*",
+		"//path/to/foo:*",
+	]
 }`,
 		},
 		{

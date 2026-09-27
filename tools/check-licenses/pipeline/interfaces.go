@@ -130,7 +130,7 @@ type ClassifiedFile struct {
 	Path          string
 	ProjectRoot   string
 	IsLicenseFile bool
-	HasReadme     bool
+	ReadmePath    string
 	IsFirstParty  bool
 	AnalyzedText  []byte
 

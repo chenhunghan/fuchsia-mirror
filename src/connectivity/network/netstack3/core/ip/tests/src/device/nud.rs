@@ -343,6 +343,7 @@ fn neighbor_confirmation_with_new_link_layer_address_should_update_cache<I: Test
             RecvEthernetFrameMeta {
                 device_id: eth_device_id.clone(),
                 parsing_context: NetworkParsingContext::default(),
+                gso_info: None,
             },
             incoming_neighbor_confirmation::<I>(mac, solicited),
         );
@@ -1249,6 +1250,7 @@ fn nud_ignores_non_unicast_macs_integration<I: TestIpExt + IpExt>(
         RecvEthernetFrameMeta {
             device_id: eth_device_id.clone(),
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         frame,
     );

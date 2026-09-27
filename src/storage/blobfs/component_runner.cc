@@ -20,6 +20,7 @@
 #include <lib/inspect/component/cpp/tree_handler_settings.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/result.h>
+#include <zircon/assert.h>
 #include <zircon/errors.h>
 #include <zircon/types.h>
 
@@ -34,9 +35,7 @@
 #include "src/storage/blobfs/blobfs.h"
 #include "src/storage/blobfs/mount.h"
 #include "src/storage/blobfs/page_loader.h"
-#include "src/storage/blobfs/service/admin.h"
 #include "src/storage/blobfs/service/lifecycle.h"
-#include "src/storage/blobfs/service/ota_health_check.h"
 #include "src/storage/blobfs/service/overwrite_configuration.h"
 #include "src/storage/blobfs/service/startup.h"
 #include "src/storage/lib/trace/trace.h"
@@ -45,6 +44,7 @@
 #include "src/storage/lib/vfs/cpp/paged_vfs.h"
 #include "src/storage/lib/vfs/cpp/pseudo_dir.h"
 #include "src/storage/lib/vfs/cpp/remote_dir.h"
+#include "src/storage/lib/vfs/cpp/service.h"
 #include "src/storage/lib/vfs/cpp/vnode.h"
 
 namespace blobfs {
@@ -58,7 +58,7 @@ ComponentRunner::ComponentRunner(async::Loop& loop, ComponentOptions config)
   FX_LOGS(INFO) << "setting up services";
 
   auto startup_svc = fbl::MakeRefCounted<StartupService>(
-      loop_.dispatcher(), config_,
+      dispatcher(), config_,
       [this](std::unique_ptr<BlockDevice> device, const MountOptions& options) {
         FX_LOGS(INFO) << "configure callback is called";
         zx::result<> status = Configure(std::move(device), options);
@@ -108,6 +108,7 @@ void ComponentRunner::Shutdown(fs::FuchsiaVfs::ShutdownCallback cb) {
       // The threads in the paged vfs' thread pool reference data owned by blobfs. The threads must
       // be stopped before blobfs is destroyed.
       TearDown();
+      ota_health_check_bindings_.RemoveAll();
       // Manually destroy the filesystem. The promise of Shutdown is that no
       // connections are active, and destroying the Runner object
       // should terminate all background workers.
@@ -123,6 +124,16 @@ void ComponentRunner::Shutdown(fs::FuchsiaVfs::ShutdownCallback cb) {
   });
 }
 
+void ComponentRunner::Shutdown(ShutdownCompleter::Sync& completer) {
+  FX_LOGS(INFO) << "fs_admin shutdown received.";
+  Shutdown([completer = completer.ToAsync()](zx_status_t status) mutable {
+    if (status != ZX_OK) {
+      FX_LOGS(ERROR) << "filesystem shutdown failed: " << zx_status_get_string(status);
+    }
+    completer.Reply();
+  });
+}
+
 zx::result<fs::FilesystemInfo> ComponentRunner::GetFilesystemInfo() {
   return blobfs_->GetFilesystemInfo();
 }
@@ -131,7 +142,7 @@ zx::result<> ComponentRunner::ServeRoot(
     fidl::ServerEnd<fuchsia_io::Directory> root,
     fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> lifecycle) {
   LifecycleServer::Create(
-      loop_.dispatcher(),
+      dispatcher(),
       [this](fs::FuchsiaVfs::ShutdownCallback cb) {
         FX_LOGS(INFO) << "Lifecycle stop request received.";
         this->Shutdown(std::move(cb));
@@ -176,7 +187,7 @@ zx::result<> ComponentRunner::Configure(std::unique_ptr<BlockDevice> device,
   // All of our pager threads get the deadline profile for scheduling.
   SetDeadlineProfile(GetPagerThreads());
 
-  auto blobfs_or = Blobfs::Create(loop_.dispatcher(), std::move(device), this, options);
+  auto blobfs_or = Blobfs::Create(dispatcher(), std::move(device), this, options);
   if (blobfs_or.is_error()) {
     FX_LOGS(ERROR) << "configure failed; could not create blobfs: " << blobfs_or.status_string();
     return blobfs_or.take_error();
@@ -207,21 +218,33 @@ zx::result<> ComponentRunner::Configure(std::unique_ptr<BlockDevice> device,
   // load, since snapshots at the receiving end must be consistent. See https://fxbug.dev/42135165
   // for details.
   exposed_inspector_.emplace(inspect::ComponentInspector{
-      loop_.dispatcher(),
+      dispatcher(),
       {.inspector = *blobfs_->GetMetrics()->inspector(),
        .tree_handler_settings = {.snapshot_behavior = inspect::TreeServerSendPreference::Frozen(
                                      inspect::TreeServerSendPreference::Type::DeepCopy)}}});
 
   auto svc_dir = fbl::MakeRefCounted<fs::PseudoDir>();
 
-  svc_dir->AddEntry(fidl::DiscoverableProtocolName<fuchsia_update_verify::ComponentOtaHealthCheck>,
-                    fbl::MakeRefCounted<OtaHealthCheckService>(loop_.dispatcher(), *blobfs_));
-  svc_dir->AddEntry(fidl::DiscoverableProtocolName<fuchsia_fs::Admin>,
-                    fbl::MakeRefCounted<AdminService>(
-                        blobfs_->dispatcher(), [this](fs::FuchsiaVfs::ShutdownCallback cb) {
-                          FX_LOGS(INFO) << "fs_admin shutdown received.";
-                          this->Shutdown(std::move(cb));
-                        }));
+  svc_dir->AddEntry(
+      fidl::DiscoverableProtocolName<fuchsia_update_verify::ComponentOtaHealthCheck>,
+      fbl::MakeRefCounted<fs::Service>(
+          [this](fidl::ServerEnd<fuchsia_update_verify::ComponentOtaHealthCheck> server_end) {
+            if (blobfs_ == nullptr) {
+              server_end.Close(ZX_ERR_UNAVAILABLE);
+              return ZX_OK;
+            }
+            ota_health_check_bindings_.AddBinding(dispatcher(), std::move(server_end), this,
+                                                  fidl::kIgnoreBindingClosure);
+            return ZX_OK;
+          }));
+
+  svc_dir->AddEntry(
+      fidl::DiscoverableProtocolName<fuchsia_fs::Admin>,
+      fbl::MakeRefCounted<fs::Service>([this](fidl::ServerEnd<fuchsia_fs::Admin> server_end) {
+        admin_bindings_.AddBinding(dispatcher(), std::move(server_end), this,
+                                   fidl::kIgnoreBindingClosure);
+        return ZX_OK;
+      }));
 
   svc_dir->AddEntry(fidl::DiscoverableProtocolName<fuchsia_fxfs::BlobReader>,
                     fbl::MakeRefCounted<BlobReader>(*blobfs_));
@@ -229,9 +252,8 @@ zx::result<> ComponentRunner::Configure(std::unique_ptr<BlockDevice> device,
   svc_dir->AddEntry(fidl::DiscoverableProtocolName<fuchsia_fxfs::BlobCreator>,
                     fbl::MakeRefCounted<BlobCreator>(*blobfs_));
 
-  svc_dir->AddEntry(
-      fidl::DiscoverableProtocolName<fuchsia_storage_blobfs::OverwriteConfiguration>,
-      fbl::MakeRefCounted<OverwriteConfigurationService>(loop_.dispatcher(), *blobfs_));
+  svc_dir->AddEntry(fidl::DiscoverableProtocolName<fuchsia_storage_blobfs::OverwriteConfiguration>,
+                    fbl::MakeRefCounted<OverwriteConfigurationService>(dispatcher(), *blobfs_));
 
   status = ServeDirectory(std::move(svc_dir), std::move(svc_server_end_));
   if (status != ZX_OK) {
@@ -240,6 +262,15 @@ zx::result<> ComponentRunner::Configure(std::unique_ptr<BlockDevice> device,
   }
 
   return zx::ok();
+}
+
+void ComponentRunner::GetHealthStatus(GetHealthStatusCompleter::Sync& completer) {
+  ZX_ASSERT(blobfs_);
+  if (blobfs_->VerifyHealth() == ZX_OK) {
+    completer.Reply(fuchsia_update_verify::wire::HealthStatus::kHealthy);
+  } else {
+    completer.Reply(fuchsia_update_verify::wire::HealthStatus::kUnhealthy);
+  }
 }
 
 }  // namespace blobfs

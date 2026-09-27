@@ -4,6 +4,10 @@
 
 """Fuchsia USB End-to-End Test Common Library."""
 
+from .fastboot_utils import (
+    reboot_to_fastboot_mode,
+    recover_to_fuchsia_mode,
+)
 from .sysfs_usb import (
     find_usb_device_node,
     get_usb_device_configuration,
@@ -16,14 +20,18 @@ from .usb_config import (
     parse_usb_config_functions,
     set_usb_config,
 )
+from .usb_power_hub_base_test import UsbPowerHubBaseTest
 
 __all__ = [
+    "UsbPowerHubBaseTest",
     "find_usb_device_node",
     "get_usb_config",
     "get_usb_device_configuration",
     "get_usb_device_speed",
     "get_usb_device_sysfs_path",
     "parse_usb_config_functions",
+    "reboot_to_fastboot_mode",
+    "recover_to_fuchsia_mode",
     "set_usb_config",
     "wait_for_usb_device",
 ]

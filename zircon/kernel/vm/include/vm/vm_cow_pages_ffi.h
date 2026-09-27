@@ -59,6 +59,14 @@ bool cpp_vm_cow_pages_can_evict(const VmCowPages* cow);
 bool cpp_vm_cow_pages_is_discardable(const VmCowPages* cow);
 VmCowPages* cpp_vm_cow_pages_upgrade_from_raw(VmCowPages* cow);
 
+void cpp_priority_changer_construct(ffi::Uninitialized<PriorityChanger>* out, VmCowPages* cow,
+                                    int64_t delta);
+void cpp_priority_changer_destroy(PriorityChanger* pc);
+void cpp_priority_changer_prepare_may_not_already_be_high_priority(PriorityChanger* pc);
+void cpp_priority_changer_prepare_is_already_high_priority_locked(PriorityChanger* pc);
+void cpp_priority_changer_change_high_priority_count_locked(PriorityChanger* pc);
+void* cpp_priority_changer_lock(const PriorityChanger* pc);
+
 __END_CDECLS
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_COW_PAGES_FFI_H_

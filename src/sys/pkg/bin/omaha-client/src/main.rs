@@ -87,7 +87,7 @@ async fn main_inner() -> Result<(), Error> {
     root.record_string("channel_source", format!("{:?}", channel_data.source));
 
     // HTTP
-    let http = http_request::FuchsiaHyperHttpRequest::new();
+    let http = http_request::FuchsiaHttpRequest::new();
 
     let cup_handler: Option<StandardCupv2Handler> =
         platform_config.omaha_public_keys.as_ref().map(StandardCupv2Handler::new);

@@ -21,8 +21,8 @@ package(
 package_info(
     name = "package_info",
     package_name = "zeroize",
-    package_url = "https://github.com/RustCrypto/utils/tree/master/zeroize",
-    package_version = "1.8.1",
+    package_url = "https://github.com/RustCrypto/utils",
+    package_version = "1.9.0",
 )
 
 license(
@@ -57,7 +57,7 @@ rust_library(
         "default",
     ],
     crate_root = "src/lib.rs",
-    edition = "2021",
+    edition = "2024",
     rustc_flags = [
         "--cap-lints=allow",
     ],
@@ -75,5 +75,5 @@ rust_library(
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    version = "1.8.1",
+    version = "1.9.0",
 )

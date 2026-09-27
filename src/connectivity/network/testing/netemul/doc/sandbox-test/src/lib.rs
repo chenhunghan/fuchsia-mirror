@@ -7,7 +7,7 @@
 use fidl_fuchsia_net as fnet;
 use net_declare::{fidl_subnet, std_socket_addr};
 use netemul::RealmUdpSocket as _;
-use netstack_testing_common::realms::{Netstack2, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 
 // NB: typically we prefer to panic in tests rather than returning `Result`;
 // see https://fuchsia.dev/fuchsia-src/contribute/contributing-to-netstack/rust-patterns#prefer_panics.
@@ -22,12 +22,12 @@ async fn test() -> Result<(), anyhow::Error> {
     let client_addr = std_socket_addr!("192.168.0.1:1234");
     let server_addr = std_socket_addr!("192.168.0.2:8080");
 
-    let client = sandbox.create_netstack_realm::<Netstack2, _>("client")?;
+    let client = sandbox.create_netstack_realm::<Netstack3, _>("client")?;
     let client_interface = client.join_network(&network, "client-ep").await?;
     client_interface.add_address_and_subnet_route(CLIENT_SUBNET).await?;
     let client_socket = fuchsia_async::net::UdpSocket::bind_in_realm(&client, client_addr).await?;
 
-    let server = sandbox.create_netstack_realm::<Netstack2, _>("server")?;
+    let server = sandbox.create_netstack_realm::<Netstack3, _>("server")?;
     let server_interface = server.join_network(&network, "server-ep").await?;
     server_interface.add_address_and_subnet_route(SERVER_SUBNET).await?;
     let server_socket = fuchsia_async::net::UdpSocket::bind_in_realm(&server, server_addr).await?;

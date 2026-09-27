@@ -24,9 +24,7 @@ func TestReadStatic(t *testing.T) {
 		Board:            "qemu",
 		Product:          "workstation",
 		NinjaTargets:     []string{"default"},
-		IncludeHostTests: false,
 		TargetArch:       fintpb.Static_X64,
-		IncludeArchives:  false,
 		SkipIfUnaffected: true,
 	}
 

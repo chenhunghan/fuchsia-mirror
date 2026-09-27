@@ -83,8 +83,12 @@ TEST(MailboxVisitorTest, TwoControllers) {
   ASSERT_TRUE(controller_0->channels());
   ASSERT_EQ(controller_0->channels()->size(), 2u);
 
-  EXPECT_TRUE(FindChannel(0x1234, *controller_0));
-  EXPECT_TRUE(FindChannel(0x5678, *controller_0));
+  auto ch1 = FindChannel(0x1234, *controller_0);
+  ASSERT_TRUE(ch1);
+  EXPECT_EQ(ch1->id(), 0x1234u);
+  auto ch2 = FindChannel(0x5678, *controller_0);
+  ASSERT_TRUE(ch2);
+  EXPECT_EQ(ch2->id(), 0x5678u);
 
   // Second controller metadata
   auto pbus_node_1_list = mailbox_tester->GetPbusNodes("mailbox-abce0000");

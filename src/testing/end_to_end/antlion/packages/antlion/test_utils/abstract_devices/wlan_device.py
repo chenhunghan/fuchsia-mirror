@@ -10,10 +10,8 @@ from datetime import timedelta
 from typing import Any
 
 import fuchsia_async_extension
-from antlion.controllers import iperf_client
 from antlion.controllers.ap_lib.hostapd_security import SecurityMode
 from antlion.controllers.fuchsia_device import FuchsiaDevice
-from antlion.controllers.iperf_client import IPerfClientBase
 from antlion.controllers.pdu import PduDevice
 from antlion.utils import PingResult
 from honeydew.affordances.connectivity.netstack.errors import (
@@ -23,6 +21,8 @@ from honeydew.affordances.connectivity.wlan import core as wlan_core
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )
+from iperf import iperf_client
+from iperf.iperf_client import IPerfClientBase
 from mobly.records import TestResultRecord
 
 DEFAULT_ASSOCIATE_TIMEOUT = timedelta(seconds=30)

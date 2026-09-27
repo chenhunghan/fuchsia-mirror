@@ -1254,7 +1254,7 @@ zx_status_t Riscv64ArchVmAspace::Protect(vaddr_t vaddr, size_t count, arch_mmu_f
       paddr_t paddr;
       arch_mmu_flags_t flags;
       if (QueryLocked(vaddr + idx * kPageSize, &paddr, &flags) == ZX_OK &&
-          (flags & ARCH_MMU_FLAG_PERM_EXECUTE)) {
+          !(flags & ARCH_MMU_FLAG_PERM_EXECUTE)) {
         cache_cm.SyncAddr(reinterpret_cast<vaddr_t>(paddr_to_physmap(paddr)), kPageSize);
         pages_synced++;
       }

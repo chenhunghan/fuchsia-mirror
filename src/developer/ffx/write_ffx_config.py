@@ -54,7 +54,10 @@ def main():
         config_data["ffx"] = ffx_data
 
     if "subtool-search-paths" not in ffx_data:
-        ffx_data["subtool-search-paths"] = [f"{args.build_dir}/host-tools"]
+        ffx_data["subtool-search-paths"] = [
+            f"{args.dollar_placeholder}BUILD_DIR/host-tools",
+            f"{args.dollar_placeholder}FUCHSIA_DIR/prebuilt/tools/gdoctor",
+        ]
 
     if "subtool-manifest" not in ffx_data:
         ffx_data["subtool-manifest"] = f"{args.build_dir}/ffx_tools.json"

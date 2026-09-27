@@ -9,13 +9,45 @@
 #include <lib/fit/function.h>
 #include <lib/syslog/cpp/macros.h>
 
+#include <limits>
 #include <optional>
+#include <type_traits>
 
+#include <safemath/safe_math.h>
 #include <src/lib/fxl/macros.h>
 #include <va/va.h>
 #include <va/va_magma.h>
 
 #include "geometry.h"
+
+template <typename T>
+constexpr safemath::CheckedNumeric<T> CheckedRoundUp(T value, T alignment) {
+  static_assert(std::is_integral_v<T>, "T must be an integral type");
+  constexpr auto kInvalid = safemath::CheckAdd(std::numeric_limits<T>::max(), T{1});
+  // Check alignment <= 0 (and negative values for signed types) upfront rather
+  // than relying on the remainder/addition expressions below:
+  // 1. `value % alignment` is UB if `alignment == 0` (or if `value == T_MIN` and
+  //    `alignment == -1` for signed `T`).
+  // 2. For signed `T`, C++ modulo truncates toward zero rather than floor, so
+  //    negative `value` or `alignment` would yield valid-looking but incorrect
+  //    results instead of failing.
+  // 3. Computing `remainder = value % alignment` first avoids false-positive
+  //    overflows when `value > T_MAX - (alignment - 1)` is already aligned or
+  //    when the rounded-up result still fits in `T`.
+  if (alignment <= 0) {
+    return kInvalid;
+  }
+  if constexpr (std::is_signed_v<T>) {
+    if (value < 0) {
+      return kInvalid;
+    }
+  }
+  T remainder = value % alignment;
+  if (remainder == 0) {
+    return safemath::CheckedNumeric<T>(value);
+  }
+  return safemath::CheckAdd(value, static_cast<T>(alignment - remainder));
+}
 
 class VADisplayWrapper {
  public:

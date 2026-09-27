@@ -298,6 +298,8 @@ func (t *Device) Start(ctx context.Context, args []string, pbPath string, isBoot
 			// when USB hubs are busy.
 			if os.Getenv("FUCHSIA_DEVICE_TYPE") == "Sorrel" {
 				bootTimeout = 20 * time.Minute
+			} else if os.Getenv("FUCHSIA_DEVICE_TYPE") == "Iris" {
+				bootTimeout = 20 * time.Minute
 			}
 			bootCtx, cancel := context.WithTimeout(ctx, bootTimeout)
 			defer cancel()
@@ -363,13 +365,27 @@ func (t *Device) flash(ctx context.Context, productBundle, target string, tcpFla
 // placeInFastboot runs the dmc health-check command which attempts to recover
 // the device by placing it in fastboot.
 func (t *Device) placeInFastboot(ctx context.Context) error {
-	// there should be an env var DMC_PATH with the path to dmc
+	dmcPath := os.Getenv("DMC_PATH")
+	if dmcPath == "" {
+		return fmt.Errorf("DMC_PATH environment variable is not set")
+	}
+	runner := subprocess.Runner{}
+	// First reset the cached device state in DMS so health-check does not assume
+	// the target is already healthy without performing physical recovery.
+	resetCmdline := []string{
+		dmcPath,
+		"reset-devices",
+		t.Nodename(),
+	}
+	if err := runner.Run(ctx, resetCmdline, subprocess.RunOptions{Setpgid: true}); err != nil {
+		logger.Warningf(ctx, "dmc reset-devices failed: %s; proceeding to health-check", err)
+	}
+
 	cmdline := []string{
-		os.Getenv("DMC_PATH"),
+		dmcPath,
 		"health-check",
 		t.Nodename(),
 	}
-	runner := subprocess.Runner{}
 	// Run the dmc invocation and wait for the subprocess call to complete.
 	// This usually takes ~20 seconds.
 	return retry.Retry(ctx, retry.WithMaxAttempts(retry.NewConstantBackoff(time.Second), 3), func() error {

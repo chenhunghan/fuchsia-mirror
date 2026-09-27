@@ -7,6 +7,7 @@
 import("//build/config/compiler_config.gni")
 import("//build/cpp/library_headers.gni")
 import("//build/toolchain/toolchain_environment.gni")
+import("//zircon/kernel/kernel_bindgen_crate.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 # These set the ABI contract between C++ and assembly code.
@@ -304,6 +305,28 @@ source_set("syscall") {
   ]
 }
 
+kernel_bindgen_crate("arch-x86-aspace-bindings") {
+  headers = [
+    "include/arch/kernel_aspace.h",
+    "include/arch/x86/mmu.h",
+  ]
+  cpp = true
+  non_rust_deps = [
+    ":headers",
+    "page_tables:headers",
+  ]
+  raw_lines = [ "#![no_std]" ]
+  var_allowlist = [
+    "KERNEL_ASPACE_BASE",
+    "KERNEL_ASPACE_SIZE",
+    "MMU_GUEST_SIZE_SHIFT",
+    "USER_ASPACE_BASE",
+    "USER_ASPACE_SIZE",
+    "USER_RESTRICTED_ASPACE_SIZE",
+  ]
+  notice_year = 2026
+}
+
 kernel_rust_mod("arch-x86-rs") {
   output_name = "arch_x86"
   source_root = "src/mod.rs"
@@ -323,6 +346,7 @@ kernel_rust_mod("arch-x86-rs") {
     "src/x86.rs",
   ]
   deps = [
+    ":arch-x86-aspace-bindings",
     "//sdk/rust/zbi",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",

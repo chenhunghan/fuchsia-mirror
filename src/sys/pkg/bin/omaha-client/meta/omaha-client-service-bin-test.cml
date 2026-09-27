@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 {
     include: [
-        "//src/connectivity/network/meta/isolated-network.shard.cml",
         "inspect/offer.shard.cml",
         "syslog/offer.shard.cml",
     ],
@@ -30,11 +29,6 @@
             storage: "data",
             from: "parent",
             to: "#stash2",
-        },
-        {
-            directory: "root-ssl-certificates",
-            from: "parent",
-            to: "#test_driver",
         },
         {
             directory: "pkg",
@@ -81,21 +75,8 @@
             to: "#test_driver",
         },
         {
-            protocol: [
-                "fuchsia.net.routes.State",
-                "fuchsia.posix.socket.Provider",
-            ],
-            from: "#netstack",
-            to: "#test_driver",
-        },
-        {
             protocol: [ "fuchsia.stash.Store2" ],
             from: "#stash2",
-            to: "#test_driver",
-        },
-        {
-            protocol: [ "fuchsia.net.name.Lookup" ],
-            from: "#dns_resolver",
             to: "#test_driver",
         },
     ],

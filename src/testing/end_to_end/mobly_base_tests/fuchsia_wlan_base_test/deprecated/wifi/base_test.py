@@ -17,12 +17,12 @@ from antlion.controllers.access_point import AccessPoint
 from antlion.controllers.ap_lib.hostapd_security import SecurityMode
 from antlion.controllers.attenuator import Attenuator
 from antlion.controllers.fuchsia_device import FuchsiaDevice
-from antlion.controllers.iperf_client import IPerfClientBase
-from antlion.controllers.iperf_server import IPerfServer, IPerfServerOverSsh
 from antlion.controllers.pdu import PduDevice
 from antlion.test_utils.abstract_devices.wlan_device import FuchsiaWlanDevice
 from antlion.types import Controller
 from honeydew.typing import custom_types
+from iperf.iperf_client import IPerfClientBase
+from iperf.iperf_server import IPerfServer, IPerfServerOverSsh
 from mobly import signals
 from mobly.base_test import BaseTestClass
 from mobly.config_parser import TestRunConfig

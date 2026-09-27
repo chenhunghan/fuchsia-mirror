@@ -46,6 +46,12 @@ import("//build/python/python_action.gni")
 #     [list of scopes] The environments to run these tests on.
 #     See //docs/contribute/testing/environments.md.
 #
+#   override_test_environments (optional; default = true)
+#     [bool] If true, override the environments set by individual tests with
+#     the environments specified for this group. If false, the group's
+#     environments are used as defaults for tests without explicit
+#     environments and intersected with explicit test environments.
+#
 template("product_bundle_test_group") {
   assert(defined(invoker.tests) || defined(invoker.target_tests) ||
              defined(invoker.host_tests),
@@ -81,6 +87,11 @@ template("product_bundle_test_group") {
       _environments = invoker.environments
     }
 
+    _override_test_environments = true
+    if (defined(invoker.override_test_environments)) {
+      _override_test_environments = invoker.override_test_environments
+    }
+
     _tests_json = "${target_out_dir}/${target_name}/tests.json"
 
     generated_file(target_name) {
@@ -111,6 +122,7 @@ template("product_bundle_test_group") {
           {
             product_bundle_name = _product_bundle_name
             environments = _environments
+            override_test_environments = _override_test_environments
             tests_json = rebase_path(_tests_json, root_build_dir)
           },
         ]

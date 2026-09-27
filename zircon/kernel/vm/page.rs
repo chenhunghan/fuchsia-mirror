@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use page_bindings as bindings;
 
 #[cfg(console_enabled)]
-use crate::console_rust::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 
 pub mod object {
     use page_bindings as bindings;
@@ -537,6 +537,19 @@ impl VmPage {
         unsafe { (*(*self.state_union.get()).object).pin_count() }
     }
 
+    /// Returns whether the page is marked as always needed.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `object` is the currently active union variant, and that reading
+    /// this subfield is safe without data races.
+    pub unsafe fn is_always_need(&self) -> bool {
+        // SAFETY: Dereferencing UnsafeCell to read the object flags from the active union variant.
+        // The caller guarantees `object` is active and that reading it does not race with
+        // concurrent writes.
+        unsafe { (*(*self.state_union.get()).object).always_need() }
+    }
+
     /// Get a reference to the page queue atomic.
     ///
     /// # Safety
@@ -591,7 +604,7 @@ impl VmPagePtr {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a kernel page.
+    /// `ptr` must be either null or a valid pointer to a kernel page.
     pub const unsafe fn from_raw(ptr: *mut VmPage) -> Option<Self> {
         match NonNull::new(ptr) {
             Some(nn) => Some(Self(nn)),
@@ -614,9 +627,9 @@ impl VmPagePtr {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a kernel page.
+    /// `ptr` must be either null or a valid pointer to a kernel page.
     pub unsafe fn from_ffi(ptr: *mut bindings::vm_page_t) -> Option<Self> {
-        // SAFETY: Method preconditions match from_raw requirements.
+        // SAFETY: ptr is either null or a valid pointer to a kernel page.
         unsafe { Self::from_raw(ptr.cast()) }
     }
 
@@ -798,6 +811,17 @@ impl VmPagePtr {
     pub unsafe fn get_pin_count(self) -> u8 {
         // SAFETY: Safety deferred to caller per function safety preconditions.
         unsafe { self.as_ref().get_pin_count() }
+    }
+
+    /// Returns whether the page is marked as always needed.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the page is attached to a VM object (`state_union` is in
+    /// `object` variant) and that reading this subfield is safe without data races.
+    pub unsafe fn is_always_need(self) -> bool {
+        // SAFETY: Safety deferred to caller per function safety preconditions.
+        unsafe { self.as_ref().is_always_need() }
     }
 
     /// Return the current VmPageState of this page.

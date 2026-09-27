@@ -86,6 +86,11 @@ class TracingAffordanceTests(fuchsia_base_test.FuchsiaBaseTest):
                 ),
                 "Compression is only supported when using the FFX tracing backend.",
             )
+        else:
+            asserts.skip_if(
+                isinstance(self.dut.tracing, tracing_using_ffx.TracingUsingFfx),
+                "Uncompressed tracing is not supported when using the FFX tracing backend.",
+            )
 
         # Initialize Tracing Session.
         self.dut.tracing.initialize(compression=compression)

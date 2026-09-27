@@ -408,6 +408,7 @@ zx_status_t Device::Add(device_add_args_t* zx_args, zx_device_t** out) {
     device->InitReply(ZX_OK);
   }
 
+  device->added_to_parent_children_ = true;
   children_.push_back(std::move(device));
   return ZX_OK;
 }

@@ -171,7 +171,11 @@ impl TracePerformanceEventManager {
         if self.active_sessions.load(Ordering::Acquire) == 0 {
             return;
         }
-        self.map.write().insert(pid, tid, identity);
+        let mut map = self.map.write();
+        if self.active_sessions.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        map.insert(pid, tid, identity);
     }
 
     /// Looks up the Zircon koids recorded for a Linux tid.
@@ -195,11 +199,19 @@ impl TracePerformanceEventManager {
             if let Some(identity) = map.get_linux_identity(tkoid) {
                 return Some(identity);
             }
+            // If `pkoid` is already a known Starnix process, the write-lock slow path
+            // below (`if !map.koid_to_pid.contains_key(&pkoid)`) will not insert it into
+            // `unmapped_processes`. Return `None` here under the read lock so an unmapped
+            // thread in a known process does not fall through and acquire the exclusive
+            // write lock on every subsequent sample for a guaranteed no-op.
+            if map.koid_to_pid.contains_key(&pkoid) {
+                return None;
+            }
         }
 
-        // Native Fuchsia process or unmapped thread: record the process in the negative
-        // cache under the write lock, re-checking first in case a concurrent record()
-        // populated it meanwhile.
+        // Unknown process (`pkoid` not in `koid_to_pid` or `unmapped_processes`): record
+        // it in the negative cache under the write lock, re-checking first in case a
+        // concurrent `record()` populated it meanwhile.
         let mut map = self.map.write();
         if let Some(identity) = map.get_linux_identity(tkoid) {
             return Some(identity);
@@ -214,7 +226,7 @@ impl TracePerformanceEventManager {
     /// is the first session.
     fn start_session_internal(&self) {
         let _guard = self.state_lock.lock().unwrap();
-        let current = self.active_sessions.load(Ordering::Acquire);
+        let current = self.active_sessions.fetch_add(1, Ordering::AcqRel);
         if current == 0 {
             if let Some(kernel) = self.weak_kernel.upgrade() {
                 let snapshot = Self::snapshot_existing_tasks(&kernel.pids);
@@ -223,21 +235,19 @@ impl TracePerformanceEventManager {
                 log_warn!("Kernel is shutting down, unable to snapshot running tasks");
             }
         }
-        self.active_sessions.store(current + 1, Ordering::Release);
     }
 
     /// Decrements the session count, releasing the map when the last session drops.
     fn stop_session_internal(&self) {
         let _guard = self.state_lock.lock().unwrap();
-        let current = self.active_sessions.load(Ordering::Acquire);
-        if current == 0 {
+        if self.active_sessions.load(Ordering::Acquire) == 0 {
             log_error!("session stopped without an active session");
             return;
         }
+        let current = self.active_sessions.fetch_sub(1, Ordering::AcqRel);
         if current == 1 {
             *self.map.write() = PidKoidMap::default();
         }
-        self.active_sessions.store(current - 1, Ordering::Release);
     }
 
     /// Builds a map of all currently running `Task`s from the kernel pid table.
@@ -536,5 +546,29 @@ mod tests {
         })
         .await;
         receiver.await.unwrap();
+    }
+
+    #[fuchsia::test]
+    fn test_resolve_koids_avoids_write_lock_for_known_process() {
+        let manager = Arc::new(TracePerformanceEventManager::new_for_testing());
+        let _session = manager.open();
+        manager.record(10, 100, identity(1000, 2000));
+
+        // Hold a read lock on `map`. A query for an unmapped thread (9999) belonging to an
+        // already-known process (1000) must return `None` under the read lock without
+        // attempting to acquire the exclusive write lock (which would deadlock/block against
+        // `read_guard`).
+        let read_guard = manager.map.read();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let manager_clone = manager.clone();
+
+        std::thread::spawn(move || {
+            let res = manager_clone.resolve_koids(Koid::from_raw(1000), Koid::from_raw(9999));
+            let _ = sender.send(res);
+        });
+
+        let result = receiver.recv_timeout(std::time::Duration::from_millis(500));
+        drop(read_guard);
+        assert_eq!(result, Ok(None), "resolve_koids blocked on write lock for known process");
     }
 }

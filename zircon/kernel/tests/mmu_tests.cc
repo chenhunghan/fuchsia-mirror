@@ -15,6 +15,7 @@
 #include <ktl/iterator.h>
 #include <vm/arch_vm_aspace.h>
 #include <vm/pmm.h>
+#include <vm/scanner.h>
 #include <vm/vm_address_region.h>
 #include <vm/vm_aspace.h>
 #include <vm/vm_object_paged.h>
@@ -535,6 +536,8 @@ static bool test_large_region_atomic() {
 // Test that RangeChangeUpdateLocked ignores pinned pages.
 static bool test_unmap_ignore_pinned() {
   BEGIN_TEST;
+
+  AutoVmScannerDisable scanner_disable;
 
   fbl::RefPtr<VmAspace> aspace = VmAspace::Create(VmAspace::Type::User, "test aspace");
   auto cleanup_aspace = fit::defer([&]() { ASSERT(ZX_OK == aspace->Destroy()); });

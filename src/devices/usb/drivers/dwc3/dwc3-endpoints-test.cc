@@ -561,10 +561,27 @@ TEST_P(Dwc3EndpointsTest, CancelAllRequestsOnControllerStop) {
     }
   });
 
-  // Stop controller.
+  // Issue CancelAll while active so that the FIDL completer is queued in cancel_completers.
+  auto cancel_result =
+      std::make_shared<std::optional<fidl::Result<fendpoint::Endpoint::CancelAll>>>();
+  auto cancel_completed = std::make_shared<libsync::Completion>();
+  ep_client_->CancelAll().Then(
+      [cancel_result, cancel_completed](fidl::Result<fendpoint::Endpoint::CancelAll>& res) {
+        *cancel_result = std::move(res);
+        cancel_completed->Signal();
+      });
+  WaitForState(ep_num, TransferState::kCanceling);
+
+  // Stop controller before hardware EndTransfer completes; software fallback must drain requests
+  // and reply ZX_OK to pending CancelAll completers.
   fidl::WireResult res = dci_->StopController();
   ASSERT_OK(res.status());
   WaitForState(ep_num, TransferState::kIdle);
+
+  dut_.runtime().RunUntil([&]() { return cancel_completed->signaled(); });
+  ASSERT_TRUE(cancel_completed->signaled());
+  ASSERT_TRUE(cancel_result->has_value());
+  ASSERT_TRUE((*cancel_result)->is_ok());
 
   // Now, active_reqs and queued_reqs should be empty.
   dut_.RunInDriverContext([&](Dwc3& drv) {
@@ -576,8 +593,13 @@ TEST_P(Dwc3EndpointsTest, CancelAllRequestsOnControllerStop) {
   // Verify completions returned with cancellation error.
   std::vector<CompletionResult> completions = event_handler_.WaitForCompletions(2);
   ASSERT_EQ(completions.size(), 2UL);
-  EXPECT_EQ(completions[0].status, ZX_ERR_IO_NOT_PRESENT);
-  EXPECT_EQ(completions[1].status, ZX_ERR_IO_NOT_PRESENT);
+  if (enqueue_many) {
+    EXPECT_EQ(completions[0].status, ZX_ERR_IO_NOT_PRESENT);
+    EXPECT_EQ(completions[1].status, ZX_ERR_IO_NOT_PRESENT);
+  } else {
+    EXPECT_EQ(completions[0].status, ZX_ERR_CANCELED);
+    EXPECT_EQ(completions[1].status, ZX_ERR_IO_NOT_PRESENT);
+  }
 }
 
 TEST_P(Dwc3EndpointsTest, CancelAllRequestsWhenControllerStopped) {
@@ -607,6 +629,74 @@ TEST_P(Dwc3EndpointsTest, CancelAllRequestsWhenControllerStopped) {
   ASSERT_TRUE(cancel_completed->signaled());
   ASSERT_TRUE(cancel_result->has_value());
   ASSERT_TRUE((*cancel_result)->is_ok());
+}
+
+TEST_P(Dwc3EndpointsTest, CancelAllRequestsWhenPowerOff) {
+  const bool enqueue_many = GetParam();
+  TriggerConnection();
+
+  const uint8_t ep_address = 0x02;
+  const uint8_t ep_num = UsbAddressToEpNum(ep_address);
+
+  SetupEndpoint(ep_address, fdescriptor::EndpointType::kBulk, 512);
+  RegisterVmo(1, 4096);
+
+  // Host sends Not Ready event.
+  dut_.RunInDriverContext([&](Dwc3& drv) { TriggerEpTransferNotReady(drv, ep_num, 0); });
+  dut_.runtime().RunUntilIdle();
+
+  // Queue two requests.
+  QueueRequests(2, 1, 0, 512, fdescriptor::EndpointType::kBulk);
+  WaitForActiveCount(ep_num, enqueue_many ? 2 : 1);
+
+  auto expected_starting_state =
+      enqueue_many ? TransferState::kStartingOngoing : TransferState::kStartingSingle;
+  WaitForState(ep_num, expected_starting_state);
+
+  // Trigger started event so requests become active.
+  dut_.RunInDriverContext([&](Dwc3& drv) { TriggerEpTransferStarted(drv, ep_num, kResourceId); });
+  auto expected_state = enqueue_many ? TransferState::kActiveOngoing : TransferState::kActiveSingle;
+  WaitForState(ep_num, expected_state);
+
+  // Simulate hardware power off (with a pre-existing pending_cancel_reason from an interrupted
+  // cancel) and verify that CancelAll resets pending_cancel_reason alongside the queues and FIFO.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    auto& uep = GetUserEndpoint(drv, ep_num);
+    uep.server->pending_cancel_reason = ZX_ERR_IO_NOT_PRESENT;
+    Dwc3TestHelper::SetPowerOn(drv, false);
+  });
+
+  // Cancel all requests via client. It should reply immediately because power is off.
+  auto cancel_result =
+      std::make_shared<std::optional<fidl::Result<fendpoint::Endpoint::CancelAll>>>();
+  auto cancel_completed = std::make_shared<libsync::Completion>();
+  ep_client_->CancelAll().Then(
+      [cancel_result, cancel_completed](fidl::Result<fendpoint::Endpoint::CancelAll>& res) {
+        *cancel_result = std::move(res);
+        cancel_completed->Signal();
+      });
+
+  dut_.runtime().RunUntil([&]() { return cancel_completed->signaled(); });
+  ASSERT_TRUE(cancel_completed->signaled());
+  ASSERT_TRUE(cancel_result->has_value());
+  ASSERT_TRUE((*cancel_result)->is_ok());
+
+  WaitForState(ep_num, TransferState::kIdle);
+
+  // Now, active_reqs, queued_reqs, and pending_cancel_reason should be empty, and FIFO cleared.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    auto& uep = GetUserEndpoint(drv, ep_num);
+    EXPECT_EQ(uep.server->active_reqs.size(), 0u);
+    EXPECT_EQ(uep.server->queued_reqs.size(), 0u);
+    EXPECT_FALSE(uep.server->pending_cancel_reason.has_value());
+    EXPECT_EQ(uep.fifo.GetActiveCount(), 0u);
+  });
+
+  // Verify completions returned with cancellation error.
+  std::vector<CompletionResult> completions = event_handler_.WaitForCompletions(2);
+  ASSERT_EQ(completions.size(), 2u);
+  EXPECT_EQ(completions[0].status, ZX_ERR_CANCELED);
+  EXPECT_EQ(completions[1].status, ZX_ERR_CANCELED);
 }
 
 TEST_P(Dwc3EndpointsTest, CancelAllRequestsWhenIdle) {

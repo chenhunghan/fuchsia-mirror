@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use crate::task::CurrentTask;
-use fuchsia_rcu::rcu_run_callbacks;
 use starnix_logging::log_warn;
 use starnix_types::ownership::Releasable;
 use std::cell::RefCell;
@@ -98,7 +97,6 @@ impl DelayedReleaser {
     pub fn apply(&self, current_task: &CurrentTask) {
         let mut counter = 0u32;
         loop {
-            let ran_rcu = rcu_run_callbacks();
             let releasers = RELEASERS.with(|cell| {
                 std::mem::take(
                     cell.borrow_mut()
@@ -107,7 +105,7 @@ impl DelayedReleaser {
                         .deref_mut(),
                 )
             });
-            if releasers.is_empty() && !ran_rcu {
+            if releasers.is_empty() {
                 return;
             }
             releasers.release(current_task);

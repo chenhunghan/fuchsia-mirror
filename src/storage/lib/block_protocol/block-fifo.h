@@ -9,9 +9,6 @@
 
 #include "src/storage/lib/block_protocol/types.h"
 
-// These constants are duplicated in the generated Banjo headers for fuchsia.hardware.block.driver.
-#ifndef BLOCK_VMOID_INVALID
-
 constexpr vmoid_t BLOCK_VMOID_INVALID = fuchsia_storage_block::kVmoidInvalid;
 
 constexpr vmoid_t MAX_TXN_GROUP_COUNT = fuchsia_storage_block::kMaxTxnGroupCount;
@@ -40,5 +37,4 @@ constexpr uint8_t BLOCK_OPCODE_WRITE =
 constexpr uint8_t BLOCK_OPCODE_CLOSE_VMO =
     static_cast<uint8_t>(fuchsia_storage_block::BlockOpcode::kCloseVmo);
 
-#endif  // BLOCK_VMOID_INVALID
 #endif  // SRC_STORAGE_LIB_BLOCK_PROTOCOL_BLOCK_FIFO_H_

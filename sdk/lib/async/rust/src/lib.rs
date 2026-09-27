@@ -7,8 +7,10 @@
 
 mod after_deadline;
 pub mod callback_state;
+mod on_interrupt;
 mod on_signals;
 
 pub use after_deadline::*;
 pub use libasync_dispatcher::*;
+pub use on_interrupt::*;
 pub use on_signals::*;

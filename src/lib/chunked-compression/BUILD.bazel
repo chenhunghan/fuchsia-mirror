@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/host:defs.bzl", "cc_binary_host_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_library(
+    name = "chunked-compression",
+    srcs = [
+        "chunked-archive.cc",
+        "chunked-compressor.cc",
+        "chunked-decompressor.cc",
+        "compression-params.cc",
+        "multithreaded-chunked-compressor.cc",
+        "streaming-chunked-compressor.cc",
+    ],
+    hdrs = [
+        "chunked-archive.h",
+        "chunked-compressor.h",
+        "chunked-decompressor.h",
+        "compression-params.h",
+        "multithreaded-chunked-compressor.h",
+        "status.h",
+        "streaming-chunked-compressor.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//third_party/zstd",
+        "//zircon/third_party/ulib/cksum",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+# @bazel2gn:skip
+cc_binary_host_tool(
+    name = "chunked-compress",
+    srcs = ["main.cc"],
+    copts = ["-Wno-conversion"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [
+        ":chunked-compression",
+        "//zircon/system/ulib/fbl",
+    ],
+)

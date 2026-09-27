@@ -896,19 +896,21 @@ void Gvnic::Start(fdf::Arena& arena, StartCompleter::Sync& completer) {
 void Gvnic::AbortPendingTX() {
   std::lock_guard tx_lock(tx_queue_lock_);
   const uint32_t tx_total_count = tx_buffer_id_queue_.Count();
-  netdev::wire::TxResult completed_tx[tx_total_count];
+  std::vector<netdev::wire::TxResult> completed_tx;
+  completed_tx.reserve(tx_total_count);
   for (uint32_t i = 0; i < tx_total_count; i++) {
-    completed_tx[i] = {
+    completed_tx.push_back({
         .id = tx_buffer_id_queue_.Front(),
         .status = ZX_ERR_BAD_STATE,
-    };
+    });
     tx_buffer_id_queue_.Dequeue();
   }
   if (tx_total_count) {
     fdf::Arena arena(0u);
     network::SharedAutoLock lock(&ifc_lock_);
-    if (fidl::OneWayStatus status = ifc_.buffer(arena)->CompleteTx(
-            fidl::VectorView<netdev::wire::TxResult>::FromExternal(completed_tx, tx_total_count));
+    if (fidl::OneWayStatus status =
+            ifc_.buffer(arena)->CompleteTx(fidl::VectorView<netdev::wire::TxResult>::FromExternal(
+                completed_tx.data(), completed_tx.size()));
         !status.ok()) {
       zxlogf(ERROR, "Failed to co complete %u TX buffers: %s", tx_total_count,
              status.FormatDescription().c_str());

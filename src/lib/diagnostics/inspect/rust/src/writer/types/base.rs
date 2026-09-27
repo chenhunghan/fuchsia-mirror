@@ -6,6 +6,7 @@ use crate::writer::{Error, Node, State};
 use derivative::Derivative;
 use inspect_format::BlockIndex;
 use private::InspectTypeInternal;
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::{Arc, Weak};
 
@@ -20,12 +21,10 @@ pub(crate) mod private {
     use crate::writer::State;
     use inspect_format::BlockIndex;
 
-    /// Trait implemented by all inspect types. It provides constructor functions that are not
+    /// Trait implemented by all inspect types. It provides functions that are not
     /// intended for use outside the crate.
     /// Use `impl_inspect_type_internal` for easy implementation.
     pub trait InspectTypeInternal {
-        fn new(state: State, block_index: BlockIndex) -> Self;
-        fn new_no_op() -> Self;
         fn is_valid(&self) -> bool;
         fn block_index(&self) -> Option<BlockIndex>;
         fn state(&self) -> Option<State>;
@@ -65,23 +64,50 @@ pub trait InspectTypeReparentable: private::InspectTypeInternal {
 
 impl<T: private::InspectTypeInternal> InspectTypeReparentable for T {}
 
+/// Trait allowing an Inspect type to be renamed.
+///
+/// This trait is not implementable by external types.
+pub trait InspectTypeRenameable: private::InspectTypeInternal {
+    /// Rename this inspect node or property.
+    fn rename<'a>(&self, name: impl Into<Cow<'a, str>>) -> Result<(), Error>;
+}
+
 /// Macro to generate private::InspectTypeInternal
 macro_rules! impl_inspect_type_internal {
     ($type_name:ident) => {
-        impl $crate::private::InspectTypeInternal for $type_name {
-            fn new(
+        impl $type_name {
+            pub(crate) fn new(
                 state: $crate::writer::State,
                 block_index: inspect_format::BlockIndex,
             ) -> $type_name {
                 $type_name { inner: $crate::writer::types::base::Inner::new(state, block_index) }
             }
 
-            fn is_valid(&self) -> bool {
-                self.inner.is_valid()
+            pub(crate) fn new_no_op() -> $type_name {
+                $type_name { inner: $crate::writer::types::base::Inner::None }
             }
 
-            fn new_no_op() -> $type_name {
-                $type_name { inner: $crate::writer::types::base::Inner::None }
+            /// Rename this inspect node or property.
+            pub fn rename<'a>(
+                &self,
+                name: impl Into<std::borrow::Cow<'a, str>>,
+            ) -> Result<(), $crate::writer::Error> {
+                <Self as $crate::writer::InspectTypeRenameable>::rename(self, name)
+            }
+        }
+
+        impl $crate::writer::InspectTypeRenameable for $type_name {
+            fn rename<'a>(
+                &self,
+                name: impl Into<std::borrow::Cow<'a, str>>,
+            ) -> Result<(), $crate::writer::Error> {
+                self.inner.rename(name)
+            }
+        }
+
+        impl $crate::private::InspectTypeInternal for $type_name {
+            fn is_valid(&self) -> bool {
+                self.inner.is_valid()
             }
 
             fn state(&self) -> Option<$crate::writer::State> {
@@ -120,6 +146,49 @@ macro_rules! impl_inspect_type_internal {
 
 pub(crate) use impl_inspect_type_internal;
 
+macro_rules! impl_inspect_type_internal_histogram {
+    ($type_name:ident) => {
+        impl $type_name {
+            /// Rename this inspect histogram property.
+            pub fn rename<'a>(
+                &self,
+                name: impl Into<std::borrow::Cow<'a, str>>,
+            ) -> Result<(), $crate::writer::Error> {
+                <Self as $crate::writer::InspectTypeRenameable>::rename(self, name)
+            }
+        }
+
+        impl $crate::writer::InspectTypeRenameable for $type_name {
+            fn rename<'a>(
+                &self,
+                name: impl Into<std::borrow::Cow<'a, str>>,
+            ) -> Result<(), $crate::writer::Error> {
+                self.array.rename(name)
+            }
+        }
+
+        impl $crate::private::InspectTypeInternal for $type_name {
+            fn is_valid(&self) -> bool {
+                self.array.is_valid()
+            }
+
+            fn state(&self) -> Option<$crate::writer::State> {
+                self.array.state()
+            }
+
+            fn block_index(&self) -> Option<inspect_format::BlockIndex> {
+                self.array.block_index()
+            }
+
+            fn atomic_access<R, F: FnOnce(&Self) -> R>(&self, accessor: F) -> R {
+                self.array.atomic_access(|_| accessor(self))
+            }
+        }
+    };
+}
+
+pub(crate) use impl_inspect_type_internal_histogram;
+
 /// An inner type of all inspect nodes and properties. Each variant implies a
 /// different relationship with the underlying inspect VMO.
 #[derive(Debug, Derivative)]
@@ -141,6 +210,16 @@ impl<T: InnerType> Inner<T> {
     /// Creates a new Inner with the desired block index within the inspect VMO
     pub(crate) fn new(state: State, block_index: BlockIndex) -> Self {
         Self::Strong(Arc::new(InnerRef { state, block_index, data: T::Data::default() }))
+    }
+
+    pub(crate) fn rename<'a>(&self, name: impl Into<Cow<'a, str>>) -> Result<(), Error> {
+        if let Some(inner_ref) = self.inner_ref() {
+            let mut state = inner_ref.state.try_lock()?;
+            if inner_ref.data.is_valid() {
+                state.set_name(inner_ref.block_index, name)?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns true if the number of strong references to this node or property
@@ -303,5 +382,122 @@ mod tests {
 
         assert!(a.reparent(&b).is_err());
         assert!(b.reparent(&a).is_err());
+    }
+
+    #[fuchsia::test]
+    async fn test_rename_nodes_and_properties() {
+        use crate::writer::{ArrayProperty, HistogramProperty};
+        use diagnostics_hierarchy::{LinearHistogram, LinearHistogramParams};
+        use futures::FutureExt;
+
+        let insp = Inspector::default();
+        let root = insp.root();
+        let node = root.create_child("node");
+        let int_prop = node.create_int("int_prop", 42);
+        let str_prop = node.create_string("str_prop", "hello");
+        let array_prop = node.create_int_array("array_prop", 2);
+        array_prop.set(0, 1);
+        array_prop.set(1, 2);
+        let hist_prop = node.create_int_linear_histogram(
+            "hist_prop",
+            LinearHistogramParams { floor: 0, step_size: 10, buckets: 2 },
+        );
+        hist_prop.insert(5);
+        let lazy_node = node.create_lazy_child("lazy_node", || {
+            async move {
+                let lazy_insp = Inspector::default();
+                lazy_insp.root().record_int("val", 99);
+                Ok(lazy_insp)
+            }
+            .boxed()
+        });
+
+        assert_data_tree!(insp, root: {
+            node: {
+                int_prop: 42i64,
+                str_prop: "hello",
+                array_prop: vec![1i64, 2i64],
+                hist_prop: LinearHistogram {
+                    floor: 0i64,
+                    step: 10,
+                    counts: vec![1],
+                    indexes: Some(vec![1]),
+                    size: 4,
+                },
+                lazy_node: {
+                    val: 99i64,
+                },
+            },
+        });
+
+        node.rename("node_renamed").unwrap();
+        int_prop.rename("int_renamed").unwrap();
+        str_prop.rename("str_renamed").unwrap();
+        array_prop.rename("array_renamed").unwrap();
+        hist_prop.rename("hist_renamed").unwrap();
+        lazy_node.rename("lazy_renamed").unwrap();
+
+        assert_data_tree!(insp, root: {
+            node_renamed: {
+                int_renamed: 42i64,
+                str_renamed: "hello",
+                array_renamed: vec![1i64, 2i64],
+                hist_renamed: LinearHistogram {
+                    floor: 0i64,
+                    step: 10,
+                    counts: vec![1],
+                    indexes: Some(vec![1]),
+                    size: 4,
+                },
+                lazy_renamed: {
+                    val: 99i64,
+                },
+            },
+        });
+    }
+
+    #[fuchsia::test]
+    async fn test_rename_root_and_noop_and_weak() {
+        let insp = Inspector::default();
+        assert_eq!(insp.root().rename("new_root"), Err(Error::RenameRoot));
+
+        let noop_node = Node::default();
+        assert_eq!(noop_node.rename("ignored"), Ok(()));
+
+        let node = insp.root().create_child("node");
+        let _child = node.create_child("child");
+        let weak = node.clone_weak();
+        weak.rename("weak_renamed").unwrap();
+        assert_data_tree!(insp, root: {
+            weak_renamed: {
+                child: {},
+            },
+        });
+
+        node.forget();
+        assert_eq!(node.rename("after_forget"), Ok(()));
+        assert_eq!(weak.rename("after_forget"), Ok(()));
+    }
+
+    #[fuchsia::test]
+    fn test_rename_string_reference_lifecycle() {
+        let insp = Inspector::default();
+        let state = insp.state().unwrap();
+
+        let node = insp.root().create_child("unique_old_name");
+        let stats_before = state.try_lock().unwrap().stats();
+
+        // Renaming to the same name should be a no-op with no block allocations/deallocations.
+        node.rename("unique_old_name").unwrap();
+        let stats_same = state.try_lock().unwrap().stats();
+        assert_eq!(stats_before.allocated_blocks, stats_same.allocated_blocks);
+        assert_eq!(stats_before.deallocated_blocks, stats_same.deallocated_blocks);
+
+        // Renaming to a new unique name should allocate 1 new string ref block and deallocate the
+        // old 1.
+        node.rename("unique_new_name").unwrap();
+        let stats_after = state.try_lock().unwrap().stats();
+        assert_eq!(stats_after.allocated_blocks, stats_before.allocated_blocks + 1);
+        assert_eq!(stats_after.deallocated_blocks, stats_before.deallocated_blocks + 1);
     }
 }

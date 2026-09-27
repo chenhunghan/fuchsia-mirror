@@ -287,6 +287,158 @@ __EXPORT void fdf_env_dispatcher_get_dump_deprecated(fdf_dispatcher_t* dispatche
   *out_dump = buf;
 }
 
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+namespace {
+
+char* CopyStringToHeap(std::string_view str) {
+  char* buf = static_cast<char*>(malloc(str.size() + 1));
+  ZX_ASSERT(buf != nullptr);
+  if (!str.empty()) {
+    memcpy(buf, str.data(), str.size());
+  }
+  buf[str.size()] = '\0';
+  return buf;
+}
+
+fdf_dispatcher_state_t ConvertDispatcherState(driver_runtime::DispatcherState state) {
+  switch (state) {
+    case driver_runtime::DispatcherState::kRunning:
+      return FDF_DISPATCHER_STATE_RUNNING;
+    case driver_runtime::DispatcherState::kShuttingDown:
+      return FDF_DISPATCHER_STATE_SHUTTING_DOWN;
+    case driver_runtime::DispatcherState::kShutdown:
+      return FDF_DISPATCHER_STATE_SHUTDOWN;
+    case driver_runtime::DispatcherState::kDestroyed:
+      return FDF_DISPATCHER_STATE_DESTROYED;
+  }
+  return FDF_DISPATCHER_STATE_RUNNING;
+}
+
+}  // namespace
+
+__EXPORT void fdf_env_get_all_dispatchers_dump(fdf_dispatcher_dump_entry_t** out_entries,
+                                               size_t* out_count) {
+  if (out_entries) {
+    *out_entries = nullptr;
+  }
+  if (out_count) {
+    *out_count = 0;
+  }
+  if (!out_entries || !out_count) {
+    return;
+  }
+  std::vector<driver_runtime::DumpState> states;
+  driver_runtime::DispatcherCoordinator::DumpDispatchers(&states);
+  if (states.empty()) {
+    return;
+  }
+
+  auto* entries = static_cast<fdf_dispatcher_dump_entry_t*>(
+      calloc(states.size(), sizeof(fdf_dispatcher_dump_entry_t)));
+  ZX_ASSERT(entries != nullptr);
+  for (size_t i = 0; i < states.size(); ++i) {
+    const auto& state = states[i];
+    auto& entry = entries[i];
+    entry.driver = state.driver_owner;
+    entry.dispatcher_ptr = reinterpret_cast<uintptr_t>(state.dispatcher_to_dump);
+    entry.name = CopyStringToHeap(std::string_view(state.name.data(), state.name.size()));
+    entry.scheduler_role = CopyStringToHeap(state.scheduler_role);
+    entry.options = state.options;
+    entry.synchronized = state.synchronized;
+    entry.allow_sync_calls = state.allow_sync_calls;
+    entry.state = ConvertDispatcherState(state.state);
+    entry.destroy_context = CopyStringToHeap(state.dispatcher_destroy_context);
+    entry.has_destroy_user_initiated = state.dispatcher_destroy_user_initiated.has_value();
+    entry.destroy_user_initiated = state.dispatcher_destroy_user_initiated.value_or(false);
+    entry.debug_stats.num_total_requests = state.debug_stats.num_total_requests;
+    entry.debug_stats.num_inlined_requests = state.debug_stats.num_inlined_requests;
+    entry.debug_stats.non_inlined.allow_sync_calls = state.debug_stats.non_inlined.allow_sync_calls;
+    entry.debug_stats.non_inlined.parallel_dispatch =
+        state.debug_stats.non_inlined.parallel_dispatch;
+    entry.debug_stats.non_inlined.task = state.debug_stats.non_inlined.task;
+    entry.debug_stats.non_inlined.unknown_thread = state.debug_stats.non_inlined.unknown_thread;
+    entry.debug_stats.non_inlined.reentrant = state.debug_stats.non_inlined.reentrant;
+    entry.debug_stats.non_inlined.channel_wait_not_yet_registered =
+        state.debug_stats.non_inlined.channel_wait_not_yet_registered;
+    entry.debug_stats.non_inlined.no_thread_migration =
+        state.debug_stats.non_inlined.no_thread_migration;
+
+    if (!state.queued_tasks.empty()) {
+      auto* tasks = static_cast<fdf_task_debug_info_t*>(
+          calloc(state.queued_tasks.size(), sizeof(fdf_task_debug_info_t)));
+      ZX_ASSERT(tasks != nullptr);
+      for (size_t j = 0; j < state.queued_tasks.size(); ++j) {
+        tasks[j].ptr = reinterpret_cast<uintptr_t>(state.queued_tasks[j].ptr);
+        tasks[j].handler = reinterpret_cast<uintptr_t>(state.queued_tasks[j].handler);
+        tasks[j].initiating_dispatcher =
+            reinterpret_cast<uintptr_t>(state.queued_tasks[j].initiating_dispatcher);
+        tasks[j].initiating_driver = state.queued_tasks[j].initiating_driver;
+      }
+      entry.queued_tasks = tasks;
+      entry.num_queued_tasks = state.queued_tasks.size();
+    }
+  }
+
+  *out_entries = entries;
+  *out_count = states.size();
+}
+
+__EXPORT void fdf_env_free_all_dispatchers_dump(fdf_dispatcher_dump_entry_t* entries,
+                                                size_t count) {
+  if (!entries) {
+    return;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    free(const_cast<char*>(entries[i].name));
+    free(const_cast<char*>(entries[i].scheduler_role));
+    free(const_cast<char*>(entries[i].destroy_context));
+    free(const_cast<fdf_task_debug_info_t*>(entries[i].queued_tasks));
+  }
+  free(entries);
+}
+
+__EXPORT void fdf_env_get_all_threads_dump(fdf_thread_dump_entry_t** out_entries,
+                                           size_t* out_count) {
+  if (out_entries) {
+    *out_entries = nullptr;
+  }
+  if (out_count) {
+    *out_count = 0;
+  }
+  if (!out_entries || !out_count) {
+    return;
+  }
+  std::vector<driver_runtime::ThreadPool::ThreadInfo> threads;
+  driver_runtime::DispatcherCoordinator::DumpThreads(&threads);
+  if (threads.empty()) {
+    return;
+  }
+
+  auto* entries = static_cast<fdf_thread_dump_entry_t*>(
+      calloc(threads.size(), sizeof(fdf_thread_dump_entry_t)));
+  ZX_ASSERT(entries != nullptr);
+  for (size_t i = 0; i < threads.size(); ++i) {
+    entries[i].koid = threads[i].koid;
+    entries[i].name = CopyStringToHeap(threads[i].name);
+    entries[i].scheduler_role = CopyStringToHeap(threads[i].scheduler_role);
+  }
+
+  *out_entries = entries;
+  *out_count = threads.size();
+}
+
+__EXPORT void fdf_env_free_all_threads_dump(fdf_thread_dump_entry_t* entries, size_t count) {
+  if (!entries) {
+    return;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    free(const_cast<char*>(entries[i].name));
+    free(const_cast<char*>(entries[i].scheduler_role));
+  }
+  free(entries);
+}
+#endif
+
 __EXPORT const void* fdf_env_get_current_driver() { return thread_context::GetCurrentDriver(); }
 
 __EXPORT zx_status_t fdf_env_shutdown_dispatchers_async(

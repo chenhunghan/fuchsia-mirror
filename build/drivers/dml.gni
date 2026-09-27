@@ -133,6 +133,11 @@ template("fuchsia_driver_dml") {
     ]
   }
 
+  _component_name = _driver_name
+  if (defined(invoker.component_name)) {
+    _component_name = invoker.component_name
+  }
+
   # Generate manifest target
   fuchsia_component_manifest("${_action_target}_manifest") {
     forward_variables_from(invoker,
@@ -140,7 +145,7 @@ template("fuchsia_driver_dml") {
                              "testonly",
                              "visibility",
                            ])
-    component_name = _driver_name
+    component_name = _component_name
     manifest = "$target_gen_dir/${_driver_name}.cml"
     deps = [ ":${_action_target}_golden" ]
   }
@@ -166,6 +171,7 @@ template("fuchsia_driver_dml_cpp_parser") {
   _gen_dir = get_label_info(invoker.dml_label, "target_gen_dir")
 
   _config_name = "${target_name}_config"
+
   config(_config_name) {
     include_dirs = [ _gen_dir ]
   }

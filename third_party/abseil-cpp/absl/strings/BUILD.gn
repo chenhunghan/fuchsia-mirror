@@ -27,6 +27,19 @@ source_set("string_view") {
   ]
 }
 
+source_set("stringify_stream") {
+  public_configs = [ "//third_party/abseil-cpp:abseil_config" ]
+
+  public = [
+    "//third_party/abseil-cpp/src/absl/strings/internal/stringify_stream.h",
+  ]
+
+  deps = [
+    ":string_view",
+    "//third_party/abseil-cpp/absl/base:config",
+  ]
+}
+
 source_set("strings") {
   public_configs = [ "//third_party/abseil-cpp:abseil_config" ]
 

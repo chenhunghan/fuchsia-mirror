@@ -6,7 +6,7 @@
 #define SRC_CONNECTIVITY_WLAN_LIB_COMMON_CPP_INCLUDE_WLAN_COMMON_ELEMENT_H_
 
 #include <endian.h>
-#include <fuchsia/wlan/mlme/cpp/fidl.h>
+#include <fidl/fuchsia.wlan.ieee80211/cpp/fidl.h>
 #include <zircon/assert.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
@@ -394,8 +394,8 @@ struct HtCapabilities {
   TxBfCapability txbf_cap;
   AselCapability asel_cap;
 
-  static HtCapabilities* ViewFromRawBytes(uint8_t bytes[fuchsia::wlan::ieee80211::HT_CAP_LEN]) {
-    static_assert(sizeof(HtCapabilities) == fuchsia::wlan::ieee80211::HT_CAP_LEN);
+  static HtCapabilities* ViewFromRawBytes(uint8_t bytes[fuchsia_wlan_ieee80211::kHtCapLen]) {
+    static_assert(sizeof(HtCapabilities) == fuchsia_wlan_ieee80211::kHtCapLen);
     return reinterpret_cast<HtCapabilities*>(bytes);
   }
 
@@ -540,8 +540,8 @@ struct VhtCapabilities {
   VhtCapabilitiesInfo vht_cap_info;
   VhtMcsNss vht_mcs_nss;
 
-  static VhtCapabilities* ViewFromRawBytes(uint8_t bytes[fuchsia::wlan::ieee80211::VHT_CAP_LEN]) {
-    static_assert(sizeof(VhtCapabilities) == fuchsia::wlan::ieee80211::VHT_CAP_LEN);
+  static VhtCapabilities* ViewFromRawBytes(uint8_t bytes[fuchsia_wlan_ieee80211::kVhtCapLen]) {
+    static_assert(sizeof(VhtCapabilities) == fuchsia_wlan_ieee80211::kVhtCapLen);
     return reinterpret_cast<VhtCapabilities*>(bytes);
   }
 

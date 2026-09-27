@@ -4,8 +4,6 @@
 
 //! TX device queues.
 
-use core::convert::Infallible as Never;
-
 use alloc::vec::Vec;
 
 use derivative::Derivative;
@@ -414,7 +412,7 @@ where
 pub struct BufVecU8Allocator;
 
 impl TxBufferAllocator<Buf<Vec<u8>>> for BufVecU8Allocator {
-    type Error = Never;
+    type Error = !;
 
     fn alloc(&mut self, len: usize, _qlen: usize) -> Result<Buf<Vec<u8>>, Self::Error> {
         new_buf_vec(len)

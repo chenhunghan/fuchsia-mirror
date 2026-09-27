@@ -167,7 +167,7 @@ zx::result<uint32_t> PipeIo::TransferLocked(const TransferOp& op) {
         ZX_PANIC("Unreachable");
       },
       op.data);
-  buffer->rw_params.sizes[0] = op.size;
+  buffer->rw_params.sizes[0] = static_cast<uint32_t>(op.size);
   buffer->rw_params.read_index = 0;
 
   return ExecTransferCommandLocked(op.type == TransferOp::Type::kWrite,
@@ -181,7 +181,7 @@ zx::result<uint32_t> PipeIo::TransferLocked(cpp20::span<const TransferOp> ops) {
   bool has_read = false;
   bool has_write = false;
   buffer->rw_params.consumed_size = 0;
-  buffer->rw_params.buffers_count = ops.size();
+  buffer->rw_params.buffers_count = static_cast<uint32_t>(ops.size());
   for (size_t i = 0; i < ops.size(); i++) {
     switch (ops[i].type) {
       case TransferOp::Type::kWrite:
@@ -193,7 +193,7 @@ zx::result<uint32_t> PipeIo::TransferLocked(cpp20::span<const TransferOp> ops) {
         break;
       case TransferOp::Type::kRead:
         if (!has_read) {
-          buffer->rw_params.read_index = i;
+          buffer->rw_params.read_index = static_cast<uint32_t>(i);
         }
         has_read = true;
         break;
@@ -211,7 +211,7 @@ zx::result<uint32_t> PipeIo::TransferLocked(cpp20::span<const TransferOp> ops) {
         },
         ops[i].data);
 
-    buffer->rw_params.sizes[i] = ops[i].size;
+    buffer->rw_params.sizes[i] = static_cast<uint32_t>(ops[i].size);
   }
 
   return ExecTransferCommandLocked(has_write, has_read);

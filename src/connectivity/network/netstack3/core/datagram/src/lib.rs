@@ -22,9 +22,8 @@ extern crate alloc;
 mod internal {
     pub(super) mod datagram;
     pub(super) mod diagnostics;
-    pub(super) mod settings;
-    pub(super) mod sndbuf;
     pub(super) mod spec_context;
+    pub(super) mod tx_metadata;
     pub(super) mod uninstantiable;
 }
 
@@ -41,12 +40,11 @@ pub use internal::datagram::{
     SocketStateInner, StrongRc, WeakRc, WrapOtherStackIpOptions, WrapOtherStackIpOptionsMut,
 };
 pub use internal::diagnostics::{DatagramSocketDiagnosticsSpec, SocketStateForMatching};
-pub use internal::settings::DatagramSettings;
-pub use internal::sndbuf::TxMetadata;
 pub use internal::spec_context::{
     DatagramSpecBoundStateContext, DatagramSpecStateContext,
     DualStackDatagramSpecBoundStateContext, NonDualStackDatagramSpecBoundStateContext,
 };
+pub use internal::tx_metadata::TxMetadata;
 
 /// Datagram socket test utilities.
 #[cfg(any(test, feature = "testutils"))]

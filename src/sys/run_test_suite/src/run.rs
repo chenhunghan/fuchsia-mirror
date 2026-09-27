@@ -5,7 +5,7 @@
 use crate::cancel::{Cancelled, NamedFutureExt, OrCancel};
 use crate::connector::SuiteRunnerConnector;
 use crate::diagnostics::{self, LogDisplayConfiguration};
-use crate::outcome::{Outcome, RunTestSuiteError};
+use crate::outcome::{ExtendedOutcome, Outcome, RunTestSuiteError};
 use crate::output::{self, RunReporter, Timestamp};
 use crate::params::{RunParams, TestParams, TimeoutBehavior};
 use crate::running_suite::{RunningSuite, WaitForStartArgs, run_suite_and_collect_logs};
@@ -24,6 +24,8 @@ struct RunState<'a> {
     timeout_occurred: bool,
     cancel_occurred: bool,
     internal_error_occurred: bool,
+    setup_succeeded: Option<bool>,
+    teardown_succeeded: Option<bool>,
 }
 
 impl<'a> RunState<'a> {
@@ -35,6 +37,8 @@ impl<'a> RunState<'a> {
             timeout_occurred: false,
             cancel_occurred: false,
             internal_error_occurred: false,
+            setup_succeeded: None,
+            teardown_succeeded: None,
         }
     }
 
@@ -43,7 +47,10 @@ impl<'a> RunState<'a> {
         self.cancel_occurred = true;
     }
 
-    fn record_next_outcome(&mut self, next_outcome: Outcome) {
+    fn record_next_outcome(&mut self, next_outcome: ExtendedOutcome) {
+        self.setup_succeeded = next_outcome.setup_succeeded;
+        self.teardown_succeeded = next_outcome.teardown_succeeded;
+        let next_outcome = next_outcome.outcome;
         if next_outcome != Outcome::Passed {
             self.failed_suites += 1;
         }
@@ -81,8 +88,12 @@ impl<'a> RunState<'a> {
             || self.internal_error_occurred
     }
 
-    fn final_outcome(self) -> Outcome {
-        self.final_outcome.unwrap_or(Outcome::Passed)
+    fn final_outcome(self) -> ExtendedOutcome {
+        ExtendedOutcome {
+            outcome: self.final_outcome.unwrap_or(Outcome::Passed),
+            setup_succeeded: self.setup_succeeded,
+            teardown_succeeded: self.teardown_succeeded,
+        }
     }
 }
 
@@ -170,7 +181,14 @@ async fn run_test_chunk<'a, F: 'a + Future<Output = ()> + Unpin>(
             let result =
                 run_suite_and_collect_logs(running_suite, &suite, log_display, cancel_fut.clone())
                     .await;
-            let suite_outcome = result.unwrap_or_else(|err| Outcome::error(err));
+            // `run_suite_and_collect_logs` return an error only when reporters fail *after*
+            // event collection is complete. In that case, setup has succeeded, but there was
+            // an issue during teardown.
+            let suite_outcome = result.unwrap_or_else(|err| ExtendedOutcome {
+                outcome: Outcome::error(err),
+                setup_succeeded: Some(true),
+                teardown_succeeded: Some(false),
+            });
             // We should always persist results, even if something failed.
             suite.finished()?;
             run_state.record_next_outcome(suite_outcome);
@@ -190,7 +208,7 @@ async fn run_tests<'a, F: 'a + Future<Output = ()> + Unpin>(
     run_params: RunParams,
     run_reporter: &'a RunReporter,
     cancel_fut: F,
-) -> Result<Outcome, RunTestSuiteError> {
+) -> Result<ExtendedOutcome, RunTestSuiteError> {
     let mut run_state = RunState::new(&run_params);
     let cancel_fut = cancel_fut.shared();
     match run_state.should_stop_run() {
@@ -234,13 +252,19 @@ pub async fn run_test_and_get_outcome<F>(
     run_params: RunParams,
     run_reporter: RunReporter,
     cancel_fut: F,
-) -> Outcome
+) -> ExtendedOutcome
 where
     F: Future<Output = ()>,
 {
     match run_reporter.started(Timestamp::Unknown) {
         Ok(()) => (),
-        Err(e) => return Outcome::error(e),
+        Err(e) => {
+            return ExtendedOutcome {
+                outcome: Outcome::error(e),
+                setup_succeeded: None,
+                teardown_succeeded: None,
+            };
+        }
     }
     let test_outcome = match run_tests(
         connector,
@@ -253,15 +277,19 @@ where
     {
         Ok(s) => s,
         Err(e) => {
-            return Outcome::error(e);
+            return ExtendedOutcome {
+                outcome: Outcome::error(e),
+                setup_succeeded: None,
+                teardown_succeeded: None,
+            };
         }
     };
 
-    let report_result = match run_reporter.stopped(&test_outcome.clone().into(), Timestamp::Unknown)
-    {
-        Ok(()) => run_reporter.finished(),
-        Err(e) => Err(e),
-    };
+    let report_result =
+        match run_reporter.stopped(&test_outcome.outcome.clone().into(), Timestamp::Unknown) {
+            Ok(()) => run_reporter.finished(),
+            Err(e) => Err(e),
+        };
     if let Err(e) = report_result {
         warn!("Failed to record results: {:?}", e);
     }
@@ -396,7 +424,7 @@ mod test {
         ]
     }
 
-    async fn call_run_tests(params: ParamsForRunTests) -> Outcome {
+    async fn call_run_tests(params: ParamsForRunTests) -> ExtendedOutcome {
         run_test_and_get_outcome(
             SingleRunConnector::new(params.runner_proxy),
             params.test_params,
@@ -437,7 +465,14 @@ mod test {
             },
         );
 
-        assert_eq!(join(run_fut, fake_fut).await.0, Outcome::Passed,);
+        assert_eq!(
+            join(run_fut, fake_fut).await.0,
+            ExtendedOutcome {
+                outcome: Outcome::Passed,
+                setup_succeeded: Some(true),
+                teardown_succeeded: Some(true),
+            }
+        );
 
         let reports = reporter.get_reports();
         assert_eq!(2usize, reports.len());
@@ -523,7 +558,14 @@ mod test {
             },
         );
 
-        assert_eq!(join(run_fut, fake_fut).await.0, Outcome::Passed,);
+        assert_eq!(
+            join(run_fut, fake_fut).await.0,
+            ExtendedOutcome {
+                outcome: Outcome::Passed,
+                setup_succeeded: Some(true),
+                teardown_succeeded: Some(true),
+            },
+        );
 
         let reports = reporter.get_reports();
         assert_eq!(2usize, reports.len());
@@ -576,7 +618,14 @@ mod test {
             },
         );
 
-        assert_matches!(join(run_fut, fake_fut).await.0, Outcome::Error { .. });
+        assert_matches!(
+            join(run_fut, fake_fut).await.0,
+            ExtendedOutcome {
+                outcome: Outcome::Error { .. },
+                setup_succeeded: Some(true),
+                teardown_succeeded: Some(true)
+            }
+        );
 
         let reports = reporter.get_reports();
         assert_eq!(2usize, reports.len());
@@ -592,6 +641,49 @@ mod test {
         assert_eq!(run.report.outcome, Some(output::ReportedOutcome::Error));
         assert!(run.report.is_finished);
         assert!(run.report.started_time.is_some());
+    }
+
+    #[fuchsia::test]
+    async fn record_output_after_launch_error() {
+        let (runner_proxy, mut suite_runner_stream) =
+            create_proxy_and_stream::<ftest_manager::SuiteRunnerMarker>();
+
+        let reporter = InMemoryReporter::new();
+        let run_reporter = RunReporter::new(reporter.clone());
+        let run_fut = call_run_tests(ParamsForRunTests {
+            runner_proxy,
+            test_params: TestParams {
+                test_url: "fuchsia-pkg://fuchsia.com/invalid#meta/invalid.cm".to_string(),
+                ..TestParams::default()
+            },
+            run_reporter,
+        });
+
+        let fake_fut = async move {
+            if let Ok(Some(ftest_manager::SuiteRunnerRequest::Run { controller, .. })) =
+                suite_runner_stream.try_next().await
+            {
+                let mut stream = controller.into_stream();
+                while let Ok(Some(req)) = stream.try_next().await {
+                    if let ftest_manager::SuiteControllerRequest::WatchEvents {
+                        responder, ..
+                    } = req
+                    {
+                        let _ =
+                            responder.send(Err(ftest_manager::LaunchError::InstanceCannotResolve));
+                    }
+                }
+            }
+        };
+
+        assert_matches!(
+            join(run_fut, fake_fut).await.0,
+            ExtendedOutcome {
+                outcome: Outcome::Error { .. },
+                setup_succeeded: Some(false),
+                teardown_succeeded: None
+            }
+        );
     }
 
     #[cfg(target_os = "fuchsia")]
@@ -676,7 +768,14 @@ mod test {
             },
         );
 
-        assert_eq!(join3(run_fut, debug_data_fut, fake_fut).await.0, Outcome::Passed);
+        assert_eq!(
+            join3(run_fut, debug_data_fut, fake_fut).await.0,
+            ExtendedOutcome {
+                outcome: Outcome::Passed,
+                setup_succeeded: Some(true),
+                teardown_succeeded: Some(true),
+            }
+        );
 
         let reports = reporter.get_reports();
         assert_eq!(2usize, reports.len());

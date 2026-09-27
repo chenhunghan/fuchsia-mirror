@@ -608,18 +608,21 @@ class BtHciBroadcomTest : public ::gtest::TestLoopFixture {
     return hci_transport_client_;
   }
 
-  uint64_t GetCoreDumpCount() {
-    return driver_test().RunInDriverContext<uint64_t>([](BtHciBroadcom& driver) {
+  uint64_t GetInspectCount(const char* property_name) {
+    return driver_test().RunInDriverContext<uint64_t>([property_name](BtHciBroadcom& driver) {
       auto vmo = driver.inspector().inspector().DuplicateVmo();
       auto hierarchy_res = inspect::ReadFromVmo(std::move(vmo));
       if (hierarchy_res.is_error())
         return static_cast<uint64_t>(0);
       auto hierarchy = std::move(hierarchy_res.value());
-      const auto* prop =
-          hierarchy.node().get_property<inspect::UintPropertyValue>("core_dump_count");
+      const auto* prop = hierarchy.node().get_property<inspect::UintPropertyValue>(property_name);
       return prop ? prop->value() : static_cast<uint64_t>(0);
     });
   }
+
+  uint64_t GetCoreDumpCount() { return GetInspectCount("core_dump_count"); }
+
+  uint64_t GetRootInflammationCount() { return GetInspectCount("root_inflammation_count"); }
 
  private:
   fdf_testing::BackgroundDriverTest<FixtureConfig> driver_test_;
@@ -663,10 +666,13 @@ TEST_F(BtHciBroadcomInitializedTest, GetCrashParameters) {
 
   auto params = result->value();
   ASSERT_TRUE(params->has_crash_events());
-  EXPECT_EQ(params->crash_events().size(), 1u);
+  ASSERT_EQ(params->crash_events().size(), 2u);
   EXPECT_EQ(params->crash_events()[0].size(), 2u);
   EXPECT_EQ(params->crash_events()[0][0], 0x1B);
   EXPECT_EQ(params->crash_events()[0][1], 0x03);
+  EXPECT_EQ(params->crash_events()[1].size(), 2u);
+  EXPECT_EQ(params->crash_events()[1][0], 0x58);
+  EXPECT_EQ(params->crash_events()[1][1], 0x05);
 
   ASSERT_TRUE(params->has_program_name());
   EXPECT_EQ(params->program_name().get(), std::string_view("bt-hci-broadcom"));
@@ -1019,6 +1025,28 @@ TEST_F(BtHciBroadcomInitializedTest, HciTransportPassthroughCoreDumpCooldown) {
   EXPECT_TRUE(status.ok());
 
   EXPECT_EQ(GetCoreDumpCount(), 2ull);  // Cooldown expired! Now 2.
+}
+
+TEST_F(BtHciBroadcomInitializedTest, HciTransportPassthroughRootInflammationCounted) {
+  OpenHciTransportClient();
+
+  EXPECT_EQ(GetCoreDumpCount(), 0ull);
+  EXPECT_EQ(GetRootInflammationCount(), 0ull);
+
+  // Vendor event, len 0x04, BQR subevent, Root Inflammation, error 0x00, vendor_error 0x7F.
+  const std::vector<uint8_t> kRootInflammationEvent = {0xFF, 0x04, 0x58, 0x05, 0x00, 0x7F};
+
+  driver_test().RunInEnvironmentTypeContext(
+      [&](TestEnvironment& env) { env.transport_device_.SendEvent(kRootInflammationEvent); });
+
+  NoOpEventHandler event_handler;
+  // Wait for the event to be forwarded to ensure the background driver thread has finished
+  // processing it before checking Inspect metrics.
+  EXPECT_TRUE(hci_transport_client().HandleOneEvent(event_handler).ok());
+
+  // Root inflammation is not a core dump, so it must not be counted as one.
+  EXPECT_EQ(GetRootInflammationCount(), 1ull);
+  EXPECT_EQ(GetCoreDumpCount(), 0ull);
 }
 
 TEST_F(BtHciBroadcomInitializedWithPowerTest, InitPowerManagement) {

@@ -158,6 +158,8 @@ if (is_fuchsia) {
     "//src/storage/blobfs/bin:blobfs-component",
     "//third_party/zstd",
   ]
+} else {
+  fxfs_deps += [ "//src/lib/fuchsia-emulated-handle" ]
 }
 
 rustc_macro("fxfs_macros") {

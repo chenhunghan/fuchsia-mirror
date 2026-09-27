@@ -74,12 +74,14 @@ Options:
   -a, --address     Address to read or write. Must be listed before --read or --write.
   -i, --width       Register width in bytes (e.g. 1, 2, 4). If left unspecified,
                     queries device properties (defaulting to 1 if unspecified by device).
-  -r, --read        Reads <registers_to_read> registers from the device.
+  -r, --read        Reads <registers_to_read> registers from the device one by one,
+                    displaying each register's address and value. Terminates on error.
   -w, --write       Writes <byte0>, <byte1>, etc to the device. Width is not required as
                     data is provided directly as individual bytes.
-  -d, --dump        Dumps <dump_bytes> from the device, reading one register at a time.
-                    Must be a multiple of register width. If there is an error, continue
-                    with the next register.
+  -d, --dump        Dumps <dump_bytes> from the device into a 16-byte aligned table,
+                    reading one register at a time. Truncated to a multiple of register
+                    width if necessary. If there is an error, continues with the next
+                    register and displays "--" for unreadable bytes.
   -p, --properties  Retrieves device properties.
   -l, --list        Lists all devices available.
   -h, --help        Show list of command-line options.
@@ -140,6 +142,50 @@ void PrintRegisters(uint16_t base_address, const std::vector<uint8_t>& data,
     std::cout << std::format("Register: 0x{:04x}  value: 0x{} ({})\n", reg_addr, hex_str, val);
     offset += bytes;
     reg_addr++;
+  }
+}
+
+// Prints dumped byte data in a 16-byte aligned table format with header and row addresses.
+// Displays raw bytes across 16 columns regardless of register width.
+// Failed or unreadable bytes are displayed as "--".
+void PrintDumpTable(uint16_t start_address,
+                    const std::vector<std::optional<uint8_t>>& dumped_bytes) {
+  if (dumped_bytes.empty()) {
+    return;
+  }
+  constexpr size_t kBytesPerRow = 16;
+  // Mask to compute the 16-byte aligned base address of each row.
+  constexpr uint16_t kRowMask = 0xfff0;
+  constexpr char kHeader[] = "       0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\n";
+
+  std::cout << kHeader;
+  uint16_t current_address = start_address;
+  size_t byte_idx = 0;
+  while (byte_idx < dumped_bytes.size()) {
+    const uint16_t row_base = static_cast<uint16_t>(current_address & kRowMask);
+    std::string hex_col;
+    for (size_t col = 0; col < kBytesPerRow; ++col) {
+      const uint16_t addr = static_cast<uint16_t>(row_base + col);
+      if (addr < current_address) {
+        // Leading padding before the first dumped byte in this row.
+        hex_col += "  ";
+      } else if (byte_idx < dumped_bytes.size()) {
+        const std::optional<uint8_t>& byte = dumped_bytes[byte_idx++];
+        current_address++;
+        if (byte.has_value()) {
+          hex_col += std::format("{:02x}", *byte);
+        } else {
+          hex_col += "--";
+        }
+        if (byte_idx == dumped_bytes.size()) {
+          break;
+        }
+      }
+      if (col + 1 < kBytesPerRow) {
+        hex_col += ' ';
+      }
+    }
+    std::cout << std::format("{:04x}: {}\n", row_base, hex_col);
   }
 }
 
@@ -390,25 +436,24 @@ int SpmiCtl::Execute(int argc, char** argv) {
         // Determine register width from command-line argument or device properties.
         const uint32_t reg_width = register_width_arg.value_or(GetRegisterWidthBytes(client));
 
-        // Ensure total bytes to read does not overflow 32-bit integer.
-        if (static_cast<uint64_t>(read_registers) >
-            std::numeric_limits<uint32_t>::max() / reg_width) {
-          std::cerr << "Read failed: total read bytes exceeds 0xffffffff" << std::endl;
-          return -1;
-        }
-        const uint32_t total_bytes = static_cast<uint32_t>(read_registers) * reg_width;
+        // Read registers one by one.
+        for (size_t reg_idx = 0; reg_idx < static_cast<size_t>(read_registers); ++reg_idx) {
+          if (static_cast<size_t>(*address) + reg_idx > std::numeric_limits<uint16_t>::max()) {
+            std::cerr << "Read terminated: address out of 16 bits range" << std::endl;
+            return -1;
+          }
+          const uint16_t local_address = static_cast<uint16_t>(*address + reg_idx);
+          fuchsia_hardware_spmi::DeviceRegisterReadRequest request;
+          request.address(local_address);
+          request.size_bytes(reg_width);
 
-        // Read size is represented as an unsigned 32-bit integer in the FIDL request.
-        fuchsia_hardware_spmi::DeviceRegisterReadRequest request;
-        request.address(std::move(*address));
-        request.size_bytes(total_bytes);
-
-        auto result = client->RegisterRead(std::move(request));
-        if (result.is_error()) {
-          std::cerr << "Read failed: " << result.error_value().FormatDescription() << std::endl;
-          return -1;
+          auto result = client->RegisterRead(std::move(request));
+          if (result.is_error()) {
+            std::cerr << "Read failed: " << result.error_value().FormatDescription() << std::endl;
+            return -1;
+          }
+          PrintRegisters(local_address, result->data(), reg_width);
         }
-        PrintRegisters(*address, result->data(), reg_width);
         return 0;
       } break;
 
@@ -417,15 +462,16 @@ int SpmiCtl::Execute(int argc, char** argv) {
           break;
         }
 
-        // Parse number of bytes to dump; must dump at least 1 byte.
+        // Parse number of bytes to dump; must be within [1, 0xffffffff].
         int64_t dump_bytes = 0;
         const auto res = ParseInteger(optarg, &dump_bytes);
         if (res == ParseResult::kInvalid) {
           ShowUsage(false);
           return -1;
         }
-        if (res == ParseResult::kOutOfRange || dump_bytes < 1) {
-          std::cerr << "Dump failed: must dump at least 1 byte" << std::endl;
+        if (res == ParseResult::kOutOfRange || dump_bytes < 1 ||
+            dump_bytes > std::numeric_limits<uint32_t>::max()) {
+          std::cerr << "Dump failed: must be between 1 and 0xffffffff inclusive" << std::endl;
           return -1;
         }
 
@@ -434,35 +480,73 @@ int SpmiCtl::Execute(int argc, char** argv) {
           return -1;
         }
 
-        // Determine register width from command-line argument or device properties.
-        const uint32_t reg_width = register_width_arg.value_or(GetRegisterWidthBytes(client));
+        // Determine register width from device properties and optional argument.
+        const uint32_t driver_reg_width = GetRegisterWidthBytes(client);
+        const uint32_t reg_width = register_width_arg.value_or(driver_reg_width);
 
-        // Dump size must be a multiple of the register width.
-        if (dump_bytes % reg_width != 0) {
+        // Dump size must be at least one register width.
+        if (dump_bytes < reg_width) {
           std::cerr << "Dump failed: bytes to dump (" << dump_bytes
-                    << ") must be a multiple of register width (" << reg_width << ")\n";
+                    << ") must be at least register width (" << reg_width << ")\n";
           return -1;
         }
 
-        fuchsia_hardware_spmi::DeviceRegisterReadRequest request;
-        // Read reg_width bytes at a time. If there is an error, continue with next register.
-        for (size_t j = 0, reg_idx = 0; j < static_cast<size_t>(dump_bytes);
-             j += reg_width, reg_idx++) {
-          if (static_cast<size_t>(*address) + reg_idx > std::numeric_limits<uint16_t>::max()) {
+        // Truncate dump size to a multiple of the register width if needed.
+        if (dump_bytes % reg_width != 0) {
+          dump_bytes -= dump_bytes % reg_width;
+          std::cerr << std::format("WARNING: Truncating dump size to register width ({} bytes)\n",
+                                   dump_bytes);
+        }
+
+        // Warn if the register width of the SPMI target is not 1 byte, as table
+        // column offsets and row addresses reflect byte offsets rather than register indices.
+        constexpr uint32_t kSingleByteRegisterWidth = 1;
+        if (driver_reg_width != kSingleByteRegisterWidth) {
+          std::cerr << std::format(
+              "WARNING: Register width in the SPMI target is {} (not 1),\n"
+              "         offsets are not the same as reading registers.\n",
+              driver_reg_width);
+        }
+
+        // Dumped byte values from reads (std::nullopt indicates a read error).
+        std::vector<std::optional<uint8_t>> dumped_bytes;
+
+        // Maximum 16-bit address limit.
+        constexpr size_t kMaxAddress16 = 0xffff;
+        const size_t total_registers = static_cast<size_t>(dump_bytes) / reg_width;
+
+        // Bound reservation to maximum addressable space to prevent excessive allocation.
+        const size_t max_registers = kMaxAddress16 + 1 - *address;
+        dumped_bytes.reserve(std::min(total_registers, max_registers) * reg_width);
+
+        // Read registers one by one. If there is an error, continue with the next register.
+        for (size_t reg_idx = 0; reg_idx < total_registers; ++reg_idx) {
+          if (static_cast<size_t>(*address) + reg_idx > kMaxAddress16) {
             std::cerr << "Dump terminated: address out of 16 bits range" << std::endl;
-            return 0;
+            break;
           }
           const uint16_t local_address = static_cast<uint16_t>(*address + reg_idx);
+          fuchsia_hardware_spmi::DeviceRegisterReadRequest request;
           request.address(local_address);
           request.size_bytes(reg_width);
-          auto result = client->RegisterRead(request);
+          auto result = client->RegisterRead(std::move(request));
           if (result.is_error()) {
-            std::cout << std::format("Register: 0x{:04x}  {}\n", local_address,
-                                     result.error_value().FormatDescription());
+            if (result.error_value().is_framework_error()) {
+              std::cerr << "Dump terminated: transport error ("
+                        << result.error_value().FormatDescription() << ")" << std::endl;
+              break;
+            }
+            for (size_t b = 0; b < reg_width; ++b) {
+              dumped_bytes.push_back(std::nullopt);
+            }
             continue;
           }
-          PrintRegisters(local_address, result->data(), reg_width);
+          for (uint8_t byte : result->data()) {
+            dumped_bytes.push_back(byte);
+          }
         }
+
+        PrintDumpTable(*address, dumped_bytes);
         return 0;
       }
 

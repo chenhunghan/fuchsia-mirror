@@ -106,10 +106,12 @@ if (is_host) {
       ":agents_testing",
     ]
   }
+
   python_host_test("agents_githooks_reporters_test") {
     main_source = "tests/githooks_reporters_test.py"
     libraries = [ ":agents_lib" ]
   }
+
   python_host_test("agents_githooks_adapters_test") {
     main_source = "tests/githooks_adapters_test.py"
     libraries = [
@@ -117,6 +119,7 @@ if (is_host) {
       ":agents_testing",
     ]
   }
+
   python_host_test("agents_githooks_runner_test") {
     main_source = "tests/githooks_runner_test.py"
     libraries = [
@@ -124,6 +127,7 @@ if (is_host) {
       ":agents_testing",
     ]
   }
+
   python_host_test("agents_githooks_installer_test") {
     main_source = "tests/githooks_installer_test.py"
     libraries = [
@@ -131,12 +135,14 @@ if (is_host) {
       ":agents_testing",
     ]
   }
+
   host_test_data("e2e_githooks_scripts") {
     sources = [
       "//scripts/shac/commit_msg_checker.py",
       "//scripts/style/json-fmt.py",
     ]
   }
+
   python_host_test("agents_e2e_githooks_test") {
     main_source = "tests/e2e_githooks_test.py"
     libraries = [ ":agents_lib" ]

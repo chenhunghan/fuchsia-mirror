@@ -246,8 +246,14 @@ impl FxFile {
         self.handle.uncached_handle().is_allocated(start_offset).await.map_err(map_to_status)
     }
 
-    // TODO(https://fxbug.dev/42171261): might be better to have a cached/uncached mode for file and call
-    // this when in uncached mode
+    /// Writes `content` to the file at `offset` directly through the uncached handle, bypassing the
+    /// pager cache.
+    ///
+    /// Both `offset` and `content.len()` must be block-aligned (`self.get_block_size()`). If the
+    /// write extends beyond the current end of the file, new extents are allocated and the file
+    /// size is grown to `offset + content.len()`.
+    // TODO(https://fxbug.dev/42171261): Might be better to have a cached/uncached mode for file and
+    // call this when in uncached mode.
     pub async fn write_at_uncached(&self, offset: u64, content: &[u8]) -> Result<u64, Status> {
         let mut buf = self.handle.uncached_handle().allocate_buffer(content.len()).await;
         buf.copy_from_slice(content);
@@ -264,19 +270,25 @@ impl FxFile {
         Ok(content.len() as u64)
     }
 
-    // TODO(https://fxbug.dev/42171261): might be better to have a cached/uncached mode for file and call
-    // this when in uncached mode
-    pub async fn read_at_uncached(&self, offset: u64, buffer: &mut [u8]) -> Result<u64, Status> {
-        let mut buf = self.handle.uncached_handle().allocate_buffer(buffer.len()).await;
-        buf.fill(0);
-        let bytes_read = self
-            .handle
-            .uncached_handle()
-            .read(offset, buf.as_mut())
-            .await
-            .map_err(map_to_status)?;
-        buf.copy_to_slice(buffer);
-        Ok(bytes_read as u64)
+    /// Reads `length` bytes from the file starting at `offset` directly from the uncached handle,
+    /// bypassing the pager cache.
+    ///
+    /// Both `offset` and `length` must be block-aligned (`self.get_block_size()`). Any portion of
+    /// the requested range beyond the end of the file (or in unallocated ranges) is zero-filled in
+    /// the returned buffer.
+    // TODO(https://fxbug.dev/42171261): Might be better to have a cached/uncached mode for file and
+    // call this when in uncached mode.
+    pub async fn read_at_uncached(
+        &self,
+        offset: u64,
+        length: usize,
+    ) -> Result<buffer::Buffer<'_>, Status> {
+        let block_size = self.get_block_size();
+        if !block_size.is_aligned(offset) || !block_size.is_aligned(length as u64) {
+            return Err(Status::INVALID_ARGS);
+        }
+        let end = offset.checked_add(length as u64).ok_or(Status::INVALID_ARGS)?;
+        self.handle.read_uncached(offset..end).await.map_err(map_to_status)
     }
 
     pub fn get_size_uncached(&self) -> u64 {
@@ -868,7 +880,7 @@ mod tests {
     use std::time::Duration;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
-    use storage_units::PAGE_SIZE;
+    use storage_units::page_size;
     use zx::Status;
 
     const WRAPPING_KEY_ID: WrappingKeyId = u128::to_le_bytes(123);
@@ -1990,7 +2002,7 @@ mod tests {
             let file_clone = file_obj.clone();
 
             unblock(move || {
-                let page_size = PAGE_SIZE.get();
+                let page_size = page_size().get();
                 let mut offset: u64 = 0;
                 while !file_clone
                     .background_flush_running
@@ -3253,7 +3265,8 @@ mod tests {
         )
         .await;
 
-        file.resize(8 * PAGE_SIZE)
+        let page_size = page_size();
+        file.resize(8 * page_size)
             .await
             .expect("resize failed")
             .map_err(Status::err_from_raw)
@@ -3294,10 +3307,10 @@ mod tests {
         let stream2_clone = stream2.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
         unblock(move || {
             stream1_dup_clone2
-                .write_at(zx::StreamWriteOptions::empty(), 1 * PAGE_SIZE, &[5, 6, 7, 8])
+                .write_at(zx::StreamWriteOptions::empty(), 1 * page_size, &[5, 6, 7, 8])
                 .expect("Write on re-opened stream 1 dup should succeed");
             stream2_clone
-                .write_at(zx::StreamWriteOptions::empty(), 2 * PAGE_SIZE, &[9, 10, 11, 12])
+                .write_at(zx::StreamWriteOptions::empty(), 2 * page_size, &[9, 10, 11, 12])
                 .expect("Write on new stream 2 should succeed");
         })
         .await;
@@ -3310,10 +3323,10 @@ mod tests {
         // Page 3 and Page 4.
         unblock(move || {
             stream1_dup
-                .write_at(zx::StreamWriteOptions::empty(), 3 * PAGE_SIZE, &[13, 14, 15, 16])
+                .write_at(zx::StreamWriteOptions::empty(), 3 * page_size, &[13, 14, 15, 16])
                 .expect_err("Write on stream 1 dup should fail after final close");
             stream2
-                .write_at(zx::StreamWriteOptions::empty(), 4 * PAGE_SIZE, &[17, 18, 19, 20])
+                .write_at(zx::StreamWriteOptions::empty(), 4 * page_size, &[17, 18, 19, 20])
                 .expect_err("Write on stream 2 should fail after final close");
         })
         .await;
@@ -3426,7 +3439,8 @@ mod tests {
         .await;
 
         // Grow the file to 4 pages and sync so the on-disk size is 4 pages.
-        file.resize(PAGE_SIZE * 4).await.unwrap().expect("resize failed");
+        let page_size = page_size();
+        file.resize(page_size * 4).await.unwrap().expect("resize failed");
         file.sync().await.unwrap().expect("sync failed");
 
         // Now cause commits to fail. All changes will be pending on the handle.
@@ -3437,14 +3451,14 @@ mod tests {
         unblock(move || {
             for i in 0..2 {
                 stream
-                    .write_at(zx::StreamWriteOptions::empty(), i * PAGE_SIZE, &[1u8])
+                    .write_at(zx::StreamWriteOptions::empty(), i * page_size, &[1u8])
                     .expect("write_at failed");
             }
         })
         .await;
 
         // Shrink the file to 2 pages so that a pending shrink is recorded on the handle.
-        file.resize(PAGE_SIZE * 2).await.unwrap().expect("resize failed");
+        file.resize(page_size * 2).await.unwrap().expect("resize failed");
 
         // Close the client-side file connection and drop object reference so only the
         // volume's IS_DIRTY raw Arc keeps the file alive.

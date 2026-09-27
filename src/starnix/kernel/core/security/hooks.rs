@@ -1372,12 +1372,14 @@ pub fn bprm_creds_from_file(
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.bprm_creds_from_file");
 
-    let (no_new_privs, is_ptraced) = {
+    let (no_new_privs, is_ptraced_without_cap_sys_ptrace) = {
         let state = current_task.read();
-        (state.no_new_privs(), state.is_ptraced())
+        (state.no_new_privs(), state.is_ptraced_without_cap_sys_ptrace())
     };
 
-    let enable_suid = current_task.kernel().features.enable_suid && !no_new_privs && !is_ptraced;
+    let enable_suid = current_task.kernel().features.enable_suid
+        && !no_new_privs
+        && !is_ptraced_without_cap_sys_ptrace;
     if enable_suid {
         resolved_program.file.name().apply_suid_and_sgid(&mut resolved_program.creds);
     }

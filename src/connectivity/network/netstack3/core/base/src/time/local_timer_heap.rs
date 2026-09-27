@@ -417,7 +417,6 @@ mod testutil {
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
-    use core::convert::Infallible as Never;
 
     use crate::InstantContext;
     use crate::testutil::{FakeAtomicInstant, FakeInstant, FakeInstantCtx};
@@ -443,7 +442,7 @@ mod tests {
     impl TimerBindingsTypes for FakeTimerCtx {
         type Timer = FakeTimer;
         type DispatchId = ();
-        type UniqueTimerId = Never;
+        type UniqueTimerId = !;
     }
 
     impl TimerContext for FakeTimerCtx {

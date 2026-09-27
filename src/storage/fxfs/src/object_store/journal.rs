@@ -2144,8 +2144,11 @@ mod tests {
             )
             .await
             .expect("open_object failed");
-            let mut buf = handle.allocate_buffer(TEST_DEVICE_BLOCK_SIZE as usize).await;
-            assert_eq!(handle.read(0, buf.as_mut()).await.expect("read failed"), TEST_DATA.len());
+            let mut buf = handle.allocate_buffer(handle.block_size().get() as usize).await;
+            assert_eq!(
+                handle.read_aligned(0, buf.as_mut()).await.expect("read failed"),
+                TEST_DATA.len()
+            );
             assert_eq!(buf.subslice(..TEST_DATA.len()).to_vec(), TEST_DATA);
             fsck(fs.clone()).await.expect("fsck failed");
             fs.close().await.expect("Close failed");
@@ -2231,9 +2234,9 @@ mod tests {
                 )
                 .await
                 .expect("open_object failed");
-                let mut buf = handle.allocate_buffer(TEST_DEVICE_BLOCK_SIZE as usize).await;
+                let mut buf = handle.allocate_buffer(handle.block_size().get() as usize).await;
                 assert_eq!(
-                    handle.read(0, buf.as_mut()).await.expect("read failed"),
+                    handle.read_aligned(0, buf.as_mut()).await.expect("read failed"),
                     TEST_DATA.len()
                 );
                 let data = buf.subslice(..TEST_DATA.len()).to_vec();
@@ -2287,9 +2290,9 @@ mod tests {
                 .unwrap_or_else(|e| {
                     panic!("open_object failed (object_id: {}): {:?}", object_id, e)
                 });
-                let mut buf = handle.allocate_buffer(TEST_DEVICE_BLOCK_SIZE as usize).await;
+                let mut buf = handle.allocate_buffer(handle.block_size().get() as usize).await;
                 assert_eq!(
-                    handle.read(0, buf.as_mut()).await.expect("read failed"),
+                    handle.read_aligned(0, buf.as_mut()).await.expect("read failed"),
                     TEST_DATA.len()
                 );
                 let data = buf.subslice(..TEST_DATA.len()).to_vec();

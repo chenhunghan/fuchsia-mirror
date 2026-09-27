@@ -39,8 +39,9 @@ bool HealthInspector::CheckReceivingVsyncsWhenDisplayIsOn(inspect::Node& node,
   }
 
   const auto power_mode = display_power_manager_->current_power_mode();
-  if (power_mode != fuchsia_ui_display_singleton::PowerMode::kOn) {
-    return true;  // Display is not on, so we don't expect Vsync events.
+  // Only `kOff` stops VSync events; the doze modes still emit them.
+  if (!display::PowerModeGeneratesVsyncs(power_mode)) {
+    return true;
   }
 
   auto default_display = display_manager_->default_display();

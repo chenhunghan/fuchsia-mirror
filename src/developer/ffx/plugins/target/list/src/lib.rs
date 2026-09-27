@@ -169,7 +169,7 @@ impl ListTool {
                         context.get(ffx_config::keys::DISCOVERY_TIMEOUT_MS).unwrap_or(2000),
                     );
                     let target_info = resolution
-                        .get_target_info(addr, &context)
+                        .get_target_info(addr.clone(), &context)
                         .on_timeout(discovery_timeout, || {
                             Err(anyhow::anyhow!("Connection timed out"))
                         })
@@ -260,6 +260,7 @@ fn query_type(query: &str) -> &str {
         Ok(TargetInfoQuery::Addr(_)) => "addr",
         Ok(TargetInfoQuery::VSock(_)) => "vsock",
         Ok(TargetInfoQuery::Usb(_)) => "usb",
+        Ok(TargetInfoQuery::Uart(_)) => "uart",
         Ok(TargetInfoQuery::First) => "first",
         Err(_) => "invalid",
     }

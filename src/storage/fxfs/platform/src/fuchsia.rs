@@ -10,6 +10,7 @@ mod dirent_cache;
 mod errors;
 pub mod file;
 pub mod fxblob;
+pub mod layer_pager;
 mod memory_pressure;
 pub mod node;
 mod paged_object_handle;

@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("virtio_input-dml") {
+  dml = "meta/virtio_input.dml"
+  driver_name = "virtio_input"
+}
+
 driver_bind_rules("virtio_input_bind") {
-  rules = "meta/virtio.bind"
+  dml_label = ":virtio_input-dml"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -45,10 +50,9 @@ fuchsia_cc_driver("virtio_input-driver") {
 }
 
 fuchsia_driver_component("virtio_input") {
-  component_name = "virtio_input"
   deps = [ ":virtio_input-driver" ]
   info = "meta/virtio_input-info.json"
-  manifest = "meta/virtio.cml"
+  dml_label = ":virtio_input-dml"
 }
 
 fuchsia_driver_package("package") {

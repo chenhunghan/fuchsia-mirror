@@ -252,6 +252,39 @@ offer: [
 ]
 ```
 
+##### Userspace Interrupt Controllers
+
+When a platform device consumes an interrupt managed by a userspace interrupt controller driver (rather than the kernel interrupt controller directly), two `offer` entries are required:
+1. Route `fuchsia.hardware.interrupt.ControllerRegistryService` from `"parent"` to the interrupt controller node (`name: "pdev"`). `dmlc` automatically allocates a unique platform bus `interrupt_controller_id` for that controller node.
+2. Reference the controller node in the consumer's `fuchsia.hardware.platform.device.Service` `interrupts` constraint via `controller: "#<controller-node>"`.
+
+```json5
+offer: [
+  {
+    name: "pdev",
+    service: "fuchsia.hardware.interrupt.ControllerRegistryService",
+    from: "parent",
+    to: "#gpio-controller-ff634400",
+  },
+  {
+    name: "pdev",
+    service: "fuchsia.hardware.platform.device.Service",
+    from: "parent",
+    to: "#touchscreen",
+    constraints: {
+      interrupts: [
+        {
+          name: "touch-irq",
+          number: 14,
+          mode: "EdgeLow",
+          controller: "#gpio-controller-ff634400",
+        },
+      ],
+    },
+  },
+]
+```
+
 #### `metadata_mappings`
 
 Aggregates child device constraints into unified FIDL metadata:

@@ -190,18 +190,7 @@ pub async fn get(vol: &Arc<ObjectStore>, src: &Path) -> Result<Vec<u8>, Error> {
         let handle =
             ObjectStore::open_object(dir.owner(), object_id, HandleOptions::default(), None)
                 .await?;
-        let mut out: Vec<u8> = Vec::new();
-        let mut buf = handle.allocate_buffer(handle.block_size().get() as usize).await;
-        let mut ofs = 0;
-        loop {
-            let bytes = handle.read(ofs, buf.as_mut()).await?;
-            ofs += bytes as u64;
-            buf.subslice(..bytes).append_to(&mut out);
-            if bytes as u64 != handle.block_size() {
-                break;
-            }
-        }
-        Ok(out)
+        Ok(handle.contents(usize::MAX).await?.into_vec())
     } else {
         bail!("File not found: {}", src.display());
     }

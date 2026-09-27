@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("intel-display-dml") {
+  dml = "meta/intel-display.dml"
+  driver_name = "intel-display"
+}
+
 driver_bind_rules("intel-display-bind") {
-  rules = "meta/intel-display.bind"
+  dml_label = ":intel-display-dml"
   tests = "meta/intel-display-bind-tests.json"
 
   deps = [
@@ -148,7 +153,7 @@ fuchsia_driver_component("intel-display") {
   component_name = "intel-display"
   deps = [ ":driver" ]
   info = "meta/intel-display-info.json"
-  manifest = "meta/intel-display.cml"
+  dml_label = ":intel-display-dml"
 }
 
 fuchsia_driver_package("package") {

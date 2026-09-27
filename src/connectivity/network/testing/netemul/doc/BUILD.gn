@@ -13,7 +13,7 @@ fuchsia_test_component("example-sandbox-test") {
   manifest = "sandbox-test/meta/sandbox-test.cml"
   deps = [
     "sandbox-test",
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
 }

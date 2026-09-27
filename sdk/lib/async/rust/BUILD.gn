@@ -27,6 +27,7 @@ rustc_library("rust") {
     "src/after_deadline.rs",
     "src/callback_state.rs",
     "src/lib.rs",
+    "src/on_interrupt.rs",
     "src/on_signals.rs",
   ]
 

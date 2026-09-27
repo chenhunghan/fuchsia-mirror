@@ -21,7 +21,9 @@
 #include "src/ui/lib/escher/util/image_utils.h"
 #include "src/ui/lib/escher/util/string_utils.h"
 #include "src/ui/lib/escher/vk/command_buffer.h"
+#include "src/ui/lib/escher/vk/impl/framebuffer.h"
 #include "src/ui/lib/escher/vk/impl/pipeline_layout_cache.h"
+#include "src/ui/lib/escher/vk/impl/render_pass_cache.h"
 #include "src/ui/lib/escher/vk/pipeline_builder.h"
 #include "src/ui/lib/escher/vk/shader_module_template.h"
 #include "src/ui/lib/escher/vk/shader_variant_args.h"
@@ -660,9 +662,8 @@ bool TestRenderPassSubpasses(RenderPassInfo* rp, vk::Rect2D render_area,
   FX_DCHECK(output_image->info().sample_count == 1);
   rp->render_area = render_area;
 
-  AttachmentInfo color_info;
-  AttachmentInfo depth_stencil_info;
-  AttachmentInfo msaa_info;
+  RenderPassInfo::AttachmentInfo color_info;
+  RenderPassInfo::AttachmentInfo depth_stencil_info;
   if (output_image) {
     if (!output_image->is_swapchain_image()) {
       FX_LOGS(ERROR) << "RenderPassInfo::InitRenderPassInfo(): Output image doesn't have valid "
@@ -680,13 +681,9 @@ bool TestRenderPassSubpasses(RenderPassInfo* rp, vk::Rect2D render_area,
     depth_stencil_info.InitFromImage(depth_texture->image());
   }
 
-  TestMultipleSubpassHelper(rp, color_info, depth_stencil_info,
-                            msaa_texture ? &msaa_info : nullptr);
+  TestMultipleSubpassHelper(rp, color_info, depth_stencil_info, nullptr);
 
-  // TODO(https://fxbug.dev/42119565): Can we get away sharing image views across multiple
-  // RenderPassInfo structs?
-  ImageViewPtr output_image_view =
-      allocator ? allocator->ObtainImageView(output_image) : ImageView::New(output_image);
+  ImageViewPtr output_image_view = ImageView::New(output_image);
 
   rp->color_attachments[kRenderTargetAttachmentIndex] = std::move(output_image_view);
   rp->depth_stencil_attachment = depth_texture;
@@ -710,34 +707,40 @@ VK_TEST_F(ShaderProgramTest, MultipleSubpasses) {
 
   auto color_attachment = escher->NewAttachmentTexture(vk::Format::eB8G8R8A8Unorm, kWidth, kHeight,
                                                        1, vk::Filter::eNearest);
+  color_attachment->image()->set_swapchain_layout(color_attachment->image()->layout());
+
   auto depth_attachment = has_depth_attachment
                               ? escher->NewAttachmentTexture(depth_format_result.value, kWidth,
                                                              kHeight, 1, vk::Filter::eNearest)
                               : TexturePtr();
 
   // Initialize the render pass.
-  RenderPassInfo render_pass;
+  RenderPassInfo render_pass_info;
   vk::Rect2D render_area = {{0, 0}, {color_attachment->width(), color_attachment->height()}};
 
-  if (!TestRenderpassSubpasses(&render_pass, render_area, color_attachment, depth_attachment) {
-    FX_LOGS(ERROR) << "RectangleCompositor::DrawBatch(): RenderPassInfo initialization failed. "
-                      "Exiting.";
+  if (!TestRenderPassSubpasses(&render_pass_info, render_area, color_attachment->image(),
+                               depth_attachment)) {
+    FX_LOGS(ERROR) << "TestRenderPassSubpasses initialization failed. Exiting.";
     return;
   }
 
+  auto& render_pass = escher->render_pass_cache()->ObtainRenderPass(
+      render_pass_info, /*allow_render_pass_creation=*/true);
+  auto framebuffer = fxl::MakeRefCounted<impl::Framebuffer>(escher->resource_recycler(),
+                                                            render_pass, render_pass_info);
 
-  cb->BeginRenderPass(render_pass_info);
+  cb->BeginRenderPass(std::move(framebuffer));
 
   // Setting the program doesn't immediately result in a pipeline being set.
   cb->SetShaderProgram(program);
   EXPECT_EQ(GetCurrentVkPipeline(cb), vk::Pipeline());
 
-  cb->Draw(/*vertex_count*/6);
+  cb->Draw(/*vertex_count*/ 6);
 
   cb->NextSubpass();
   cb->SetShaderProgram(program);
 
-  cb->Draw(/*vertex_count*/6);
+  cb->Draw(/*vertex_count*/ 6);
 
   cb->EndRenderPass();
 
@@ -812,7 +815,12 @@ VK_TEST_F(ShaderProgramTest, GeneratePipelines) {
   cb->AddWaitSemaphore(std::move(upload_semaphore), vk::PipelineStageFlagBits::eFragmentShader);
   auto noise_texture = escher->NewTexture(noise_image, vk::Filter::eLinear);
 
-  cb->BeginRenderPass(render_pass_info);
+  auto& render_pass = escher->render_pass_cache()->ObtainRenderPass(
+      render_pass_info, /*allow_render_pass_creation=*/true);
+  auto framebuffer = fxl::MakeRefCounted<impl::Framebuffer>(escher->resource_recycler(),
+                                                            render_pass, render_pass_info);
+
+  cb->BeginRenderPass(std::move(framebuffer));
 
   // Setting the program doesn't immediately result in a pipeline being set.
   cb->SetShaderProgram(program);

@@ -16,8 +16,8 @@ use fuchsia_async::{TimeoutExt, Timer};
 use futures::channel::oneshot::{Sender, channel};
 use std::time::Duration;
 use usb_fastboot_discovery::{
-    DefaultSerialFinder, FastbootEvent, FastbootEventHandler, FastbootUsbLiveTester,
-    FastbootUsbTester, FastbootUsbWatcher, Interface as AsyncInterface, SerialNumberFinder,
+    FastbootEvent, FastbootEventHandler, FastbootUsbLiveTester, FastbootUsbTester,
+    FastbootUsbWatcher, Interface as AsyncInterface, SerialNumberFinder, TargetSerialFinder,
     UnversionedFastbootUsbTester, open_interface_with_serial, wait_for_live,
 };
 
@@ -37,10 +37,10 @@ const DEFAULT_DISCONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Discovery polling interval for FastbootUsbWatcher.
-const DEFAULT_DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_DISCOVERY_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Sleep duration between consecutive getvar liveness checks on the rediscovered target.
-const DEFAULT_LIVE_SLEEP_INTERVAL: Duration = Duration::from_millis(500);
+const DEFAULT_LIVE_SLEEP_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RediscoveryConfig {
@@ -250,7 +250,7 @@ impl InterfaceFactoryBase<AsyncInterface> for UsbFactory {
 
     async fn rediscover(&mut self) -> Result<(), InterfaceFactoryError> {
         self.rediscover_impl(
-            DefaultSerialFinder {},
+            TargetSerialFinder::new(self.serial.clone()),
             // This tester will not attempt to talk to the USB devices to extract version info, it
             // only inspects the USB interface
             UnversionedFastbootUsbTester {},

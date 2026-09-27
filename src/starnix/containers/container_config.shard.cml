@@ -43,7 +43,7 @@
             config: "fuchsia.starnix.config.container.DirentCacheSize",
             key: "dirent_cache_size",
             type: "uint32",
-            default: 32,
+            default: 2048,
             availability: "transitional",
         },
         {

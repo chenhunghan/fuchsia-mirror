@@ -327,6 +327,29 @@ template("riscv64_abi_config") {
     }
 
     if (toolchain_environment == "kernel") {
+      # LLVM only inlines a callee whose target features are a subset of the
+      # caller's, and every C++ function carries two features that rustc does
+      # not derive on its own, so without these no C++ FFI shim can inline into
+      # a Rust caller:
+      #
+      #  * `+relax`: Clang enables linker relaxation by default.  It has no
+      #    bearing on instruction selection.
+      #  * `+b`: Clang folds Zba+Zbb+Zbs, all already enabled above, into B.
+      #    rustc enables the three but not the umbrella bit, so this adds no
+      #    new instructions.
+      #
+      # This is confined to the kernel because only there does
+      # `rust_target_features` edit a custom target spec.  Elsewhere these
+      # would become `-Ctarget-feature=` flags, and rustc warns on feature
+      # names it does not accept there.
+      #
+      # TODO(https://fxbug.dev/537458631): Remove once rustc and Clang agree on
+      # the feature set without help.
+      rust_target_features += [
+        "+b",
+        "+relax",
+      ]
+
       rust_target_edits = [
         {
           key = "llvm-abiname"

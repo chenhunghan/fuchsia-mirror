@@ -18,6 +18,7 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::PathBuf;
 mod checker;
+mod code_block_checker;
 mod include_checker;
 mod link_checker;
 mod md_element;
@@ -239,6 +240,8 @@ async fn do_main(opt: &DocCheckerArgs) -> Result<Option<Vec<DocCheckError>>> {
 
     let reachability_graph: ReachabilityGraph = Default::default();
     let exemption_set: ExemptionSet = Default::default();
+
+    markdown_checks.extend(code_block_checker::register_markdown_checks(opt)?);
 
     markdown_checks
         .extend(link_checker::register_markdown_checks(opt, reachability_graph.clone())?);

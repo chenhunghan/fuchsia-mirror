@@ -86,7 +86,7 @@ zx_status_t AddMlbComposite(fdf::WireSyncClient<fpbus::PlatformBus>& pbus,
   auto result = pbus.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, node),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "ti_ina231_mlb", .parents2 = kParents}}));
+                                   {.name = "ti-ina231-mlb", .parents2 = kParents}}));
   if (!result.ok()) {
     zxlogf(ERROR, "Failed to send AddCompositeNodeSpec request failed to platform bus: %s",
            result.FormatDescription().data());
@@ -149,7 +149,7 @@ zx_status_t AddSpeakerComposite(fdf::WireSyncClient<fpbus::PlatformBus>& pbus,
   auto result = pbus.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, node),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "ti_ina231_speakers", .parents2 = kParents}}));
+                                   {.name = "ti-ina231-speakers", .parents2 = kParents}}));
   if (!result.ok()) {
     zxlogf(ERROR, "Failed to send AddCompositeNodeSpec request failed to platform bus: %s",
            result.FormatDescription().data());

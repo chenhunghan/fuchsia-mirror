@@ -25,7 +25,11 @@ pub use rcu_option_box::RcuOptionBox;
 pub use rcu_ptr::RcuReadGuard;
 pub use rcu_read_scope::RcuReadScope;
 pub use rcu_weak::RcuWeak;
-pub use state_machine::{rcu_drop, rcu_run_callbacks, rcu_synchronize, with_thread_block_counters};
+pub use state_machine::{
+    RcuThreadRegistration, rcu_advancer_wait_for_work, rcu_advancer_wake, rcu_drop,
+    rcu_run_callbacks, rcu_synchronize, register_thread, unregister_thread,
+    with_thread_block_counters,
+};
 
 pub mod subtle {
     pub use super::rcu_droppable_arc::{rcu_ptr_to_arc, rcu_ptr_upgrade};

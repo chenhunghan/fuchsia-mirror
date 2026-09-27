@@ -4,63 +4,470 @@
 @available(added=HEAD)
 library fuchsia.hardware.power.charger;
 
-using fuchsia.hardware.power.source;
 using fuchsia.power.system;
 
-/// Static characteristics of the charging hardware.
+/// Errors returned by the charger protocols.
+type Error = flexible enum {
+    /// An unexpected error occurred within the driver.
+    INTERNAL = 1;
+
+    /// The requested operation, field, or mode is not supported by this hardware.
+    NOT_SUPPORTED = 2;
+
+    /// One or more arguments provided to the method were invalid, or a requested value lies outside
+    /// the range the hardware can program.
+    INVALID_ARGS = 3;
+
+    /// Communication with the charger hardware failed (e.g. a bus transfer error).
+    IO = 4;
+
+    /// A `Watch` call is already pending on this connection.
+    ALREADY_WATCHING = 5;
+};
+
+/// Describes the active charging phase of the charger hardware.
+///
+/// Lithium-ion battery charging typically transitions across distinct stages:
+/// Pre-conditioning/Trickle -> Constant Current (Fast) -> Constant Voltage (Taper) -> Top-off ->
+/// Done.
+type ChargePhase = flexible enum {
+    /// The charger is idle, off, or not supplying charging power to the battery (including during
+    /// passthrough, bypass, or charge-inhibit mode).
+    NONE = 1;
+
+    /// Pre-qualification / trickle charging phase.
+    /// Used when the battery is deeply depleted below the pre-charge voltage threshold; current is
+    /// limited to a small, safe level to restore cell voltage before fast charge.
+    TRICKLE = 2;
+
+    /// Constant Current (CC) fast charging phase.
+    /// The charger acts as a regulated current source supplying maximum programmed fast charge
+    /// current.
+    FAST = 3;
+
+    /// Constant Voltage (CV) taper phase.
+    /// The battery voltage has reached the regulation target limit; current naturally tapers down
+    /// as the cell saturates.
+    TAPER = 4;
+
+    /// Top-off charging phase.
+    /// Low-current charging stage right after the CV termination threshold is reached, providing a
+    /// timed saturation before stopping.
+    TOP_OFF = 5;
+
+    /// Charge termination complete.
+    /// The charger has completed its charging cycle (e.g. top-off timer or termination-current
+    /// threshold reached) and has cut off charge current to the battery while continuing to supply
+    /// system load. The charger may automatically re-enter `FAST` if battery voltage decays below
+    /// the recharge threshold.
+    DONE = 6;
+};
+
+/// Describes the primary power converter operating state across the power path and battery
+/// interface.
+///
+/// Reported as state in `Status` and requested as a target in `ControlOptions`. A requested mode
+/// selects the converter configuration; the state subsequently reported also accounts for whether
+/// external power is actually present, so a charger left in `CHARGING` reports `DISCHARGING` once
+/// the input goes away.
+type OperatingMode = flexible enum {
+    /// Normal operation: External power supplies system rails and charges the battery.
+    /// Requesting this mode resumes normal charging after `PASSTHROUGH` or `DISCHARGING`.
+    CHARGING = 1;
+
+    /// Inhibit charge / passthrough: External power supplies system rails, but battery charging is
+    /// disabled (cell rests at current state of charge).
+    PASSTHROUGH = 2;
+
+    /// As a request: force discharge. External power draw is suspended; the system runs
+    /// exclusively on battery while external communication (e.g. USB data) remains active.
+    ///
+    /// As reported state: the battery is supplying the system, either because discharge was
+    /// requested or because no external power is present. Use `Status.online` to tell these
+    /// apart. A configured `PASSTHROUGH` is not separately observable while offline.
+    DISCHARGING = 3;
+
+    /// OTG / Reverse Boost: Power is sourced outward from the battery to the external port.
+    OTG = 4;
+};
+
+/// Describes the external power source type feeding the charger.
+type SourceType = flexible enum {
+    /// Standard wall-plug adapter or dedicated charger (e.g. BC1.2 DCP).
+    AC = 1;
+
+    /// Standard USB host or charging downstream port (e.g. BC1.2 SDP / CDP).
+    USB = 2;
+
+    /// Inductive or magnetic resonance wireless charging pad (e.g. WCIN / Qi).
+    WIRELESS = 3;
+};
+
+/// Hardware health and fault conditions of the charging converter.
+type Health = flexible enum {
+    /// Normal operation; no faults or converter thermal throttling detected.
+    GOOD = 1;
+
+    /// Input voltage on the charger supply rail exceeds the over-voltage lockout (OVLO) limit.
+    INPUT_OVER_VOLTAGE = 2;
+
+    /// Input voltage on the charger supply rail fell below the under-voltage lockout (UVLO)
+    /// operational floor.
+    INPUT_UNDER_VOLTAGE = 3;
+
+    /// Internal charger die temperature reached the thermal regulation (TREG) threshold; the
+    /// converter is still operating but actively folding back current to limit die heating.
+    THERMAL_WARNING = 4;
+
+    /// Internal charger die or input connector temperature exceeded thermal shutdown (TSHDN)
+    /// protection limits and the converter has suspended operation.
+    THERMAL_SHUTDOWN = 5;
+
+    /// Hardware charge safety timer expired before reaching the target charge state.
+    SAFETY_TIMER_EXPIRED = 6;
+
+    /// Voltage sensed at the charger output rail exceeded the converter's over-voltage threshold.
+    BATTERY_OVER_VOLTAGE = 7;
+
+    /// Hardware watchdog timer expired (`WDT`), suspending converter operation.
+    WATCHDOG_TIMER_EXPIRED = 8;
+
+    /// Unspecified charger hardware fault.
+    UNSPECIFIED_FAILURE = 9;
+};
+
+/// Configuration options for charger state watching.
+///
+/// Both fields are optional masks. In both `interest` and `wake_on`, the actual field values within
+/// the `Status` table are ignored; only field presence (set vs. unset) determines the mask.
+///
+/// An absent mask means "use this field's default"; a present but empty mask means "no fields".
+/// The two defaults differ because the safe choice differs: `interest` defaults to everything the
+/// driver supports watching, so a client that never configures anything still makes progress,
+/// while `wake_on` defaults to nothing, since waking the system is a cost a client must opt into.
+type WatchOptions = table {
+    /// Fields the client wants to receive change notifications for.
+    /// Defaults to every field the driver supports watching, as reported by
+    /// `Spec.supported_options`. Pass an explicitly empty table to be notified only for the
+    /// fields named in `wake_on`.
+    1: interest Status;
+
+    /// Fields that should actively wake the system from suspend.
+    /// Any field present in `wake_on` is implicitly included in `interest`.
+    /// Defaults to no fields: changes occurring during suspend are deferred until the next system
+    /// wakeup and do not wake the device.
+    2: wake_on Status;
+};
+
+/// Static hardware characteristics and driver capabilities.
 type Spec = table {
-    /// Maximum current the charger can supply to the battery, in microamps.
+    /// Optional. Maximum current the charger hardware can supply to the battery, in microamps.
+    /// Omitted if unsupported by hardware.
     1: max_charge_current_ua uint32;
-    /// Maximum voltage the charger can supply to the battery, in microvolts.
+
+    /// Optional. Maximum voltage the charger hardware can regulate across the battery, in
+    /// microvolts.
+    /// Omitted if unsupported by hardware.
     2: max_charge_voltage_uv uint32;
+
+    /// Optional. Maximum input current the charger input power path can draw, in microamps.
+    /// Omitted if unsupported by hardware.
+    3: max_input_current_ua uint32;
+
+    /// Optional. Informational charger model string or manufacturer part number.
+    /// Omitted if unknown or unprogrammed in hardware.
+    4: model string:128;
+
+    /// Optional. List of operating modes supported by this charger hardware implementation.
+    /// Omitted if unsupported or unconfigurable by hardware.
+    5: supported_modes vector<OperatingMode>:16;
+
+    /// Required. The interest and wake options supported by this driver/hardware.
+    ///
+    /// Drivers must populate this table so clients know which fields support active change
+    /// notifications. If omitted by the driver, clients should assume no active interrupt watching
+    /// is supported.
+    ///
+    /// - `supported_options.interest`: Telemetry fields that can actively trigger hanging-get watch
+    ///   notifications on change. Fields omitted are passive measurements that do not generate
+    ///   hardware interrupts; their freshest values are returned during active state changes or via
+    ///   [`Charger.GetStatus`].
+    /// - `supported_options.wake_on`: Telemetry fields capable of actively waking the system from
+    ///   suspend via hardware interrupt lines etc.
+    6: supported_options WatchOptions;
+
+    /// Optional. Trickle/precharge current supplied when battery voltage is below the fast-charge
+    /// threshold, in microamps.
+    /// Omitted if unsupported by hardware.
+    7: precharge_current_ua uint32;
+
+    /// Optional. Default or minimum charge termination (top-off / taper cutoff) current threshold,
+    /// in microamps.
+    /// Omitted if unsupported by hardware.
+    8: charge_term_current_ua uint32;
+
+    /// Optional. Battery voltage threshold (or drop below float voltage) at which the charger
+    /// automatically initiates a recharge cycle after reaching `ChargePhase::DONE`, in microvolts.
+    /// Omitted if unsupported by hardware.
+    9: recharge_voltage_uv uint32;
+
+    /// Optional. Minimum programmable input voltage regulation floor (VINDPM), in microvolts.
+    /// Omitted if unsupported by hardware.
+    10: min_input_voltage_uv uint32;
+
+    /// Optional. Maximum programmable input voltage regulation floor (VINDPM), in microvolts.
+    /// Omitted if unsupported by hardware.
+    11: max_input_voltage_uv uint32;
 };
 
-/// Dynamic state of the charging regulator and its inputs.
+/// Primary telemetry snapshot of the charging regulator and its power inputs.
 type Status = table {
-    /// Base status from [`fuchsia.hardware.power.source/Status`].
-    1: source_status fuchsia.hardware.power.source.Status;
+    /// Whether an external power supply or adapter (e.g. VBUS / USB-C / wireless)
+    /// is physically attached and supplying valid power.
+    /// If false, no external source is detected. Omitted if attachment status is indeterminate.
+    1: online bool;
+
+    /// The measured input voltage from the external power source in microvolts.
+    /// Omitted if unsupported by hardware or unavailable.
+    2: input_voltage_uv uint32;
+
+    /// The measured input current drawn from the external power source in microamps.
+    /// Positive (+) indicates current drawn into the charger from the external power source;
+    /// negative (-) indicates current sourced outward to the external port (e.g. during
+    /// `OperatingMode::OTG` reverse boost, if the hardware senses reverse port current).
+    /// Omitted if unsupported by hardware or unavailable.
+    3: input_current_ua int32;
+
+    /// Active operational mode of the power converter and battery interface.
+    /// Omitted if indeterminate or unsupported by hardware.
+    4: operating_mode OperatingMode;
+
+    /// Current charging phase.
+    /// Omitted if indeterminate or unsupported by hardware.
+    5: charge_phase ChargePhase;
+
+    /// Active Input Current Limit (ICL) programmed into the input power path, in microamps.
+    /// Represents the maximum current the charger is permitted to draw from the external input.
+    /// Omitted if indeterminate or unsupported by hardware.
+    6: input_current_limit_ua uint32;
+
+    /// Active Fast Charge Current (FCC) regulation limit programmed for the battery, in microamps.
+    /// Represents the target constant-current delivered to the battery terminals during fast charge.
+    /// Omitted if indeterminate or unsupported by hardware.
+    7: charge_current_limit_ua uint32;
+
+    /// Active float (constant voltage / CV) regulation target programmed for the battery, in
+    /// microvolts. Represents the maximum terminal voltage across the battery pack (as distinct
+    /// from the static hardware ceiling `Spec.max_charge_voltage_uv`).
+    /// Omitted if indeterminate or unsupported by hardware.
+    8: float_voltage_uv uint32;
+
+    /// The detected external power supply type feeding the charger.
+    /// Omitted if indeterminate or disconnected.
+    9: source_type SourceType;
+
+    /// Hardware health and fault condition of the charging converter.
+    /// Omitted if indeterminate or unsupported by hardware.
+    10: health Health;
+
+    /// Active charge termination (top-off / taper cutoff) current threshold programmed into the
+    /// charger, in microamps.
+    /// Omitted if indeterminate or unsupported by hardware.
+    11: charge_term_current_ua uint32;
+
+    /// Active minimum input voltage regulation floor (VINDPM) programmed into the input power
+    /// path, in microvolts.
+    /// Omitted if indeterminate or unsupported by hardware.
+    12: input_voltage_limit_uv uint32;
 };
 
+/// Diagnostic and telemetry interface for charging hardware.
+///
+/// This is a read-only protocol that supports multiple concurrent clients.
 @discoverable
 open protocol Charger {
-    /// Returns static hardware characteristics of the charger.
-    flexible GetSpec() -> (struct {
-        spec Spec;
-    }) error fuchsia.hardware.power.source.Error;
-
-    /// Returns the current dynamic status of the charger immediately.
-    flexible GetStatus() -> (struct {
-        status Status;
-    }) error fuchsia.hardware.power.source.Error;
-
-    /// Control methods.
+    /// Retrieves the static specification of the charger.
+    ///
+    /// Returns:
+    /// + `spec`: Static hardware characteristics and driver capabilities of the charger.
     ///
     /// Errors:
-    /// + `NOT_SUPPORTED`: If the hardware does not support enabling/disabling charging.
-    /// + `INTERNAL`: If an unexpected error occurred.
-    flexible SetChargingEnabled(struct {
-        enabled bool;
-    }) -> () error fuchsia.hardware.power.source.Error;
+    /// - `NOT_SUPPORTED`: Hardware does not supply a static specification.
+    /// - `IO`: Communication failure with the charger hardware (e.g. SPMI transfer failure).
+    /// - `INTERNAL`: Internal driver error.
+    flexible GetSpec() -> (struct {
+        spec Spec;
+    }) error Error;
 
-    /// Change notification for charger state using a "hanging-get" pattern.
+    /// Retrieves an instantaneous snapshot of the charger status.
     ///
-    /// Follows the same semantics and power management rules as
-    /// [`fuchsia.hardware.power.source/Source.Watch`].
+    /// Returns:
+    /// + `status`: Complete current telemetry snapshot of the charging regulator and its inputs.
     ///
-    /// # Errors
+    /// Errors:
+    /// - `IO`: Communication failure with the charger hardware (e.g. SPMI transfer failure).
+    /// - `INTERNAL`: Internal driver error.
+    flexible GetStatus() -> (struct {
+        status Status;
+    }) error Error;
+
+    /// Configures the fields of interest and wake triggers for this client connection.
     ///
-    /// * `ALREADY_BOUND` if `Watch` is called before the previous call completes.
+    /// The driver filters the requested masks against hardware capabilities and returns the
+    /// effective configuration in `effective_options`.
+    ///
+    /// - **Partially supported options**: If some requested fields are supported and others are not
+    ///   (e.g., requesting passive fields like `input_voltage_uv` or `input_current_ua` that do not
+    ///   support active interrupt notifications), the driver enables the supported fields and
+    ///   returns the active subset in `effective_options`. The call succeeds (`Ok`).
+    /// - **Fully unsupported options**: If non-empty masks were specified but NONE of the requested
+    ///   fields are supported, the driver returns `NOT_SUPPORTED`.
+    ///
+    /// If `ConfigureWatch` is never called, `Watch` defaults to returning on ANY supported field
+    /// change. The driver aggregates constraints across all clients to determine hardware reporting
+    /// rates.
+    ///
+    /// Calling `ConfigureWatch` while a `Watch` call is already pending takes effect immediately:
+    /// if the current hardware state already differs from the last-delivered snapshot on a newly
+    /// enabled field, the pending `Watch` resolves immediately; otherwise it remains pending under
+    /// the updated mask.
+    ///
+    /// If `ConfigureWatch` returns an error, the connection's prior watch configuration remains
+    /// unchanged.
+    ///
+    /// Parameters:
+    /// + `options`: Requested watch options. Both `interest` and `wake_on` are optional.
+    ///
+    /// Returns:
+    /// + `effective_options`: The subset of requested options supported and enabled by the driver.
+    ///
+    /// Errors:
+    /// - `NOT_SUPPORTED`: Non-empty options were requested, but none of the requested
+    ///   interest/wake fields are supported by the driver.
+    flexible ConfigureWatch(struct {
+        options WatchOptions;
+    }) -> (struct {
+        effective_options WatchOptions;
+    }) error Error;
+
+    /// Watches for changes in charger state using a hanging-get pattern.
+    ///
+    /// The first call returns the full current hardware state immediately. Subsequent calls block
+    /// until a state change matches the masks in [`ConfigureWatch`]. Each return contains a
+    /// complete telemetry snapshot of all current charger fields, not a sparse delta.
+    ///
+    /// At most one `Watch` call may be outstanding per connection; concurrent calls fail with
+    /// `ALREADY_WATCHING`.
+    ///
+    /// Parameters:
+    /// + `lease`: An optional power lease token used to coordinate handoff between client and
+    ///   server, preventing the system from suspending before critical charger events are handled.
+    ///   If omitted, or if the driver does not support any `wake_on` fields, no lease coordination
+    ///   is performed and any provided token is dropped without returning a `wake_lease`.
+    ///
+    /// Returns:
+    /// + `status`: Complete current telemetry snapshot of the charger.
+    /// + `wake_lease`: An optional lease token provided if the change triggered a `wake_on`
+    ///   condition.
+    ///   Omitted if the change did not trigger a wake condition or if suspend coordination is
+    ///   inactive.
+    ///
+    /// Errors:
+    /// - `ALREADY_WATCHING`: A `Watch` call is already pending on this connection.
+    /// - `IO`: Communication failure with the charger hardware (e.g. SPMI transfer failure).
+    /// - `INTERNAL`: Internal driver error.
     flexible Watch(resource struct {
-        interest Status;
-        wake_on Status;
         lease fuchsia.power.system.LeaseToken:optional;
     }) -> (resource struct {
         status Status;
         wake_lease fuchsia.power.system.LeaseToken:optional;
-    }) error fuchsia.hardware.power.source.Error;
+    }) error Error;
+};
+
+/// Operational and electrical constraints applicable to the charger converter.
+///
+/// This is a partial update: only the fields present are applied, and any omitted field leaves the
+/// corresponding hardware setting unchanged. While the `Controller` connection remains open, to
+/// relax a previously applied limit, set the field again to the desired value, or close the
+/// `Controller` channel to withdraw all overrides and restore driver defaults.
+///
+/// Values between discrete hardware register steps are rounded in the direction that honors the
+/// constraint. Ceilings (current and voltage limits) round down, so a value below the lowest
+/// programmable step is rejected with `Error::INVALID_ARGS`; the `input_voltage_limit_uv` floor
+/// rounds up, so a value below the lowest programmable step is clamped to it.
+type ControlOptions = table {
+    /// Desired operational mode of the power converter.
+    1: operating_mode OperatingMode;
+
+    /// Active Input Current Limit (ICL) programmed into the input power path, in microamps.
+    /// Values between discrete hardware register steps are rounded down to the nearest
+    /// programmable step so the requested ceiling is never exceeded.
+    2: input_current_limit_ua uint32;
+
+    /// Active Fast Charge Current (FCC) regulation limit for the battery, in microamps.
+    /// Values between discrete hardware register steps are rounded down to the nearest
+    /// programmable step so the requested ceiling is never exceeded.
+    3: charge_current_limit_ua uint32;
+
+    /// Active float (constant voltage / CV) regulation target across the battery, in microvolts
+    /// (bounded by `Spec.max_charge_voltage_uv`).
+    /// Values between discrete hardware register steps are rounded down to the nearest
+    /// programmable step. Note that writing a float voltage target may cause the hardware charge
+    /// state machine to exit `ChargePhase::TOP_OFF` and re-evaluate CV regulation.
+    4: float_voltage_uv uint32;
+
+    /// Active charge termination (top-off / taper cutoff) current threshold, in microamps.
+    /// Values between discrete hardware register steps are rounded down to the nearest
+    /// programmable step.
+    5: charge_term_current_ua uint32;
+
+    /// Minimum input voltage regulation floor (VINDPM), in microvolts, below which the converter
+    /// throttles input current draw to prevent source collapse.
+    /// Values between discrete hardware register steps are rounded up to the nearest programmable
+    /// step so the input voltage never drops below the requested floor.
+    6: input_voltage_limit_uv uint32;
+};
+
+/// Control interface for mutating charger hardware state.
+///
+/// # Single-Client Exclusivity
+/// This protocol mutates shared hardware state and admits a single active client. While one client
+/// is connected, a second connection attempt is closed immediately with a `ZX_ERR_ALREADY_BOUND`
+/// epitaph before any request is served, so no request from the second client ever reaches the
+/// hardware.
+///
+/// # Connection-Scoped Lifetime (Revert on Close)
+/// The `Controller` channel encodes the lifetime of the constraints applied through it. When the
+/// client closes the channel (or disconnects unexpectedly), the driver withdraws all constraints
+/// set during that session and reverts the charger to autonomous hardware / board-configured
+/// defaults (e.g. restoring autonomous USB-C/BC1.2 input current limit selection and default
+/// charging mode).
+@discoverable
+open protocol Controller {
+    /// Atomically applies operational and electrical constraints to the charger converter.
+    ///
+    /// Either every requested constraint is applied, or none are; a rejected request leaves the
+    /// hardware in its previous state. The response is returned only after all corresponding
+    /// hardware register writes have completed and been acknowledged by the charger IC.
+    ///
+    /// Parameters:
+    /// + `options`: The constraints to apply. Omitted fields leave the corresponding hardware
+    ///   setting unchanged.
+    ///
+    /// Errors:
+    /// - `NOT_SUPPORTED`: One or more requested constraints are not adjustable on this
+    ///   hardware, or the requested `operating_mode` is absent from `Spec.supported_modes`.
+    /// - `INVALID_ARGS`: A requested value is outside the range the hardware can program, or the
+    ///   requested `operating_mode` conflicts with the active power path state (for example,
+    ///   requesting `OperatingMode::OTG` while external input power is online on the same port).
+    /// - `IO`: Communication failure with the charger hardware (e.g. SPMI transfer failure).
+    /// - `INTERNAL`: Internal driver error.
+    flexible SetControl(struct {
+        options ControlOptions;
+    }) -> () error Error;
 };
 
 service Service {
     charger client_end:Charger;
-    power_source client_end:fuchsia.hardware.power.source.Source;
+    controller client_end:Controller;
 };

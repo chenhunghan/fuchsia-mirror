@@ -18,6 +18,7 @@ zr::static_assert!(core::mem::size_of::<ArchSavedNormalState>() == 16);
 zr::static_assert!(core::mem::align_of::<ArchSavedNormalState>() == 8);
 
 use crate::kernel::types::cpu_num_t;
+use arch_arm64_aspace_bindings as aspace_bindings;
 use core::fmt::Write;
 use debug::ltrace::KernelConsoleWriter;
 use debug::ltracef;
@@ -168,10 +169,38 @@ pub fn is_user_accessible(va: usize) -> bool {
     (va & USER_BIT_MASK) == 0
 }
 
-/// Base address of the kernel address space.
-pub const KERNEL_ASPACE_BASE: usize = 0xffff_0000_0000_0000;
-/// Size of the kernel address space.
-pub const KERNEL_ASPACE_SIZE: usize = 0x0001_0000_0000_0000;
+/// Virtual address where the kernel address space begins.
+/// Below this is the user address space.
+pub const KERNEL_ASPACE_BASE: usize = 0xffff000000000000;
+zr::static_assert!(KERNEL_ASPACE_BASE == aspace_bindings::KERNEL_ASPACE_BASE as usize);
+
+/// Virtual address where the kernel address space begins.
+/// Below this is the user address space.
+pub const KERNEL_ASPACE_SIZE: usize = 0x0001000000000000;
+zr::static_assert!(KERNEL_ASPACE_SIZE == aspace_bindings::KERNEL_ASPACE_SIZE as usize);
+
+/// Virtual address where the user-accessible address space begins.
+/// Below this is wholly inaccessible.
+pub const USER_ASPACE_BASE: usize = 0x0000000000200000;
+zr::static_assert!(USER_ASPACE_BASE == aspace_bindings::USER_ASPACE_BASE as usize);
+
+/// Virtual address where the user-accessible address space begins.
+/// Below this is wholly inaccessible.
+pub const USER_ASPACE_SIZE: usize = 0xffffff000000 - USER_ASPACE_BASE;
+zr::static_assert!(USER_ASPACE_SIZE == aspace_bindings::USER_ASPACE_SIZE as usize);
+
+/// Size of the restricted mode address space in unified address spaces.
+/// We set the top of the restricted aspace to exactly halfway through the top
+/// level page table.
+pub const USER_RESTRICTED_ASPACE_SIZE: usize = (1usize << 47) - USER_ASPACE_BASE;
+zr::static_assert!(
+    USER_RESTRICTED_ASPACE_SIZE == aspace_bindings::USER_RESTRICTED_ASPACE_SIZE as usize
+);
+
+/// See ARM DDI 0487B.b, Table D4-25 for the maximum IPA range that can be used.
+/// This size is based on a 4KB granule and a starting level of 1. We chose this
+/// size due to the 40-bit physical address range on Cortex-A53.
+pub const MMU_GUEST_SIZE_SHIFT: usize = aspace_bindings::MMU_GUEST_SIZE_SHIFT as usize;
 
 /// Returns whether `va` is within the kernel address space.
 #[inline]
@@ -559,59 +588,66 @@ pub unsafe extern "C" fn rust_arch_enter_full(
     enter_full(arch_state, vector_table, context, code);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(ktest)]
+/// Architecture unit tests for arm64.
+#[unittest::suite(name = "arm64")]
+mod arm64_tests {
+    use unittest::{assert_err, assert_false, assert_ok, assert_true};
 
+    /// Tests `is_user_accessible`.
     #[test]
     fn test_is_user_accessible() {
-        assert!(is_user_accessible(0x0000_7fff_ffff_ffff));
-        assert!(!is_user_accessible(0x0080_0000_0000_0000));
-        assert!(!is_user_accessible(0xffff_ffff_8000_0000));
+        assert_true!(is_user_accessible(0x0000_7fff_ffff_ffff));
+        assert_false!(is_user_accessible(0x0080_0000_0000_0000));
+        assert_false!(is_user_accessible(0xffff_ffff_8000_0000));
     }
 
+    /// Tests `is_kernel_address`.
     #[test]
     fn test_is_kernel_address() {
-        assert!(is_kernel_address(KERNEL_ASPACE_BASE));
-        assert!(is_kernel_address(KERNEL_ASPACE_BASE + 0x1000));
-        assert!(is_kernel_address(usize::MAX));
-        assert!(!is_kernel_address(0));
-        assert!(!is_kernel_address(0x1000));
-        assert!(!is_kernel_address(0x0000_7fff_ffff_ffff));
-        assert!(!is_kernel_address(KERNEL_ASPACE_BASE - 1));
+        assert_true!(is_kernel_address(KERNEL_ASPACE_BASE));
+        assert_true!(is_kernel_address(KERNEL_ASPACE_BASE + 0x1000));
+        assert_true!(is_kernel_address(usize::MAX));
+        assert_false!(is_kernel_address(0));
+        assert_false!(is_kernel_address(0x1000));
+        assert_false!(is_kernel_address(0x0000_7fff_ffff_ffff));
+        assert_false!(is_kernel_address(KERNEL_ASPACE_BASE - 1));
     }
 
+    /// Tests `is_valid_user_pc`.
     #[test]
     fn test_is_valid_user_pc() {
         // Null pointer is valid (used for threads intended to fault).
-        assert!(is_valid_user_pc(0));
+        assert_true!(is_valid_user_pc(0));
         // Valid userspace addresses.
-        assert!(is_valid_user_pc(0x1000));
-        assert!(is_valid_user_pc(0x0000_7fff_ffff_0000));
+        assert_true!(is_valid_user_pc(0x1000));
+        assert_true!(is_valid_user_pc(0x0000_7fff_ffff_0000));
         // Inaccessible user address (bit 55 set).
-        assert!(!is_valid_user_pc(0x0080_0000_0000_0000));
+        assert_false!(is_valid_user_pc(0x0080_0000_0000_0000));
         // Kernel address.
-        assert!(!is_valid_user_pc(KERNEL_ASPACE_BASE));
-        assert!(!is_valid_user_pc(0xffff_ffff_8000_0000));
+        assert_false!(is_valid_user_pc(KERNEL_ASPACE_BASE));
+        assert_false!(is_valid_user_pc(0xffff_ffff_8000_0000));
     }
 
+    /// Tests `validate_state_pre_restricted_entry` for AArch64.
     #[test]
     fn test_validate_state_pre_restricted_entry_aarch64() {
         let mut state = zx_restricted_state_t::default();
         state.pc = 0x1000;
         state.cpsr = ARM64_USER_RESTRICTED_VISIBLE_FLAGS;
-        assert_eq!(validate_state_pre_restricted_entry(&state), Ok(()));
+        assert_ok!(validate_state_pre_restricted_entry(&state));
 
         // Invalid PC (> user accessible address space)
-        state.pc = 1usize << 55 as u64;
-        assert_eq!(validate_state_pre_restricted_entry(&state), Err(Status::BAD_STATE));
+        state.pc = 1u64 << 55;
+        assert_err!(validate_state_pre_restricted_entry(&state), Status::BAD_STATE);
         state.pc = 0x1000;
 
         // Invalid flag in CPSR for AArch64
         state.cpsr = 0x0001_0000;
-        assert_eq!(validate_state_pre_restricted_entry(&state), Err(Status::BAD_STATE));
+        assert_err!(validate_state_pre_restricted_entry(&state), Status::BAD_STATE);
     }
 
+    /// Tests `validate_state_pre_restricted_entry` for AArch32.
     #[test]
     fn test_validate_state_pre_restricted_entry_aarch32() {
         let mut state = zx_restricted_state_t::default();
@@ -620,24 +656,22 @@ mod tests {
         // Note: feature_test requires ARM32 ISA support in global feature mask.
         // If arm64_feature_test returns true in test harness, we test the alignment and bounds.
         if arm64_feature_test(ZX_ARM64_FEATURE_ISA_ARM32) {
-            assert_eq!(validate_state_pre_restricted_entry(&state), Ok(()));
+            assert_ok!(validate_state_pre_restricted_entry(&state));
 
             // Out-of-range 32-bit PC
             state.pc = 1u64 << 32;
-            assert_eq!(validate_state_pre_restricted_entry(&state), Err(Status::BAD_STATE));
+            assert_err!(validate_state_pre_restricted_entry(&state), Status::BAD_STATE);
             state.pc = 0x1000;
 
             // Unaligned A32 PC (must be 4-byte aligned when T bit == 0)
             state.pc = 0x1003;
-            assert_eq!(validate_state_pre_restricted_entry(&state), Err(Status::BAD_STATE));
+            assert_err!(validate_state_pre_restricted_entry(&state), Status::BAD_STATE);
 
-            // In Thumb mode (T bit == 1), an address with bit 0 set (interworking convention)
-            // is accepted to match C++ behavior.
             state.cpsr |= ARM32_BIT_THUMB_MODE;
             state.pc = 0x1001;
-            assert_eq!(validate_state_pre_restricted_entry(&state), Ok(()));
+            assert_ok!(validate_state_pre_restricted_entry(&state));
             state.pc = 0x1002;
-            assert_eq!(validate_state_pre_restricted_entry(&state), Ok(()));
+            assert_ok!(validate_state_pre_restricted_entry(&state));
         }
     }
 }

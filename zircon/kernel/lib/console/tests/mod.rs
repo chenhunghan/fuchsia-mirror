@@ -104,11 +104,12 @@ fn capture_output_helper(f: impl FnOnce() -> c_int) -> (c_int, &'static core::ff
 #[cfg(all(console_enabled, ktest))]
 #[unittest::suite(name = "console_rust")]
 mod console_tests {
-    use crate::console_rust::console::{
+    use crate::console::{
         CMD_AVAIL_ALWAYS, CMD_AVAIL_NORMAL, CMD_AVAIL_PANIC, CMD_FLAG_PANIC, Cmd, CmdArgs, ECHO,
-        EXIT_CONSOLE, console_run_script_locked, match_command, parse_bool, parse_c_style_int,
-        static_command, tokenize_command,
+        EXIT_CONSOLE, boot_test_success, console_run_script_locked, match_command, parse_bool,
+        parse_c_style_int, static_command, tokenize_command,
     };
+    use core::ffi::CStr;
     use core::sync::atomic::{AtomicI32, Ordering};
     use unittest::{assert_eq, expect_eq, expect_false, expect_lt, expect_ne, expect_true};
     use zx_status::Status;
@@ -302,14 +303,16 @@ mod console_tests {
     /// Test boot-test-success command callback in Rust
     #[test]
     fn command_boot_test_success_test() {
+        const MOCK_SUCCESS_STRING: &CStr = c"***Mock-boot-test-successful!***";
+
         // Test success.
         console_run_script_locked("mock_success");
-        let res = console_run_script_locked("boot-test-success");
+        let res = boot_test_success(MOCK_SUCCESS_STRING);
         expect_eq!(res, zx_status::sys::ZX_OK);
 
         // Test failure.
         let some_failure = console_run_script_locked("mock_failure");
-        let res = console_run_script_locked("boot-test-success");
+        let res = boot_test_success(MOCK_SUCCESS_STRING);
         expect_eq!(res, some_failure);
 
         // Restore to success state.
@@ -664,7 +667,7 @@ mod console_tests {
 #[cfg(feature = "console_enable_history")]
 #[unittest::suite(name = "console_rust_history_enabled")]
 mod console_history_enabled_tests {
-    use crate::console_rust::console::{
+    use crate::console::{
         add_history, console_init_history, match_command, next_history, prev_history,
     };
     use unittest::{expect_eq, expect_true};
@@ -843,7 +846,7 @@ mod console_history_enabled_tests {
 #[cfg(not(feature = "console_enable_history"))]
 #[unittest::suite(name = "console_rust_history_disabled")]
 mod console_history_disabled_tests {
-    use crate::console_rust::console::match_command;
+    use crate::console::match_command;
     use unittest::expect_true;
 
     /// Test history safety and graceful handling when history is disabled at build time.

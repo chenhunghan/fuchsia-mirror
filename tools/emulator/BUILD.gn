@@ -32,6 +32,9 @@ if (is_fuchsia) {
 # Currently, we only support working with QEMU or FEMU on Linux.
 if (is_linux) {
   if (current_toolchain == toolchain_variant.base) {
+    tarmaker_label = "//build/tools/tarmaker"
+    tarmaker_path = "$root_out_dir/tarmaker"
+
     # The infrastructure does not provide a way for host tests to access
     # qemu, so we need to archive our own copy of qemu from the source
     # tree.
@@ -44,9 +47,14 @@ if (is_linux) {
 
       depfile = "${archive_path}.d"
 
+      inputs = [ tarmaker_path ]
+      deps = [ tarmaker_label ]
+
       script = "archive.py"
 
       args = [
+        "--tarmaker",
+        rebase_path(tarmaker_path, root_build_dir),
         "--src",
         rebase_path("//prebuilt/third_party/qemu/${host_platform}",
                     root_build_dir),
@@ -66,9 +74,14 @@ if (is_linux) {
 
       depfile = "${archive_path}.d"
 
+      inputs = [ tarmaker_path ]
+      deps = [ tarmaker_label ]
+
       script = "archive.py"
 
       args = [
+        "--tarmaker",
+        rebase_path(tarmaker_path, root_build_dir),
         "--src",
         rebase_path(
             "//prebuilt/third_party/android/aemu/release-gfxstream/${host_platform}",

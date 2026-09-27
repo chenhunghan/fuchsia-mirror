@@ -1,0 +1,67 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/power-supply.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Power Supply Provider and Consumer
+
+maintainers:
+  - Ruby Zhuang (rdzhuang@google.com)
+
+description: |
+  Links a device to the power supplies that power it. The consumer lists the
+  supplies with the standard `power-supplies` property, and each supply node
+  declares its own type. The type determines the FIDL service the supply
+  serves, mirroring fuchsia.hardware.power.source/SourceType:
+
+    "usb"     -> fuchsia.hardware.power.usb.Service
+    "battery" -> fuchsia.hardware.power.battery.Service
+    "ac"      -> fuchsia.hardware.power.source.Service
+
+properties:
+  power-supplies:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description: Phandles of the supplies powering this device.
+
+  power-supply-names:
+    $ref: /schemas/types.yaml#/definitions/string-array
+    description:
+      Name for each `power-supplies` entry, in order. Becomes the bind parent
+      name, so it must match the consuming driver's bind rules. Required when
+      more than one supply is referenced.
+
+  power-supply-type:
+    $ref: /schemas/types.yaml#/definitions/string
+    enum: [ac, battery, usb]
+    description: Type of this power supply. Required on supply nodes.
+
+  power-supply-output-name:
+    $ref: /schemas/types.yaml#/definitions/string
+    description:
+      Name of this supply, selecting between several of the same type on one
+      provider (e.g. two USB ports). Becomes a bind rule.
+
+additionalProperties: true
+
+examples:
+  - |
+    pmic@50 {
+        compatible = "test-pmic";
+        reg = <0x50>;
+
+        pmic_usb_in: usb-power {
+            power-supply-type = "usb";
+            power-supply-output-name = "chgin";
+        };
+    };
+
+    usb_phy: usb-phy@c410000 {
+        compatible = "test-usb-phy";
+        reg = <0x0 0xc410000 0x0 0x10000>;
+        power-supplies = <&pmic_usb_in>;
+        power-supply-names = "usb-power";
+    };

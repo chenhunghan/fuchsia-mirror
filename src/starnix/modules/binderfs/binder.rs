@@ -80,6 +80,7 @@ use starnix_uapi::{
     transaction_flags_TF_ONE_WAY, uapi,
 };
 use std::cell::Cell;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -438,6 +439,16 @@ impl Default for BinderDriver {
             next_identifier: Default::default(),
         }
     }
+}
+
+/// Action to take on a dequeued refcount command.
+#[derive(Debug)]
+enum RefcountDisposition {
+    /// The command was not transient and should be retained and dispatched to userspace.
+    Retain,
+    /// The command was cancelled, optionally producing an unblocked command
+    /// (e.g. `ReleaseRef`, `DecRef`, or `IncRef`) to be dispatched in its place.
+    Cancel(Option<Command>),
 }
 
 impl BinderDriver {
@@ -1322,6 +1333,46 @@ impl BinderDriver {
         }
     }
 
+    /// Checks if a dequeued refcount command is transient and can be lazily cancelled.
+    /// If cancelled, removes the object from the process table if no references remain,
+    /// and returns any unblocked command (e.g. ReleaseRef / DecRef / IncRef).
+    fn try_cancel_transient_refcount(
+        proc_state: &mut crate::process::BinderProcessState,
+        command: &Command,
+    ) -> RefcountDisposition {
+        let (local, is_acquire) = match command {
+            Command::AcquireRef(local) => (local, true),
+            Command::IncRef(local) => (local, false),
+            _ => return RefcountDisposition::Retain,
+        };
+
+        match proc_state.objects.entry(local.weak_ref_addr) {
+            Entry::Occupied(entry) => {
+                if entry.get().local != *local {
+                    log_warn!(
+                        "Dropping refcount command {:?} due to mismatched object cookie in table: {:?}",
+                        command,
+                        entry.get().local
+                    );
+                    return RefcountDisposition::Cancel(None);
+                }
+                if let Some((unblocked, has_no_ref)) =
+                    entry.get().cancel_transient_refcount(is_acquire)
+                {
+                    if has_no_ref {
+                        entry.remove();
+                    }
+                    return RefcountDisposition::Cancel(unblocked);
+                }
+                RefcountDisposition::Retain
+            }
+            Entry::Vacant(_) => {
+                log_warn!("Dropping refcount command {:?} for missing object in table", command);
+                RefcountDisposition::Cancel(None)
+            }
+        }
+    }
+
     /// Dequeues a command from the thread's commands' queue, or blocks until commands are available.
     pub fn handle_thread_read(
         &self,
@@ -1390,6 +1441,24 @@ impl BinderDriver {
                 .and_then(|s| s.target_thread_handle.clone());
 
             if let Some(QueuedCommand { command, trace_id }) = command_with_trace {
+                if matches!(&command, Command::AcquireRef(_) | Command::IncRef(_)) {
+                    // Drop thread_state before locking the BinderObject to avoid lock order inversion.
+                    drop(thread_state);
+                    match Self::try_cancel_transient_refcount(&mut proc_state, &command) {
+                        RefcountDisposition::Cancel(unblocked_cmd) => {
+                            drop(proc_state);
+                            if let Some(cmd) = unblocked_cmd {
+                                return cmd.write_to_memory(context.memory_accessor, read_buffer);
+                            }
+                            continue;
+                        }
+                        RefcountDisposition::Retain => {
+                            drop(proc_state);
+                            return command.write_to_memory(context.memory_accessor, read_buffer);
+                        }
+                    }
+                }
+
                 // Attempt to write the command to the thread's buffer.
                 let bytes_written =
                     command.write_to_memory(context.memory_accessor, read_buffer)?;
@@ -1424,9 +1493,7 @@ impl BinderDriver {
                     Command::TransactionComplete
                     | Command::OnewayTransaction(..)
                     | Command::OnewayTransactionComplete
-                    | Command::AcquireRef(..)
                     | Command::ReleaseRef(..)
-                    | Command::IncRef(..)
                     | Command::DecRef(..)
                     | Command::Error(..)
                     | Command::FailedReply
@@ -1437,6 +1504,9 @@ impl BinderDriver {
                     | Command::ClearDeathNotificationDone(..)
                     | Command::SpawnLooper
                     | Command::ClearFreezeNotificationDone(..) => false,
+                    Command::AcquireRef(..) | Command::IncRef(..) => unreachable!(
+                        "AcquireRef and IncRef are handled earlier to check for lazy cancellation"
+                    ),
                 };
 
                 drop(thread_state);
@@ -1723,11 +1793,11 @@ impl BinderDriver {
                             // to translate this address to some handle.
 
                             // Register this binder object if it hasn't already been registered.
-                            let guard = source.binder_proc.lock().find_or_register_object(
-                                source.binder_thread,
-                                local,
-                                flags,
-                            );
+                            let guard = source
+                                .binder_proc
+                                .lock()
+                                .find_or_register_object(source.binder_thread, local, flags)
+                                .map_err(|_| TransactionError::Failure)?;
                             // Create a handle in the receiving process that references the binder object
                             // in the sender's process.
                             let handle =
@@ -1736,8 +1806,10 @@ impl BinderDriver {
                             transaction_state.push_handle(handle);
 
                             // Translate the serialized object into a handle.
-                            SerializedBinderObject::Handle { handle, flags, cookie: 0 }
-                        })
+                            Result::<SerializedBinderObject, TransactionError>::Ok(
+                                SerializedBinderObject::Handle { handle, flags, cookie: 0 },
+                            )
+                        })?
                     }
                     SerializedBinderObject::File { fd, cookie } => {
                         files.push(TransientFile { object_offset, fd, cookie });

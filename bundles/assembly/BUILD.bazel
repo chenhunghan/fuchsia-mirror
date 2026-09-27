@@ -1297,7 +1297,7 @@ assembly_input_bundle(
         # This is a required dependency of pkg-cache
         "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/system-update-committer",
         # Build-Information
-        "//bundles/assembly/bazel_inputs/src/developer/build_info:build-info-service",
+        "//src/developer/build_info:build-info-service",
         # Developer.
         "//bundles/assembly/bazel_inputs/src/developer/forensics:pkg",
     ],
@@ -2914,7 +2914,7 @@ assembly_input_bundle(
     core_shards = [
         "//src/starnix/runner:meta/starnix_runner.core_shard.cml",
     ],
-    bootfs_files_package = "//bundles/assembly/bazel_inputs:starnix_support.bootfs_files_package",
+    bootfs_files_package = "//src/starnix/config:starnix_support.bootfs_files_package",
     memory_buckets = ["//src/developer/memory/buckets:starnix.json5"],
 )
 
@@ -2987,10 +2987,10 @@ assembly_input_bundle(
         "eng",
     ],
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:google_backlight",
-        "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:google_display",
-        "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:google_nanohub",
-        "//bundles/assembly/bazel_inputs/src/starnix/modules/nanohub:sockettunnel",
+        "//src/starnix/modules/nanohub:google_backlight",
+        "//src/starnix/modules/nanohub:google_display",
+        "//src/starnix/modules/nanohub:google_nanohub",
+        "//src/starnix/modules/nanohub:sockettunnel",
     ],
     core_shards = [
         "//src/starnix/modules/nanohub:meta/backlight.core_shard.cml",
@@ -3010,7 +3010,7 @@ assembly_input_bundle(
         "eng",
     ],
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/starnix/modules/fastrpc:google_fastrpc",
+        "//src/starnix/modules/fastrpc:google_fastrpc",
     ],
     core_shards = [
         "//src/starnix/modules/fastrpc:meta/fastrpc.core_shard.cml",
@@ -3030,7 +3030,7 @@ assembly_input_bundle(
         "eng",
     ],
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/starnix/modules/hvdcp_opti:hvdcp_opti",
+        "//src/starnix/modules/hvdcp_opti:hvdcp_opti",
     ],
     core_shards = [
         "//src/starnix/modules/hvdcp_opti:meta/hvdcp_opti.core_shard.cml",
@@ -3750,30 +3750,6 @@ assembly_input_bundle(
     ],
 )
 
-# AIB to include Netstack2 as the netstack for use by base networking.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "netstack2",
-    # The Go toolchain used for netstack2 does not support RISC-V.
-    base_packages = select({
-        "//build/bazel/platforms:is_fuchsia_riscv64": [],
-        "//conditions:default": [
-            "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack2",
-        ],
-    }),
-    compiled_packages = [
-        {
-            "name": "network",
-            "components": [
-                {
-                    "component_name": "network",
-                    "shards": ["//src/connectivity/network:meta/netstack2.shard.cml"],
-                },
-            ],
-        },
-    ],
-)
-
 # Netstack3 as the netstack for use by base networking.
 #
 # To be used in conjunction with netstack3_packages or netstack3_packages_gub.
@@ -3805,7 +3781,7 @@ assembly_input_bundle(
     ],
 )
 
-# Netstack3 packages without unified binary.
+# Netstack3 packages with unified binary.
 #
 # This AIB provides space-saving equivalent packages for the netstack3
 # configuration as found in netstack3_packages. It is mutually exclusive with
@@ -3865,62 +3841,6 @@ assembly_input_bundle(
     base_packages = [
         "//bundles/assembly/bazel_inputs/src/connectivity/policy/socket-proxy:package",
     ],
-)
-
-# Netstack-migration as the netstack for use by base networking.
-#
-# Must be used in conjunction with netstack_migration_packages or
-# netstack_migration_packages_gub.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "netstack_migration",
-    core_shards = select({
-        "//build/bazel/platforms:is_fuchsia_riscv64": [],
-        "//conditions:default": [
-            "//src/connectivity/network:meta/netstack-migration.core.shard.cml",
-        ],
-    }),
-    compiled_packages = [
-        {
-            "name": "network",
-            "components": [
-                {
-                    "component_name": "network",
-                    "shards": ["//src/connectivity/network:meta/netstack-migration.shard.cml"],
-                },
-            ],
-        },
-    ],
-)
-
-# Netstack migration packages without unified binary.
-#
-# This AIB provides packages for the netstack_migration configuration. It is
-# mutually exclusive with netstack_migration_packages_gub.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "netstack_migration_packages",
-    base_packages = select({
-        "//build/bazel/platforms:is_fuchsia_riscv64": [],
-        "//conditions:default": [
-            "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack-migration",
-        ],
-    }),
-)
-
-# Netstack migration packages with unified binary.
-#
-# This AIB provides packages for the netstack_migration configuration. It is
-# mutually exclusive with netstack_migration_packages.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "netstack_migration_packages_gub",
-    base_packages = select({
-        "//build/bazel/platforms:is_fuchsia_riscv64": [],
-        "//conditions:default": [
-            "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack-migration_gub",
-        ],
-    }),
 )
 
 # Includes network-tun functionality.

@@ -5,6 +5,7 @@
 #include "codec_adapter_aac_encoder.h"
 
 #include <lib/async/cpp/task.h>
+#include <lib/syslog/cpp/macros.h>
 #include <lib/trace/event.h>
 
 #include "chunk_input_stream.h"
@@ -105,6 +106,7 @@ void CodecAdapterAacEncoder::CoreCodecStartStream() {
   {
     std::lock_guard<std::mutex> lock(lock_);
     stream_active_ = true;
+    output_reconfig_pending_ = false;
   }
 
   TRACE_INSTANT("codec_runner", "Media:Start", TRACE_SCOPE_THREAD);
@@ -119,7 +121,7 @@ void CodecAdapterAacEncoder::CoreCodecQueueInputFormatDetails(
            });
 }
 
-void CodecAdapterAacEncoder::CoreCodecQueueInputPacket(CodecPacket* packet) {
+void CodecAdapterAacEncoder::CoreCodecQueueInputPacket(const CodecPacket* packet) {
   TRACE_INSTANT("codec_runner", "Media:PacketReceived", TRACE_SCOPE_THREAD);
   PostTask(input_processing_loop_.dispatcher(),
            [this, packet]() { ProcessInput(CodecInputItem::Packet(packet)); });
@@ -136,6 +138,7 @@ void CodecAdapterAacEncoder::CoreCodecStopStream() {
   {
     std::lock_guard<std::mutex> lock(lock_);
     stream_active_ = false;
+    reconfig_cond_.notify_all();
   }
   output_sink_->StopAllWaits();
 
@@ -179,6 +182,9 @@ void CodecAdapterAacEncoder::CoreCodecEnsureBuffersNotConfigured(CodecPort port)
   ZX_DEBUG_ASSERT(output_sink_);
 
   output_sink_->Reset();
+  if (port == kOutputPort) {
+    staged_buffers_.Clear();
+  }
 }
 
 std::unique_ptr<const fuchsia::media::StreamOutputConstraints>
@@ -249,6 +255,12 @@ void CodecAdapterAacEncoder::CoreCodecMidStreamOutputBufferReConfigFinish() {
   for (const auto buffer : buffers) {
     output_sink_->AddOutputBuffer(buffer);
   }
+
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    output_reconfig_pending_ = false;
+    reconfig_cond_.notify_all();
+  }
 }
 
 void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
@@ -260,16 +272,17 @@ void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
     }
   });
 
-  {  // scope lock
-    std::lock_guard<std::mutex> lock(lock_);
-    if (!stream_active_) {
-      // The stream is no longer active; we should not process this input.
-      //
-      // ~lock
-      // ~return_packet
-      return;
+  bool is_active = [this, &input_item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
+    std::unique_lock<std::mutex> lock(lock_);
+    while (output_reconfig_pending_ && !input_item.is_format_details()) {
+      reconfig_cond_.wait(lock);
     }
-  }  // ~lock
+    return stream_active_;
+  }();
+
+  if (!is_active) {
+    return;
+  }
 
   if (input_item.is_format_details()) {
     if (stream_) {
@@ -284,6 +297,11 @@ void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
     if (build_stream_result.is_error()) {
       ReportError(build_stream_result.error());
       return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      output_reconfig_pending_ = true;
     }
 
     events_->onCoreCodecMidStreamOutputConstraintsChange(

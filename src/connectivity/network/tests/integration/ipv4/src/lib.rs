@@ -17,7 +17,7 @@ use net_types::ethernet::Mac;
 use net_types::ip::{self as net_types_ip, Ipv4, Ipv4Addr};
 use netemul::RealmUdpSocket;
 use netstack_testing_common::interfaces::{self, TestInterfaceExt};
-use netstack_testing_common::realms::{Netstack, Netstack3, NetstackVersion, TestSandboxExt};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, setup_network,
 };
@@ -143,21 +143,17 @@ fn check_igmp_report(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(Some(fnet_interfaces_admin::IgmpVersion::V1); "igmpv1")]
 #[test_case(Some(fnet_interfaces_admin::IgmpVersion::V2); "igmpv2")]
 #[test_case(Some(fnet_interfaces_admin::IgmpVersion::V3); "igmpv3")]
 #[test_case(None; "default")]
-async fn sends_igmp_reports<N: Netstack>(
-    name: &str,
-    igmp_version: Option<fnet_interfaces_admin::IgmpVersion>,
-) {
+async fn sends_igmp_reports(name: &str, igmp_version: Option<fnet_interfaces_admin::IgmpVersion>) {
     const INTERFACE_ADDR: std::net::Ipv4Addr = std_ip_v4!("192.168.0.1");
     const MULTICAST_ADDR: std::net::Ipv4Addr = std_ip_v4!("224.1.2.3");
 
     let sandbox = netemul::TestSandbox::new().expect("error creating sandbox");
     let (_network, realm, iface, fake_ep) =
-        setup_network::<N>(&sandbox, name, None).await.expect("error setting up network");
+        setup_network::<Netstack3>(&sandbox, name, None).await.expect("error setting up network");
 
     if let Some(igmp_version) = igmp_version {
         let gen_config = |igmp_version| fnet_interfaces_admin::Configuration {
@@ -250,7 +246,7 @@ async fn sends_igmp_reports<N: Netstack>(
                     return None;
                 }
 
-                let (payload, src_ip, dst_ip, proto, ttl) =
+                let (payload, _src_ip, dst_ip, proto, ttl) =
                     parse_ip_packet::<net_types_ip::Ipv4>(&data)
                         .expect("error parsing IPv4 packet");
 
@@ -259,15 +255,9 @@ async fn sends_igmp_reports<N: Netstack>(
                     return None;
                 }
 
-                // TODO(https://fxbug.dev/42180878): Don't send IGMP reports before a local address
-                // is assigned.
-                if N::VERSION != NetstackVersion::Netstack3 {
-                    assert_eq!(
-                        src_ip,
-                        net_types_ip::Ipv4Addr::new(INTERFACE_ADDR.octets()),
-                        "IGMP messages must be sent from an address assigned to the NIC",
-                    );
-                }
+                // TODO(https://fxbug.dev/42180878): Assert that IGMP messages are sent from an
+                // address assigned to the NIC once Netstack3 stops sending IGMP reports before a
+                // local address is assigned.
 
                 // As per RFC 2236 section 2,
                 //
@@ -291,14 +281,13 @@ async fn sends_igmp_reports<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn all_ones_broadcast<N: Netstack>(name: &str) {
+async fn all_ones_broadcast(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("error creating sandbox");
 
     let name_suffixes = ["a", "b", "c"];
     let realms = name_suffixes.map(|suffix| {
         sandbox
-            .create_netstack_realm::<N, _>(format!("{name}_{suffix}"))
+            .create_netstack_realm::<Netstack3, _>(format!("{name}_{suffix}"))
             .unwrap_or_else(|e| panic!("create realm {suffix}: {e:?}"))
     });
     let network = sandbox.create_network(name).await.expect("create network");

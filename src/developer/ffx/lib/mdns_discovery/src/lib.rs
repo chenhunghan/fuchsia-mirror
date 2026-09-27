@@ -4,8 +4,6 @@
 
 use async_lock::Mutex;
 use async_trait::async_trait;
-use fidl_fuchsia_developer_ffx as ffx;
-use fidl_fuchsia_net::{IpAddress, Ipv4Address, Ipv6Address};
 use fuchsia_async::{Task, Timer};
 use futures::FutureExt;
 use mdns::protocol as dns;
@@ -59,20 +57,73 @@ pub const MDNS_TTL: u32 = 255;
 const MDNS_MCAST_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_MCAST_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
 
+/// Discovered target information from mDNS.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MdnsTargetInfo {
+    pub nodename: Option<String>,
+    pub addresses: Vec<TargetAddrInfo>,
+    pub serial_number: Option<String>,
+    pub fastboot_interface: Option<FastbootInterface>,
+    pub ssh_address: Option<TargetAddrInfo>,
+}
+
+/// Address types discovered via mDNS (IP or IP:Port).
+/// TODO(b/552087172): clean this up with other concrete types.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TargetAddrInfo {
+    Ip(TargetIp),
+    IpPort(TargetIpPort),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetIp {
+    pub ip: IpAddr,
+    pub scope_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetIpPort {
+    pub ip: IpAddr,
+    pub scope_id: u32,
+    pub port: u16,
+}
+
+/// Fastboot connection mode for mDNS responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FastbootInterface {
+    Tcp,
+    Udp,
+}
+
+/// Events published by the mDNS protocol engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdnsEventType {
+    TargetFound(MdnsTargetInfo),
+    TargetRediscovered(MdnsTargetInfo),
+    TargetExpired(MdnsTargetInfo),
+    SocketBound(MdnsBindEvent),
+}
+
+/// Notification emitted when the listener socket binds to a port.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MdnsBindEvent {
+    pub port: Option<u16>,
+}
+
 #[derive(Debug)]
 pub struct CachedTarget {
-    target: ffx::TargetInfo,
+    target: MdnsTargetInfo,
     // TODO(https://fxbug.dev/42165549)
     #[allow(unused)]
     eviction_task: Option<Task<()>>,
 }
 
 impl CachedTarget {
-    fn new(target: ffx::TargetInfo) -> Self {
+    fn new(target: MdnsTargetInfo) -> Self {
         Self { target, eviction_task: None }
     }
 
-    fn new_with_task(target: ffx::TargetInfo, eviction_task: Task<()>) -> Self {
+    fn new_with_task(target: MdnsTargetInfo, eviction_task: Task<()>) -> Self {
         Self { target, eviction_task: Some(eviction_task) }
     }
 }
@@ -92,12 +143,12 @@ impl PartialEq for CachedTarget {
 impl Eq for CachedTarget {}
 
 pub struct MdnsProtocol {
-    pub events_out: async_channel::Sender<ffx::MdnsEventType>,
+    pub events_out: async_channel::Sender<MdnsEventType>,
     pub target_cache: Mutex<HashSet<CachedTarget>>,
 }
 
 impl MdnsProtocol {
-    pub async fn handle_target(self: &Arc<Self>, t: ffx::TargetInfo, ttl: u32) {
+    pub async fn handle_target(self: &Arc<Self>, t: MdnsTargetInfo, ttl: u32) {
         let weak = Arc::downgrade(self);
         let t_clone = t.clone();
         let eviction_task = Task::spawn(async move {
@@ -114,23 +165,23 @@ impl MdnsProtocol {
             .replace(CachedTarget::new_with_task(t.clone(), eviction_task))
             .is_none()
         {
-            self.publish_event(ffx::MdnsEventType::TargetFound(t)).await;
+            self.publish_event(MdnsEventType::TargetFound(t)).await;
         } else {
-            self.publish_event(ffx::MdnsEventType::TargetRediscovered(t)).await
+            self.publish_event(MdnsEventType::TargetRediscovered(t)).await
         }
     }
 
-    async fn evict_target(&self, t: ffx::TargetInfo) {
+    async fn evict_target(&self, t: MdnsTargetInfo) {
         if self.target_cache.lock().await.remove(&CachedTarget::new(t.clone())) {
-            self.publish_event(ffx::MdnsEventType::TargetExpired(t)).await
+            self.publish_event(MdnsEventType::TargetExpired(t)).await
         }
     }
 
-    async fn publish_event(&self, event: ffx::MdnsEventType) {
+    async fn publish_event(&self, event: MdnsEventType) {
         let _ = self.events_out.send(event).await;
     }
 
-    pub async fn target_cache(&self) -> Vec<ffx::TargetInfo> {
+    pub async fn target_cache(&self) -> Vec<MdnsTargetInfo> {
         self.target_cache.lock().await.iter().map(|c| c.target.clone()).collect()
     }
 }
@@ -150,11 +201,7 @@ async fn propagate_bind_event(sock: &UdpSocket, svc: &Weak<MdnsProtocol>) -> u16
         SocketAddr::V6(s) => s.port(),
     };
     if let Some(svc) = svc.upgrade() {
-        svc.publish_event(ffx::MdnsEventType::SocketBound(ffx::MdnsBindEvent {
-            port: Some(port),
-            ..Default::default()
-        }))
-        .await;
+        svc.publish_event(MdnsEventType::SocketBound(MdnsBindEvent { port: Some(port) })).await;
     }
     port
 }
@@ -173,12 +220,12 @@ impl MdnsEnabledChecker for MdnsEnabled {
     }
 }
 
-/// Returns a TargetInfo of a Fuchsia target discovered via mDNS during the given `duration`
+/// Returns a MdnsTargetInfo of a Fuchsia target discovered via mDNS during the given `duration`
 pub async fn discover_target(
     target_name: String,
     listen_duration: Duration,
     mdns_port: u16,
-) -> std::result::Result<ffx::TargetInfo, MdnsDiscoveryError> {
+) -> std::result::Result<MdnsTargetInfo, MdnsDiscoveryError> {
     discover_target_by(listen_duration, mdns_port, move |t| {
         t.nodename.as_ref() == Some(&target_name)
     })
@@ -189,11 +236,11 @@ pub async fn discover_target_by<F>(
     listen_duration: Duration,
     mdns_port: u16,
     filter: F,
-) -> std::result::Result<ffx::TargetInfo, MdnsDiscoveryError>
+) -> std::result::Result<MdnsTargetInfo, MdnsDiscoveryError>
 where
-    F: Fn(&ffx::TargetInfo) -> bool + Send + 'static,
+    F: Fn(&MdnsTargetInfo) -> bool + Send + 'static,
 {
-    let (sender, receiver) = async_channel::bounded::<ffx::MdnsEventType>(1);
+    let (sender, receiver) = async_channel::bounded::<MdnsEventType>(1);
     let inner = Arc::new(MdnsProtocol { events_out: sender, target_cache: Default::default() });
 
     let inner_mv = Arc::downgrade(&inner);
@@ -231,16 +278,16 @@ where
 }
 
 async fn loop_for_target<F>(
-    receiver: async_channel::Receiver<ffx::MdnsEventType>,
+    receiver: async_channel::Receiver<MdnsEventType>,
     filter: F,
-) -> std::result::Result<ffx::TargetInfo, MdnsDiscoveryError>
+) -> std::result::Result<MdnsTargetInfo, MdnsDiscoveryError>
 where
-    F: Fn(&ffx::TargetInfo) -> bool + Send + 'static,
+    F: Fn(&MdnsTargetInfo) -> bool + Send + 'static,
 {
     loop {
         let mdns_event = receiver.recv().await?;
         match mdns_event {
-            ffx::MdnsEventType::TargetFound(target_info) => {
+            MdnsEventType::TargetFound(target_info) => {
                 if filter(&target_info) {
                     return Ok(target_info);
                 }
@@ -252,12 +299,12 @@ where
     }
 }
 
-/// Returns a Vec<TargetInfo> of Fuchsia targets discovered via mDNS during the given `duration`
+/// Returns a Vec<MdnsTargetInfo> of Fuchsia targets discovered via mDNS during the given `duration`
 pub async fn discover_targets(
     listen_duration: Duration,
     mdns_port: u16,
-) -> std::result::Result<Vec<ffx::TargetInfo>, MdnsDiscoveryError> {
-    let (sender, receiver) = async_channel::bounded::<ffx::MdnsEventType>(1);
+) -> std::result::Result<Vec<MdnsTargetInfo>, MdnsDiscoveryError> {
+    let (sender, receiver) = async_channel::bounded::<MdnsEventType>(1);
     let inner = Arc::new(MdnsProtocol { events_out: sender, target_cache: Default::default() });
 
     let inner_mv = Arc::downgrade(&inner);
@@ -289,7 +336,7 @@ pub async fn discover_targets(
 }
 
 async fn drain_reciever(
-    receiver: async_channel::Receiver<ffx::MdnsEventType>,
+    receiver: async_channel::Receiver<MdnsEventType>,
 ) -> std::result::Result<(), MdnsDiscoveryError> {
     loop {
         match receiver.recv().await {
@@ -312,14 +359,14 @@ pub struct MdnsWatcher {
 
 pub trait MdnsEventHandler: Send + 'static {
     /// Handles an event.
-    fn handle_event(&mut self, event: ffx::MdnsEventType);
+    fn handle_event(&mut self, event: MdnsEventType);
 }
 
 impl<F> MdnsEventHandler for F
 where
-    F: FnMut(ffx::MdnsEventType) -> () + Send + 'static,
+    F: FnMut(MdnsEventType) -> () + Send + 'static,
 {
-    fn handle_event(&mut self, x: ffx::MdnsEventType) -> () {
+    fn handle_event(&mut self, x: MdnsEventType) -> () {
         self(x)
     }
 }
@@ -350,7 +397,7 @@ impl MdnsWatcher {
     {
         let mut res = Self { discovery_task: None, inner: None, drain_task: None };
 
-        let (sender, receiver) = async_channel::bounded::<ffx::MdnsEventType>(1);
+        let (sender, receiver) = async_channel::bounded::<MdnsEventType>(1);
 
         let inner = Arc::new(MdnsProtocol { events_out: sender, target_cache: Default::default() });
         res.inner.replace(inner.clone());
@@ -374,10 +421,8 @@ impl MdnsWatcher {
     }
 }
 
-async fn handle_events_loop<F>(
-    receiver: async_channel::Receiver<ffx::MdnsEventType>,
-    mut handler: F,
-) where
+async fn handle_events_loop<F>(receiver: async_channel::Receiver<MdnsEventType>, mut handler: F)
+where
     F: MdnsEventHandler,
 {
     loop {
@@ -584,17 +629,14 @@ pub async fn discovery_loop(config: DiscoveryConfig, checker: impl MdnsEnabledCh
 fn make_target<B: SplitByteSlice + Copy>(
     src: SocketAddr,
     msg: dns::Message<B>,
-) -> Option<(ffx::TargetInfo, u32)> {
+) -> Option<(MdnsTargetInfo, u32)> {
     let mut nodename = String::new();
     let mut serial = None;
     let mut ttl = 0u32;
     let mut ssh_port: u16 = 0;
     let mut ssh_address = None;
-    let src_info = ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-        ip: match &src {
-            SocketAddr::V6(s) => IpAddress::Ipv6(Ipv6Address { addr: s.ip().octets() }),
-            SocketAddr::V4(s) => IpAddress::Ipv4(Ipv4Address { addr: s.ip().octets() }),
-        },
+    let src_info = TargetAddrInfo::Ip(TargetIp {
+        ip: src.ip(),
         scope_id: if let SocketAddr::V6(s) = &src { s.scope_id() } else { 0 },
     });
     let mut discovered_addresses = Vec::new();
@@ -611,15 +653,13 @@ fn make_target<B: SplitByteSlice + Copy>(
                 if let Some(data) = record.rdata.bytes() {
                     let txt_lines: Vec<String> = decode_txt_rdata(data).unwrap_or_default();
                     log::debug!("found text lines: {:#?}", txt_lines);
-                    let mut ip_addr: Option<IpAddress> = None;
+                    let mut ip_addr: Option<IpAddr> = None;
                     for txt in &txt_lines {
                         if let Some((name, value)) = txt.split_once(':') {
                             match name {
                                 "host" => {
                                     if let Ok(addr) = value.parse::<Ipv4Addr>() {
-                                        let ip =
-                                            IpAddress::Ipv4(Ipv4Address { addr: addr.octets() });
-                                        ip_addr = Some(ip);
+                                        ip_addr = Some(IpAddr::V4(addr));
                                     }
                                 }
                                 "ssh" => {
@@ -638,12 +678,12 @@ fn make_target<B: SplitByteSlice + Copy>(
                         }
                     }
                     if let Some(ip) = ip_addr {
-                        ssh_address = Some(ffx::TargetIpAddrInfo::IpPort(ffx::TargetIpPort {
+                        ssh_address = Some(TargetAddrInfo::IpPort(TargetIpPort {
                             ip,
                             scope_id: 0,
                             port: ssh_port,
                         }));
-                        discovered_addresses.push(ffx::TargetAddrInfo::IpPort(ffx::TargetIpPort {
+                        discovered_addresses.push(TargetAddrInfo::IpPort(TargetIpPort {
                             ip,
                             scope_id: 0,
                             port: ssh_port,
@@ -663,8 +703,8 @@ fn make_target<B: SplitByteSlice + Copy>(
                     ttl = record.ttl;
                 }
                 if let Some(IpAddr::V4(v4)) = record.rdata.ip_addr() {
-                    let ip = IpAddress::Ipv4(Ipv4Address { addr: v4.octets() });
-                    let target_addr = ffx::TargetAddrInfo::Ip(ffx::TargetIp { ip, scope_id: 0 });
+                    let target_addr =
+                        TargetAddrInfo::Ip(TargetIp { ip: IpAddr::V4(v4), scope_id: 0 });
                     if !discovered_addresses.contains(&target_addr) {
                         discovered_addresses.push(target_addr);
                     }
@@ -679,9 +719,8 @@ fn make_target<B: SplitByteSlice + Copy>(
                     ttl = record.ttl;
                 }
                 if let Some(IpAddr::V6(v6)) = record.rdata.ip_addr() {
-                    let ip = IpAddress::Ipv6(Ipv6Address { addr: v6.octets() });
                     let scope_id = if v6.is_link_local_addr()
-                        && let ffx::TargetAddrInfo::Ip(ref sip) = src_info
+                        && let TargetAddrInfo::Ip(ref sip) = src_info
                     {
                         sip.scope_id
                     } else {
@@ -690,7 +729,8 @@ fn make_target<B: SplitByteSlice + Copy>(
 
                     // Only add link-local addresses if we have a valid scope ID.
                     if !v6.is_link_local_addr() || scope_id != 0 {
-                        let target_addr = ffx::TargetAddrInfo::Ip(ffx::TargetIp { ip, scope_id });
+                        let target_addr =
+                            TargetAddrInfo::Ip(TargetIp { ip: IpAddr::V6(v6), scope_id });
                         if !discovered_addresses.contains(&target_addr) {
                             discovered_addresses.push(target_addr);
                         }
@@ -713,14 +753,12 @@ fn make_target<B: SplitByteSlice + Copy>(
         return None;
     }
     Some((
-        ffx::TargetInfo {
+        MdnsTargetInfo {
             nodename: Some(nodename),
-            addresses: Some(discovered_addresses),
+            addresses: discovered_addresses,
             serial_number: serial,
-            target_state: fastboot_interface.map(|_| ffx::TargetState::Fastboot),
             fastboot_interface,
             ssh_address,
-            ..Default::default()
         },
         ttl,
     ))
@@ -959,13 +997,13 @@ fn is_fuchsia_response<B: zerocopy::SplitByteSlice + Copy>(m: &dns::Message<B>) 
 
 fn is_fastboot_response<B: zerocopy::SplitByteSlice + Copy>(
     m: &dns::Message<B>,
-) -> Option<ffx::FastbootInterface> {
+) -> Option<FastbootInterface> {
     if m.answers.is_empty() {
         None
     } else if m.answers.iter().any(|a| a.domain == "_fastboot._udp.local") {
-        Some(ffx::FastbootInterface::Udp)
+        Some(FastbootInterface::Udp)
     } else if m.answers.iter().any(|a| a.domain == "_fastboot._tcp.local") {
-        Some(ffx::FastbootInterface::Tcp)
+        Some(FastbootInterface::Tcp)
     } else {
         None
     }
@@ -1084,8 +1122,6 @@ mod tests {
     use ::mdns::protocol::{
         Class, DomainBuilder, EmbeddedPacketBuilder, Message, MessageBuilder, RecordBuilder,
     };
-    use fidl_fuchsia_developer_ffx::TargetIpPort;
-    use fidl_fuchsia_net::IpAddress::Ipv4;
     use packet::{InnerPacketBuilder, NoOpSerializationContext, ParseBuffer, Serializer};
     use std::io::Write;
 
@@ -1106,14 +1142,14 @@ mod tests {
         let addr: SocketAddr = (Ipv4Addr::new(192, 168, 1, 1), 12).into();
         let (t, ttl) = make_target(addr, parsed).unwrap();
         assert_eq!(ttl, 4500);
-        let addrs = t.addresses.as_ref().unwrap();
+        let addrs = &t.addresses;
         assert_eq!(addrs.len(), 2);
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [192, 168, 1, 1] }),
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             scope_id: 0
         })));
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [8, 8, 8, 8] }),
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             scope_id: 0
         })));
         assert_eq!(t.nodename.unwrap(), "foo._fuchsia._udp");
@@ -1149,13 +1185,13 @@ mod tests {
         let addr: SocketAddr = (Ipv4Addr::new(192, 168, 1, 1), 12).into();
         let (t, ttl) = make_target(addr, parsed).unwrap();
         assert_eq!(ttl, 4500);
-        let addrs = t.addresses.as_ref().unwrap();
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [192, 168, 1, 1] }),
+        let addrs = &t.addresses;
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             scope_id: 0
         })));
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [8, 8, 8, 8] }),
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             scope_id: 0
         })));
         assert_eq!(t.nodename.unwrap(), "foo._fuchsia._udp");
@@ -1193,24 +1229,24 @@ mod tests {
         let addr: SocketAddr = (Ipv4Addr::new(192, 168, 1, 1), 12).into();
         let (t, ttl) = make_target(addr, parsed).unwrap();
         assert_eq!(ttl, 4500);
-        let addrs = t.addresses.as_ref().unwrap();
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [192, 168, 1, 1] }),
+        let addrs = &t.addresses;
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             scope_id: 0
         })));
-        assert!(addrs.contains(&ffx::TargetAddrInfo::IpPort(ffx::TargetIpPort {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [123, 11, 22, 33] }),
+        assert!(addrs.contains(&TargetAddrInfo::IpPort(TargetIpPort {
+            ip: IpAddr::V4(Ipv4Addr::new(123, 11, 22, 33)),
             scope_id: 0,
             port: 54321
         })));
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [8, 8, 8, 8] }),
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             scope_id: 0
         })));
         assert_eq!(
             t.ssh_address,
-            Some(ffx::TargetIpAddrInfo::IpPort(TargetIpPort {
-                ip: Ipv4(Ipv4Address { addr: [123, 11, 22, 33] }),
+            Some(TargetAddrInfo::IpPort(TargetIpPort {
+                ip: IpAddr::V4(Ipv4Addr::new(123, 11, 22, 33)),
                 scope_id: 0,
                 port: 54321
             }))
@@ -1239,12 +1275,12 @@ mod tests {
         let parsed = msg_bytes.parse::<Message<_>>().expect("failed to parse");
         let addr: SocketAddr = (Ipv4Addr::new(192, 168, 1, 1), 12).into();
         let (t, _ttl) = make_target(addr, parsed).unwrap();
-        let addrs = t.addresses.as_ref().unwrap();
+        let addrs = &t.addresses;
 
         // Should only contain the source address (IPv4), not the link-local IPv6 address.
         assert_eq!(addrs.len(), 1);
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv4(Ipv4Address { addr: [192, 168, 1, 1] }),
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             scope_id: 0
         })));
     }
@@ -1272,17 +1308,14 @@ mod tests {
         let addr = SocketAddr::V6(std::net::SocketAddrV6::new(src_ip, 12, 0, 3)); // scope_id = 3
 
         let (t, _ttl) = make_target(addr, parsed).unwrap();
-        let addrs = t.addresses.as_ref().unwrap();
+        let addrs = &t.addresses;
 
         assert_eq!(addrs.len(), 2);
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv6(Ipv6Address { addr: src_ip.octets() }),
-            scope_id: 3
-        })));
-        assert!(addrs.contains(&ffx::TargetAddrInfo::Ip(ffx::TargetIp {
-            ip: IpAddress::Ipv6(Ipv6Address {
-                addr: [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]
-            }),
+        assert!(
+            addrs.contains(&TargetAddrInfo::Ip(TargetIp { ip: IpAddr::V6(src_ip), scope_id: 3 }))
+        );
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2)),
             scope_id: 3
         })));
     }
@@ -1401,13 +1434,13 @@ mod tests {
             is_fastboot_response(
                 &build_fastboot_mdns_response("_tcp").as_slice().parse::<Message<_>>().unwrap(),
             ),
-            Some(ffx::FastbootInterface::Tcp)
+            Some(FastbootInterface::Tcp)
         );
         assert_eq!(
             is_fastboot_response(
                 &build_fastboot_mdns_response("_udp").as_slice().parse::<Message<_>>().unwrap(),
             ),
-            Some(ffx::FastbootInterface::Udp)
+            Some(FastbootInterface::Udp)
         );
         assert_eq!(
             is_fastboot_response(
@@ -1423,5 +1456,82 @@ mod tests {
         let message =
             bytes.parse::<dns::Message<_>>().unwrap_or_else(|_| panic!("couldn't parse mdns"));
         assert_eq!(is_fastboot_response(&message), None);
+    }
+
+    #[test]
+    fn test_make_target_global_ipv6_no_scope() {
+        let nodename = DomainBuilder::from_str("global-v6._fuchsia._udp.local").unwrap();
+        // 2001:db8::1 (global unicast)
+        let record = RecordBuilder::new(
+            nodename,
+            dns::Type::Aaaa,
+            Class::Any,
+            true,
+            3600,
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        );
+        let mut message = MessageBuilder::new(0, true);
+        message.add_additional(record);
+        let mut msg_bytes = message
+            .into_serializer()
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .unwrap_or_else(|_| panic!("failed to serialize"));
+        let parsed = msg_bytes.parse::<Message<_>>().unwrap();
+        let addr: SocketAddr = (Ipv4Addr::new(10, 0, 0, 1), 5353).into();
+        let (t, ttl) = make_target(addr, parsed).unwrap();
+        assert_eq!(ttl, 3600);
+        let addrs = &t.addresses;
+        assert!(addrs.contains(&TargetAddrInfo::Ip(TargetIp {
+            ip: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            scope_id: 0,
+        })));
+    }
+
+    #[test]
+    fn test_make_target_txt_complex_parsing() -> anyhow::Result<()> {
+        let nodename = DomainBuilder::from_str("fuchsia-complex._fuchsia._udp.local").unwrap();
+        let mut txt_data: Vec<u8> = vec![];
+        let txt_strings = [
+            "host:10.1.2.3",
+            "ssh:9022",
+            "serial=alpha-beta-1234",
+            "unknown_key:value",
+            "malformed_without_separator",
+        ];
+        for d in txt_strings {
+            txt_data.write_all(&[d.len() as u8])?;
+            txt_data.write_all(d.as_bytes())?;
+        }
+        let a_record = RecordBuilder::new(
+            nodename.clone(),
+            dns::Type::A,
+            Class::Any,
+            true,
+            120,
+            &[10, 1, 2, 3],
+        );
+        let txt_record =
+            RecordBuilder::new(nodename, dns::Type::Txt, Class::Any, true, 120, &txt_data);
+        let mut message = MessageBuilder::new(0, true);
+        message.add_additional(a_record);
+        message.add_additional(txt_record);
+        let mut msg_bytes = message
+            .into_serializer()
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .unwrap_or_else(|_| panic!("failed to serialize"));
+        let parsed = msg_bytes.parse::<Message<_>>().unwrap();
+        let addr: SocketAddr = (Ipv4Addr::new(10, 1, 2, 3), 5353).into();
+        let (t, ttl) = make_target(addr, parsed).unwrap();
+        assert_eq!(ttl, 120);
+        assert_eq!(t.serial_number.as_deref(), Some("alpha-beta-1234"));
+        assert_eq!(
+            t.ssh_address,
+            Some(TargetAddrInfo::IpPort(TargetIpPort {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)),
+                scope_id: 0,
+                port: 9022,
+            }))
+        );
+        Ok(())
     }
 }

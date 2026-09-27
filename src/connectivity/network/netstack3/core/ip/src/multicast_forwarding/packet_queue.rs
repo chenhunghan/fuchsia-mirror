@@ -6,9 +6,10 @@
 
 use alloc::vec::Vec;
 use arrayvec::ArrayVec;
+use core::num::NonZeroUsize;
 use core::time::Duration;
 use derivative::Derivative;
-use lru_cache::LruCache;
+use lru::LruCache;
 use net_types::ip::{Ip, IpVersionMarker};
 use netstack3_base::{
     CoreTimerContext, Inspectable, Inspector, Instant as _, LocalFrameDestination,
@@ -36,7 +37,7 @@ pub(crate) const PACKET_QUEUE_LEN: usize = 3;
 /// The size of each entry is dominated by the packet queue (up to
 /// PACKET_QUEUE_LEN). With 1000 entries, each with 3 standard MTU packets, this
 /// limit is approximately 4.5MB.
-const MAX_PENDING_ROUTES: usize = 1000;
+const MAX_PENDING_ROUTES: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
 
 /// The amount of time the stack is willing to queue a packet while waiting
 /// for an applicable route to be installed.
@@ -119,7 +120,7 @@ impl<I: IpLayerIpExt, D: WeakDeviceIdentifier, BC: MulticastForwardingBindingsCo
                 .try_push(|| QueuedPacket::new(dev, packet, frame_dst, max_fragment_len))
                 .expect("newly instantiated queue must have capacity");
 
-            let prev = self.table.insert(key, queue);
+            let prev = self.table.put(key, queue);
             debug_assert!(prev.is_none());
             QueuePacketOutcome::QueuedInNewQueue
         };
@@ -136,7 +137,7 @@ impl<I: IpLayerIpExt, D: WeakDeviceIdentifier, BC: MulticastForwardingBindingsCo
 
     #[cfg(any(debug_assertions, test))]
     pub(crate) fn contains(&self, key: &MulticastRouteKey<I>) -> bool {
-        self.table.iter().any(|(k, _)| k == key)
+        self.table.contains(key)
     }
 
     /// Remove the key from the pending table, returning its queue of packets.
@@ -148,7 +149,7 @@ impl<I: IpLayerIpExt, D: WeakDeviceIdentifier, BC: MulticastForwardingBindingsCo
         bindings_ctx: &mut BC,
     ) -> Option<PacketQueue<I, D, BC>> {
         let was_empty = self.table.is_empty();
-        let queue = self.table.remove(key);
+        let queue = self.table.pop(key);
 
         // If the table is newly empty, cancel the GC. Note, we don't assert on
         // the previous state of the timer, because it's possible cancelation
@@ -175,7 +176,7 @@ impl<I: IpLayerIpExt, D: WeakDeviceIdentifier, BC: MulticastForwardingBindingsCo
             .collect();
 
         for key in expired_keys {
-            let queue = self.table.remove(&key).expect("expired key must be present");
+            let queue = self.table.pop(&key).expect("expired key must be present");
             // NB: "as" conversion is safe because queue_len has a maximum
             // value of `PACKET_QUEUE_LEN`, which fits in a u64.
             removed_count += queue.queue.len() as u64;

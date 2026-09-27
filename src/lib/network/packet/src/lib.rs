@@ -399,7 +399,6 @@ pub use crate::fragmented::*;
 pub use crate::serialize::*;
 pub use crate::util::*;
 
-use std::convert::Infallible as Never;
 use std::ops::{Bound, Range, RangeBounds};
 use std::{cmp, mem};
 
@@ -1143,7 +1142,7 @@ impl Buffer for EmptyBuf {
     }
 }
 
-impl FragmentedBuffer for Never {
+impl FragmentedBuffer for ! {
     fn len(&self) -> usize {
         match *self {}
     }
@@ -1155,7 +1154,7 @@ impl FragmentedBuffer for Never {
         match *self {}
     }
 }
-impl FragmentedBufferMut for Never {
+impl FragmentedBufferMut for ! {
     fn with_bytes_mut<'a, R, F>(&'a mut self, _f: F) -> R
     where
         F: for<'b> FnOnce(FragmentedBytesMut<'b, 'a>) -> R,
@@ -1163,11 +1162,11 @@ impl FragmentedBufferMut for Never {
         match *self {}
     }
 }
-impl ShrinkBuffer for Never {
+impl ShrinkBuffer for ! {
     fn shrink_front(&mut self, _n: usize) {}
     fn shrink_back(&mut self, _n: usize) {}
 }
-impl GrowBuffer for Never {
+impl GrowBuffer for ! {
     fn with_parts<'a, O, F>(&'a self, _f: F) -> O
     where
         F: for<'b> FnOnce(&'a [u8], FragmentedBytes<'b, 'a>, &'a [u8]) -> O,
@@ -1177,7 +1176,7 @@ impl GrowBuffer for Never {
     fn grow_front(&mut self, _n: usize) {}
     fn grow_back(&mut self, _n: usize) {}
 }
-impl GrowBufferMut for Never {
+impl GrowBufferMut for ! {
     fn with_parts_mut<'a, O, F>(&'a mut self, _f: F) -> O
     where
         F: for<'b> FnOnce(&'a mut [u8], FragmentedBytesMut<'b, 'a>, &'a mut [u8]) -> O,

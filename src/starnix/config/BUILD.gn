@@ -2,12 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/assembly/bootfs_files_for_assembly.gni")
 import("//build/dist/resource.gni")
-
-bootfs_files_for_assembly("bootfs") {
-  deps = [ ":starnix.profiles" ]
-}
 
 resource("starnix.profiles") {
   sources = [ "starnix.profiles" ]
@@ -22,4 +17,12 @@ config("starnix_clippy_lints") {
   if (current_cpu != "riscv64") {
     rustflags += [ "-Wclippy::undocumented_unsafe_blocks" ]
   }
+}
+
+# Counterpart of the Bazel starnix_clippy_lints_test, for test targets of
+# Starnix libraries that are declared separately from the library. GN appends
+# lint configs to the defaults (and leaves out production lints for test
+# code), so this is the same as starnix_clippy_lints.
+config("starnix_clippy_lints_test") {
+  configs = [ ":starnix_clippy_lints" ]
 }

@@ -7,8 +7,7 @@
 import abc
 import inspect as py_inspect
 import logging
-from collections.abc import Collection, Sequence
-from typing import MutableSequence
+from collections.abc import Collection, Sequence, Set
 
 from reporting import metrics
 from trace_processing import trace_model
@@ -45,7 +44,7 @@ class MetricsProcessor(metaclass=abc.ABCMeta):
         return self.__class__.__name__
 
     @property
-    def event_patterns(self) -> set[str]:
+    def event_patterns(self) -> Set[str]:
         """Patterns describing the trace events needed to generate these metrics.
 
         Metrics may be calculated from kernel scheduler records, named trace events or a combination
@@ -62,7 +61,7 @@ class MetricsProcessor(metaclass=abc.ABCMeta):
         return {r".*"}  # Default to requesting all events.
 
     @property
-    def category_names(self) -> set[str]:
+    def category_names(self) -> Set[str]:
         """Categories needed to generate these metrics.
 
         Metrics may be calculated from kernel scheduler records, named trace events or a combination
@@ -92,7 +91,7 @@ class MetricsProcessor(metaclass=abc.ABCMeta):
 
     def process_metrics_with_fxt(
         self, fxt_path: str
-    ) -> MutableSequence[metrics.TestCaseResult]:
+    ) -> Collection[metrics.TestCaseResult]:
         """Generates metrics from the file at the given fxt_path.
 
         Args:

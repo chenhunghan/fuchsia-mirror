@@ -87,6 +87,8 @@ rustc_library("fidl") {
   ]
   if (is_fuchsia) {
     deps += [ "//sdk/rust/zx" ]
+  } else {
+    deps += [ "//src/lib/fuchsia-emulated-handle" ]
   }
 }
 rustc_test("fidl_rust_lib_tests_bin") {
@@ -112,5 +114,7 @@ rustc_test("fidl_rust_lib_tests_bin") {
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:futures-test",
     ]
+  } else {
+    deps += [ "//src/lib/fuchsia-emulated-handle" ]
   }
 }

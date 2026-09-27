@@ -4,7 +4,6 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::hash::Hash;
 use core::marker::PhantomData;
@@ -29,13 +28,13 @@ use netstack3_base::socket::{EitherStack, SocketIpAddr, SocketIpAddrExt as _};
 use netstack3_base::sync::{Mutex, PrimaryRc, RwLock, StrongRc, WeakRc};
 use netstack3_base::{
     AnyDevice, BroadcastIpExt, CoreTimerContext, Counter, CounterCollectionSpec, CounterContext,
-    DeviceIdContext, DeviceIdentifier as _, ErrorAndSerializer, EventContext, HandleableTimer,
-    InstantContext, InterfaceProperties, IpAddressId, IpDeviceAddr, IpDeviceAddressIdContext,
-    IpExt, LocalFrameDestination, MarkDomain, Marks, Matcher as _, MatcherBindingsTypes,
-    NestedIntoCoreTimerCtx, NetworkParsingContext, NetworkSerializationContext, NotFoundError,
-    ResourceCounterContext, RngContext, SendFrameErrorReason, StrongDeviceIdentifier,
-    TimerBindingsTypes, TimerContext, TimerHandler, TxMetadata as _, TxMetadataBindingsTypes,
-    WeakIpAddressId, WrapBroadcastMarker,
+    DeviceIdContext, DeviceIdentifier as _, ErrorAndSerializer, EventContext, GsoInfo,
+    HandleableTimer, InstantContext, InterfaceProperties, IpAddressId, IpDeviceAddr,
+    IpDeviceAddressIdContext, IpExt, LocalFrameDestination, MarkDomain, Marks, Matcher as _,
+    MatcherBindingsTypes, NestedIntoCoreTimerCtx, NetworkParsingContext,
+    NetworkSerializationContext, NotFoundError, ResourceCounterContext, RngContext,
+    SendFrameErrorReason, StrongDeviceIdentifier, TimerBindingsTypes, TimerContext, TimerHandler,
+    TxMetadata as _, TxMetadataBindingsTypes, WeakIpAddressId, WrapBroadcastMarker,
 };
 use netstack3_filter::{
     self as filter, ConnectionDirection, ConntrackConnection, FilterBindingsContext,
@@ -159,6 +158,14 @@ pub struct IpLayerPacketMetadata<
     /// Socket info of the associate socket if any.
     socket_info: Option<SocketInfo>,
 
+    /// GSO metadata if the frame requires transport-layer segmentation (e.g.
+    /// because it was coalesced from multiple segments by GRO, or generated
+    /// locally as a large segment).
+    ///
+    /// Note: This is only for transport-layer segmentation, not IP-layer
+    /// fragmentation of reassembled packets.
+    gso_info: Option<GsoInfo>,
+
     #[cfg(debug_assertions)]
     drop_check: IpLayerPacketMetadataDropCheck,
 }
@@ -225,6 +232,7 @@ impl<
         core_ctx: &mut CC,
         device: &D,
         DeviceIpLayerMetadata { conntrack_entry, tx_metadata, marks }: DeviceIpLayerMetadata<BT>,
+        gso_info: Option<GsoInfo>,
     ) -> Self
     where
         CC: ResourceCounterContext<D, IpCounters<I>>,
@@ -247,29 +255,67 @@ impl<
             }
         };
 
-        let socket_info = tx_metadata.socket_info();
-
         Self {
             conntrack_connection_and_direction,
             tx_metadata,
             marks,
-            socket_info,
+            // `tx_metadata` belongs to the sending socket (preserved across
+            // loopback for TX buffer accounting). On ingress, `socket_info` must
+            // only reflect the receiving socket (populated later by early demux).
+            socket_info: None,
+            gso_info,
             #[cfg(debug_assertions)]
             drop_check: Default::default(),
         }
     }
 }
 
+/// The result of splitting metadata for multicast replication via
+/// [`IpLayerPacketMetadata::split_for_multicast`].
+pub(crate) struct SplitMulticastPacketMetadata<I, A, BT>
+where
+    I: packet_formats::ip::IpExt,
+    BT: FilterBindingsTypes + TxMetadataBindingsTypes,
+{
+    pub(crate) primary: IpLayerPacketMetadata<I, A, BT>,
+    pub(crate) secondary: IpLayerPacketMetadata<I, A, BT>,
+}
+
 impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
     IpLayerPacketMetadata<I, A, BT>
 {
-    pub(crate) fn from_tx_metadata_and_marks(tx_metadata: BT::TxMetadata, marks: Marks) -> Self {
+    /// Splits metadata for multicast replication into [`SplitMulticastPacketMetadata`].
+    ///
+    /// The `primary` instance retains unique resources
+    /// (`conntrack_connection_and_direction` and `tx_metadata`), while the
+    /// `secondary` instance receives a copy of shareable metadata (`marks`,
+    /// `socket_info`, and `gso_info`) with default unique resources for
+    /// subsequent replications.
+    pub(crate) fn split_for_multicast(self) -> SplitMulticastPacketMetadata<I, A, BT> {
+        let secondary = Self {
+            conntrack_connection_and_direction: None,
+            tx_metadata: Default::default(),
+            marks: self.marks,
+            socket_info: self.socket_info.clone(),
+            gso_info: self.gso_info,
+            #[cfg(debug_assertions)]
+            drop_check: Default::default(),
+        };
+        SplitMulticastPacketMetadata { primary: self, secondary }
+    }
+
+    pub(crate) fn new_local_tx(
+        tx_metadata: BT::TxMetadata,
+        marks: Marks,
+        gso_info: Option<GsoInfo>,
+    ) -> Self {
         let socket_info = tx_metadata.socket_info();
         Self {
             conntrack_connection_and_direction: None,
             tx_metadata,
             marks,
             socket_info,
+            gso_info,
             #[cfg(debug_assertions)]
             drop_check: Default::default(),
         }
@@ -282,12 +328,14 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
         BT::TxMetadata,
         Marks,
         Option<SocketInfo>,
+        Option<GsoInfo>,
     ) {
         let Self {
             tx_metadata,
             marks,
             conntrack_connection_and_direction,
             socket_info,
+            gso_info,
             #[cfg(debug_assertions)]
             mut drop_check,
         } = self;
@@ -295,7 +343,7 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
         {
             drop_check.okay_to_drop = true;
         }
-        (conntrack_connection_and_direction, tx_metadata, marks, socket_info)
+        (conntrack_connection_and_direction, tx_metadata, marks, socket_info, gso_info)
     }
 
     /// Acknowledge that it's okay to drop this packet metadata.
@@ -1116,6 +1164,15 @@ pub trait MarksBindingsContext {
     /// socket to the packet and can be observed in `LOCAL_INGRESS` filter
     /// hook.
     fn marks_to_set_on_ingress() -> &'static [MarkDomain];
+
+    /// Returns a copy of `packet_marks` with the mark domains in
+    /// [`Self::marks_to_set_on_ingress`] overridden from `socket_marks`.
+    fn update_ingress_marks(mut packet_marks: Marks, socket_marks: &Marks) -> Marks {
+        for mark in Self::marks_to_set_on_ingress() {
+            *packet_marks.get_mut(*mark) = *socket_marks.get(*mark);
+        }
+        packet_marks
+    }
 }
 
 /// The bindings execution context for the IP layer.
@@ -2511,9 +2568,8 @@ impl<I: FilterIpExt, S> EarlyDemuxResult<I, S> {
         CC: IpLayerIngressContext<I, BC>,
     {
         packet_metadata.socket_info = Some(self.socket.socket_info(core_ctx));
-        for mark in BC::marks_to_set_on_ingress() {
-            *packet_metadata.marks.get_mut(*mark) = self.socket.marks(core_ctx).get(*mark).clone();
-        }
+        packet_metadata.marks =
+            BC::update_ingress_marks(packet_metadata.marks, &self.socket.marks(core_ctx));
     }
 }
 
@@ -3210,7 +3266,10 @@ where
     // If the packet is leaving through the loopback device, attempt to extract a
     // weak reference to the packet's conntrack entry to plumb that through the
     // device layer so it can be reused on ingress to the IP layer.
-    let (conntrack_connection_and_direction, tx_metadata, marks, _socket_cookie) =
+    // TODO(https://fxbug.dev/452980285): Split a frame carrying GSO metadata
+    // back into `gso_size` segments here. A coalesced frame is larger than the
+    // MTU by construction, so until then it is sent (and fragmented) whole.
+    let (conntrack_connection_and_direction, tx_metadata, marks, _socket_cookie, _gso_info) =
         packet_metadata.into_parts();
     let conntrack_entry = if device.is_loopback() {
         conntrack_connection_and_direction
@@ -3330,14 +3389,9 @@ where
 /// fact serializing the buffer.
 struct AlwaysFailBufferAlloc;
 
-impl LayoutBufferAlloc<Never> for AlwaysFailBufferAlloc {
+impl LayoutBufferAlloc<!> for AlwaysFailBufferAlloc {
     type Error = ();
-    fn layout_alloc(
-        self,
-        _prefix: usize,
-        _body: usize,
-        _suffix: usize,
-    ) -> Result<Never, Self::Error> {
+    fn layout_alloc(self, _prefix: usize, _body: usize, _suffix: usize) -> Result<!, Self::Error> {
         Err(())
     }
 }
@@ -3520,6 +3574,7 @@ pub fn receive_ipv4_packet<
     frame_dst: Option<LocalFrameDestination>,
     device_ip_layer_metadata: DeviceIpLayerMetadata<BC>,
     parsing_context: NetworkParsingContext,
+    gso_info: Option<GsoInfo>,
     buffer: B,
 ) {
     if !core_ctx.is_ip_device_enabled(&device) {
@@ -3635,6 +3690,7 @@ pub fn receive_ipv4_packet<
         core_ctx,
         device,
         device_ip_layer_metadata,
+        gso_info,
     );
     let mut filter = core_ctx.filter_handler();
     match filter.ingress_hook(bindings_ctx, &mut packet, device, &mut packet_metadata) {
@@ -3654,6 +3710,7 @@ pub fn receive_ipv4_packet<
             let Some(addr) = SpecifiedAddr::new(addr) else {
                 core_ctx.increment_both(device, |c| &c.unspecified_destination);
                 debug!("cannot perform transparent delivery to unspecified destination; dropping");
+                packet_metadata.acknowledge_drop();
                 return;
             };
 
@@ -3692,6 +3749,7 @@ pub fn receive_ipv4_packet<
             "receive_ipv4_packet: received packet from invalid source {}; dropping",
             packet.src_ip()
         );
+        packet_metadata.acknowledge_drop();
         return;
     };
 
@@ -3962,6 +4020,7 @@ pub fn receive_ipv6_packet<
     frame_dst: Option<LocalFrameDestination>,
     device_ip_layer_metadata: DeviceIpLayerMetadata<BC>,
     parsing_context: NetworkParsingContext,
+    gso_info: Option<GsoInfo>,
     buffer: B,
 ) {
     if !core_ctx.is_ip_device_enabled(&device) {
@@ -4113,6 +4172,7 @@ pub fn receive_ipv6_packet<
         core_ctx,
         device,
         device_ip_layer_metadata,
+        gso_info,
     );
     let mut filter = core_ctx.filter_handler();
 
@@ -4133,6 +4193,7 @@ pub fn receive_ipv6_packet<
             let Some(addr) = SpecifiedAddr::new(addr) else {
                 core_ctx.increment_both(device, |c| &c.unspecified_destination);
                 debug!("cannot perform transparent delivery to unspecified destination; dropping");
+                packet_metadata.acknowledge_drop();
                 return;
             };
 
@@ -4168,6 +4229,7 @@ pub fn receive_ipv6_packet<
             packet.src_ip()
         );
         core_ctx.increment_both(device, |c| &c.invalid_source);
+        packet_metadata.acknowledge_drop();
         return;
     };
 

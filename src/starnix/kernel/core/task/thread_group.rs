@@ -18,7 +18,7 @@ use crate::task::memory_attribution::MemoryAttributionLifecycleEvent;
 use crate::task::{
     ControllingTerminal, CurrentTask, ExitStatus, Kernel, Pid, PidTable, PidTableGuard,
     ProcessGroup, Session, SessionDisassociation, Task, TaskMutableState, TaskPersistentInfo,
-    TypedWaitQueue,
+    TypedWaitQueue, WaitResult, ZombieProcess, ZombieState,
 };
 use crate::time::{IntervalTimerHandle, TimerTable};
 use itertools::Itertools;
@@ -33,7 +33,7 @@ use starnix_task_command::TaskCommand;
 use starnix_types::ownership::{OwnedRef, Releasable};
 use starnix_types::stats::TaskTimeStats;
 use starnix_types::time::{itimerspec_from_itimerval, timeval_from_duration};
-use starnix_uapi::auth::{CAP_SYS_ADMIN, CAP_SYS_RESOURCE, Credentials};
+use starnix_uapi::auth::{CAP_SYS_ADMIN, CAP_SYS_RESOURCE};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::personality::PersonalityFlags;
 use starnix_uapi::resource_limits::{Resource, ResourceLimits};
@@ -43,7 +43,7 @@ use starnix_uapi::signals::{
 use starnix_uapi::user_address::UserAddress;
 use starnix_uapi::{
     ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, SA_NOCLDWAIT, SI_TKILL, SI_USER, SIG_IGN, errno,
-    error, itimerval, pid_t, rlimit, tid_t, uid_t,
+    error, itimerval, pid_t, rlimit, tid_t,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -409,231 +409,12 @@ impl ProcessSelector {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProcessExitInfo {
-    pub status: ExitStatus,
-    pub exit_signal: Option<Signal>,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum ThreadGroupRunState {
     #[default]
     Running,
     Exiting(ExitStatus),
     Exited(ExitStatus),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WaitResult {
-    pub pid: Pid,
-    pub uid: uid_t,
-
-    pub exit_info: ProcessExitInfo,
-
-    /// Cumulative time stats for the process and its children.
-    pub time_stats: TaskTimeStats,
-}
-
-impl WaitResult {
-    // According to wait(2) man page, SignalInfo.signal needs to always be set to SIGCHLD
-    pub fn as_signal_info(&self) -> SignalInfo {
-        SignalInfo::with_detail(
-            SIGCHLD,
-            self.exit_info.status.signal_info_code(),
-            SignalDetail::SIGCHLD {
-                pid: self.pid.clone(),
-                uid: self.uid,
-                status: self.exit_info.status.signal_info_status(),
-            },
-        )
-    }
-}
-
-#[derive(Debug)]
-pub struct ZombieProcess {
-    pub pid: Pid,
-    pub pgid: Pid,
-    pub uid: uid_t,
-
-    pub exit_info: ProcessExitInfo,
-
-    /// Cumulative time stats for the process and its children.
-    pub time_stats: TaskTimeStats,
-
-    /// Whether dropping this ZombieProcess should imply removing the pid from
-    /// the PidTable
-    pub is_canonical: bool,
-}
-
-impl PartialEq for ZombieProcess {
-    fn eq(&self, other: &Self) -> bool {
-        // We assume only one set of ZombieProcess data per process, so this should cover it.
-        self.pid == other.pid && self.is_canonical == other.is_canonical
-    }
-}
-
-impl Eq for ZombieProcess {}
-
-impl PartialOrd for ZombieProcess {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ZombieProcess {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (&self.pid, self.is_canonical).cmp(&(&other.pid, other.is_canonical))
-    }
-}
-
-impl ZombieProcess {
-    pub fn new(
-        thread_group: ThreadGroupStateRef<'_>,
-        credentials: &Credentials,
-        exit_info: ProcessExitInfo,
-    ) -> OwnedRef<Self> {
-        let time_stats = thread_group.base.time_stats() + thread_group.children_time_stats;
-        OwnedRef::new(ZombieProcess {
-            pid: thread_group.base.leader.clone(),
-            pgid: thread_group.process_group.leader.clone(),
-            uid: credentials.uid,
-            exit_info,
-            time_stats,
-            is_canonical: true,
-        })
-    }
-
-    pub fn pid(&self) -> pid_t {
-        self.pid.id
-    }
-
-    pub fn pgid(&self) -> pid_t {
-        self.pgid.id
-    }
-
-    pub fn to_wait_result(&self) -> WaitResult {
-        WaitResult {
-            pid: self.pid.clone(),
-            uid: self.uid,
-            exit_info: self.exit_info.clone(),
-            time_stats: self.time_stats,
-        }
-    }
-
-    pub fn as_artificial(&self) -> Self {
-        ZombieProcess {
-            pid: self.pid.clone(),
-            pgid: self.pgid.clone(),
-            uid: self.uid,
-            exit_info: self.exit_info.clone(),
-            time_stats: self.time_stats,
-            is_canonical: false,
-        }
-    }
-
-    pub fn matches_selector(&self, selector: &ProcessSelector) -> bool {
-        match selector {
-            ProcessSelector::Any => true,
-            ProcessSelector::Pid(pid) => &self.pid == pid,
-            ProcessSelector::Pgid(pgid) => &self.pgid == pgid,
-        }
-    }
-
-    pub fn matches_selector_and_waiting_option(
-        &self,
-        selector: &ProcessSelector,
-        options: &WaitingOptions,
-    ) -> bool {
-        if !self.matches_selector(selector) {
-            return false;
-        }
-
-        if options.wait_for_all {
-            true
-        } else {
-            // A "clone" zombie is one which has delivered no signal, or a
-            // signal other than SIGCHLD to its parent upon termination.
-            options.wait_for_clone == (self.exit_info.exit_signal != Some(SIGCHLD))
-        }
-    }
-}
-
-/// Trait for releasing a zombie process from the PID table.
-///
-/// This trait erases the lifetime parameter of [`PidTableGuard`] so that [`ZombieProcess`] can
-/// implement [`Releasable`] without tying the mutable reference lifetime to the guard's lifetime
-/// parameter, preserving variance and allowing reborrowing in loops and across sequential calls.
-pub trait ZombieReleaser {
-    fn remove_zombie(&mut self, pid: &Pid);
-}
-
-impl<'a> ZombieReleaser for PidTableGuard<'a> {
-    fn remove_zombie(&mut self, pid: &Pid) {
-        self.remove_zombie(pid);
-    }
-}
-
-impl Releasable for ZombieProcess {
-    type Context<'a> = &'a mut dyn ZombieReleaser;
-
-    fn release<'a>(self, pids: &'a mut dyn ZombieReleaser) {
-        if self.is_canonical {
-            pids.remove_zombie(&self.pid);
-        }
-    }
-}
-
-/// A zombie process that is pending notification.
-///
-/// # Thread Safety
-///
-/// Notifications are generally produced in contexts in which a [`ThreadGroup`] state lock is held.
-/// Any such lock must be released before notifications are delivered. The notification's
-/// recipient thread group may be:
-/// - The originating thread group, in which case delivery while locked would self-deadlock.
-/// - One of this thread group's ancestors, in which case delivery while locked would invert the
-///   parent-child ordering of [`ThreadGroup`] locks.
-///
-/// The [`PidTable`] lock must be held continuously between [`ZombieNotification`] production and
-/// delivery to protect against concurrent exit races. Delivery requires releasing [`ThreadGroup`]
-/// state locks. If the recipient thread group exits before the notification is delivered, subreaper
-/// identification becomes impossible and the zombie must be reaped without notifying observers.
-/// Holding the [`PidTable`] lock throughout notification ensures the recipient cannot concurrently
-/// exit.
-#[must_use = "Notifications must be explicitly delivered or discarded"]
-pub struct ZombieNotification {
-    /// The recipient [`ThreadGroup`], which is generally the zombie's parent.
-    pub recipient: Weak<ThreadGroup>,
-
-    /// The zombie process to notify the parent of.
-    pub zombie: OwnedRef<ZombieProcess>,
-}
-
-impl ZombieNotification {
-    pub fn new(recipient: Weak<ThreadGroup>, zombie: OwnedRef<ZombieProcess>) -> Self {
-        Self { recipient, zombie }
-    }
-
-    /// Delivers the zombie notification to the parent.
-    ///
-    /// # Thread Safety
-    ///
-    /// Acquires [`ThreadGroup`] state locks.
-    pub fn deliver(self, pids: &mut PidTableGuard<'_>) {
-        if let Some(parent) = self.recipient.upgrade() {
-            parent.do_zombie_notifications(self.zombie, pids);
-        } else {
-            log_warn!("Zombie {} reaped silently", self.zombie.pid());
-            self.zombie.release(pids);
-        }
-    }
-
-    /// Discards the zombie notification without delivering it.
-    ///
-    /// If the [`ZombieProcess`] has no other owners, it will be reaped.
-    pub fn discard(self, pids: &mut PidTableGuard<'_>) {
-        self.zombie.release(pids);
-    }
 }
 
 impl ThreadGroup {
@@ -876,10 +657,12 @@ impl ThreadGroup {
             let zombie_notifications = state.zombie_ptracees.detach_all(&mut pids);
 
             // Replace PID table entry with a zombie.
-            let exit_info =
-                ProcessExitInfo { status: exit_status, exit_signal: state.exit_signal.clone() };
-            let zombie =
-                ZombieProcess::new(state.as_ref(), &task.persistent_info.real_creds(), exit_info);
+            let zombie = ZombieProcess::new(
+                task.clone(),
+                state.as_ref(),
+                exit_status,
+                state.exit_signal.clone(),
+            );
             pids.kill_process(&self.leader);
 
             let session = state.leave_process_group(&mut pids);
@@ -1032,10 +815,10 @@ impl ThreadGroup {
     ) {
         let mut state = self.write();
 
-        state.children.remove(&zombie.pid());
-        state.deferred_zombie_ptracers.retain(|dzp| dzp.tracee_pid != zombie.pid);
+        state.children.remove(&zombie.task.get_pid());
+        state.deferred_zombie_ptracers.retain(|dzp| dzp.tracee_pid != zombie.task.pid);
 
-        let exit_signal = zombie.exit_info.exit_signal;
+        let exit_signal = zombie.exit_signal;
         let mut signal_info = zombie.to_wait_result().as_signal_info();
 
         // From https://man7.org/linux/man-pages/man2/sigaction.2.html
@@ -1621,8 +1404,10 @@ impl ThreadGroup {
                     } else {
                         {
                             let mut state = tg.write();
-                            state.children.remove(&z.pid());
-                            state.deferred_zombie_ptracers.retain(|dzp| dzp.tracee_pid != z.pid);
+                            state.children.remove(&z.task.get_pid());
+                            state
+                                .deferred_zombie_ptracers
+                                .retain(|dzp| dzp.tracee_pid != z.task.pid);
                         }
 
                         z.release(pids);
@@ -1776,8 +1561,8 @@ impl ThreadGroup {
                     return Some(WaitResult {
                         pid,
                         uid,
-                        exit_info: ProcessExitInfo { status: exit_status, exit_signal },
-                        time_stats,
+                        zombie_state: ZombieState { exit_status, time_stats },
+                        exit_signal,
                     });
                 }
             }
@@ -2116,7 +1901,7 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
 
     /// Reaps the given zombie, making its PID available for reuse.
     fn reap_zombie(&mut self, zombie: OwnedRef<ZombieProcess>, pids: &mut PidTableGuard<'_>) {
-        self.children_time_stats += zombie.time_stats;
+        self.children_time_stats += zombie.state.time_stats;
         zombie.release(pids);
     }
 
@@ -2235,11 +2020,11 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
                     WaitResult {
                         pid: child.base.leader.clone(),
                         uid,
-                        exit_info: ProcessExitInfo {
-                            status: exit_status,
-                            exit_signal: child.exit_signal,
+                        zombie_state: ZombieState {
+                            exit_status,
+                            time_stats: child.base.time_stats() + child.children_time_stats,
                         },
-                        time_stats: child.base.time_stats() + child.children_time_stats,
+                        exit_signal: child.exit_signal,
                     }
                 };
                 let child_stopped = child.base.load_stopped();
@@ -2389,12 +2174,30 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         let sigaction = self.base.signal_actions.get(signal_info.signal);
         let action = action_for_signal(&signal_info, sigaction);
 
-        {
+        let tasks: Vec<Pid> = self.tasks.iter().map(|info| info.tid.clone()).collect();
+
+        // Like `send_signal_prio` does for a single task, discard an ignored signal instead of
+        // queueing it: no task would ever act on it, but it would still make interruptible syscalls
+        // fail with EINTR. It must still be queued when a task blocks it with its current or its
+        // saved mask, as it can be accepted later (see the `SigtimedwaitTest.IgnoredUnmaskedSignal`
+        // gvisor test), or when a task is ptraced, for the signal-delivery-stop.
+        let queue_on_group = action != DeliveryAction::Ignore
+            || tasks
+                .iter()
+                .filter_map(|pid| pid.get_task().ok())
+                .filter(|task| task.is_running())
+                .any(|task| {
+                    let task_state = task.read();
+                    task_state.is_signal_masked(signal_info.signal)
+                        || task_state.is_signal_masked_by_saved_mask(signal_info.signal)
+                        || task_state.is_ptraced()
+                });
+
+        if queue_on_group {
             let mut pending_signals = self.base.pending_signals.lock();
             pending_signals.enqueue(signal_info.clone());
             self.base.has_pending_signals.store(true, Ordering::Relaxed);
         }
-        let tasks: Vec<Pid> = self.tasks.iter().map(|info| info.tid.clone()).collect();
 
         // Set state to waking before interrupting any tasks.
         if signal_info.signal == SIGKILL {
@@ -2481,7 +2284,7 @@ mod test {
             child.thread_group().kill(ExitStatus::Exit(42), None);
             std::mem::drop(child);
             assert_eq!(
-                current_task.thread_group().read().zombie_children[0].exit_info.status,
+                current_task.thread_group().read().zombie_children[0].state.exit_status,
                 ExitStatus::Exit(42)
             );
         })

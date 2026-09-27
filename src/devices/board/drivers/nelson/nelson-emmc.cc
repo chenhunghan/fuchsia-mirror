@@ -149,7 +149,7 @@ zx_status_t Nelson::EmmcInit() {
   auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, emmc_dev),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "nelson_emmc", .parents2 = kEmmcParents}}));
+                                   {.name = "nelson-emmc", .parents2 = kEmmcParents}}));
   if (!result.ok()) {
     zxlogf(ERROR, "AddCompositeNodeSpec Emmc(emmc_dev) request failed: %s",
            result.FormatDescription().data());

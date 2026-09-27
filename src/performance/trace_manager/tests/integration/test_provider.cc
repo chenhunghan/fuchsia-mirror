@@ -12,7 +12,9 @@
 
 size_t counter = 1;
 void EmitSomeEvents(async_dispatcher_t* dispatcher) {
-  TRACE_INSTANT("test", "test_counter", TRACE_SCOPE_THREAD, "counter", uint64_t{counter++});
+  for (size_t i = 0; i < 100; ++i) {
+    TRACE_INSTANT("test", "test_counter", TRACE_SCOPE_THREAD, "counter", uint64_t{counter++});
+  }
   async::PostTask(dispatcher, [dispatcher] { EmitSomeEvents(dispatcher); });
 }
 

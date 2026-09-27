@@ -119,7 +119,7 @@ zx_status_t Nelson::PwmInit() {
   fdf::Arena arena('PWM_');
 
   auto composite_spec =
-      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("amlogic_pwm").Build();
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("pwm").Build();
 
   auto result =
       pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, pwm_dev), composite_spec);

@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "mock-reboot",
+    srcs = ["src/lib.rs"],
+    crate_name = "mock_reboot",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//src/lib/fuchsia",
+    ],
+    version = "0.0.1",
+    visibility = [
+        "//src/recovery:__subpackages__",
+        "//src/security:__subpackages__",
+        "//src/starnix:__subpackages__",
+        "//src/sys/pkg:__subpackages__",
+        "//vendor/google/starnix:__subpackages__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

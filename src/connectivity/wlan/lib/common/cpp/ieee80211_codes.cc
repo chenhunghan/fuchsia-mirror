@@ -9,108 +9,108 @@
 namespace wlan {
 namespace common {
 
-namespace wlan_ieee80211 = ::fuchsia::wlan::ieee80211;
+namespace wlan_ieee80211 = ::fuchsia_wlan_ieee80211;
 
 namespace {
 
 template <typename T>
 constexpr bool IsValidStatusCode(T status_code) {
   switch (status_code) {
-    case static_cast<T>(wlan_ieee80211::StatusCode::SUCCESS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REFUSED_REASON_UNSPECIFIED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TDLS_REJECTED_ALTERNATIVE_PROVIDED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TDLS_REJECTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::SECURITY_DISABLED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::UNACCEPTABLE_LIFETIME):
-    case static_cast<T>(wlan_ieee80211::StatusCode::NOT_IN_SAME_BSS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REFUSED_CAPABILITIES_MISMATCH):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_NO_ASSOCIATION_EXISTS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_OTHER_REASON):
-    case static_cast<T>(wlan_ieee80211::StatusCode::UNSUPPORTED_AUTH_ALGORITHM):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TRANSACTION_SEQUENCE_ERROR):
-    case static_cast<T>(wlan_ieee80211::StatusCode::CHALLENGE_FAILURE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_SEQUENCE_TIMEOUT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_NO_MORE_STAS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REFUSED_BASIC_RATES_MISMATCH):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_NO_SHORT_PREAMBLE_SUPPORT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_SPECTRUM_MANAGEMENT_REQUIRED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_BAD_POWER_CAPABILITY):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_BAD_SUPPORTED_CHANNELS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_NO_SHORT_SLOT_TIME_SUPPORT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_NO_HT_SUPPORT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::R0KH_UNREACHABLE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_PCO_TIME_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REFUSED_TEMPORARILY):
-    case static_cast<T>(wlan_ieee80211::StatusCode::ROBUST_MANAGEMENT_POLICY_VIOLATION):
-    case static_cast<T>(wlan_ieee80211::StatusCode::UNSPECIFIED_QOS_FAILURE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_INSUFFICIENT_BANDWIDTH):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_POOR_CHANNEL_CONDITIONS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_QOS_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REQUEST_DECLINED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::INVALID_PARAMETERS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_WITH_SUGGESTED_CHANGES):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_ELEMENT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_GROUP_CIPHER):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_PAIRWISE_CIPHER):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_AKMP):
-    case static_cast<T>(wlan_ieee80211::StatusCode::UNSUPPORTED_RSNE_VERSION):
-    case static_cast<T>(wlan_ieee80211::StatusCode::INVALID_RSNE_CAPABILITIES):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_CIPHER_OUT_OF_POLICY):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_FOR_DELAY_PERIOD):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DLS_NOT_ALLOWED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::NOT_PRESENT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::NOT_QOS_STA):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_LISTEN_INTERVAL_TOO_LARGE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_FT_ACTION_FRAME_COUNT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_PMKID):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_MDE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::STATUS_INVALID_FTE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REQUESTED_TCLAS_NOT_SUPPORTED_BY_AP):
-    case static_cast<T>(wlan_ieee80211::StatusCode::INSUFFICIENT_TCLAS_PROCESSING_RESOURCES):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TRY_ANOTHER_BSS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::GAS_ADVERTISEMENT_PROTOCOL_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::NO_OUTSTANDING_GAS_REQUEST):
-    case static_cast<T>(wlan_ieee80211::StatusCode::GAS_RESPONSE_NOT_RECEIVED_FROM_SERVER):
-    case static_cast<T>(wlan_ieee80211::StatusCode::GAS_QUERY_TIMEOUT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::GAS_QUERY_RESPONSE_TOO_LARGE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_HOME_WITH_SUGGESTED_CHANGES):
-    case static_cast<T>(wlan_ieee80211::StatusCode::SERVER_UNREACHABLE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_FOR_SSP_PERMISSIONS):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REFUSED_UNAUTHENTICATED_ACCESS_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::INVALID_RSNE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::U_APSD_COEXISTANCE_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::U_APSD_COEX_MODE_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::BAD_INTERVAL_WITH_U_APSD_COEX):
-    case static_cast<T>(wlan_ieee80211::StatusCode::ANTI_CLOGGING_TOKEN_REQUIRED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::UNSUPPORTED_FINITE_CYCLIC_GROUP):
-    case static_cast<T>(wlan_ieee80211::StatusCode::CANNOT_FIND_ALTERNATIVE_TBTT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TRANSMISSION_FAILURE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REQUESTED_TCLAS_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TCLAS_RESOURCES_EXHAUSTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_WITH_SUGGESTED_BSS_TRANSITION):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECT_WITH_SCHEDULE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECT_NO_WAKEUP_SPECIFIED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::SUCCESS_POWER_SAVE_MODE):
-    case static_cast<T>(wlan_ieee80211::StatusCode::PENDING_ADMITTING_FST_SESSION):
-    case static_cast<T>(wlan_ieee80211::StatusCode::PERFORMING_FST_NOW):
-    case static_cast<T>(wlan_ieee80211::StatusCode::PENDING_GAP_IN_BA_WINDOW):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECT_U_PID_SETTING):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REFUSED_EXTERNAL_REASON):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REFUSED_AP_OUT_OF_MEMORY):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECTED_EMERGENCY_SERVICES_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::QUERY_RESPONSE_OUTSTANDING):
-    case static_cast<T>(wlan_ieee80211::StatusCode::REJECT_DSE_BAND):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TCLAS_PROCESSING_TERMINATED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::TS_SCHEDULE_CONFLICT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_WITH_SUGGESTED_BAND_AND_CHANNEL):
-    case static_cast<T>(wlan_ieee80211::StatusCode::MCCAOP_RESERVATION_CONFLICT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::MAF_LIMIT_EXCEEDED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::MCCA_TRACK_LIMIT_EXCEEDED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_DUE_TO_SPECTRUM_MANAGEMENT):
-    case static_cast<T>(wlan_ieee80211::StatusCode::DENIED_VHT_NOT_SUPPORTED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::ENABLEMENT_DENIED):
-    case static_cast<T>(wlan_ieee80211::StatusCode::RESTRICTION_FROM_AUTHORIZED_GDB):
-    case static_cast<T>(wlan_ieee80211::StatusCode::AUTHORIZATION_DEENABLED):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kSuccess):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRefusedReasonUnspecified):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTdlsRejectedAlternativeProvided):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTdlsRejected):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kSecurityDisabled):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kUnacceptableLifetime):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kNotInSameBss):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRefusedCapabilitiesMismatch):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedNoAssociationExists):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedOtherReason):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kUnsupportedAuthAlgorithm):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTransactionSequenceError):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kChallengeFailure):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedSequenceTimeout):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedNoMoreStas):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRefusedBasicRatesMismatch):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedNoShortPreambleSupport):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedSpectrumManagementRequired):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedBadPowerCapability):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedBadSupportedChannels):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedNoShortSlotTimeSupport):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedNoHtSupport):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kR0KhUnreachable):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedPcoTimeNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRefusedTemporarily):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRobustManagementPolicyViolation):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kUnspecifiedQosFailure):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedInsufficientBandwidth):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedPoorChannelConditions):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedQosNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRequestDeclined):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kInvalidParameters):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedWithSuggestedChanges):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidElement):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidGroupCipher):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidPairwiseCipher):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidAkmp):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kUnsupportedRsneVersion):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kInvalidRsneCapabilities):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusCipherOutOfPolicy):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedForDelayPeriod):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDlsNotAllowed):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kNotPresent):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kNotQosSta):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedListenIntervalTooLarge):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidFtActionFrameCount):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidPmkid):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidMde):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kStatusInvalidFte):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRequestedTclasNotSupportedByAp):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kInsufficientTclasProcessingResources):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTryAnotherBss):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kGasAdvertisementProtocolNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kNoOutstandingGasRequest):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kGasResponseNotReceivedFromServer):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kGasQueryTimeout):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kGasQueryResponseTooLarge):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedHomeWithSuggestedChanges):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kServerUnreachable):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedForSspPermissions):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRefusedUnauthenticatedAccessNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kInvalidRsne):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kUApsdCoexistanceNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kUApsdCoexModeNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kBadIntervalWithUApsdCoex):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kAntiCloggingTokenRequired):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kUnsupportedFiniteCyclicGroup):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kCannotFindAlternativeTbtt):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTransmissionFailure):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRequestedTclasNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTclasResourcesExhausted):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedWithSuggestedBssTransition):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectWithSchedule):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectNoWakeupSpecified):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kSuccessPowerSaveMode):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kPendingAdmittingFstSession):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kPerformingFstNow):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kPendingGapInBaWindow):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectUPidSetting):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRefusedExternalReason):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRefusedApOutOfMemory):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectedEmergencyServicesNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kQueryResponseOutstanding):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRejectDseBand):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTclasProcessingTerminated):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kTsScheduleConflict):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedWithSuggestedBandAndChannel):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kMccaopReservationConflict):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kMafLimitExceeded):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kMccaTrackLimitExceeded):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedDueToSpectrumManagement):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kDeniedVhtNotSupported):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kEnablementDenied):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kRestrictionFromAuthorizedGdb):
+    case static_cast<T>(wlan_ieee80211::StatusCode::kAuthorizationDeenabled):
       return true;
     default:
       return false;
@@ -120,14 +120,14 @@ constexpr bool IsValidStatusCode(T status_code) {
 }  // namespace
 
 uint16_t ConvertStatusCode(wlan_ieee80211::StatusCode status) {
-  ZX_ASSERT(IsValidStatusCode(status));
+  ZX_ASSERT(IsValidStatusCode(static_cast<uint16_t>(status)));
   return static_cast<uint16_t>(status);
 }
 
 wlan_ieee80211::StatusCode ConvertStatusCode(uint16_t status) {
   // Use a default for invalid uint16_t status codes from external sources.
   if (!IsValidStatusCode(status)) {
-    return wlan_ieee80211::StatusCode::REFUSED_REASON_UNSPECIFIED;
+    return wlan_ieee80211::StatusCode::kRefusedReasonUnspecified;
   }
   return static_cast<wlan_ieee80211::StatusCode>(status);
 }

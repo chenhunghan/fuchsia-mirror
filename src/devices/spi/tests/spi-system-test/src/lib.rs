@@ -13,6 +13,7 @@ use fuchsia_component::client::{connect_to_service_instance, open_service_at};
 use fuchsia_fs::directory::{WatchEvent, Watcher};
 use futures::StreamExt;
 use rand::RngExt as _;
+use rand::seq::SliceRandom;
 use spi_system_test_config::Config;
 use std::collections::{HashMap, HashSet};
 use zx::Status;
@@ -801,6 +802,105 @@ spi_test!(test_latency, device, bus, {
         median,
         bus.max_expected_latency
     );
+
+    let _unregistered_tx_vmo = device
+        .unregister_vmo(TX_VMO_ID)
+        .await
+        .context("UnregisterVmo TX FIDL call failed")?
+        .map_err(|status| {
+            anyhow::anyhow!("UnregisterVmo TX failed: {:?}", Status::err_from_raw(status))
+        })?;
+
+    let _unregistered_rx_vmo = device
+        .unregister_vmo(RX_VMO_ID)
+        .await
+        .context("UnregisterVmo RX FIDL call failed")?
+        .map_err(|status| {
+            anyhow::anyhow!("UnregisterVmo RX failed: {:?}", Status::err_from_raw(status))
+        })?;
+
+    Ok(())
+});
+
+// This test calls Exchange() with various transfer sizes (such as common FIFO sizes +/- 1, odd
+// numbers, and page size +/- 1) in random order to verify that the SPI controller handles
+// arbitrary transfer lengths correctly without data corruption or writing more RX bytes than
+// requested.
+spi_test!(test_exchange_sizes, device, {
+    const TX_VMO_ID: u32 = 1;
+    const RX_VMO_ID: u32 = 2;
+
+    let mut sizes = [
+        1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257,
+        511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049, 4095, 4096, 4097,
+    ];
+    sizes.shuffle(&mut rand::rng());
+
+    let max_size = *sizes.iter().max().unwrap();
+
+    let tx_vmo = zx::Vmo::create(max_size as u64).context("Failed to create TX VMO")?;
+    let tx_vmo_dup =
+        tx_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).context("Failed to duplicate TX VMO")?;
+
+    let rx_vmo = zx::Vmo::create(max_size as u64).context("Failed to create RX VMO")?;
+    let rx_vmo_dup =
+        rx_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).context("Failed to duplicate RX VMO")?;
+
+    device
+        .register_vmo(
+            TX_VMO_ID,
+            fmem::Range { vmo: tx_vmo_dup, offset: 0, size: max_size as u64 },
+            fsharedmemory::SharedVmoRight::READ,
+        )
+        .await
+        .context("RegisterVmo TX FIDL call failed")?
+        .map_err(|status| {
+            anyhow::anyhow!("RegisterVmo TX failed: {:?}", Status::err_from_raw(status))
+        })?;
+
+    device
+        .register_vmo(
+            RX_VMO_ID,
+            fmem::Range { vmo: rx_vmo_dup, offset: 0, size: max_size as u64 },
+            fsharedmemory::SharedVmoRight::WRITE,
+        )
+        .await
+        .context("RegisterVmo RX FIDL call failed")?
+        .map_err(|status| {
+            anyhow::anyhow!("RegisterVmo RX failed: {:?}", Status::err_from_raw(status))
+        })?;
+
+    let mut rx_init_data = vec![0u8; max_size];
+    rand::rng().fill(&mut rx_init_data[..]);
+
+    for size in sizes {
+        rx_vmo.write(&rx_init_data, 0).context("Failed to write to RX VMO")?;
+
+        let mut txdata = vec![0u8; size];
+        rand::rng().fill(&mut txdata[..]);
+        tx_vmo.write(&txdata, 0).context("Failed to write to TX VMO")?;
+
+        device
+            .exchange(
+                &fsharedmemory::SharedVmoBuffer { vmo_id: TX_VMO_ID, offset: 0, size: size as u64 },
+                &fsharedmemory::SharedVmoBuffer { vmo_id: RX_VMO_ID, offset: 0, size: size as u64 },
+            )
+            .await
+            .context("Exchange FIDL call failed")?
+            .map_err(|status| {
+                anyhow::anyhow!("Exchange failed: {:?}", Status::err_from_raw(status))
+            })?;
+
+        let mut rxdata = vec![0u8; max_size];
+        rx_vmo.read(&mut rxdata, 0).context("Failed to read from RX VMO")?;
+        assert_eq!(&rxdata[..size], &txdata[..], "Data mismatch for transfer size {}", size);
+        assert_eq!(
+            &rxdata[size..],
+            &rx_init_data[size..],
+            "Driver wrote more RX bytes than expected for transfer size {}",
+            size
+        );
+    }
 
     let _unregistered_tx_vmo = device
         .unregister_vmo(TX_VMO_ID)

@@ -8,7 +8,6 @@
 #include <lib/sysmem-version/sysmem-version.h>
 
 #include <fbl/algorithm.h>
-#include <fbl/array.h>
 #include <zxtest/zxtest.h>
 
 namespace sysmem_v1 = fuchsia_sysmem;

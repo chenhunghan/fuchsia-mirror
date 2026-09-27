@@ -107,11 +107,10 @@ class Metadata:
     rust_target_mapping walk.
     """
 
-    crate_name: str  # according to --extern
+    crate_name: str
     actual_label: str
     rustdoc_label: str
     rustdoc_out_dir: Path
-    disable_rustdoc: bool
     original_label: str
     rustdoc_parts_dir: str
     target_is_fuchsia: bool
@@ -121,16 +120,14 @@ class Metadata:
 
     @staticmethod
     def parse(m: dict[str, Any], build_dir: Path) -> Optional["Metadata"]:
-        if "extern" not in m:
+        if m["disable_rustdoc"]:
             return None
-        _, crate_name, _ = m["extern"].split("=")
         rustdoc_out_dir = Path(build_dir, m["rustdoc_out_dir"])
         return Metadata(
-            crate_name=crate_name,
+            crate_name=m["crate_name"],
             actual_label=m["actual_label"],
             rustdoc_label=m["rustdoc_label"],
             rustdoc_out_dir=rustdoc_out_dir,
-            disable_rustdoc=m["disable_rustdoc"],
             original_label=m["original_label"],
             rustdoc_parts_dir=m["rustdoc_parts_dir"],
             target_is_fuchsia=m["target_is_fuchsia"],
@@ -551,10 +548,8 @@ def main(args: Namespace) -> None:
 
     meta = read_metadata_file(args)
 
-    # remove shared and disabled targets
-    meta = [
-        m for m in meta if not m.is_shared_target() and not m.disable_rustdoc
-    ]
+    # remove shared targets
+    meta = [m for m in meta if not m.is_shared_target()]
 
     # filter according to the specific targets that the user wants to build
     if args.build_labels:

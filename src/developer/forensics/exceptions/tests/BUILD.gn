@@ -108,9 +108,6 @@ cc_test_executable("exception_broker_unittest_exe") {
     "//third_party/googletest:gtest",
     "//zircon/system/ulib/zx",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 cc_test_executable("process_launch_failure_unittest_exe") {

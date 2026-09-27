@@ -88,7 +88,7 @@ impl DefineSubsystemConfiguration<(&BluetoothConfig, &PlatformMediaConfig)>
             builder.platform_bundle("bt_transport_uart_driver")?;
         }
 
-        let BluetoothConfig::Standard { profiles, core, snoop: _ } = config else {
+        let BluetoothConfig::Standard { profiles, core, snoop } = config else {
             return Ok(());
         };
 
@@ -182,19 +182,32 @@ impl DefineSubsystemConfiguration<(&BluetoothConfig, &PlatformMediaConfig)>
             "fuchsia.bluetooth.Rfcomm",
             Config::new(ConfigValueType::Bool, profiles.rfcomm.enabled().into()),
         )?;
+        builder.set_config_capability(
+            "fuchsia.bluetooth.AutostartSnoop",
+            Config::new(ConfigValueType::Bool, (!matches!(snoop, Snoop::None)).into()),
+        )?;
 
-        // `bt-gap` is included as part of the `bluetooth_core` platform bundle (packaged
-        // with `bt-init`).
-        // While `bredr_connectable` is the only configurable field, we must override the entire
-        // config. Default values are taken from bt-gap's default.
-        builder
-            .package("bt-init")
-            .component("meta/bt-gap.cm")?
-            .field("le_privacy", true)?
-            .field("le_background_scanning", false)?
-            .field("le_security_mode", "Mode1")?
-            .field("bredr_connectable", core.start_connectable)?
-            .field("bredr_security_mode", "Mode4")?;
+        // `bt-gap` config capabilities
+        builder.set_config_capability(
+            "fuchsia.bluetooth.LePrivacy",
+            Config::new(ConfigValueType::Bool, true.into()),
+        )?;
+        builder.set_config_capability(
+            "fuchsia.bluetooth.LeBackgroundScanning",
+            Config::new(ConfigValueType::Bool, false.into()),
+        )?;
+        builder.set_config_capability(
+            "fuchsia.bluetooth.LeSecurityMode",
+            Config::new(ConfigValueType::String { max_size: 21 }, "Mode1".into()),
+        )?;
+        builder.set_config_capability(
+            "fuchsia.bluetooth.BredrConnectable",
+            Config::new(ConfigValueType::Bool, core.start_connectable.into()),
+        )?;
+        builder.set_config_capability(
+            "fuchsia.bluetooth.BredrSecurityMode",
+            Config::new(ConfigValueType::String { max_size: 21 }, "Mode4".into()),
+        )?;
 
         if profiles.rfcomm.enabled() {
             builder.platform_bundle("bluetooth_rfcomm")?;

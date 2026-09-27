@@ -4,7 +4,6 @@
 
 #include "src/storage/lib/vfs/cpp/journal/entry_view.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <zircon/types.h>
 
 #include <cstddef>
@@ -13,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include "src/storage/lib/block_protocol/block-fifo.h"
 #include "src/storage/lib/buffer/block_buffer.h"
 #include "src/storage/lib/buffer/block_buffer_view.h"
 #include "src/storage/lib/operation/operation.h"

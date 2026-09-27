@@ -39,9 +39,6 @@ cc_test_executable("test_bin") {
     "//src/lib/testing/predicates",
     "//third_party/googletest:gtest",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_unittest_package("vmo-store-test") {

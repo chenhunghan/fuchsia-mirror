@@ -17,19 +17,19 @@ interface.
 
 Other protocols will of course have different requirements for the functions they
 must provide.
-For example a block device will publish an interface that conforms to the
-"block implementation protocol" (`ZX_PROTOCOL_BLOCK_IMPL`) and
-provide functions defined by `block_protocol_ops_t`.
-This protocol includes a function that returns the size of the device in blocks,
-for example.
+For example, a block device serves the
+[`fuchsia.hardware.block.volume.Service`](/sdk/fidl/fuchsia.hardware.block.volume/volume.fidl)
+FIDL service, whose `volume` protocol
+([`fuchsia.storage.block.Block`](/sdk/fidl/fuchsia.storage.block/block.fidl))
+includes methods that return the size of the device in blocks and open sessions
+for I/O.
 
-In many cases a Protocol is used to allow drivers to be simpler by taking advantage
-of a common implementation of an Interface. For example, the "block" driver implements
-the common block interface, and binds to devices implementing the Block Core Protocol,
-and the "ethernet" driver does the same thing for the Ethernet Interface and Ethermac
-Protocol. Some protocols, such as the two cited here, make use of shared memory, and
-non-rpc signaling for more efficient, lower latency, and higher throughput than could
-be achieved otherwise.
+In many cases a Protocol is used to allow drivers to be simpler by taking
+advantage of a common implementation of an Interface. For example, the
+"ethernet" driver implements the Ethernet Interface and binds to devices
+implementing the Ethermac Protocol. Some protocols make use of shared memory and
+non-rpc signaling for more efficient, lower latency, and higher throughput than
+could be achieved otherwise.
 
 Classes represent a promise that a device implements an Interface or Protocol.
 Devices exist in the Device Filesystem under a topological path, like
@@ -66,13 +66,8 @@ This is effectively a "platform dependent" vs "platform independent" decoupling;
 common code exists in the platform independent part (once), and driver-specific code
 is implemented in the platform dependent part.
 
-This architecture is repeated in multiple places.
-With block devices, for example, the hardware driver binds to the bus (e.g., PCI)
-and provides a `ZX_PROTOCOL_BLOCK_IMPL` protocol.
-The platform independent driver binds to `ZX_PROTOCOL_BLOCK_IMPL`, and publishes the
-client-facing protocol, `ZX_PROTOCOL_BLOCK`.
-
-You'll also see this with the display controllers, I<sup>2</sup>C bus, and serial drivers.
+This architecture is repeated in multiple places, such as with display controllers,
+I<sup>2</sup>C bus, and serial drivers.
 
 <!--- More content? -->
 

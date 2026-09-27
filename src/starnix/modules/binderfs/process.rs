@@ -954,11 +954,14 @@ impl<'a> BinderProcessGuard<'a> {
         binder_thread: &BinderThread,
         local: LocalBinderObject,
         flags: BinderObjectFlags,
-    ) -> StrongRefGuard {
+    ) -> Result<StrongRefGuard, Errno> {
         if let Some(object) = self.find_object(&local) {
+            if object.local.strong_ref_addr != local.strong_ref_addr {
+                return error!(EINVAL);
+            }
             // The ref count can grow back from 0 in this instance because the object is being
             // registered again by its owner.
-            object.inc_strong_unchecked(binder_thread)
+            Ok(object.inc_strong_unchecked(binder_thread))
         } else {
             let (object, guard) = BinderObject::new(self.base, local, flags);
 
@@ -968,7 +971,7 @@ impl<'a> BinderProcessGuard<'a> {
 
             self.objects.insert(object.local.weak_ref_addr, object);
 
-            guard
+            Ok(guard)
         }
     }
 

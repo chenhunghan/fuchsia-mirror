@@ -123,6 +123,9 @@ pub enum Error {
 
     #[error("Cannot adopt ancestor")]
     AdoptAncestor,
+
+    #[error("Cannot rename root node")]
+    RenameRoot,
 }
 
 impl From<FormatError> for Error {

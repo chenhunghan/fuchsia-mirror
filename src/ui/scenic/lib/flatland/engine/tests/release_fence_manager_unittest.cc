@@ -18,48 +18,54 @@
 //    Since there is no previous frame, these fences are signaled immediately.
 //
 //    Tests:
-//    - FirstFrameSignalsImmediately
+//    - `FirstFrameSignalsImmediately`
 //
 // 1) Verify that the moment that release fence are signaled depends on whether the *previous* frame
-//    is GPU-composited or direct-scanout.  See "Design Requirements" in the ReleaseFenceManager
+//    is GPU-composited or direct-scanout.  See "Design Requirements" in the `ReleaseFenceManager`
 //    class comment.
 //
 //    Tests:
-//    - SignalingWhenPreviousFrameWasGpuComposited
-//    - SignalingWhenPreviousFrameWasDirectScanout
+//    - `SignalingWhenPreviousFrameWasGpuComposited`
+//    - `SignalingWhenPreviousFrameWasDirectScanout`
 //
-// 2) Dropped/Skipped frames.  OnVsync() for later frame causes frame callback of earlier frames to
-//    be invoked (assuming that all render_finished_fences are signaled for earlier GPU-composited
-//    frames).
-//
-//    Tests:
-//    - OutOfOrderRenderFinished
-//
-// 3) FrameRecords are removed ASAP, as soon as the frame callback has been invoked and there is at
-//    least one subsequent frame registered.
+// 2) Dropped/Skipped frames.  `OnVsync()` for later frame causes frame callback of earlier frames
+//    to be invoked (assuming that all `render_finished_fences` are signaled for earlier
+//    GPU-composited frames).
 //
 //    Tests:
-//    - ImmediateErasure
+//    - `OutOfOrderRenderFinished`
 //
-// 4) Repeated OnVsync() calls with the same frame number are OK.  This is an expected use case:
+// 3) `FrameRecords` are removed ASAP, as soon as the frame callback has been invoked and there is
+//    at least one subsequent frame registered.
+//
+//    Tests:
+//    - `ImmediateErasure`
+//
+// 4) Repeated `OnVsync()` calls with the same frame number are OK.  This is an expected use case:
 //    this is what will be received from the display controller and someone needs to handle it, so
-//    might as well be ReleaseFenceManager.
+//    might as well be `ReleaseFenceManager`.
 //
 //    Tests:
-//    - RepeatedOnVsyncFrameNumbers
+//    - `RepeatedOnVsyncFrameNumbers`
 //
-// 5) Edge-case where OnVsync() is received before |render_finished_fence| is signaled (or at least
-//    before the signal is handled).
+// 5) Edge-case where `OnVsync()` is received before `render_finished_fence` is signaled (or at
+//    least before the signal is handled).
 //
 //    Tests:
-//    - FramePresentedCallbackForGpuCompositedFrame
+//    - `FramePresentedCallbackForGpuCompositedFrame`
 //
 // 6) Properly-set timestamps in frame-presented callback.
 //
 //    Tests:
-//    - OutOfOrderRenderFinished
-//    - FramePresentedCallbackForGpuCompositedFrame
-//    - FramePresentedCallbackForDirectScanoutFrame
+//    - `OutOfOrderRenderFinished`
+//    - `FramePresentedCallbackForGpuCompositedFrame`
+//    - `FramePresentedCallbackForDirectScanoutFrame`
+//
+// 7) `MarkAllFramesPresented()`: used when the display is powered off and no vsync will arrive.
+//
+//    Tests:
+//    - `MarkAllFramesPresentedSignalsDirectScanoutFences`
+//    - `MarkAllFramesPresentedKeepsRenderingGpuFrame`
 
 namespace flatland::test {
 
@@ -178,7 +184,7 @@ TEST_F(ReleaseFenceManagerTest, SignalingWhenPreviousFrameWasDirectScanout) {
         /*frame_number*/ 1, {}, {}, {}, [](scheduling::Timestamps) {});
 
     // These fences will be passed along with the second frame, and signaled when the second frame
-    // is displayed on screen (as evidenced by receiving an OnVsync()).
+    // is displayed on screen (as evidenced by receiving an `OnVsync()`).
     std::vector<zx::event> release_fences = utils::CreateEventArray(2);
     std::vector<zx::counter> release_counters = utils::CreateCounterArray(2);
 
@@ -227,7 +233,7 @@ TEST_F(ReleaseFenceManagerTest, SignalingWhenPreviousFrameWasDirectScanout) {
 }
 
 TEST_F(ReleaseFenceManagerTest, FramePresentedCallbackForGpuCompositedFrame) {
-  // Test common case, where render_finished_fence is signaled before the OnVsync() is received.
+  // Test common case, where `render_finished_fence` is signaled before the `OnVsync()` is received.
   {
     ReleaseFenceManager manager(dispatcher());
     zx::event render_finished_fence = utils::CreateEvent();
@@ -254,8 +260,9 @@ TEST_F(ReleaseFenceManagerTest, FramePresentedCallbackForGpuCompositedFrame) {
     EXPECT_EQ(callback_timestamps.actual_presentation_time, kVsyncTime);
   }
 
-  // Test rare edge case, where render_finished_fence is signaled before the OnVsync() is received,
-  // but we don't process is until afterward (unclear whether this will ever happen in practice).
+  // Test rare edge case, where `render_finished_fence` is signaled before the `OnVsync()` is
+  // received, but we don't process is until afterward (unclear whether this will ever happen in
+  // practice).
   {
     ReleaseFenceManager manager(dispatcher());
     zx::event render_finished_fence = utils::CreateEvent();
@@ -302,7 +309,7 @@ TEST_F(ReleaseFenceManagerTest, FramePresentedCallbackForDirectScanoutFrame) {
 
   manager.OnVsync(/*frame_number*/ 1, kVsyncTime);
   EXPECT_TRUE(callback_invoked);
-  // TODO(https://fxbug.dev/42154139): what should the render_done_time be?
+  // TODO(https://fxbug.dev/42154139): what should the `render_done_time` be?
   EXPECT_EQ(callback_timestamps.render_done_time, kFrameStartTime);
   EXPECT_EQ(callback_timestamps.actual_presentation_time, kVsyncTime);
 }
@@ -381,8 +388,8 @@ TEST_F(ReleaseFenceManagerTest, OutOfOrderRenderFinished) {
   manager.OnVsync(/*frame_number*/ 4, kVsyncTime);
 
   // Even though frame 4 has been presented, we can only invoke the first callback.  This is because
-  // of scheduling::FrameRenderer's requirement that: "Frames must be rendered in the order they are
-  // requested, and callbacks must be triggered in the same order."
+  // of `scheduling::FrameRenderer`'s requirement that: "Frames must be rendered in the order they
+  // are requested, and callbacks must be triggered in the same order."
   EXPECT_TRUE(callback_invoked1);
   EXPECT_FALSE(callback_invoked2);
   EXPECT_FALSE(callback_invoked3);
@@ -457,7 +464,7 @@ TEST_F(ReleaseFenceManagerTest, ImmediateErasure) {
         /*frame_number*/ 2, utils::CopyZxHandle(render_finished_fence2), {}, {}, {},
         [](scheduling::Timestamps) {});
 
-    // First frame has fence signaled before OnVsync().  The other way works too, as we see below.
+    // First frame has fence signaled before `OnVsync()`.  The other way works too, as we see below.
     render_finished_fence1.signal(0u, ZX_EVENT_SIGNALED);
     RunLoopUntilIdle();
     EXPECT_EQ(manager.frame_record_count(), 2u);
@@ -467,11 +474,11 @@ TEST_F(ReleaseFenceManagerTest, ImmediateErasure) {
     // Add a third frame, so the second can be erased immediately after its callback is invoked.
     manager.OnDirectScanoutFrame(/*frame_number*/ 3, {}, {}, {}, [](scheduling::Timestamps) {});
 
-    // Second frame has OnVsync() before fence signal is received.
+    // Second frame has `OnVsync()` before fence signal is received.
     render_finished_fence2.signal(0u, ZX_EVENT_SIGNALED);
     manager.OnVsync(/*frame_number*/ 2, zx::time_monotonic(200));
     EXPECT_EQ(manager.frame_record_count(), 2u);
-    RunLoopUntilIdle();  // handle the signaling of |render_finished_fence2|
+    RunLoopUntilIdle();  // handle the signaling of `render_finished_fence2`
     EXPECT_EQ(manager.frame_record_count(), 1u);
   }
 
@@ -661,7 +668,7 @@ TEST_F(ReleaseFenceManagerTest, SignalReleaseFencesWhenPreviousFrameFinishedEarl
   const zx::time_monotonic kRenderFinishedLowerBoundTime(zx_clock_get_monotonic());
   // GPU finishes rendering immediately.
   render_finished_fence1.signal(0u, ZX_EVENT_SIGNALED);
-  // Allow waiter to notice the signaling of |render_finished_fence1|
+  // Allow waiter to notice the signaling of `render_finished_fence1`
   RunLoopUntilIdle();
   const zx::time_monotonic kRenderFinishedUpperBoundTime(zx_clock_get_monotonic());
 
@@ -686,7 +693,7 @@ TEST_F(ReleaseFenceManagerTest, ReleaseFenceManagerDestructionWithPendingWait) {
     ReleaseFenceManager manager(dispatcher());
     manager.OnGpuCompositedFrame(/*frame_number*/ 1, utils::CopyZxHandle(render_finished_fence), {},
                                  {}, {}, [](scheduling::Timestamps) {});
-    // Destruction here should cancel the WaitOnce.
+    // Destruction here should cancel the `WaitOnce`.
   }
   // No crash is success.
 }
@@ -742,6 +749,58 @@ TEST_F(ReleaseFenceManagerTest, ReleaseCountersOfSameFrameHaveIdenticalTimestamp
 
     EXPECT_EQ(utils::ReadCounter(release_counters[0]), utils::ReadCounter(release_counters[1]));
   }
+}
+
+TEST_F(ReleaseFenceManagerTest, MarkAllFramesPresentedSignalsDirectScanoutFences) {
+  ReleaseFenceManager manager(dispatcher());
+
+  bool frame1_callback_ran = false;
+  manager.OnDirectScanoutFrame(
+      /*frame_number*/ 1, {}, {}, {},
+      [&frame1_callback_ran](scheduling::Timestamps) { frame1_callback_ran = true; });
+
+  std::vector<zx::event> release_fences = utils::CreateEventArray(1);
+  bool frame2_callback_ran = false;
+  zx::time_monotonic frame2_presentation_time = zx::time_monotonic::infinite_past();
+  manager.OnDirectScanoutFrame(
+      /*frame_number*/ 2, utils::CopyZxHandleVector(release_fences), {}, {},
+      [&frame2_callback_ran, &frame2_presentation_time](scheduling::Timestamps timestamps) {
+        frame2_callback_ran = true;
+        frame2_presentation_time = timestamps.actual_presentation_time;
+      });
+
+  manager.MarkAllFramesPresented(zx::time_monotonic(1000));
+
+  EXPECT_TRUE(utils::IsEventSignalled(release_fences[0], ZX_EVENT_SIGNALED));
+  EXPECT_TRUE(frame1_callback_ran);
+  EXPECT_TRUE(frame2_callback_ran);
+  EXPECT_EQ(frame2_presentation_time.get(), 1000);
+  EXPECT_EQ(manager.frame_record_count(), 1u);
+}
+
+TEST_F(ReleaseFenceManagerTest, MarkAllFramesPresentedKeepsRenderingGpuFrame) {
+  ReleaseFenceManager manager(dispatcher());
+
+  zx::event render_finished_fence = utils::CreateEvent();
+  bool callback_ran = false;
+  zx::time_monotonic presentation_time = zx::time_monotonic::infinite_past();
+  manager.OnGpuCompositedFrame(
+      /*frame_number*/ 1, utils::CopyZxHandle(render_finished_fence), {}, {}, {},
+      [&callback_ran, &presentation_time](scheduling::Timestamps timestamps) {
+        callback_ran = true;
+        presentation_time = timestamps.actual_presentation_time;
+      });
+
+  manager.MarkAllFramesPresented(zx::time_monotonic(1000));
+
+  EXPECT_FALSE(callback_ran);
+  EXPECT_EQ(manager.frame_record_count(), 1u);
+
+  render_finished_fence.signal(0u, ZX_EVENT_SIGNALED);
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(callback_ran);
+  EXPECT_EQ(presentation_time.get(), 1000);
 }
 
 }  // namespace flatland::test

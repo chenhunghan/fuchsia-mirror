@@ -84,5 +84,6 @@ fx_package(
         # TODO(https://fxbug.dev/490178129): Remove this visibility when build-info-service package
         # is added to the Bazel assembly.
         "//build/bazel/rules/tests:__subpackages__",
+        "//bundles/assembly:__subpackages__",
     ],
 )

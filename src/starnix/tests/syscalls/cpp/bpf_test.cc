@@ -107,12 +107,13 @@ namespace {
 int bpf(int cmd, union bpf_attr* attr) { return (int)syscall(__NR_bpf, cmd, attr, sizeof(*attr)); }
 
 void TestMapCreationFail(uint32_t type, uint32_t key_size, uint32_t value_size,
-                         uint32_t max_entries, int expected_errno) {
+                         uint32_t max_entries, int expected_errno, uint32_t flags = 0) {
   bpf_attr attr = {
       .map_type = type,
       .key_size = key_size,
       .value_size = value_size,
       .max_entries = max_entries,
+      .map_flags = flags,
   };
   int result = bpf(BPF_MAP_CREATE, &attr);
   EXPECT_EQ(result, -1);
@@ -134,6 +135,11 @@ TEST(BpfTest, ArraySizeZero) {
 TEST(BpfTest, HashMapSizeZero) { TestMapCreationFail(BPF_MAP_TYPE_HASH, 1, 1024, 0, EINVAL); }
 
 TEST(BpfTest, HashMapZeroKeySize) { TestMapCreationFail(BPF_MAP_TYPE_HASH, 0, 1024, 10, EINVAL); }
+
+TEST(BpfTest, LpmTrieSizeOverflow) {
+  TestMapCreationFail(BPF_MAP_TYPE_LPM_TRIE, 8, UINT32_MAX, UINT32_MAX, EINVAL, BPF_F_NO_PREALLOC);
+  TestMapCreationFail(BPF_MAP_TYPE_LPM_TRIE, 5, 0xffffffd0, 0xfffffff8, EINVAL, BPF_F_NO_PREALLOC);
+}
 
 class BpfTestBase : public testing::Test {
  protected:
@@ -484,8 +490,20 @@ TEST_F(BpfMapTest, Map) {
     keys.push_back(next_key);
     last_key = &next_key;
   }
+  ASSERT_EQ(keys.size(), static_cast<size_t>(NUM_VALUES));
+
+  // Querying a non-existent key in a non-empty hash map returns the first key.
+  int missing_key = -1;
+  next_key = -1;
+  bpf_attr next_attr = {
+      .map_fd = static_cast<unsigned>(map_fd()),
+      .key = reinterpret_cast<uintptr_t>(&missing_key),
+      .next_key = reinterpret_cast<uintptr_t>(&next_key),
+  };
+  ASSERT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &next_attr), SyscallSucceeds());
+  EXPECT_EQ(next_key, keys[0]);
+
   std::sort(keys.begin(), keys.end());
-  EXPECT_EQ(keys.size(), static_cast<size_t>(NUM_VALUES));
   for (int i = 0; i < NUM_VALUES; ++i) {
     EXPECT_EQ(keys[i], i);
   }
@@ -520,7 +538,49 @@ TEST_F(BpfMapTest, Map) {
     EXPECT_EQ(errno, ENOENT);
   }
 
+  // Querying an empty hash map returns ENOENT both for nullptr and for a missing key.
+  next_attr.key = reinterpret_cast<uintptr_t>(&missing_key);
+  EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &next_attr), SyscallFailsWithErrno(ENOENT));
+  next_attr.key = 0;
+  EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &next_attr), SyscallFailsWithErrno(ENOENT));
+
   CheckMapInfo();
+}
+
+TEST_F(BpfMapTest, ArrayGetNextKey) {
+  uint32_t key = 0;
+  uint32_t next_key = 42;
+
+  // A null key returns the first index (0).
+  bpf_attr attr = {
+      .map_fd = static_cast<unsigned>(array_fd()),
+      .key = 0,
+      .next_key = reinterpret_cast<uintptr_t>(&next_key),
+  };
+  EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &attr), SyscallSucceeds());
+  EXPECT_EQ(next_key, 0u);
+
+  // A valid non-final key returns key + 1.
+  key = 0;
+  attr.key = reinterpret_cast<uintptr_t>(&key);
+  EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &attr), SyscallSucceeds());
+  EXPECT_EQ(next_key, 1u);
+
+  // The last key (max_entries - 1 = 9) fails with ENOENT.
+  key = 9;
+  EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &attr), SyscallFailsWithErrno(ENOENT));
+
+  // Out-of-bounds keys (not found in the array map), including UINT32_MAX, return the first
+  // element's key (0) without overflowing.
+  key = 10;
+  next_key = 42;
+  EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &attr), SyscallSucceeds());
+  EXPECT_EQ(next_key, 0u);
+
+  key = UINT32_MAX;
+  next_key = 42;
+  EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &attr), SyscallSucceeds());
+  EXPECT_EQ(next_key, 0u);
 }
 
 TEST_F(BpfMapTest, MapWriteOnly) {

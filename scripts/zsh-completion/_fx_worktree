@@ -99,7 +99,6 @@ case $state in
         ;;
       add)
         _arguments \
-          '--sync[Sync after adding]' \
           '--pool-name[Specific pool slot to allocate]:pool_name: __fx_worktree_names_filtered physical_free' \
           '--json[Output JSON]' \
           '1:name: '

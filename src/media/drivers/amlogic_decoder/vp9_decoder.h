@@ -372,9 +372,10 @@ class Vp9Decoder : public VideoDecoder {
   void ConfigureMotionPrediction();
   void ConfigureReferenceFrameHardware();
   void SetRefFrames(HardwareRenderParams* params);
-  void AdaptProbabilityCoefficients(uint32_t adapt_prob_status);
+  bool AdaptProbabilityCoefficients(uint32_t adapt_prob_status);
   __WARN_UNUSED_RESULT zx_status_t InitializeBuffers();
   void InitializeLoopFilterData();
+  static uint64_t GetMpredBufferSize(uint32_t width, uint32_t height);
 
   InputType input_type_;
 

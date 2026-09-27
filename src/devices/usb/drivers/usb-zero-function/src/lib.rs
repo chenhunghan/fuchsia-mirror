@@ -1139,7 +1139,7 @@ fn spawn_loopback_pair(
             match event {
                 fusb_endpoint::EndpointEvent::OnCompletion { completion } => {
                     // Harvest any recycled buffers from write_task without blocking
-                    while let Ok(Some(buf)) = ack_rx.try_next() {
+                    while let Ok(buf) = ack_rx.try_recv() {
                         recycled_bufs.push(buf);
                     }
 

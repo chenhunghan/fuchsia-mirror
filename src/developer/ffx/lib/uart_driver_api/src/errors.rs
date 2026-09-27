@@ -48,6 +48,38 @@ pub enum ConnectionError {
         /// Socket path currently held by another process.
         socket_path: String,
     },
+    /// The resolved UNIX socket path exceeded the operating system's maximum path length limit.
+    #[error("UNIX socket path exceeds limit ({len} bytes, max {max} bytes for OS): {path}")]
+    SocketPathTooLong {
+        /// Target socket path.
+        path: String,
+        /// Path length in bytes.
+        len: usize,
+        /// Maximum allowed bytes on the host OS.
+        max: usize,
+    },
+    /// The target endpoint string was not recognized as a valid path.
+    #[error(
+        "Target '{target}' is not recognized. It must be an absolute path (starting with '/')."
+    )]
+    TargetNotRecognized {
+        /// The invalid target string.
+        target: String,
+    },
+    /// Failed to retrieve the shared data directory path from the environment.
+    #[error("Failed to get shared data path: {error}")]
+    SharedDataError {
+        /// Underlying error message.
+        error: String,
+    },
+    /// Failed to read, parse, or write connection metadata.
+    #[error("Metadata error at {path}: {error}")]
+    MetadataError {
+        /// Metadata file path.
+        path: String,
+        /// Error description.
+        error: String,
+    },
     /// Uncategorized or unstructured error message.
     #[error("{message}")]
     Raw {

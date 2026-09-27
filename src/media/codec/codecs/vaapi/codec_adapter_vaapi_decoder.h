@@ -249,7 +249,7 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
     input_queue_.Push(CodecInputItem::FormatDetails(per_stream_override_format_details));
   }
 
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override {
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override {
     TRACE_INSTANT("codec_runner", "Media:PacketReceived", TRACE_SCOPE_THREAD);
     input_queue_.Push(CodecInputItem::Packet(packet));
   }

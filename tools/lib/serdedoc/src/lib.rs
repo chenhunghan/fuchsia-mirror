@@ -12,7 +12,7 @@ use handlebars::{
     Handlebars, Helper, JsonRender, Output, RenderContext, RenderError, RenderErrorReason,
 };
 use schemars::JsonSchema;
-use schemars::r#gen::SchemaSettings;
+use schemars::generate::SchemaSettings;
 use std::fs::File;
 use std::io::Write;
 use toc::TableOfContents;
@@ -59,11 +59,7 @@ impl<'a> DocWriter<'a> {
         std::fs::create_dir_all(&output_dir)
             .with_context(|| format!("Creating output dir: {}", output_dir))?;
 
-        let settings = SchemaSettings::default().with(|s| {
-            // Remove the definitions path so that we don't have to strip it out later to determine
-            // the child type.
-            s.definitions_path = "".to_string();
-        });
+        let settings = SchemaSettings::default();
         let generator = settings.into_generator();
         let root_schema = generator.into_root_schema_for::<T>();
         let all_data = AllData::from_root_schema(&self.url_path, &root_schema)?;

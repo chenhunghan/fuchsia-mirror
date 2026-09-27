@@ -158,8 +158,8 @@ zx::result<> PowerDomainVisitor::ParseReferenceChild(fdf_devicetree::Node& child
     }
   } else {
     fuchsia_hardware_powerdomain::PowerDomain domain;
-    domain.id() = domain_id;
-    domain.node_id() = node_id;
+    domain.id() = node_id;
+    domain.domain_id() = domain_id;
     if (name) {
       domain.name() = std::string(*name);
     }

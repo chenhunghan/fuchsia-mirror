@@ -94,7 +94,7 @@ class GpioImplVisitor : public fdf_devicetree::Visitor {
   static zx::result<> AddInitNodeSpec(fdf_devicetree::Node& child, uint32_t controller_id,
                                       uint32_t controller_index);
 
-  static zx::result<> AddPinStatesNodeSpec(fdf_devicetree::Node& child, uint32_t controller_id,
+  static zx::result<> AddPinStatesNodeSpec(fdf_devicetree::Node& child, uint32_t pin_states_id,
                                            uint32_t controller_index,
                                            const std::string& client_name);
 

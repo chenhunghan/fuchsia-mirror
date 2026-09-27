@@ -36,7 +36,8 @@ a general overview of the target device.
 The trace continues for the specified duration (or until the `ENTER` key
 is pressed if a duration is not specified). When the trace is finished, the
 trace data is automatically saved to the `trace.fxt` file in the
-current directory (which can be changed by specifying the `--output` flag;
+current directory (or `trace.fxt.zst` if the `--compressed` flag is used;
+you can also specify a custom filename using the `--output` flag;
 for example, `ffx trace start --output <FILE_PATH>`). To visualize the trace
 results stored in this file, see the [Visualize a trace](#visualize-a-trace)
 section below.
@@ -48,7 +49,7 @@ Note: For more details on the `ffx trace` commands and options, see
 
 [Fuchsia trace format][fuchsia-trace-format] (`.fxt`) is Fuchsia's
 binary format that directly encodes the original trace data. To
-visualize an `.fxt` trace file, you can use the
+visualize an `.fxt` (or `.fxt.zst` compressed) trace file, you can use the
 [Perfetto viewer][perfetto-viewer]{:.external}.
 
 You can visualize trace results using either of the following methods:
@@ -61,7 +62,7 @@ You can visualize trace results using either of the following methods:
   1. Visit the [Perfetto viewer][perfetto-viewer]{:.external}
      site on a web browser.
   2. Click **Open trace file** on the navigation bar.
-  3. Select your `.fxt` file from the host machine.
+  3. Select your `.fxt` or `.fxt.zst` file from the host machine.
 
 This viewer also allows you to query the trace data using SQL. For practical
 query recipes and automated triage tools, see

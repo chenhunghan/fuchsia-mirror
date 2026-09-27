@@ -18,6 +18,13 @@
 #include "src/lib/unwinder/unwind.h"
 
 namespace {
+static_assert(sizeof(ffi_frame_t) == 24, "ffi_frame_t size must be 24 bytes");
+static_assert(alignof(ffi_frame_t) == 8, "ffi_frame_t alignment must be 8 bytes");
+static_assert(offsetof(ffi_frame_t, pc) == 0, "ffi_frame_t::pc offset must be 0");
+static_assert(offsetof(ffi_frame_t, sp) == 8, "ffi_frame_t::sp offset must be 8");
+static_assert(offsetof(ffi_frame_t, pc_is_return_address) == 16,
+              "ffi_frame_t::pc_is_return_address offset must be 16");
+
 struct MemoryChunk {
   uint64_t base;
   std::vector<uint8_t> data;
@@ -272,6 +279,7 @@ size_t ffi_unwinder_unwind(ffi_unwinder_t* unwinder, const uint8_t* regs_data, s
 
     output_frames[count].pc = pc;
     output_frames[count].sp = sp;
+    output_frames[count].pc_is_return_address = frame.pc_is_return_address;
     count++;
   }
 

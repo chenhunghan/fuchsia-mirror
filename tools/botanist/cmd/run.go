@@ -318,7 +318,7 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 			ProductBundles:    r.productBundles,
 			ProductBundleName: r.productBundleName,
 			IsBootTest:        r.isBootTest,
-			BootupTimeout:     r.bootupTimeout,
+			BootupTimeout:     r.getBootTimeout(),
 		}
 
 		if err := targets.StartTargets(ctx, startOpts, fuchsiaTargets); err != nil {
@@ -872,4 +872,16 @@ func (r *RunCommand) deriveTargetsFromFile(ctx context.Context, targetOpts targe
 	}
 
 	return baseTargets, fuchsiaTargets, nil
+}
+
+// getBootTimeout returns the boot timeout scaled by testTimeoutScaleFactor if set.
+func (r *RunCommand) getBootTimeout() time.Duration {
+	timeout := r.bootupTimeout
+	if r.testTimeoutScaleFactor > 1 {
+		if timeout == 0 {
+			timeout = targets.DefaultConnectionTimeout
+		}
+		timeout *= time.Duration(r.testTimeoutScaleFactor)
+	}
+	return timeout
 }

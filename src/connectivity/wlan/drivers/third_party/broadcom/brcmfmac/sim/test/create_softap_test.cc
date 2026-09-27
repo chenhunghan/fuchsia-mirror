@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/wlan/ieee80211/cpp/fidl.h>
+#include <fidl/fuchsia.wlan.ieee80211/cpp/fidl.h>
 #include <lib/inspect/cpp/hierarchy.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <zircon/errors.h>

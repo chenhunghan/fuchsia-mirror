@@ -88,6 +88,10 @@ zx_status_t DeviceCtx::Bind() {
   zx_status_t status = DdkAdd(
       ddk::DeviceAddArgs("amlogic_video").set_inspect_vmo(driver_->diagnostics().DuplicateVmo()));
   zxlogf(INFO, "amlogic-video finished initialization with status %d", status);
+  if (status != ZX_OK) {
+    return status;
+  }
+  device_fidl_->InitializeClosureQueue();
 
   diagnostics().SetBindTime();
 

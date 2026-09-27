@@ -4,16 +4,19 @@
 
 pub mod client;
 pub mod context;
+pub mod error;
 pub mod image;
 pub mod models;
 pub mod tunnel;
 
-pub use client::GceClient;
-pub use context::{GceContext, get_serial_endpoint};
+pub use client::{Api, GceClient};
+pub use context::{GceContext, get_serial_endpoint, resolve_config_string};
 pub use discovery::gce_watcher::{GceInstance, GceInstanceData, GceWatcher};
+pub use error::{BoxedError, GceError, Result};
 pub use image::{
-    BUNDLE_HASH_HEX_LEN, DEFAULT_GCE_DISK_SIZE, compute_bundle_hash, generate_serial_number,
-    package_gce_tar_gz,
+    BUNDLE_HASH_HEX_LEN, DEFAULT_GCE_DISK_SIZE, GceVmShape, VbmetaKeys, compute_bundle_hash,
+    gce_vm_shape, generate_instance_name, generate_serial_number, package_gce_tar_gz,
+    prepare_gce_disk_archive, product_bundle_architecture,
 };
 pub use models::{
     AccessConfig, AttachedDisk, AttachedDiskInitializeParams, FirewallAllowed, FirewallRule,

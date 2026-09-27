@@ -55,7 +55,7 @@ impl Name {
 
 /// A sequential ID that is assigned to each added layer.
 ///
-/// We use it to avoid removing entries from the same layer when an opaque whiteout is found.
+/// We use it to avoid removing entries from the same layer when a whiteout is found.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct LayerIndex(usize);
 
@@ -157,8 +157,17 @@ impl LayeredImage {
                     continue;
                 }
                 if let Some(name) = name.strip_whiteout_prefix() {
-                    // Drop only the entry with the specific name.
-                    parent_entries.remove(&name);
+                    if name.is_empty() {
+                        bail!("Whiteout entry has an empty target name");
+                    }
+                    // Drop only the entry with the specific name, unless it came from the same
+                    // layer.
+                    if parent_entries
+                        .get(&name)
+                        .is_some_and(|(_, layer_index)| *layer_index != current_layer_index)
+                    {
+                        parent_entries.remove(&name);
+                    }
                     continue;
                 }
             }
@@ -467,5 +476,413 @@ impl DirectoryVisitor for AssignInodeNumVisitor<'_> {
         if self.visit_metadata(directory.metadata()) {
             directory.visit(self);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use tempfile::TempDir;
+
+    const DEFAULT_DIR_MODE: u32 = 0o755;
+    const DEFAULT_FILE_MODE: u32 = 0o644;
+
+    /// An entry to write into a synthetic tar archive.
+    enum TarEntry {
+        Dir { path: String, mode: u32, uid: u64, gid: u64 },
+        File { path: String, contents: String, mode: u32, uid: u64, gid: u64 },
+        Symlink { path: String, target: String },
+        HardLink { path: String, target: String },
+    }
+
+    fn dir(path: &str) -> TarEntry {
+        TarEntry::Dir { path: path.to_string(), mode: DEFAULT_DIR_MODE, uid: 0, gid: 0 }
+    }
+
+    fn file(path: &str, contents: &str) -> TarEntry {
+        TarEntry::File {
+            path: path.to_string(),
+            contents: contents.to_string(),
+            mode: DEFAULT_FILE_MODE,
+            uid: 0,
+            gid: 0,
+        }
+    }
+
+    fn symlink(path: &str, target: &str) -> TarEntry {
+        TarEntry::Symlink { path: path.to_string(), target: target.to_string() }
+    }
+
+    fn hard_link(path: &str, target: &str) -> TarEntry {
+        TarEntry::HardLink { path: path.to_string(), target: target.to_string() }
+    }
+
+    /// Builds an in-memory tar archive containing `entries`, in the given order.
+    fn build_archive(entries: Vec<TarEntry>) -> Archive<Cursor<Vec<u8>>> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for entry in entries {
+            let mut header = tar::Header::new_gnu();
+            match entry {
+                TarEntry::Dir { path, mode, uid, gid } => {
+                    header.set_entry_type(tar::EntryType::Directory);
+                    header.set_mode(mode);
+                    header.set_uid(uid);
+                    header.set_gid(gid);
+                    header.set_size(0);
+                    builder.append_data(&mut header, path, std::io::empty()).unwrap();
+                }
+                TarEntry::File { path, contents, mode, uid, gid } => {
+                    header.set_entry_type(tar::EntryType::Regular);
+                    header.set_mode(mode);
+                    header.set_uid(uid);
+                    header.set_gid(gid);
+                    header.set_size(contents.len() as u64);
+                    builder.append_data(&mut header, path, contents.as_bytes()).unwrap();
+                }
+                TarEntry::Symlink { path, target } => {
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    header.set_mode(0o777);
+                    header.set_uid(0);
+                    header.set_gid(0);
+                    header.set_size(0);
+                    builder.append_link(&mut header, path, target).unwrap();
+                }
+                TarEntry::HardLink { path, target } => {
+                    header.set_entry_type(tar::EntryType::Link);
+                    header.set_mode(DEFAULT_FILE_MODE);
+                    header.set_uid(0);
+                    header.set_gid(0);
+                    header.set_size(0);
+                    builder.append_link(&mut header, path, target).unwrap();
+                }
+            }
+        }
+        Archive::new(Cursor::new(builder.into_inner().unwrap()))
+    }
+
+    /// Merges the given layers, bottom-up, into a finalized image.
+    ///
+    /// Each layer is paired with the `handle_whiteouts` flag to apply to it.
+    fn merge(extract_dir: &Path, layers: Vec<(Vec<TarEntry>, bool)>) -> Result<Directory> {
+        let mut image = LayeredImage::new(extract_dir)?;
+        for (entries, handle_whiteouts) in layers {
+            image = image.add_layer(build_archive(entries), handle_whiteouts)?;
+        }
+
+        let mut next_inode_num = ext4_metadata::ROOT_INODE_NUM;
+        Ok(image.finalize(&mut || {
+            let result = next_inode_num;
+            next_inode_num += 1;
+            result
+        }))
+    }
+
+    /// A flattened view of a finalized image, so that tests can make whole-tree assertions.
+    #[derive(Default)]
+    struct Snapshot {
+        /// Description of each node, keyed by absolute path.
+        nodes: BTreeMap<String, String>,
+
+        /// Inode number of each node, keyed by absolute path.
+        inode_nums: BTreeMap<String, u64>,
+
+        /// (mode, uid, gid) of each node, keyed by absolute path.
+        attributes: BTreeMap<String, (u16, u16, u16)>,
+
+        /// Absolute path of the directory currently being visited.
+        prefix: String,
+    }
+
+    impl Snapshot {
+        fn of(root: &Directory) -> Snapshot {
+            let mut snapshot = Snapshot::default();
+            root.visit(&mut snapshot);
+            snapshot
+        }
+
+        fn record(&mut self, name: &[u8], metadata: &Metadata, description: String) -> String {
+            let path = format!("{}/{}", self.prefix, String::from_utf8_lossy(name));
+            self.nodes.insert(path.clone(), description);
+            self.inode_nums.insert(path.clone(), metadata.inode_num());
+            self.attributes.insert(path.clone(), (metadata.mode(), metadata.uid(), metadata.gid()));
+            path
+        }
+
+        /// Returns every node as a (path, description) pair, sorted by path.
+        fn nodes(&self) -> Vec<(&str, &str)> {
+            self.nodes.iter().map(|(path, description)| (&**path, &**description)).collect()
+        }
+    }
+
+    impl DirectoryVisitor for Snapshot {
+        fn visit_file(&mut self, name: &[u8], file: &File) {
+            let contents = std::fs::read_to_string(file.data_file_path()).unwrap();
+            self.record(name, file.metadata(), format!("file:{contents}"));
+        }
+
+        fn visit_symlink(&mut self, name: &[u8], symlink: &Symlink) {
+            let target = String::from_utf8_lossy(symlink.target()).into_owned();
+            self.record(name, symlink.metadata(), format!("symlink:{target}"));
+        }
+
+        fn visit_directory(&mut self, name: &[u8], directory: &Directory) {
+            let path = self.record(name, directory.metadata(), "dir".to_string());
+            let parent_prefix = std::mem::replace(&mut self.prefix, path);
+            directory.visit(self);
+            self.prefix = parent_prefix;
+        }
+    }
+
+    #[test]
+    fn single_layer_is_preserved() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![(
+                vec![
+                    dir("etc"),
+                    file("etc/hosts", "localhost"),
+                    symlink("etc/mtab", "/proc/mounts"),
+                ],
+                false,
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![
+                ("/etc", "dir"),
+                ("/etc/hosts", "file:localhost"),
+                ("/etc/mtab", "symlink:/proc/mounts"),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_parent_directories_are_created() {
+        // Layers routinely omit directory entries for ancestors they did not modify.
+        let extract_dir = TempDir::new().unwrap();
+        let root =
+            merge(extract_dir.path(), vec![(vec![file("usr/lib/libc.so", "elf")], false)]).unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![("/usr", "dir"), ("/usr/lib", "dir"), ("/usr/lib/libc.so", "file:elf")]
+        );
+    }
+
+    #[test]
+    fn upper_layer_replaces_lower_layer_file() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![
+                (vec![file("etc/hosts", "lower")], false),
+                (vec![file("etc/hosts", "upper")], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![("/etc", "dir"), ("/etc/hosts", "file:upper")]
+        );
+    }
+
+    #[test]
+    fn whiteout_hides_file_from_lower_layer() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![
+                (vec![file("etc/hosts", "lower"), file("etc/passwd", "root")], false),
+                (vec![file("etc/.wh.hosts", "")], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![("/etc", "dir"), ("/etc/passwd", "file:root")]
+        );
+    }
+
+    #[test]
+    fn whiteout_keeps_entry_from_the_same_layer() {
+        // An explicit whiteout hides lower layers only, even if the entry in its own layer
+        // appeared before the whiteout in the archive.
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![
+                (vec![file("etc/hosts", "lower")], false),
+                (vec![file("etc/hosts", "upper"), file("etc/.wh.hosts", "")], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![("/etc", "dir"), ("/etc/hosts", "file:upper")]
+        );
+    }
+
+    #[test]
+    fn bare_whiteout_prefix_is_rejected() {
+        let extract_dir = TempDir::new().unwrap();
+        let Err(error) = merge(extract_dir.path(), vec![(vec![file("etc/.wh.", "")], true)]) else {
+            panic!("a '.wh.' entry with no basename to delete should fail");
+        };
+
+        assert!(error.to_string().contains("Whiteout"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn whiteouts_are_literal_when_disabled() {
+        // The base layer of a Docker image cannot contain whiteouts, so a file that merely looks
+        // like one must be kept verbatim.
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![(vec![file("etc/hosts", "lower"), file("etc/.wh.hosts", "surprise")], false)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![
+                ("/etc", "dir"),
+                ("/etc/.wh.hosts", "file:surprise"),
+                ("/etc/hosts", "file:lower"),
+            ]
+        );
+    }
+
+    #[test]
+    fn opaque_whiteout_hides_lower_layer_directory_contents() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![
+                (vec![file("etc/hosts", "lower"), file("etc/passwd", "root")], false),
+                (vec![file("etc/.wh..wh..opq", ""), file("etc/resolv.conf", "nameserver")], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![("/etc", "dir"), ("/etc/resolv.conf", "file:nameserver")]
+        );
+    }
+
+    #[test]
+    fn opaque_whiteout_keeps_entries_from_the_same_layer() {
+        // The opaque marker hides lower layers only, even for entries its own layer added before
+        // the marker appeared in the archive.
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![
+                (vec![file("etc/hosts", "lower")], false),
+                (vec![file("etc/resolv.conf", "nameserver"), file("etc/.wh..wh..opq", "")], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![("/etc", "dir"), ("/etc/resolv.conf", "file:nameserver")]
+        );
+    }
+
+    #[test]
+    fn hard_links_share_an_inode() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![(vec![file("bin/busybox", "binary"), hard_link("bin/sh", "bin/busybox")], false)],
+        )
+        .unwrap();
+
+        let snapshot = Snapshot::of(&root);
+        assert_eq!(
+            snapshot.nodes(),
+            vec![("/bin", "dir"), ("/bin/busybox", "file:binary"), ("/bin/sh", "file:binary")]
+        );
+        assert_eq!(snapshot.inode_nums["/bin/busybox"], snapshot.inode_nums["/bin/sh"]);
+    }
+
+    #[test]
+    fn directory_replaces_file_from_lower_layer() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![
+                (vec![file("opt", "not-a-directory")], false),
+                (vec![file("opt/app/data", "hello")], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            Snapshot::of(&root).nodes(),
+            vec![("/opt", "dir"), ("/opt/app", "dir"), ("/opt/app/data", "file:hello")]
+        );
+    }
+
+    #[test]
+    fn file_replaces_directory_from_lower_layer() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![
+                (vec![file("opt/app/data", "hello")], false),
+                (vec![file("opt", "not-a-directory")], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(Snapshot::of(&root).nodes(), vec![("/opt", "file:not-a-directory")]);
+    }
+
+    #[test]
+    fn metadata_is_preserved() {
+        let extract_dir = TempDir::new().unwrap();
+        let root = merge(
+            extract_dir.path(),
+            vec![(
+                vec![
+                    TarEntry::Dir { path: "etc".to_string(), mode: 0o751, uid: 1, gid: 2 },
+                    TarEntry::File {
+                        path: "etc/shadow".to_string(),
+                        contents: "secret".to_string(),
+                        mode: 0o600,
+                        uid: 42,
+                        gid: 43,
+                    },
+                ],
+                false,
+            )],
+        )
+        .unwrap();
+
+        let snapshot = Snapshot::of(&root);
+        assert_eq!(snapshot.attributes["/etc"], (0o751, 1, 2));
+        assert_eq!(snapshot.attributes["/etc/shadow"], (0o600, 42, 43));
+    }
+
+    #[test]
+    fn hard_link_to_unknown_path_is_rejected() {
+        let extract_dir = TempDir::new().unwrap();
+        let Err(error) =
+            merge(extract_dir.path(), vec![(vec![hard_link("bin/sh", "bin/busybox")], false)])
+        else {
+            panic!("hard link to a file that was never seen should fail");
+        };
+
+        assert!(error.to_string().contains("Hard link"), "unexpected error: {error}");
     }
 }

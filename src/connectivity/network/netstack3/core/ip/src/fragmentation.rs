@@ -495,8 +495,8 @@ fn maximum_fragment_body_with_header_and_mtu(
     header: usize,
 ) -> Result<usize, FragmentationError> {
     let v = usize::from(mtu).checked_sub(header).ok_or(FragmentationError::MtuTooSmall)?;
-    // Mask the final 8 bits since fragment offset is expressed in units
-    // of 8 octets for both IP versions.
+    // Mask the final 3 bits since fragment offset is expressed in units of 8
+    // octets for both IP versions.
     let v = v & !0x07usize;
 
     if v == 0 {

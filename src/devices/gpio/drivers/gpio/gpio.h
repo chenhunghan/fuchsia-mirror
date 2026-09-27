@@ -148,11 +148,9 @@ class GpioDevice : public fidl::WireServer<fuchsia_hardware_pin::Pin>,
 class PinStatesDevice : public fidl::WireServer<fuchsia_hardware_pin::PinStates> {
  public:
   PinStatesDevice(fdf::WireSharedClient<fuchsia_hardware_pinimpl::PinImpl> pinimpl,
-                  fuchsia_hardware_pinimpl::DevicePinStates pin_states, uint32_t controller_id,
-                  fdf::Logger& logger)
+                  fuchsia_hardware_pinimpl::DevicePinStates pin_states, fdf::Logger& logger)
       : fidl_dispatcher_(fdf::Dispatcher::GetCurrent()->async_dispatcher()),
         pin_states_(std::move(pin_states)),
-        controller_id_(controller_id),
         pinimpl_(std::move(pinimpl)),
         logger_(logger) {}
 
@@ -172,7 +170,6 @@ class PinStatesDevice : public fidl::WireServer<fuchsia_hardware_pin::PinStates>
 
   async_dispatcher_t* const fidl_dispatcher_;
   const fuchsia_hardware_pinimpl::DevicePinStates pin_states_;
-  const uint32_t controller_id_;
   fdf::WireSharedClient<fuchsia_hardware_pinimpl::PinImpl> pinimpl_;
   fidl::ServerBindingGroup<fuchsia_hardware_pin::PinStates> bindings_;
   fidl::ClientEnd<fuchsia_driver_framework::NodeController> controller_;

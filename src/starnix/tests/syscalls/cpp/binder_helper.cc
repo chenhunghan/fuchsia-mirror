@@ -20,9 +20,6 @@ fbl::unique_fd OpenBinder(std::string_view dir) {
 }
 
 ParsedMessage ParseMessage(const binder_uintptr_t start, const binder_size_t length) {
-  // This function is based on the code of `printReturnCommand`:
-  // https://cs.android.com/android/platform/superproject/+/master:frameworks/native/libs/binder/IPCThreadState.cpp;drc=bf14463e0c2309f04d0ba25cf951dcea3c47858e;l=153
-
   ParsedMessage m;
 
   const binder_uintptr_t end = start + length;
@@ -31,45 +28,11 @@ ParsedMessage ParseMessage(const binder_uintptr_t start, const binder_size_t len
   while (ptr < end) {
     binder_driver_return_protocol returned = *(binder_driver_return_protocol*)ptr;
     m.returns_.push_back(returned);
-    ptr += sizeof(binder_driver_return_protocol);
-    switch (returned) {
-      case BR_TRANSACTION_SEC_CTX:
-        ptr += sizeof(binder_transaction_data_secctx);
-        break;
-      case BR_TRANSACTION:
-      case BR_REPLY:
-        ptr += sizeof(binder_transaction_data);
-        break;
-      case BR_ACQUIRE_RESULT:
-        ptr += sizeof(uint32_t);
-        break;
-      case BR_INCREFS:
-      case BR_ACQUIRE:
-      case BR_RELEASE:
-      case BR_DECREFS:
-        ptr += sizeof(uint32_t) * 2;
-        break;
-      case BR_ATTEMPT_ACQUIRE:
-        ptr += sizeof(uint32_t) * 3;
-        break;
-      case BR_DEAD_BINDER:
-      case BR_CLEAR_DEATH_NOTIFICATION_DONE:
-        ptr += sizeof(uint32_t);
-        break;
-      case BR_OK:
-      case BR_DEAD_REPLY:
-      case BR_TRANSACTION_COMPLETE:
-      case BR_FINISHED:
-      case BR_NOOP:
-      case BR_FAILED_REPLY:
-        break;
-      case BR_ERROR:
-        ptr += sizeof(int32_t);
-        break;
-      default:
-        break;
-    }
+    // `binder_driver_return_protocol` values are defined with `_IOR`/`_IO`
+    // macros, encoding their payload size in the command value.
+    ptr += sizeof(binder_driver_return_protocol) + _IOC_SIZE(returned);
   }
+  EXPECT_EQ(ptr, end) << "binder read buffer did not parse cleanly";
   return m;
 }
 

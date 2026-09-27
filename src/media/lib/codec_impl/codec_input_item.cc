@@ -16,7 +16,7 @@ CodecInputItem::CodecInputItem(const fuchsia::media::FormatDetails& format_detai
   // nothing else to do here
 }
 
-CodecInputItem::CodecInputItem(CodecPacket* packet) : packet_(packet) {
+CodecInputItem::CodecInputItem(const CodecPacket* packet) : packet_(packet) {
   // nothing else do to here
 }
 
@@ -27,7 +27,7 @@ CodecInputItem CodecInputItem::FormatDetails(const fuchsia::media::FormatDetails
   return CodecInputItem(format_details);
 }
 
-CodecInputItem CodecInputItem::Packet(CodecPacket* packet) {
+CodecInputItem CodecInputItem::Packet(const CodecPacket* packet) {
   ZX_DEBUG_ASSERT(packet);
   return CodecInputItem(packet);
 }
@@ -47,7 +47,7 @@ const fuchsia::media::FormatDetails& CodecInputItem::format_details() {
   return *format_details_;
 }
 
-CodecPacket* CodecInputItem::packet() const {
+const CodecPacket* CodecInputItem::packet() const {
   ZX_DEBUG_ASSERT(is_packet());
   return packet_;
 }

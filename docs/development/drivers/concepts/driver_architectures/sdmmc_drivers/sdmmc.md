@@ -17,25 +17,28 @@ driver. If the controller implements the SDHCI specification then this driver
 should implement
 [fuchsia.hardware.sdhci](/sdk/fidl/fuchsia.hardware.sdhci/sdhci.fidl), otherwise it
 should implement
-[fuchsia.hardware.sdmmc](/sdk/banjo/fuchsia.hardware.sdmmc/sdmmc.fidl). It may be
+[fuchsia.hardware.sdmmc](/sdk/fidl/fuchsia.hardware.sdmmc/sdmmc.fidl). It may be
 helpful to disable DMA and higher speed modes through `SdmmcHostInfo` and
 `SdmmcHostPrefs` until the basic functionality of the hardware has been
 validated. See the SDHCI and SDMMC protocol definitions for more information.
 
 ## SD/eMMC core driver
 
-The SD/eMMC block driver creates a device that implements
-[fuchsia.hardware.block.BlockImpl](/sdk/fidl/fuchsia.hardware.block.driver/block.fidl) and
-[fuchsia.hardware.block.partition](/sdk/banjo/fuchsia.hardware.block.partition/partition.fidl)
-for the user data partition, as well as devices for the boot0 and boot1
-partitions if enabled (eMMC only). A device implementing
-[fuchsia.hardware.rpmb](/sdk/fidl/fuchsia.hardware.rpmb/rpmb.fidl) is created if the
-device supports it (eMMC only, based on JEDEC standard JESD84-B51 section 6.6.22).
+The SD/eMMC block driver serves
+[fuchsia.hardware.block.volume.Service](/sdk/fidl/fuchsia.hardware.block.volume/volume.fidl)
+instances for the user data partition, as well as for the `boot1` and `boot2`
+partitions if enabled (eMMC only). A device serving
+[fuchsia.hardware.rpmb.Service](/sdk/fidl/fuchsia.hardware.rpmb/rpmb.fidl) is
+created if the device supports it (eMMC only, based on JEDEC standard JESD84-B51
+section 6.6.22). When command queueing is enabled (eMMC only), the driver
+instead creates a child node offering
+[fuchsia.hardware.cqhci.Service](/sdk/fidl/fuchsia.hardware.cqhci/cqhci.fidl),
+and the child `cqhci` driver serves the partition and RPMB services.
 
 ## SDIO core driver
 
 The SDIO core driver creates devices that implement
-[fuchsia.hardware.sdio](/sdk/banjo/fuchsia.hardware.sdio/sdio.fidl), one for
+[fuchsia.hardware.sdio](/sdk/fidl/fuchsia.hardware.sdio/sdio.fidl), one for
 each IO function. Whereas the only expected client of the SD/eMMC block driver
 is the storage stack, the SDIO driver will have different clients depending on
 what kind of SDIO card is detected. Client drivers bind to the SDIO core driver

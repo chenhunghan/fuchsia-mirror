@@ -38,8 +38,8 @@ rustc_library("console_env") {
   rustenv = [ "BOOT_TEST_SUCCESS_STRING=$boot_test_success_string" ]
 }
 
-kernel_rust_mod("console_rust") {
-  output_name = "console_rust"
+kernel_rust_mod("console_rs") {
+  output_name = "console"
   visibility = [ "//zircon/kernel/*" ]
   sources = [ "mod.rs" ]
   source_root = "mod.rs"

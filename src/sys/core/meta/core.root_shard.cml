@@ -44,9 +44,15 @@
         {
             config: [
                 "fuchsia.adb.IsRecovery",
+                "fuchsia.bluetooth.AutostartSnoop",
+                "fuchsia.bluetooth.BredrConnectable",
+                "fuchsia.bluetooth.BredrSecurityMode",
                 "fuchsia.bluetooth.FastPairProvider",
                 "fuchsia.bluetooth.HciCommandTimeout",
+                "fuchsia.bluetooth.LeBackgroundScanning",
                 "fuchsia.bluetooth.LegacyPairing",
+                "fuchsia.bluetooth.LePrivacy",
+                "fuchsia.bluetooth.LeSecurityMode",
                 "fuchsia.bluetooth.OverrideVendorCapabilitiesVersion",
                 "fuchsia.bluetooth.Rfcomm",
                 "fuchsia.bluetooth.ScoOffloadPathIndex",

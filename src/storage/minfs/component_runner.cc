@@ -31,26 +31,24 @@
 #include "src/storage/lib/vfs/cpp/managed_vfs.h"
 #include "src/storage/lib/vfs/cpp/pseudo_dir.h"
 #include "src/storage/lib/vfs/cpp/remote_dir.h"
+#include "src/storage/lib/vfs/cpp/service.h"
 #include "src/storage/minfs/bcache.h"
 #include "src/storage/minfs/minfs_private.h"
 #include "src/storage/minfs/mount.h"
-#include "src/storage/minfs/service/admin.h"
 #include "src/storage/minfs/service/lifecycle.h"
 #include "src/storage/minfs/service/startup.h"
 
 namespace minfs {
 
 ComponentRunner::ComponentRunner(async_dispatcher_t* dispatcher, bool die_on_mutation_failure)
-    : fs::ManagedVfs(dispatcher),
-      dispatcher_(dispatcher),
-      die_on_mutation_failure_(die_on_mutation_failure) {
+    : fs::ManagedVfs(dispatcher), die_on_mutation_failure_(die_on_mutation_failure) {
   outgoing_ = fbl::MakeRefCounted<fs::PseudoDir>();
   auto startup = fbl::MakeRefCounted<fs::PseudoDir>();
   outgoing_->AddEntry("startup", startup);
 
   FX_LOGS(INFO) << "setting up startup service";
   auto startup_svc = fbl::MakeRefCounted<StartupService>(
-      dispatcher_, [this](std::unique_ptr<Bcache> device, const MountOptions& options) {
+      dispatcher, [this](std::unique_ptr<Bcache> device, const MountOptions& options) {
         FX_LOGS(INFO) << "configure callback is called";
         MountOptions modified_options = options;
         modified_options.die_on_mutation_failure = die_on_mutation_failure_;
@@ -67,7 +65,7 @@ zx::result<> ComponentRunner::ServeRoot(
     fidl::ServerEnd<fuchsia_io::Directory> root,
     fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> lifecycle) {
   LifecycleServer::Create(
-      dispatcher_, [this](fs::FuchsiaVfs::ShutdownCallback cb) { this->Shutdown(std::move(cb)); },
+      dispatcher(), [this](fs::FuchsiaVfs::ShutdownCallback cb) { this->Shutdown(std::move(cb)); },
       std::move(lifecycle));
 
   // Make dangling endpoints for the root directory and the service directory. Creating the
@@ -102,7 +100,7 @@ zx::result<> ComponentRunner::ServeRoot(
 
 zx::result<> ComponentRunner::Configure(std::unique_ptr<Bcache> bcache,
                                         const MountOptions& options) {
-  auto minfs = Minfs::Create(dispatcher_, std::move(bcache), options, this);
+  auto minfs = Minfs::Create(dispatcher(), std::move(bcache), options, this);
   if (minfs.is_error()) {
     FX_PLOGS(ERROR, minfs.status_value()) << "configure failed; could not create minfs";
     return minfs.take_error();
@@ -125,8 +123,10 @@ zx::result<> ComponentRunner::Configure(std::unique_ptr<Bcache> bcache,
   auto svc_dir = fbl::MakeRefCounted<fs::PseudoDir>();
   svc_dir->AddEntry(
       fidl::DiscoverableProtocolName<fuchsia_fs::Admin>,
-      fbl::MakeRefCounted<AdminService>(dispatcher_, [this](fs::FuchsiaVfs::ShutdownCallback cb) {
-        this->Shutdown(std::move(cb));
+      fbl::MakeRefCounted<fs::Service>([this](fidl::ServerEnd<fuchsia_fs::Admin> server_end) {
+        admin_bindings_.AddBinding(dispatcher(), std::move(server_end), this,
+                                   fidl::kIgnoreBindingClosure);
+        return ZX_OK;
       }));
 
   status = ServeDirectory(std::move(svc_dir), std::move(svc_server_end_));
@@ -173,7 +173,7 @@ void ComponentRunner::Shutdown(fs::FuchsiaVfs::ShutdownCallback cb) {
         if (sync_status != ZX_OK) {
           FX_PLOGS(ERROR, sync_status) << "Sync at unmount failed";
         }
-        async::PostTask(dispatcher_, [this, cb = std::move(cb)]() mutable {
+        async::PostTask(dispatcher(), [this, cb = std::move(cb)]() mutable {
           std::unique_ptr<Bcache> bc = Minfs::Destroy(std::move(minfs_));
           bc.reset();
 
@@ -196,6 +196,15 @@ void ComponentRunner::Shutdown(fs::FuchsiaVfs::ShutdownCallback cb) {
         cb(ZX_OK);
       });
     }
+  });
+}
+
+void ComponentRunner::Shutdown(ShutdownCompleter::Sync& completer) {
+  Shutdown([completer = completer.ToAsync()](zx_status_t status) mutable {
+    if (status != ZX_OK) {
+      FX_LOGS(ERROR) << "filesystem shutdown failed: " << zx_status_get_string(status);
+    }
+    completer.Reply();
   });
 }
 

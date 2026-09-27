@@ -25,6 +25,8 @@ pub struct StreamOptions {
     pub input_buffer_collection_constraints: Option<BufferCollectionConstraints>,
     pub output_buffer_collection_constraints: Option<BufferCollectionConstraints>,
     pub stop_after_first_output: bool,
+    pub stop_after_n_output: Option<usize>,
+    pub close_on_stop: bool,
 }
 
 impl Default for StreamOptions {
@@ -36,6 +38,8 @@ impl Default for StreamOptions {
             input_buffer_collection_constraints: None,
             output_buffer_collection_constraints: None,
             stop_after_first_output: false,
+            stop_after_n_output: None,
+            close_on_stop: true,
         }
     }
 }
@@ -53,6 +57,7 @@ pub struct Stream<'a> {
     pub stream: &'a dyn ElementaryStream,
     pub options: StreamOptions,
     pub output: Vec<Output>,
+    pub closing: bool,
 }
 
 pub enum StreamControlFlow {
@@ -112,6 +117,13 @@ impl<'a: 'b, 'b> Stream<'a> {
                 debug!("Output constraints are: {:#?}", output_config);
 
                 let constraints = ValidStreamOutputConstraints::try_from(output_config)?;
+                if constraints.stream_lifetime_ordinal < self.stream_lifetime_ordinal {
+                    debug!(
+                        "Ignoring stale output constraints for stream {}",
+                        constraints.stream_lifetime_ordinal
+                    );
+                    return Ok(StreamControlFlow::Continue);
+                }
                 if constraints.buffer_constraints_action_required {
                     self.output_buffer_set = Some(
                         Box::pin(BufferSetFactory::buffer_set(
@@ -136,13 +148,27 @@ impl<'a: 'b, 'b> Stream<'a> {
                     "get free input packets back."
                 ));
                 input_packet_stream.add_free_packet(free_input_packet)?;
-                self.send_available_input()?;
+                if self.closing {
+                    if self.all_input_packets_free() {
+                        debug!("All input packets are free after OnFreeInputPacket. Stopping.");
+                        return Ok(StreamControlFlow::Stop);
+                    }
+                } else {
+                    self.send_available_input()?;
+                }
             }
             StreamProcessorEvent::OnOutputFormat { output_format } => {
                 debug!("Received output format.");
                 debug!("Output format is: {:#?}", output_format);
 
                 let output_format = ValidStreamOutputFormat::try_from(output_format)?;
+                if output_format.stream_lifetime_ordinal < self.stream_lifetime_ordinal {
+                    debug!(
+                        "Ignoring stale output format for stream {}",
+                        output_format.stream_lifetime_ordinal
+                    );
+                    return Ok(StreamControlFlow::Continue);
+                }
                 assert_eq!(output_format.stream_lifetime_ordinal, self.stream_lifetime_ordinal);
                 self.current_output_format = Some(Rc::new(output_format));
             }
@@ -157,25 +183,48 @@ impl<'a: 'b, 'b> Stream<'a> {
                 debug!("Output packet is: {:#?}", output_packet);
 
                 let output_packet = ValidPacket::try_from(output_packet)?;
-                self.output.push(Output::Packet(OutputPacket {
-                    data: self
-                        .output_buffer_set
-                        .as_ref()
-                        .ok_or_else(|| {
+                if output_packet.stream_lifetime_ordinal < self.stream_lifetime_ordinal {
+                    debug!(
+                        "Ignoring stale output packet for stream {}",
+                        output_packet.stream_lifetime_ordinal
+                    );
+                    self.stream_processor.recycle_output_packet(&PacketHeader {
+                        buffer_lifetime_ordinal: Some(output_packet.header.buffer_lifetime_ordinal),
+                        packet_index: Some(output_packet.header.packet_index),
+                        ..Default::default()
+                    })?;
+                    return Ok(StreamControlFlow::Continue);
+                }
+
+                let reached_limit = if let Some(n) = self.options.stop_after_n_output {
+                    let packet_count =
+                        self.output.iter().filter(|o| matches!(o, Output::Packet(_))).count();
+                    packet_count >= n
+                } else {
+                    false
+                };
+
+                if !reached_limit {
+                    self.output.push(Output::Packet(OutputPacket {
+                        data: self
+                            .output_buffer_set
+                            .as_ref()
+                            .ok_or_else(|| {
+                                FatalError(String::from(concat!(
+                                    "There should be an output buffer set ",
+                                    "if we are receiving output packets"
+                                )))
+                            })?
+                            .read_packet(&output_packet)?,
+                        format: self.current_output_format.clone().ok_or_else(|| {
                             FatalError(String::from(concat!(
-                                "There should be an output buffer set ",
+                                "There should be an output format set ",
                                 "if we are receiving output packets"
                             )))
-                        })?
-                        .read_packet(&output_packet)?,
-                    format: self.current_output_format.clone().ok_or_else(|| {
-                        FatalError(String::from(concat!(
-                            "There should be an output format set ",
-                            "if we are receiving output packets"
-                        )))
-                    })?,
-                    packet: output_packet,
-                }));
+                        })?,
+                        packet: output_packet,
+                    }));
+                }
 
                 self.stream_processor.recycle_output_packet(&PacketHeader {
                     buffer_lifetime_ordinal: Some(output_packet.header.buffer_lifetime_ordinal),
@@ -183,8 +232,16 @@ impl<'a: 'b, 'b> Stream<'a> {
                     ..Default::default()
                 })?;
 
-                if self.options.stop_after_first_output {
-                    return Ok(StreamControlFlow::Stop);
+                let should_stop = if let Some(n) = self.options.stop_after_n_output {
+                    let packet_count =
+                        self.output.iter().filter(|o| matches!(o, Output::Packet(_))).count();
+                    packet_count >= n
+                } else {
+                    self.options.stop_after_first_output
+                };
+
+                if should_stop && !self.closing {
+                    return self.close_stream_and_wait_for_free_packets().await;
                 }
             }
             StreamProcessorEvent::OnOutputEndOfStream {
@@ -195,14 +252,21 @@ impl<'a: 'b, 'b> Stream<'a> {
                 debug!("Received output end of stream.");
                 debug!("End of stream is for stream {}", stream_lifetime_ordinal);
 
+                if stream_lifetime_ordinal < self.stream_lifetime_ordinal {
+                    debug!("Ignoring stale end of stream for stream {}", stream_lifetime_ordinal);
+                    return Ok(StreamControlFlow::Continue);
+                }
+
                 // TODO(turnage): Enable the flush method of ending stream in options.
                 self.output.push(Output::Eos { stream_lifetime_ordinal });
-                self.stream_processor.close_current_stream(
-                    self.stream_lifetime_ordinal,
-                    self.options.release_input_buffers_at_end,
-                    self.options.release_output_buffers_at_end,
-                )?;
-                self.stream_processor.sync().await?;
+                if self.options.close_on_stop {
+                    self.stream_processor.close_current_stream(
+                        self.stream_lifetime_ordinal,
+                        self.options.release_input_buffers_at_end,
+                        self.options.release_output_buffers_at_end,
+                    )?;
+                    self.stream_processor.sync().await?;
+                }
 
                 // TODO(turnage): Some codecs return all input packets explicitly, not
                 //                implicitly. All codecs should return explicitly. For now
@@ -219,6 +283,9 @@ impl<'a: 'b, 'b> Stream<'a> {
     }
 
     fn send_available_input(&'b mut self) -> Result<()> {
+        if self.closing {
+            return Ok(());
+        }
         let input_packet_stream =
             if let Some(input_packet_stream) = self.input_packet_stream.as_mut() {
                 input_packet_stream
@@ -241,5 +308,33 @@ impl<'a: 'b, 'b> Stream<'a> {
                 PacketPoll::NotReady => break Ok(()),
             }
         }
+    }
+
+    async fn close_stream_and_wait_for_free_packets(&mut self) -> Result<StreamControlFlow> {
+        if !self.options.close_on_stop {
+            return Ok(StreamControlFlow::Stop);
+        }
+        self.closing = true;
+        debug!(
+            "Closing stream {} early, waiting for input packets to be freed...",
+            self.stream_lifetime_ordinal
+        );
+        self.stream_processor.close_current_stream(
+            self.stream_lifetime_ordinal,
+            self.options.release_input_buffers_at_end,
+            self.options.release_output_buffers_at_end,
+        )?;
+        self.stream_processor.sync().await?;
+
+        if self.all_input_packets_free() {
+            debug!("All input packets are already free. Stopping.");
+            Ok(StreamControlFlow::Stop)
+        } else {
+            Ok(StreamControlFlow::Continue)
+        }
+    }
+
+    fn all_input_packets_free(&self) -> bool {
+        self.input_packet_stream.as_ref().map(|s| s.all_packets_free()).unwrap_or(true)
     }
 }

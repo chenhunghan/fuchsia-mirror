@@ -44,7 +44,6 @@
 #include "fidl/fuchsia.wlan.fullmac/cpp/wire_types.h"
 #include "fidl/fuchsia.wlan.ieee80211/cpp/common_types.h"
 #include "fidl/fuchsia.wlan.ieee80211/cpp/wire_types.h"
-#include "fuchsia/wlan/ieee80211/cpp/fidl.h"
 #include "lib/fidl/cpp/wire/vector_view.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/bcdc.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/bits.h"
@@ -2013,7 +2012,14 @@ void brcmf_return_roam_start(struct net_device* ndev) {
       chanspec_to_secondary80(&cfg->d11inf, target_bss_info->chanspec);
 
   if (target_bss_info->ie_length > 0) {
-    const auto& ie_ptr = cfg->target_bss_info_buf + target_bss_info->ie_offset;
+    uint8_t* ie_ptr = cfg->target_bss_info_buf + target_bss_info->ie_offset;
+    const uint8_t* ie_end = ie_ptr + target_bss_info->ie_length;
+    if (ie_end > cfg->target_bss_info_buf + WL_EXTRA_BUF_MAX) {
+      BRCMF_ERR("Invalid IEs in BSS info, offset %u and length %u exceed maximum length %u",
+                target_bss_info->ie_offset, target_bss_info->ie_length, WL_EXTRA_BUF_MAX);
+      return;
+    }
+
     selected_bss.ies =
         ::fidl::VectorView<uint8_t>::FromExternal(ie_ptr, target_bss_info->ie_length);
   }
@@ -3345,6 +3351,8 @@ static zx_status_t brcmf_cfg80211_escan_handler(struct brcmf_if* ifp,
   uint32_t escan_buflen;
   struct brcmf_bss_info_le* bss_info_le;
   auto escan_result_le = static_cast<struct brcmf_escan_result_le*>(data);
+  const uint8_t* data_end = static_cast<const uint8_t*>(data) + e->datalen;
+  const uint8_t* bss_info_ie_end = nullptr;
 
   BRCMF_DBG_EVENT(ifp, e, "%d", [](uint32_t reason) { return reason; });
 
@@ -3398,6 +3406,15 @@ static zx_status_t brcmf_cfg80211_escan_handler(struct brcmf_if* ifp,
 
   if (bss_info_le->length != escan_buflen - WL_ESCAN_RESULTS_FIXED_SIZE) {
     BRCMF_ERR("Ignoring invalid bss_info length: %d", bss_info_le->length);
+    goto chk_scan_end;
+  }
+  bss_info_ie_end = reinterpret_cast<const uint8_t*>(bss_info_le) + bss_info_le->ie_offset +
+                    bss_info_le->ie_length;
+  if (bss_info_ie_end > data_end) {
+    BRCMF_ERR(
+        "Invalid escan bss info, ie_offset %u and ie_length %u with bss_info at offset %zu exceed buffer length %u",
+        bss_info_le->ie_offset, bss_info_le->ie_length,
+        offsetof(brcmf_escan_result_le, bss_info_le), escan_buflen);
     goto chk_scan_end;
   }
 
@@ -4839,7 +4856,7 @@ static void brcmf_dump_if_band_cap(fuchsia_wlan_fullmac::BandCapability* band_ca
   }
   BRCMF_DBG_UNFILTERED("   band: %s", band_str);
 
-  char rates_str[fuchsia::wlan::ieee80211::MAX_SUPPORTED_BASIC_RATES * 6 + 1];
+  char rates_str[fuchsia_wlan_ieee80211::kMaxSupportedBasicRates * 6 + 1];
   char* str = rates_str;
   for (unsigned i = 0; i < band_cap->basic_rates()->size(); i++) {
     str += sprintf(str, "%s%d", i > 0 ? " " : "", band_cap->basic_rates()->at(i));
@@ -4847,13 +4864,13 @@ static void brcmf_dump_if_band_cap(fuchsia_wlan_fullmac::BandCapability* band_ca
   BRCMF_DBG_UNFILTERED("     basic_rates: %s", rates_str);
 
   size_t num_primary_channels = band_cap->primary_channels()->size();
-  if (num_primary_channels > fuchsia::wlan::ieee80211::MAX_UNIQUE_CHANNEL_NUMBERS) {
+  if (num_primary_channels > fuchsia_wlan_ieee80211::kMaxUniqueChannelNumbers) {
     BRCMF_DBG_UNFILTERED("Number of channels reported (%zu) exceeds limit (%u), truncating",
                          band_cap->primary_channels()->size(),
-                         fuchsia::wlan::ieee80211::MAX_UNIQUE_CHANNEL_NUMBERS);
-    num_primary_channels = fuchsia::wlan::ieee80211::MAX_UNIQUE_CHANNEL_NUMBERS;
+                         fuchsia_wlan_ieee80211::kMaxUniqueChannelNumbers);
+    num_primary_channels = fuchsia_wlan_ieee80211::kMaxUniqueChannelNumbers;
   }
-  char channels_str[fuchsia::wlan::ieee80211::MAX_UNIQUE_CHANNEL_NUMBERS * 4 + 1];
+  char channels_str[fuchsia_wlan_ieee80211::kMaxUniqueChannelNumbers * 4 + 1];
   str = channels_str;
   for (unsigned i = 0; i < num_primary_channels; i++) {
     str += sprintf(str, "%s%d", i > 0 ? " " : "",
@@ -4957,7 +4974,7 @@ void brcmf_if_query(net_device* ndev, fuchsia_wlan_fullmac::WlanFullmacImplQuery
       band_cap->band(fuchsia_wlan_ieee80211::WlanBand::kTwoGhz);
 
       constexpr uint8_t kNumSupported2GRates =
-          std::min<size_t>(fuchsia::wlan::ieee80211::MAX_SUPPORTED_BASIC_RATES, wl_g_rates_size);
+          std::min<size_t>(fuchsia_wlan_ieee80211::kMaxSupportedBasicRates, wl_g_rates_size);
       band_cap->basic_rates()->resize(kNumSupported2GRates);
 
       // Ensure that element sizes are identical because we will memcpy them.
@@ -4970,7 +4987,7 @@ void brcmf_if_query(net_device* ndev, fuchsia_wlan_fullmac::WlanFullmacImplQuery
       band_cap->band(fuchsia_wlan_ieee80211::WlanBand::kFiveGhz);
 
       constexpr uint8_t kNumSupported5GRates =
-          std::min<size_t>(fuchsia::wlan::ieee80211::MAX_SUPPORTED_BASIC_RATES, wl_a_rates_size);
+          std::min<size_t>(fuchsia_wlan_ieee80211::kMaxSupportedBasicRates, wl_a_rates_size);
       band_cap->basic_rates()->resize(kNumSupported5GRates);
 
       // Ensure that element sizes are identical because we will memcpy them.
@@ -5770,6 +5787,11 @@ static zx_status_t brcmf_get_assoc_ies(struct brcmf_cfg80211_info* cfg, struct b
   assoc_info = (struct brcmf_cfg80211_assoc_ielen_le*)cfg->extra_buf;
   req_len = assoc_info->req_len;
   resp_len = assoc_info->resp_len;
+  if (req_len > WL_ASSOC_INFO_MAX || resp_len > WL_ASSOC_INFO_MAX) {
+    BRCMF_ERR("Invalid assoc info, req_len %u and/or resp_len %u exceed iovar length %u", req_len,
+              resp_len, WL_ASSOC_INFO_MAX);
+    return ZX_ERR_INTERNAL;
+  }
   if (req_len) {
     err =
         brcmf_fil_iovar_data_get(ifp, "assoc_req_ies", cfg->extra_buf, WL_ASSOC_INFO_MAX, &fw_err);
@@ -6863,7 +6885,7 @@ static zx_status_t brcmf_handle_assoc_ind(struct brcmf_if* ifp, const struct brc
   }
 
   const struct brcmf_tlv* rsn_ie = brcmf_parse_tlvs(data, e->datalen, WLAN_IE_TYPE_RSNE);
-  if (rsn_ie && rsn_ie->len > fuchsia::wlan::ieee80211::WLAN_IE_BODY_MAX_LEN) {
+  if (rsn_ie && rsn_ie->len > fuchsia_wlan_ieee80211::kWlanIeBodyMaxLen) {
     BRCMF_ERR("Received ASSOC_IND with invalid RSN IE");
     return ZX_ERR_INVALID_ARGS;
   }
@@ -7502,9 +7524,16 @@ static zx_status_t brcmf_process_set_ssid_event(struct brcmf_if* ifp,
 // This check is not meant to be exhaustive; it is intended to catch
 // obviously invalid IE buffers (occasionally seen in data retrieved from
 // firmware). Higher WLAN layers must perform their own IE validation.
-static bool brcmf_bss_info_le_ie_buffer_well_formed(brcmf_bss_info_le* bi) {
-  const auto& ies = reinterpret_cast<uint8_t*>(bi) + bi->ie_offset;
-  const auto& ies_len = bi->ie_length;
+static bool brcmf_bss_info_le_ie_buffer_well_formed(brcmf_bss_info_le* bi, uint32_t max_len) {
+  auto bi_end = reinterpret_cast<const uint8_t*>(bi) + max_len;
+  auto ies = reinterpret_cast<const uint8_t*>(bi) + bi->ie_offset;
+  const uint32_t ies_len = bi->ie_length;
+  const uint8_t* ies_end = ies + ies_len;
+  if (ies_end > bi_end) {
+    BRCMF_WARN("Invalid IEs in BSS info, offset %u and length %u exceed maximum length %u",
+               bi->ie_offset, bi->ie_length, max_len);
+    return false;
+  }
 
   const auto ssid = brcmf_find_ssid_in_ies(ies, ies_len);
   if (ssid.empty()) {
@@ -7548,7 +7577,7 @@ static zx_status_t brcmf_get_target_bss_info(struct brcmf_if* ifp) {
   }
   const auto& target_bss_info = reinterpret_cast<brcmf_bss_info_le*>(cfg->target_bss_info_buf);
 
-  if (!brcmf_bss_info_le_ie_buffer_well_formed(target_bss_info)) {
+  if (!brcmf_bss_info_le_ie_buffer_well_formed(target_bss_info, WL_EXTRA_BUF_MAX)) {
     BRCMF_ERR(
         "target_bss_info firmware retrieval reported success, but IE buffer is not well-formed");
     return ZX_ERR_INTERNAL;

@@ -296,6 +296,7 @@ async fn main() {
     };
     let should_format = match FfxCommandLine::from_env() {
         Ok(cli) => cli.global.should_format(),
+        Err(Error::Help { .. }) => false,
         Err(_e) => true,
     };
     ffx_command::exit(env_context, result, should_format).await

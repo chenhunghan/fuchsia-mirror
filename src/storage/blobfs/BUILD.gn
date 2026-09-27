@@ -145,12 +145,8 @@ static_library("blobfs") {
       "mount.cc",
       "page_loader.cc",
       "page_loader.h",
-      "service/admin.cc",
-      "service/admin.h",
       "service/lifecycle.cc",
       "service/lifecycle.h",
-      "service/ota_health_check.cc",
-      "service/ota_health_check.h",
       "service/overwrite_configuration.cc",
       "service/overwrite_configuration.h",
       "service/startup.cc",
@@ -187,7 +183,6 @@ static_library("blobfs") {
     ]
     deps += [
       "//sdk/fidl/fuchsia.fs:fuchsia.fs_cpp",
-      "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_c",
       "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
       "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
       "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",

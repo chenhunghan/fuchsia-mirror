@@ -6,7 +6,6 @@ import("//build/bazel/config/logging.gni")
 import("//build/bazel/remote_services.gni")
 import("//build/config/clang/clang.gni")
 import("//build/config/compiler.gni")
-import("//build/config/fuchsia/zircon_asserts.gni")
 import("//build/config/fuchsia_cxx_version.gni")
 
 # Compute the list of `bazel build` arguments corresponding to the current
@@ -118,7 +117,7 @@ if (_has_coverage_clang) {
   _build_args += [ "--features=coverage" ]
 }
 if (_has_host_coverage_rust) {
-  _build_args += [ "--config=host_rust_coverage" ]
+  _common_args += [ "--config=host_rust_coverage" ]
 }
 
 if (is_profile) {
@@ -141,12 +140,6 @@ if (_is_compilation_mode_dbg) {
   assert(false, "Unsupported mode optimize = $optimize")
 }
 
-if (zircon_asserts) {
-  # LINT.IfChange(enable_zircon_asserts_feature)
-  _build_args += [ "--features=enable_zircon_asserts" ]
-  # LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/toolchain_utils.bzl:enable_zircon_asserts_feature)
-}
-
 # Forward GN C/C++ compiler optimization configuration to Bazel
 # If the c++ version is 20, we overwrite the copts to use
 # c++20 in Bazel too.
@@ -162,9 +155,11 @@ if (fuchsia_cxx_version == 20) {
   ]
 }
 
+# LINT.IfChange(bazel_args_json_schema)
 bazel_args = {
   common = _common_args
   build = _build_args
   current_os = current_os
   current_cpu = current_cpu
 }
+# LINT.ThenChange(//build/bazel/scripts/workspace_utils.py:bazel_args_json_schema)

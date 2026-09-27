@@ -32,11 +32,10 @@ bit shifts and masks while providing overflow-safe alignment helpers.
   * Predefined constants: `SIZE_512B`, `SIZE_1KIB`, `SIZE_2KIB`, `SIZE_4KIB`,
     `SIZE_8KIB`, `SIZE_16KIB`, `SIZE_32KIB`, `SIZE_64KIB`, `SIZE_128KIB`,
     `SIZE_256KIB`, `SIZE_512KIB`, `SIZE_1MIB`.
-* **[`PAGE_SIZE`](src/page.rs)** *(Fuchsia targets)*: A
-  `GenericBlockSize<PageSizeSpec>` representing the Fuchsia system memory page
-  size. It lazily caches the `MaskShiftSpec` representation of
-  `zx::system_get_page_size()` in a relaxed atomic on first use to avoid
-  repeated syscalls/vDSO lookups.
+* **[`page_size()`](src/page.rs)** *(Fuchsia targets)*: Returns the Fuchsia
+  system memory page size as a [`PageSize`](src/page.rs). It caches the
+  `MaskShiftSpec` representation of `zx::system_get_page_size()` in a relaxed
+  atomic on first use to avoid repeated syscalls/vDSO lookups.
 
 ### Why is `GenericBlockSize<T>` Generic Over `BlockSizeSpec`?
 
@@ -46,7 +45,7 @@ simultaneously:
 * **Device Block Size** (e.g. physical 512B or 4KiB sectors)
 * **Filesystem Block Size** (e.g. logical 4KiB blocks in Fxfs)
 * **Journal Block Size** (e.g. fixed 4KiB journal chunks)
-* **System Page Size** (`PAGE_SIZE`)
+* **System Page Size** (`page_size()`)
 
 If all block sizes shared a single concrete type, the type system could not
 distinguish *which* domain a byte offset or range was aligned to. By

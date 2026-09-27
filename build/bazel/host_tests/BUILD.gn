@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bazel/bazel_action.gni")
+
+bazel_action("host_tests") {
+  testonly = true
+  command = "build"
+  bazel_target = "//build/bazel/host_tests:host_tests_stamp"
+  bazel_config = "host"
+
+  # The suites themselves are built as top-level Bazel targets, because they
+  # are Bazel test_suite targets: they expose no files to depend on, and are
+  # typically private to their own package.
+  #
+  # Note: `tests.json` entries for Bazel host tests point into `*.runfiles`
+  # directories under the Bazel execroot, so this action relies on Bazel's
+  # default `--build_runfile_links=true` and `--enable_runfiles=auto` flags to
+  # materialize runfile trees during `bazel build`.
+  extra_bazel_targets_file = "$root_build_dir/bazel_host_test_suites.txt"
+
+  copy_outputs = [
+    {
+      bazel = "{{BAZEL_TARGET_OUT_DIR}}/host_tests.stamp"
+      ninja = "host_tests.stamp"
+    },
+  ]
+}

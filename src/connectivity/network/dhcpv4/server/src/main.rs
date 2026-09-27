@@ -24,7 +24,6 @@ use packet_formats::udp::UdpPacketBuilder;
 use sockaddr::IntoSockAddr as _;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::convert::{Infallible, TryInto as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// A buffer size in excess of the maximum allowable DHCP message size.
@@ -401,7 +400,7 @@ impl<'a, S: SocketServerDispatcher> MessageHandler<'a, S> {
 async fn define_msg_handling_loop_future<DS: DataStore>(
     sock: SocketWithId<<Server<DS> as SocketServerDispatcher>::Socket>,
     server: &RefCell<ServerDispatcherRuntime<Server<DS>>>,
-) -> Result<Infallible, Error> {
+) -> Result<!, Error> {
     let SocketWithId { socket, iface_id } = sock;
     let mut handler = MessageHandler::new(server);
     let mut buf = vec![0u8; BUF_SZ];
@@ -535,7 +534,7 @@ where
         info!("Server starting");
         match futures::future::Abortable::new(msg_loops, abort_registration).await {
             Ok(Ok(v)) => {
-                let _: Vec<Infallible> = v;
+                let _: Vec<!> = v;
                 Err(anyhow::anyhow!("Server futures finished unexpectedly"))
             }
             Ok(Err(error)) => {

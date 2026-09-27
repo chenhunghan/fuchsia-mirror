@@ -250,7 +250,8 @@ fn fuchsia_ssh_key_dir() -> Option<PathBuf> {
 fn local_ssh_key_dirs(ctx: &EnvironmentContext) -> fho::Result<Vec<PathBuf>> {
     let mut dirs = HashSet::from([
         // Regular SSH directory on *nix systems.
-        PathBuf::from(env::var("HOME").user_message("Could not find home directory")?).join(".ssh"),
+        PathBuf::from(ctx.env_var("HOME").user_message("Could not find home directory")?)
+            .join(".ssh"),
     ]);
     if let Some(fuchsia_dir) = fuchsia_ssh_key_dir() {
         dirs.insert(fuchsia_dir);
@@ -1759,8 +1760,8 @@ mod test {
         assert_eq!(found_key1.sources, expected_key1.sources);
     }
 
-    const TEST_DATA_DIR_1: &str = "../../src/developer/ffx/lib/ssh/testdata/key_parsing";
-    const TEST_DATA_DIR_2: &str = "../../src/developer/ffx/lib/ssh/testdata/key_parsing/other_dir";
+    const TEST_DATA_DIR_1: &str = "testdata/key_parsing";
+    const TEST_DATA_DIR_2: &str = "testdata/key_parsing/other_dir";
 
     #[test]
     fn test_find_ssh_keys() {
@@ -1772,14 +1773,12 @@ mod test {
         let cloned_key = keyset.iter().filter(|k| k.sources.len() == 3).next().unwrap();
         assert!(cloned_key.sources.iter().any(|loc| *loc
             == SshKeySource::File(PathBuf::from(
-                "../../src/developer/ffx/lib/ssh/testdata/key_parsing/other_dir/key_other_copy.pub"
+                "testdata/key_parsing/other_dir/key_other_copy.pub"
             ))));
         let unique_key = keyset.iter().filter(|k| k.sources.len() == 1).next().unwrap();
         assert!(
             *unique_key.sources.iter().next().unwrap()
-                == SshKeySource::File(PathBuf::from(
-                    "../../src/developer/ffx/lib/ssh/testdata/key_parsing/other_key.pub"
-                ))
+                == SshKeySource::File(PathBuf::from("testdata/key_parsing/other_key.pub"))
         )
     }
 
@@ -2011,8 +2010,7 @@ mod test {
         assert_eq!(message, expected_msg);
     }
 
-    const TEST_DATA_DIR_3: &str =
-        "../../src/developer/ffx/lib/ssh/testdata/key_parsing/only_private_key";
+    const TEST_DATA_DIR_3: &str = "testdata/key_parsing/only_private_key";
 
     #[test]
     fn test_ssh_agent_keys_success_with_only_private_keys() {
@@ -2024,7 +2022,7 @@ mod test {
         let private_key = keyset.iter().next().unwrap();
         assert!(private_key.sources.iter().any(|loc| *loc
             == SshKeySource::File(PathBuf::from(
-                "../../src/developer/ffx/lib/ssh/testdata/key_parsing/only_private_key/only_private"
+                "testdata/key_parsing/only_private_key/only_private"
             ))));
         assert_eq!(
             private_key.key,
@@ -2037,6 +2035,7 @@ mod test {
     #[fuchsia::test]
     fn test_find_key_dirs_pub_and_private() {
         let env = ffx_config::test_env()
+            .env_var("HOME", "/fake/home")
             .user_config(
                 SSH_PUB_KEY,
                 vec!["$ENV_PATH_THAT_IS_NOT_SET", "/expected/default", "/someother/thing"],

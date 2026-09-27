@@ -4,6 +4,8 @@
 
 #include <fidl/fuchsia.hardware.sysmem/cpp/wire_test_base.h>
 #include <fidl/fuchsia.hardware.tee/cpp/wire.h>
+#include <fidl/fuchsia.sysmem2/cpp/wire.h>
+#include <fidl/fuchsia.tee/cpp/wire.h>
 #include <lib/async-loop/default.h>
 #include <lib/async/cpp/task.h>
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
@@ -17,6 +19,7 @@
 #include <lib/zx/resource.h>
 #include <zircon/limits.h>
 
+#include <bind/fuchsia/amlogic/platform/sysmem/heap/cpp/bind.h>
 #include <fbl/array.h>
 #include <zxtest/zxtest.h>
 
@@ -46,6 +49,10 @@ class FakeSysmem : public fidl::testing::WireTestBase<fuchsia_hardware_sysmem::S
     completer.Close(ZX_ERR_NOT_SUPPORTED);
   }
 
+  fidl::ClientEnd<fuchsia_sysmem2::SecureMem> take_tee_connection() {
+    return std::move(tee_connection_);
+  }
+
   void Connect(fidl::ServerEnd<fuchsia_hardware_sysmem::Sysmem> request) {
     sysmem_bindings_.AddBinding(async_get_default_dispatcher(), std::move(request), this,
                                 fidl::kIgnoreBindingClosure);
@@ -56,16 +63,83 @@ class FakeSysmem : public fidl::testing::WireTestBase<fuchsia_hardware_sysmem::S
   fidl::ServerBindingGroup<fuchsia_hardware_sysmem::Sysmem> sysmem_bindings_;
 };
 
+class FakeTeeApplication : public fidl::WireServer<fuchsia_tee::Application> {
+ public:
+  void OpenSession2(OpenSession2RequestView request,
+                    OpenSession2Completer::Sync& completer) override {
+    fidl::Arena arena;
+    auto res = fuchsia_tee::wire::OpResult::Builder(arena);
+    res.return_code(TEEC_SUCCESS);
+    res.return_origin(fuchsia_tee::wire::ReturnOrigin::kTrustedApplication);
+    completer.Reply(1 /* session_id */, res.Build());
+  }
+
+  void CloseSession(CloseSessionRequestView request,
+                    CloseSessionCompleter::Sync& completer) override {
+    completer.Reply();
+  }
+
+  void InvokeCommand(InvokeCommandRequestView request,
+                     InvokeCommandCompleter::Sync& completer) override {
+    invoke_command_count_++;
+    uint32_t secmem_return_code = 0;
+    if (invoke_command_count_ == 1) {
+      secmem_return_code = 0xFFFF0000;
+    } else if (invoke_command_count_ == 7) {
+      secmem_return_code = 0xFFFF0000;
+    }
+
+    fidl::Arena arena;
+    auto val_builder = fuchsia_tee::wire::Value::Builder(arena);
+    val_builder.direction(fuchsia_tee::wire::Direction::kOutput);
+    val_builder.a(secmem_return_code);
+
+    auto buf_builder = fuchsia_tee::wire::Buffer::Builder(arena);
+    buf_builder.direction(fuchsia_tee::wire::Direction::kInout);
+    buf_builder.offset(0);
+    if (!request->parameter_set.empty() && request->parameter_set[0].is_buffer()) {
+      auto& req_buf = request->parameter_set[0].buffer();
+      if (req_buf.has_size() && req_buf.size() > 0) {
+        zx::vmo vmo;
+        zx::vmo::create(req_buf.size(), 0, &vmo);
+        buf_builder.vmo(std::move(vmo));
+        buf_builder.size(req_buf.size());
+      } else {
+        buf_builder.size(0);
+      }
+    } else {
+      buf_builder.size(0);
+    }
+
+    fidl::VectorView<fuchsia_tee::wire::Parameter> out_params(arena, 4);
+    out_params[0] = fuchsia_tee::wire::Parameter::WithBuffer(arena, buf_builder.Build());
+    out_params[1] = fuchsia_tee::wire::Parameter::WithNone(fuchsia_tee::wire::None{});
+    out_params[2] = fuchsia_tee::wire::Parameter::WithNone(fuchsia_tee::wire::None{});
+    out_params[3] = fuchsia_tee::wire::Parameter::WithValue(arena, val_builder.Build());
+
+    auto res = fuchsia_tee::wire::OpResult::Builder(arena);
+    res.return_code(TEEC_SUCCESS);
+    res.return_origin(fuchsia_tee::wire::ReturnOrigin::kTrustedApplication);
+    res.parameter_set(out_params);
+
+    completer.Reply(res.Build());
+  }
+
+  uint32_t invoke_command_count() const { return invoke_command_count_; }
+
+ private:
+  uint32_t invoke_command_count_ = 0;
+};
+
 // We cover the code involved in supporting non-VDEC secure memory and VDEC secure memory in
 // sysmem-test, so this fake doesn't really need to do much yet.
 class FakeTee : public fidl::WireServer<fuchsia_hardware_tee::DeviceConnector> {
  public:
   void ConnectToApplication(ConnectToApplicationRequestView request,
                             ConnectToApplicationCompleter::Sync& completer) override {
-    // Currently, do nothing
-    //
-    // We don't rely on the tee_app_request channel sticking around for these tests.  See
-    // sysmem-test for a test that exercises the tee_app_request channel.
+    app_bindings_.AddBinding(async_get_default_dispatcher(),
+                             std::move(request->application_request), &app_,
+                             fidl::kIgnoreBindingClosure);
   }
 
   void ConnectToDeviceInfo(ConnectToDeviceInfoRequestView request,
@@ -77,8 +151,12 @@ class FakeTee : public fidl::WireServer<fuchsia_hardware_tee::DeviceConnector> {
                                                      fidl::kIgnoreBindingClosure)});
   }
 
+  FakeTeeApplication& app() { return app_; }
+
  private:
+  FakeTeeApplication app_;
   fidl::ServerBindingGroup<fuchsia_hardware_tee::DeviceConnector> bindings_;
+  fidl::ServerBindingGroup<fuchsia_tee::Application> app_bindings_;
 };
 
 class AmlogicSecureMemTest : public zxtest::Test {
@@ -158,6 +236,9 @@ class AmlogicSecureMemTest : public zxtest::Test {
 
   amlogic_secure_mem::AmlogicSecureMemDevice* dev() { return dev_; }
 
+  async_patterns::TestDispatcherBound<FakeSysmem>& sysmem() { return sysmem_; }
+  async_patterns::TestDispatcherBound<FakeTee>& tee() { return tee_; }
+
  private:
   fdf_testing::DriverRuntime* runtime() { return fdf_testing::DriverRuntime::GetInstance(); }
 
@@ -181,4 +262,76 @@ TEST_F(AmlogicSecureMemTest, GetSecureMemoryPhysicalAddressBadVmo) {
   ASSERT_OK(zx::vmo::create(zx_system_get_page_size(), 0, &vmo));
 
   ASSERT_TRUE(dev()->GetSecureMemoryPhysicalAddress(std::move(vmo)).is_error());
+}
+
+// Verifies that out-of-bounds physical range modifications are rejected by IsWithinAllowedHeap()
+// and never forwarded to the TEE over SMC.
+TEST_F(AmlogicSecureMemTest, OutOfBoundsSecureHeapRangeRejected) {
+  // Retrieve the fuchsia.sysmem2/SecureMem client endpoint registered by the driver during setup.
+  fidl::ClientEnd<fuchsia_sysmem2::SecureMem> client_end;
+  sysmem().SyncCall([&](FakeSysmem* sysmem) { client_end = sysmem->take_tee_connection(); });
+  ASSERT_TRUE(client_end.is_valid());
+  fidl::WireSyncClient<fuchsia_sysmem2::SecureMem> client(std::move(client_end));
+
+  fidl::Arena arena;
+  // Helper lambda to construct a valid SecureHeapAndRange table for requests without reusing
+  // builders.
+  auto make_heap_and_range = [&](uint64_t phys_addr, uint64_t size_bytes) {
+    auto heap_builder = fuchsia_sysmem2::wire::Heap::Builder(arena);
+    heap_builder.heap_type(bind_fuchsia_amlogic_platform_sysmem_heap::HEAP_TYPE_SECURE);
+    heap_builder.id(0);
+
+    auto range_builder = fuchsia_sysmem2::wire::SecureHeapRange::Builder(arena);
+    range_builder.physical_address(phys_addr);
+    range_builder.size_bytes(size_bytes);
+
+    auto heap_range_builder = fuchsia_sysmem2::wire::SecureHeapAndRange::Builder(arena);
+    heap_range_builder.heap(heap_builder.Build());
+    heap_range_builder.range(range_builder.Build());
+    return heap_range_builder.Build();
+  };
+
+  // Initialize allowed_heap_ bounds.
+  auto props_req_builder =
+      fuchsia_sysmem2::wire::SecureMemGetPhysicalSecureHeapPropertiesRequest::Builder(arena);
+  props_req_builder.entire_heap(make_heap_and_range(0x40000000, 0x00200000));
+
+  auto props_res = client->GetPhysicalSecureHeapProperties(props_req_builder.Build());
+  ASSERT_OK(props_res.status());
+  ASSERT_TRUE(props_res->is_ok());
+
+  // Record the baseline number of TEE commands dispatched during property detection and setup.
+  uint32_t probe_cmd_count = 0;
+  tee().SyncCall([&](FakeTee* tee) { probe_cmd_count = tee->app().invoke_command_count(); });
+  EXPECT_GT(probe_cmd_count, 0);
+
+  // Request an in-bounds physical range modification.
+  auto add_req_builder1 =
+      fuchsia_sysmem2::wire::SecureMemAddSecureHeapPhysicalRangeRequest::Builder(arena);
+  add_req_builder1.heap_range(make_heap_and_range(0x40000000, 0x00010000));
+
+  auto add_res1 = client->AddSecureHeapPhysicalRange(add_req_builder1.Build());
+  ASSERT_OK(add_res1.status());
+  ASSERT_TRUE(add_res1->is_ok());
+
+  // Verify that an in-bounds request is allowed and forwards exactly one command to the TEE.
+  uint32_t after_in_bounds_count = 0;
+  tee().SyncCall([&](FakeTee* tee) { after_in_bounds_count = tee->app().invoke_command_count(); });
+  EXPECT_EQ(after_in_bounds_count, probe_cmd_count + 1);
+
+  // Request an out-of-bounds physical range modification.
+  auto add_req_builder2 =
+      fuchsia_sysmem2::wire::SecureMemAddSecureHeapPhysicalRangeRequest::Builder(arena);
+  add_req_builder2.heap_range(make_heap_and_range(0x50000000, 0x00010000));
+
+  auto add_res2 = client->AddSecureHeapPhysicalRange(add_req_builder2.Build());
+  ASSERT_OK(add_res2.status());
+  ASSERT_TRUE(add_res2->is_error());
+  EXPECT_EQ(add_res2->error_value(), fuchsia_sysmem2::wire::Error::kProtocolDeviation);
+
+  // Assert that the out-of-bounds request was blocked before reaching the TEE.
+  uint32_t after_out_of_bounds_count = 0;
+  tee().SyncCall(
+      [&](FakeTee* tee) { after_out_of_bounds_count = tee->app().invoke_command_count(); });
+  EXPECT_EQ(after_out_of_bounds_count, after_in_bounds_count);
 }

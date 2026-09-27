@@ -62,7 +62,10 @@ rustc_macro("proc-macro") {
   crate_name = "version_history_macro"
   edition = "2024"
   rustflags = [ "-Dunused_results" ]
-  visibility = [ "//src/lib/versioning/version-history/rust/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/versioning/version-history/rust/*",
+  ]
   with_unit_tests = true
   deps = [
     ":version_history_data",

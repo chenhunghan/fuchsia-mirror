@@ -18,11 +18,7 @@ pub type async_wait_t = async_wait;
 pub type async_task_t = async_task;
 #[doc = " Holds content for a packet receiver and its handler.\n\n After successfully queuing packets to the receiver, the client is responsible\n for retaining the structure in memory (and unmodified) until all packets have\n been received by the handler or the dispatcher shuts down.  There is no way\n to cancel a packet which has been queued.\n\n Multiple packets may be delivered to the same receiver concurrently."]
 pub type async_receiver_t = async_receiver;
-#[repr(C)]
-#[derive(Debug)]
-pub struct async_irq {
-    _unused: [u8; 0],
-}
+#[doc = " Similar to async_wait, but holds state for an interrupt."]
 pub type async_irq_t = async_irq;
 #[doc = " Holds content for a paged request packet receiver and its handler.\n\n The client is responsible for retaining the structure in memory\n (and unmodified) until all packets have been received by the handler or the\n dispatcher shuts down."]
 pub type async_paged_vmo_t = async_paged_vmo;
@@ -267,6 +263,61 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Releases a shared dispatcher reference for this dispatcher.\n\n The caller must call this to release a shared dispatcher object acquired by\n |async_acquire_shared_ref|. In general, this should always return ZX_OK if the\n api is used correctly.\n\n Returns |ZX_OK| if the dispatcher has been successfully released.\n Returns |ZX_ERR_NOT_SUPPORTED| if you have tried to call this on a dispatcher that\n does not support having shared references."]
     pub fn async_release_shared_ref(dispatcher: *mut async_dispatcher_t) -> zx_status_t;
+}
+#[doc = " Handles interrupt.\n\n The |status| is |ZX_OK| if the IRQ was signalled.\n The |status| is |ZX_ERR_CANCELED| if the dispatcher was shut down before\n the task's handler ran or the task was canceled."]
+pub type async_irq_handler_t = ::core::option::Option<
+    unsafe extern "C" fn(
+        dispatcher: *mut async_dispatcher_t,
+        irq: *mut async_irq_t,
+        status: zx_status_t,
+        signal: *const zx_packet_interrupt_t,
+    ),
+>;
+#[doc = " Similar to async_wait, but holds state for an interrupt."]
+#[repr(C)]
+pub struct async_irq {
+    #[doc = " Private state owned by the dispatcher, initialize to zero with |ASYNC_STATE_INIT|."]
+    pub state: async_state_t,
+    #[doc = " The wait's handler function."]
+    pub handler: async_irq_handler_t,
+    #[doc = " The object to wait for signals on."]
+    pub object: zx_handle_t,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of async_irq"][::core::mem::size_of::<async_irq>() - 32usize];
+    ["Alignment of async_irq"][::core::mem::align_of::<async_irq>() - 8usize];
+    ["Offset of field: async_irq::state"][::core::mem::offset_of!(async_irq, state) - 0usize];
+    ["Offset of field: async_irq::handler"][::core::mem::offset_of!(async_irq, handler) - 16usize];
+    ["Offset of field: async_irq::object"][::core::mem::offset_of!(async_irq, object) - 24usize];
+};
+impl Default for async_irq {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+impl ::core::fmt::Debug for async_irq {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        write!(f, "async_irq {{ state: {:?}, handler: {:?} }}", self.state, self.handler)
+    }
+}
+unsafe extern "C" {
+    #[doc = " Begins asynchronously waiting on an IRQ specified in |irq|.\n Invokes the handler when the wait completes.\n The irq's handler will be invoked once for each interrupt packet received,\n until the irq object is unbound with |async_unbind_irq| or the dispatcher is\n shut down.\n When the dispatcher is shutting down (being destroyed), if the irq has not\n been unbound, the handlers of all remaining irqs will be invoked with a\n status of |ZX_ERR_CANCELED|.\n\n Returns |ZX_OK| if the wait was successfully begun.\n Returns |ZX_ERR_BAD_STATE| if the dispatcher is shutting down.\n Returns |ZX_ERR_NOT_SUPPORTED| if not supported by the dispatcher.\n\n This operation is thread-safe."]
+    pub fn async_bind_irq(
+        dispatcher: *mut async_dispatcher_t,
+        irq: *mut async_irq_t,
+    ) -> zx_status_t;
+}
+unsafe extern "C" {
+    #[doc = " Unbinds the IRQ associated with |irq|.\n\n If successful, the IRQ will be unbound from the async loop and no further\n handler callbacks will be called.\n\n Returns |ZX_OK| if the IRQ has been successfully unbound.\n Returns |ZX_ERR_BAD_STATE| if the dispatcher is shutting down.\n Returns |ZX_ERR_NOT_SUPPORTED| if not supported by the dispatcher.\n\n This operation is thread-safe."]
+    pub fn async_unbind_irq(
+        dispatcher: *mut async_dispatcher_t,
+        irq: *mut async_irq_t,
+    ) -> zx_status_t;
 }
 #[doc = " Handles port packets containing page requests.\n\n The |status| is |ZX_OK| if the packet was successfully delivered and |request|\n contains the information from the packet, otherwise |request| is null.\n The |status| is |ZX_ERR_CANCELED| if the dispatcher was shut down."]
 pub type async_paged_vmo_handler_t = ::core::option::Option<

@@ -18,10 +18,16 @@ use thiserror::Error;
 pub struct NotANetworkAddress;
 
 /// Error returned when parsing a target address fails.
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum TargetAddrParseError {
-    #[error("Invalid address: {0}")]
-    Parse(#[from] std::net::AddrParseError),
+    #[error("Invalid network address: {0}")]
+    Net(#[from] std::net::AddrParseError),
+    #[error("Invalid UART address: {0}")]
+    Uart(String),
+    #[error("Invalid USB CID: {0}")]
+    Usb(#[source] std::num::ParseIntError),
+    #[error("Invalid VSOCK CID: {0}")]
+    VSock(#[source] std::num::ParseIntError),
 }
 
 /// Represents an address associated with a target, like [`TargetAddr`], but is
@@ -206,7 +212,9 @@ impl TryFrom<&TargetAddr> for TargetIpAddr {
     fn try_from(value: &TargetAddr) -> std::result::Result<Self, Self::Error> {
         match value {
             TargetAddr::Net(socket_addr) => Ok(TargetIpAddr(*socket_addr)),
-            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => Err(NotANetworkAddress),
+            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => {
+                Err(NotANetworkAddress)
+            }
         }
     }
 }
@@ -253,7 +261,7 @@ impl std::fmt::Display for TargetIpAddr {
 }
 
 /// Represents an address associated with a target, network or otherwise.
-#[derive(Clone, Debug, Copy, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TargetAddr {
     /// IPv6 connection, for example CDC Ethernet.
     Net(SocketAddr),
@@ -263,6 +271,13 @@ pub enum TargetAddr {
 
     /// VSOCK bridged over USB.
     UsbCtx(u32),
+
+    /// Direct serial connection over UART, represented by an endpoint string:
+    /// a character device (e.g. `"/dev/ttyUSB0"`), UNIX domain socket, or TCP address.
+    ///
+    /// Formatted as `"uart:<endpoint>"`. During target address resolution, UART addresses
+    /// are evaluated after network and USB/VSOCK addresses in multi-transport priority order.
+    Uart(String),
 }
 
 // Compare `TargetAddr` by ip, port, and scope_id (if network address) or cid (if VSOCK/USB address).
@@ -277,6 +292,10 @@ impl std::hash::Hash for TargetAddr {
             TargetAddr::UsbCtx(cid) => {
                 cid.hash(state);
                 "usb".hash(state)
+            }
+            TargetAddr::Uart(endpoint) => {
+                endpoint.hash(state);
+                "uart".hash(state)
             }
         }
     }
@@ -294,6 +313,8 @@ impl PartialEq for TargetAddr {
             (TargetAddr::VSockCtx(cid), TargetAddr::VSockCtx(other)) => cid == other,
             (TargetAddr::VSockCtx(_), _) | (_, TargetAddr::VSockCtx(_)) => false,
             (TargetAddr::UsbCtx(cid), TargetAddr::UsbCtx(other)) => cid == other,
+            (TargetAddr::UsbCtx(_), _) | (_, TargetAddr::UsbCtx(_)) => false,
+            (TargetAddr::Uart(endpoint), TargetAddr::Uart(other)) => endpoint == other,
         }
     }
 }
@@ -308,14 +329,21 @@ impl Ord for TargetAddr {
                 .cmp(&other_addr.ip())
                 .then(addr.port().cmp(&other_addr.port()))
                 .then(self.scope_id().cmp(&other.scope_id())),
-            (TargetAddr::Net(_), TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_)) => Ordering::Less,
-            (TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_), TargetAddr::Net(_)) => {
-                Ordering::Greater
-            }
             (TargetAddr::VSockCtx(cid), TargetAddr::VSockCtx(other)) => cid.cmp(other),
             (TargetAddr::UsbCtx(cid), TargetAddr::UsbCtx(other)) => cid.cmp(other),
-            (TargetAddr::VSockCtx(_), TargetAddr::UsbCtx(_)) => Ordering::Greater,
-            (TargetAddr::UsbCtx(_), TargetAddr::VSockCtx(_)) => Ordering::Less,
+            (TargetAddr::Uart(endpoint), TargetAddr::Uart(other)) => endpoint.cmp(other),
+
+            // VSockCtx is highest priority (smallest)
+            (TargetAddr::VSockCtx(_), _) => Ordering::Less,
+            (_, TargetAddr::VSockCtx(_)) => Ordering::Greater,
+
+            // UsbCtx is second
+            (TargetAddr::UsbCtx(_), _) => Ordering::Less,
+            (_, TargetAddr::UsbCtx(_)) => Ordering::Greater,
+
+            // Net is preferred over Uart
+            (TargetAddr::Net(_), TargetAddr::Uart(_)) => Ordering::Less,
+            (TargetAddr::Uart(_), TargetAddr::Net(_)) => Ordering::Greater,
         }
     }
 }
@@ -338,6 +366,7 @@ impl Into<TargetAddrInfo> for &TargetAddr {
                 cid: *cid,
                 namespace: TargetVSockNamespace::Usb,
             }),
+            TargetAddr::Uart(endpoint) => TargetAddrInfo::Uart(endpoint.clone()),
         }
     }
 }
@@ -402,6 +431,7 @@ impl From<&TargetAddrInfo> for TargetAddr {
             TargetAddrInfo::Vsock(TargetVSockCtx { cid, namespace: TargetVSockNamespace::Usb }) => {
                 return TargetAddr::UsbCtx(*cid);
             } // TODO(https://fxbug.dev/42130068): Add serial numbers.,
+            TargetAddrInfo::Uart(endpoint) => return TargetAddr::Uart(endpoint.clone()),
         };
 
         TargetAddr::new(addr, scope, port)
@@ -420,6 +450,22 @@ impl FromStr for TargetAddr {
     type Err = TargetAddrParseError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if let Some(endpoint) = s.strip_prefix("uart:") {
+            if endpoint.is_empty() {
+                return Err(TargetAddrParseError::Uart(
+                    "requires a non-empty endpoint (e.g. uart:/dev/ttyUSB0)".to_string(),
+                ));
+            }
+            return Ok(Self::Uart(endpoint.to_string()));
+        }
+        if let Some(cid_str) = s.strip_prefix("usb:cid:") {
+            let cid = cid_str.parse().map_err(TargetAddrParseError::Usb)?;
+            return Ok(Self::UsbCtx(cid));
+        }
+        if let Some(cid_str) = s.strip_prefix("vsock:cid:") {
+            let cid = cid_str.parse().map_err(TargetAddrParseError::VSock)?;
+            return Ok(Self::VSockCtx(cid));
+        }
         let sa = s.parse::<SocketAddr>()?;
         Ok(Self::from(sa))
     }
@@ -454,28 +500,35 @@ impl TargetAddr {
     pub fn ip(&self) -> Option<IpAddr> {
         match self {
             TargetAddr::Net(addr) => Some(addr.ip()),
-            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => None,
+            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => None,
         }
     }
 
     pub fn port(&self) -> Option<u16> {
         match self {
             TargetAddr::Net(addr) => Some(addr.port()),
-            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => None,
+            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => None,
         }
     }
 
     pub fn cid_vsock(&self) -> Option<u32> {
         match self {
             TargetAddr::VSockCtx(cid) => Some(*cid),
-            TargetAddr::Net(_) | TargetAddr::UsbCtx(_) => None,
+            TargetAddr::Net(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => None,
         }
     }
 
     pub fn cid_usb(&self) -> Option<u32> {
         match self {
             TargetAddr::UsbCtx(cid) => Some(*cid),
-            TargetAddr::Net(_) | TargetAddr::VSockCtx(_) => None,
+            TargetAddr::Net(_) | TargetAddr::VSockCtx(_) | TargetAddr::Uart(_) => None,
+        }
+    }
+
+    pub fn uart_endpoint(&self) -> Option<&str> {
+        match self {
+            TargetAddr::Uart(endpoint) => Some(endpoint.as_str()),
+            TargetAddr::Net(_) | TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => None,
         }
     }
 
@@ -485,7 +538,9 @@ impl TargetAddr {
                 addr.set_port(new_port);
                 Ok(())
             }
-            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => Err(NotANetworkAddress),
+            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => {
+                Err(NotANetworkAddress)
+            }
         }
     }
 
@@ -496,7 +551,60 @@ impl TargetAddr {
                 (IpAddr::V6(_), p) => format!("[{self}]:{p}"),
                 (_, p) => format!("{self}:{p}"),
             },
-            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) => format!("{self}"),
+            TargetAddr::VSockCtx(_) | TargetAddr::UsbCtx(_) | TargetAddr::Uart(_) => {
+                format!("{self}")
+            }
+        }
+    }
+
+    /// Compares two [`SocketAddr`] instances by discovery connection priority.
+    ///
+    /// Prioritizes link-local IPv6 addresses over global/routable IP addresses to prefer
+    /// direct local connections (such as CDC Ethernet) during target resolution.
+    ///
+    /// # Arguments
+    ///
+    /// * `a1` - The first socket address to compare.
+    /// * `a2` - The second socket address to compare.
+    ///
+    /// # Returns
+    ///
+    /// Returns [`Ordering::Less`] if `a1` has higher priority than `a2`,
+    /// [`Ordering::Greater`] if `a2` has higher priority than `a1`, or
+    /// [`Ordering::Equal`] if both addresses have the same link-local classification.
+    pub fn compare_socket_addrs_by_priority(a1: &SocketAddr, a2: &SocketAddr) -> Ordering {
+        match (a1.ip().is_link_local_addr(), a2.ip().is_link_local_addr()) {
+            (true, true) | (false, false) => Ordering::Equal,
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+        }
+    }
+
+    /// Compares two [`TargetAddr`] instances by overall transport connection priority.
+    ///
+    /// Multi-transport resolution evaluates target addresses in the following order:
+    /// 1. Virtual sockets ([`TargetAddr::VSockCtx`]) - highest priority
+    /// 2. USB bridged virtual sockets ([`TargetAddr::UsbCtx`])
+    /// 3. Network sockets ([`TargetAddr::Net`], with link-local prioritized over global)
+    /// 4. Serial connections ([`TargetAddr::Uart`]) - lowest priority
+    ///
+    /// If both addresses belong to the same transport variant, ties are resolved using
+    /// standard [`Ord::cmp`] ordering.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other target address to compare against.
+    ///
+    /// # Returns
+    ///
+    /// Returns [`Ordering::Less`] if `self` has higher priority than `other`,
+    /// [`Ordering::Greater`] if `self` has lower priority, or [`Ordering::Equal`] if identical.
+    pub fn compare_by_priority(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (TargetAddr::Net(a), TargetAddr::Net(b)) => {
+                Self::compare_socket_addrs_by_priority(a, b).then_with(|| self.cmp(other))
+            }
+            _ => self.cmp(other),
         }
     }
 }
@@ -507,6 +615,7 @@ impl std::fmt::Display for TargetAddr {
             TargetAddr::Net(addr) => write!(f, "{}", TargetIpAddr::from(*addr)),
             TargetAddr::VSockCtx(cid) => write!(f, "vsock:cid:{cid}"),
             TargetAddr::UsbCtx(cid) => write!(f, "usb:cid:{cid}"),
+            TargetAddr::Uart(endpoint) => write!(f, "uart:{endpoint}"),
         }
     }
 }
@@ -595,5 +704,65 @@ mod test {
 
         assert_eq!(h1.finish(), h1_dup.finish());
         assert_ne!(h1.finish(), h2.finish());
+    }
+
+    #[fuchsia::test]
+    fn test_target_addr_uart() {
+        let parsed: TargetAddr = "uart:/dev/ttyUSB0".parse().expect("valid uart addr");
+        assert_eq!(parsed, TargetAddr::Uart("/dev/ttyUSB0".to_string()));
+        assert_eq!(format!("{parsed}"), "uart:/dev/ttyUSB0");
+        assert_eq!(parsed.ip(), None);
+        assert_eq!(parsed.port(), None);
+        assert_eq!(parsed.cid_vsock(), None);
+        assert_eq!(parsed.cid_usb(), None);
+        assert_eq!(parsed.uart_endpoint(), Some("/dev/ttyUSB0"));
+
+        // Empty path rejected
+        assert!("uart:".parse::<TargetAddr>().is_err());
+
+        // Conversion to/from FIDL TargetAddrInfo
+        let info: fidl_fuchsia_developer_ffx::TargetAddrInfo = (&parsed).into();
+        let from_info: TargetAddr = (&info).into();
+        assert_eq!(parsed, from_info);
+
+        // Ordering: VSockCtx < UsbCtx < Net < Uart
+        let vsock = TargetAddr::VSockCtx(42);
+        let usb = TargetAddr::UsbCtx(42);
+        let net = TargetAddr::Net("127.0.0.1:8022".parse().unwrap());
+        let uart1 = TargetAddr::Uart("/dev/ttyUSB0".to_string());
+        let uart2 = TargetAddr::Uart("/dev/ttyUSB1".to_string());
+
+        assert!(vsock < usb);
+        assert!(usb < net);
+        assert!(net < uart1);
+        assert!(uart1 < uart2);
+    }
+
+    #[fuchsia::test]
+    fn test_target_addr_parse() {
+        // Net
+        let net: TargetAddr = "127.0.0.1:8022".parse().expect("valid net addr");
+        assert_eq!(net, TargetAddr::Net("127.0.0.1:8022".parse().unwrap()));
+        assert!(matches!("127.0.0.1".parse::<TargetAddr>(), Err(TargetAddrParseError::Net(_))));
+
+        // Uart
+        let uart: TargetAddr = "uart:/dev/ttyUSB0".parse().expect("valid uart addr");
+        assert_eq!(uart, TargetAddr::Uart("/dev/ttyUSB0".to_string()));
+        assert!(matches!("uart:".parse::<TargetAddr>(), Err(TargetAddrParseError::Uart(_))));
+
+        // USB
+        let usb: TargetAddr = "usb:cid:42".parse().expect("valid usb addr");
+        assert_eq!(usb, TargetAddr::UsbCtx(42));
+        assert!(matches!("usb:cid:".parse::<TargetAddr>(), Err(TargetAddrParseError::Usb(_))));
+        assert!(matches!("usb:cid:abc".parse::<TargetAddr>(), Err(TargetAddrParseError::Usb(_))));
+
+        // VSock
+        let vsock: TargetAddr = "vsock:cid:42".parse().expect("valid vsock addr");
+        assert_eq!(vsock, TargetAddr::VSockCtx(42));
+        assert!(matches!("vsock:cid:".parse::<TargetAddr>(), Err(TargetAddrParseError::VSock(_))));
+        assert!(matches!(
+            "vsock:cid:xyz".parse::<TargetAddr>(),
+            Err(TargetAddrParseError::VSock(_))
+        ));
     }
 }

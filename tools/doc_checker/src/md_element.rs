@@ -20,8 +20,8 @@ pub enum Element<'a> {
     Block(Tag<'a>, Vec<Element<'a>>, DocLine),
     /// An inline `code` string.
     Code(CowStr<'a>, DocLine),
-    /// A ``` code fence
-    CodeBlock(CowStr<'a>, Vec<Element<'a>>, DocLine),
+    /// A ``` code fence. Tuple is (language_info, elements, doc_line, optional (file_text, byte_range)).
+    CodeBlock(CowStr<'a>, Vec<Element<'a>>, DocLine, Option<(&'a str, Range<usize>)>),
     /// A footnote reference
     /// TODO: I have not seen one of these in our docs.
     FootnoteReference(CowStr<'a>, DocLine),
@@ -51,7 +51,7 @@ impl<'a> Element<'a> {
         let doc_line = match self {
             Element::Block(_, _, doc_line) => doc_line,
             Element::Code(_, doc_line) => doc_line,
-            Element::CodeBlock(_, _, doc_line) => doc_line,
+            Element::CodeBlock(_, _, doc_line, _) => doc_line,
             Element::FootnoteReference(_, doc_line) => doc_line,
             Element::HardBreak(doc_line) => doc_line,
             Element::Html(_, doc_line) => doc_line,
@@ -70,7 +70,7 @@ impl<'a> Element<'a> {
         match self {
             Element::Block(_, _, doc_line) => doc_line,
             Element::Code(_, doc_line) => doc_line,
-            Element::CodeBlock(_, _, doc_line) => doc_line,
+            Element::CodeBlock(_, _, doc_line, _) => doc_line,
             Element::FootnoteReference(_, doc_line) => doc_line,
             Element::HardBreak(doc_line) => doc_line,
             Element::Html(_, doc_line) => doc_line,
@@ -90,7 +90,7 @@ impl<'a> Element<'a> {
                 elements.iter().map(|e| e.get_contents()).collect::<Vec<String>>().join("")
             }
             Element::Code(code, _) => code.to_string(),
-            Element::CodeBlock(code, elements, _) => {
+            Element::CodeBlock(code, elements, _, _) => {
                 let mut parts = vec![code.to_string()];
                 parts.extend(elements.iter().map(|e| e.get_contents()));
                 parts.join(" ")
@@ -126,7 +126,7 @@ impl<'a> Element<'a> {
                 if !links.is_empty() { Some(links) } else { None }
             }
             Element::Code(_, _) => None,
-            Element::CodeBlock(_, elements, _) => {
+            Element::CodeBlock(_, elements, _, _) => {
                 let links: Vec<&Element<'a>> =
                     elements.iter().filter_map(|e| e.get_links()).flatten().collect();
                 if !links.is_empty() { Some(links) } else { None }
@@ -157,7 +157,7 @@ impl<'a> Element<'a> {
         match self {
             Element::Block(_, elements, _) => Some(elements),
             Element::Code(_, _) => None,
-            Element::CodeBlock(_, elements, _) => Some(elements),
+            Element::CodeBlock(_, elements, _, _) => Some(elements),
             Element::FootnoteReference(_, _) => None,
             Element::HardBreak(_) => None,
             Element::Html(_, _) => None,
@@ -216,7 +216,7 @@ pub struct DocContext<'a> {
     pub file_name: PathBuf,
     pub line_num: usize,
     pub(crate) parser: pulldown_cmark::OffsetIter<'a, CallbackWrapper<'a>>,
-    file_text: &'a str,
+    pub(crate) file_text: &'a str,
     line_index: HashMap<&'a str, usize>,
 }
 

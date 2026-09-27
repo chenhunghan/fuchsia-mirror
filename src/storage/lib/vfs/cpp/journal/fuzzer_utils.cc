@@ -3,7 +3,6 @@
 
 #include "src/storage/lib/vfs/cpp/journal/fuzzer_utils.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/zx/vmo.h>
 #include <stddef.h>
 #include <stdint.h>

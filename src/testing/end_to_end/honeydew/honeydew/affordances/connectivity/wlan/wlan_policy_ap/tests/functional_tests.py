@@ -13,10 +13,6 @@ from honeydew.affordances.connectivity.netstack.types import (
     InterfaceProperties,
     PortClass,
 )
-from honeydew.affordances.connectivity.wlan.utils.types import (
-    AccessPointState,
-    NetworkIdentifier,
-)
 from mobly import asserts, test_runner
 
 # Time to wait for a WLAN interface to become available.
@@ -83,15 +79,15 @@ class WlanPolicyApTests(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         asserts.assert_equal(
             await self.dut.wlan_policy_ap.get_update(),
             [
-                AccessPointState(
+                f_wlan_policy.AccessPointState(
                     state=f_wlan_policy.OperatingState.STARTING,
                     mode=f_wlan_policy.ConnectivityMode.LOCAL_ONLY,
                     band=f_wlan_policy.OperatingBand.ONLY_2_4_GHZ,
                     frequency=None,
                     clients=None,
-                    id_=NetworkIdentifier(
-                        ssid=test_ssid,
-                        security_type=f_wlan_policy.SecurityType.NONE,
+                    id_=f_wlan_policy.NetworkIdentifier(
+                        ssid=list(test_ssid.encode("utf-8")),
+                        type_=f_wlan_policy.SecurityType.NONE,
                     ),
                 )
             ],
@@ -99,15 +95,15 @@ class WlanPolicyApTests(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         asserts.assert_equal(
             await self.dut.wlan_policy_ap.get_update(),
             [
-                AccessPointState(
+                f_wlan_policy.AccessPointState(
                     state=f_wlan_policy.OperatingState.ACTIVE,
                     mode=f_wlan_policy.ConnectivityMode.LOCAL_ONLY,
                     band=f_wlan_policy.OperatingBand.ONLY_2_4_GHZ,
                     frequency=None,
                     clients=None,
-                    id_=NetworkIdentifier(
-                        ssid=test_ssid,
-                        security_type=f_wlan_policy.SecurityType.NONE,
+                    id_=f_wlan_policy.NetworkIdentifier(
+                        ssid=list(test_ssid.encode("utf-8")),
+                        type_=f_wlan_policy.SecurityType.NONE,
                     ),
                 )
             ],
@@ -118,15 +114,15 @@ class WlanPolicyApTests(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         asserts.assert_equal(
             got_states,
             [
-                AccessPointState(
+                f_wlan_policy.AccessPointState(
                     state=f_wlan_policy.OperatingState.ACTIVE,
                     mode=f_wlan_policy.ConnectivityMode.LOCAL_ONLY,
                     band=f_wlan_policy.OperatingBand.ONLY_2_4_GHZ,
                     frequency=got_states[0].frequency,
                     clients=f_wlan_policy.ConnectedClientInformation(count=0),
-                    id_=NetworkIdentifier(
-                        ssid=test_ssid,
-                        security_type=f_wlan_policy.SecurityType.NONE,
+                    id_=f_wlan_policy.NetworkIdentifier(
+                        ssid=list(test_ssid.encode("utf-8")),
+                        type_=f_wlan_policy.SecurityType.NONE,
                     ),
                 )
             ],
@@ -138,15 +134,15 @@ class WlanPolicyApTests(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         asserts.assert_equal(
             got_states,
             [
-                AccessPointState(
+                f_wlan_policy.AccessPointState(
                     state=f_wlan_policy.OperatingState.ACTIVE,
                     mode=f_wlan_policy.ConnectivityMode.LOCAL_ONLY,
                     band=f_wlan_policy.OperatingBand.ONLY_2_4_GHZ,
                     frequency=got_states[0].frequency,
                     clients=f_wlan_policy.ConnectedClientInformation(count=0),
-                    id_=NetworkIdentifier(
-                        ssid=test_ssid,
-                        security_type=f_wlan_policy.SecurityType.NONE,
+                    id_=f_wlan_policy.NetworkIdentifier(
+                        ssid=list(test_ssid.encode("utf-8")),
+                        type_=f_wlan_policy.SecurityType.NONE,
                     ),
                 )
             ],

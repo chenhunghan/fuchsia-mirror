@@ -88,27 +88,37 @@ impl Namespace {
     /// Assuming new_ns is a clone of the namespace that node is from, return the equivalent of
     /// node in new_ns. If this assumption is violated, returns None.
     pub fn translate_node(
-        mut node: NamespaceNode,
+        node: NamespaceNode,
         new_ns: &Namespace,
-        _mounts_guard: &MountsWriteToken,
+        mounts_guard: &MountsWriteToken,
     ) -> Option<NamespaceNode> {
+        let mut node = mounts_guard.defer_drop(node);
         // Collect the list of mountpoints that leads to this node's mount
         let mut mountpoints = vec![];
-        let mut mount = node.mount;
+        let mut mount = node.mount.clone();
         while let Some(mountpoint) = mount.as_ref().and_then(|m| m.mountpoint()) {
             mountpoints.push(mountpoint.entry);
-            mount = mountpoint.mount;
+            let prev = std::mem::replace(&mut mount, mountpoint.mount);
+            mounts_guard.defer_drop(prev);
         }
+        mounts_guard.defer_drop(mount);
+        let mountpoints = mounts_guard.defer_drop(mountpoints);
 
         // Follow the same path in the new namespace
         let scope = RcuReadScope::new();
         let mut mount = Arc::clone(&new_ns.root_mount);
         for mountpoint in mountpoints.iter().rev() {
-            let next_mount = mount.relations.get_submount(&scope, &PtrKey::from(mountpoint))?;
-            mount = next_mount;
+            let next_mount = match mount.relations.get_submount(&scope, &PtrKey::from(mountpoint)) {
+                Some(m) => m,
+                None => {
+                    mounts_guard.defer_drop(mount);
+                    return None;
+                }
+            };
+            mounts_guard.defer_drop(std::mem::replace(&mut mount, next_mount));
         }
-        node.mount = Some(mount).into();
-        Some(node)
+        mounts_guard.defer_drop(std::mem::replace(&mut node.mount, Some(mount).into()));
+        Some(scopeguard::ScopeGuard::into_inner(node))
     }
 
     pub fn pivot_root(
@@ -391,7 +401,7 @@ impl MountRelations {
         // SAFETY: The MountsWriteToken proves we have exclusive write access.
         let _ = unsafe { self.submount_lookup.remove(key) };
         let submount = self.submounts.lock().remove(key);
-        let submount = scopeguard::guard(submount, |submount| guard.defer_drop(submount));
+        let submount = guard.defer_drop(submount);
         if submount.is_some() { Ok(()) } else { error!(EINVAL) }
     }
 
@@ -467,7 +477,8 @@ impl Mount {
         what: WhatToMount,
         mut flags: MountpointFlags,
     ) -> Result<MountHandle, Errno> {
-        match what {
+        let what = mounts_guard.defer_drop(what);
+        match &*what {
             WhatToMount::Fs(fs) => {
                 // If `flags` does not explicitly specify an access-time flag then default to `RELATIME`.
                 flags.default_atime_from(MountpointFlags::RELATIME);
@@ -515,7 +526,7 @@ impl Mount {
         // Necessary to make a copy to prevent excess replication, see the comment on the
         // following Mount::new call.
         let peers = self.peer_group().map(|g| g.copy_propagation_targets()).unwrap_or_default();
-        let peers = scopeguard::guard(peers, |peers| mounts_guard.defer_drop(peers));
+        let peers = mounts_guard.defer_drop(peers);
 
         // Create the mount after copying the peer list, because in the case of creating a bind
         // mount inside itself, the new mount would get added to our peer group during the
@@ -549,7 +560,7 @@ impl Mount {
     ) -> Result<(), Errno> {
         // create_submount explains why we need to make a copy of peers.
         let peers = self.peer_group().map(|g| g.copy_propagation_targets()).unwrap_or_default();
-        let peers = scopeguard::guard(peers, |peers| mounts_guard.defer_drop(peers));
+        let peers = mounts_guard.defer_drop(peers);
 
         for peer in &*peers {
             if Arc::ptr_eq(self, peer) {
@@ -558,8 +569,12 @@ impl Mount {
             // mount_namespaces(7): If B is shared, then all most-recently-mounted mounts at b on
             // mounts that receive propagation from mount B and do not have submounts under them are
             // unmounted.
-            let scope = RcuReadScope::new();
-            if let Some(submount) = peer.relations.get_submount(&scope, mount_hash_key) {
+            let submount = {
+                let scope = RcuReadScope::new();
+                peer.relations.get_submount(&scope, mount_hash_key)
+            };
+            if let Some(submount) = submount {
+                let submount = mounts_guard.defer_drop(submount);
                 if submount.relations.submounts_len() != 0 {
                     continue;
                 }
@@ -579,10 +594,10 @@ impl Mount {
         let mounts_guard = kernel.mounts_lock();
 
         let source_mountpoint = source_mount.mountpoint().ok_or_else(|| errno!(EIO))?;
+        let source_mountpoint = mounts_guard.defer_drop(source_mountpoint);
         let source_parent = mounts_guard.retain(
             source_mountpoint.mount.as_ref().expect("a mountpoint must be part of a mount"),
         );
-        mounts_guard.retain(&source_mountpoint.entry);
 
         // First, disconnect the mount from its parent.
         {
@@ -619,18 +634,25 @@ impl Mount {
         let clone = Self::new_with_root(Arc::clone(new_root), self.mount_flags());
 
         if flags.contains(MountFlags::REC) {
-            for (dir, submount) in self.relations.iter_submounts(&RcuReadScope::new()) {
-                if let (Some(dir), Some(submount)) = (dir.0.upgrade(), submount.upgrade()) {
-                    let submount = submount.clone_mount_recursive(mounts_guard);
-                    clone.add_submount_internal(mounts_guard, &dir, submount);
-                }
+            let submounts: Vec<_> = {
+                let scope = RcuReadScope::new();
+                self.relations
+                    .iter_submounts(&scope)
+                    .filter_map(|(dir, submount)| Some((dir.0.upgrade()?, submount.upgrade()?)))
+                    .collect()
+            };
+            let submounts = mounts_guard.defer_drop(submounts);
+            for (dir, submount) in &*submounts {
+                let submount = submount.clone_mount_recursive(mounts_guard);
+                clone.add_submount_internal(mounts_guard, dir, submount);
             }
         }
 
         // Put the clone in the same peer group
         let peer_group = self.peer_group();
         if let Some(peer_group) = peer_group {
-            clone.set_peer_group(mounts_guard, peer_group);
+            let peer_group = mounts_guard.defer_drop(peer_group);
+            clone.set_peer_group(mounts_guard, Arc::clone(&peer_group));
         }
 
         clone
@@ -658,10 +680,16 @@ impl Mount {
         }
 
         if recursive {
-            for (_, submount) in self.relations.iter_submounts(&starnix_rcu::RcuReadScope::new()) {
-                if let Some(submount) = submount.upgrade() {
-                    submount.change_propagation(mounts_guard, flag, recursive);
-                }
+            let submounts: Vec<_> = {
+                let scope = starnix_rcu::RcuReadScope::new();
+                self.relations
+                    .iter_submounts(&scope)
+                    .filter_map(|(_, submount)| submount.upgrade())
+                    .collect()
+            };
+            let submounts = mounts_guard.defer_drop(submounts);
+            for submount in &*submounts {
+                submount.change_propagation(mounts_guard, flag, recursive);
             }
         }
     }
@@ -715,6 +743,7 @@ impl Mount {
         }
 
         let mountpoint = self.mountpoint().ok_or_else(|| errno!(EINVAL))?;
+        let mountpoint = mounts_guard.defer_drop(mountpoint);
         let parent_mount = mountpoint.mount.as_ref().expect("a mountpoint must be part of a mount");
         parent_mount.remove_submount(mounts_guard, &mountpoint.mount_hash_key())
     }
@@ -758,11 +787,12 @@ impl Mount {
         dir: &DirEntryHandle,
         mount: MountHandle,
     ) {
+        let mount = guard.defer_drop(mount);
         if !dir.is_descendant_of(&self.root) {
             return;
         }
 
-        let submount = mount.kernel().mounts.register_mount(dir, mount.clone());
+        let submount = mount.kernel().mounts.register_mount(dir, Arc::clone(&mount));
 
         let old_mountpoint = {
             let scope = RcuReadScope::new();
@@ -777,20 +807,24 @@ impl Mount {
             Arc::downgrade(&mount),
             submount,
         );
+        let old_mount = guard.defer_drop(old_mount);
 
-        if let Some(old_mount) = old_mount {
+        if let Some(old_mount) = &*old_mount {
             old_mount
                 .mount
                 .relations
                 .set_mountpoint(guard, Some((Arc::downgrade(&mount), Arc::downgrade(&mount.root))));
             let new_old_submount =
                 mount.kernel().mounts.register_mount(&mount.root, old_mount.mount.clone());
-            mount.relations.insert_submount(
+            let replaced = mount.relations.insert_submount(
                 guard,
                 WeakKey::from(&mount.root),
                 Arc::downgrade(&old_mount.mount),
                 new_old_submount,
             );
+            if let Some(replaced) = replaced {
+                guard.defer_drop(replaced);
+            }
         }
     }
 
@@ -815,6 +849,7 @@ impl Mount {
         upstream: Option<(Weak<PeerGroup>, PtrKey<Mount>)>,
         mount_ptr: PtrKey<Mount>,
     ) {
+        let peer_group = guard.defer_drop(peer_group);
         let upstream_group = match upstream {
             Some((weak_group, mount)) => {
                 if let Some(group) = weak_group.upgrade() {
@@ -826,16 +861,18 @@ impl Mount {
             }
             None => None,
         };
+        let upstream_group = guard.defer_drop(upstream_group);
 
-        if let Some(group) = peer_group {
+        if let Some(group) = &*peer_group {
             group.remove(guard, mount_ptr);
 
-            if let Some(upstream_group) = upstream_group {
+            if let Some(upstream_group) = &*upstream_group {
                 let next_mount = {
                     let scope = RcuReadScope::new();
                     group.mounts.keys(&scope).next().and_then(|w| w.0.upgrade())
                 };
                 if let Some(next_mount) = next_mount {
+                    let next_mount = guard.defer_drop(next_mount);
                     next_mount.set_upstream(guard, upstream_group);
                 }
             }
@@ -870,21 +907,24 @@ impl Mount {
         if let Some((weak_group, mount)) = upstream {
             if let Some(group) = weak_group.upgrade() {
                 group.remove_downstream(guard, mount);
+                guard.defer_drop(group);
             }
         }
     }
 
     /// Set this mount's peer group.
     fn set_peer_group(self: &Arc<Mount>, guard: &MountsWriteToken, group: Arc<PeerGroup>) {
-        self.take_from_peer_group(guard);
+        if let Some(prev) = self.take_from_peer_group(guard) {
+            guard.defer_drop(prev);
+        }
         group.add(guard, self);
         self.relations.peer_group.update(Some(group));
     }
 
-    fn set_upstream(self: &Arc<Mount>, guard: &MountsWriteToken, group: Arc<PeerGroup>) {
+    fn set_upstream(self: &Arc<Mount>, guard: &MountsWriteToken, group: &Arc<PeerGroup>) {
         self.remove_from_upstream(guard);
         group.add_downstream(guard, self);
-        self.relations.upstream.update(Some((Arc::downgrade(&group), Arc::as_ptr(self).into())));
+        self.relations.upstream.update(Some((Arc::downgrade(group), Arc::as_ptr(self).into())));
     }
 
     /// Is the mount in a peer group? Corresponds to MS_SHARED.
@@ -917,7 +957,8 @@ impl Mount {
     /// MountFlags::DOWNSTREAM (MS_SLAVE).
     fn make_downstream(self: &Arc<Mount>, guard: &MountsWriteToken) {
         if let Some(peer_group) = self.take_from_peer_group(guard) {
-            self.set_upstream(guard, peer_group);
+            let peer_group = guard.defer_drop(peer_group);
+            self.set_upstream(guard, &peer_group);
         }
     }
 }
@@ -1902,7 +1943,9 @@ impl NamespaceNode {
 
         let kernel = self.entry.node.fs().kernel.upgrade().expect("can't mount without a kernel");
         let mounts_guard = kernel.mounts_lock();
+        let what = mounts_guard.defer_drop(what);
         let mountpoint = self.enter_mount_locked(&mounts_guard);
+        let mountpoint = mounts_guard.defer_drop(mountpoint);
 
         let mount = mountpoint.mount.as_ref().ok_or_else(|| errno!(ENOENT))?;
         let writeable_mount = mounts_guard.retain(mount);
@@ -1910,7 +1953,7 @@ impl NamespaceNode {
         writeable_mount.create_submount(
             &mounts_guard,
             &writeable_entry,
-            WhatSubmount::New(what, flags),
+            WhatSubmount::New(scopeguard::ScopeGuard::into_inner(what), flags),
         )
     }
 
@@ -1920,8 +1963,7 @@ impl NamespaceNode {
         let mounts_guard = kernel.mounts_lock();
 
         let mountpoint = self.enter_mount_locked(&mounts_guard);
-        mounts_guard.retain(&mountpoint.entry);
-        mountpoint.mount.as_ref().map(|mount| mounts_guard.retain(mount));
+        let mountpoint = mounts_guard.defer_drop(mountpoint);
         let mount = mounts_guard.retain(mountpoint.mount_if_root()?);
         mount.unmount(&mounts_guard, flags)
     }
@@ -2183,7 +2225,7 @@ impl Mounts {
             let upgraded: Vec<_> = mounts.iter().filter_map(|m| m.0.upgrade()).collect();
             if let Some(kernel) = upgraded.first().map(|m| m.kernel()) {
                 let mounts_guard = kernel.mounts_lock();
-                let mounts = scopeguard::guard(upgraded, |mounts| mounts_guard.defer_drop(mounts));
+                let mounts = mounts_guard.defer_drop(upgraded);
                 for mount in &*mounts {
                     // Ignore errors.
                     let _ = mount.unmount(&mounts_guard, UnmountFlags::DETACH);

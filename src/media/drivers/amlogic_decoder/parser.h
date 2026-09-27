@@ -77,7 +77,7 @@ class Parser final {
   void SyncToDecoderInstance(DecoderInstance*);
 
  private:
-  void SyncFromBufferParameters(uint32_t buffer_phys_address, uint32_t buffer_size,
+  void SyncFromBufferParameters(zx_paddr_t buffer_phys_address, uint64_t buffer_size,
                                 uint32_t read_offset, uint32_t write_offset);
 
   Owner* owner_;

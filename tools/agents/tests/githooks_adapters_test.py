@@ -34,7 +34,7 @@ class AdaptersTest(unittest.TestCase):
         self.assertIsNotNone(action.remediation_cmd_fn)
         if action.remediation_cmd_fn:
             self.assertEqual(action.remediation_cmd_fn(["a.py"]), ["fix a.py"])
-        self.assertTrue(len(adapters.DEFAULT_PRE_COMMIT_ACTIONS) > 0)
+        self.assertTrue(len(adapters.DEFAULT_PRE_COMMIT_ACTIONS) >= 2)
         default_cmd_fn = adapters.DEFAULT_PRE_COMMIT_ACTIONS[
             0
         ].remediation_cmd_fn
@@ -43,6 +43,15 @@ class AdaptersTest(unittest.TestCase):
             self.assertEqual(
                 default_cmd_fn(["a.py"]),
                 ["fx format-code --files=a.py"],
+            )
+        lint_action = adapters.DEFAULT_PRE_COMMIT_ACTIONS[1]
+        self.assertEqual(lint_action.name, "fx_lint")
+        self.assertTrue(lint_action.is_mutating)
+        self.assertIsNotNone(lint_action.remediation_cmd_fn)
+        if lint_action.remediation_cmd_fn:
+            self.assertEqual(
+                lint_action.remediation_cmd_fn(["a.py"]),
+                ["fx lint --files=a.py"],
             )
 
 
@@ -286,6 +295,212 @@ class FormatCodeActionTest(BaseTestCase):
                 returncode=2, stderr=""
             )
             ok = adapters.format_code_action(ctx, ["foo.py"])
+            self.assertFalse(ok)
+            mock_reporter.on_error.assert_called_once()
+            err_msg = mock_reporter.on_error.call_args[0][0]
+            self.assertIn("failed with exit code 2", err_msg)
+
+
+class LintCodeActionTest(BaseTestCase):
+    """Unit tests for lint_code_action using HookContext.reporter."""
+
+    def make_mock_reporter(
+        self,
+        spec: Any = None,
+    ) -> mock.MagicMock:
+        """Factory helper to construct a mock ConsoleReporter."""
+        return mock.MagicMock(spec=spec) if spec else mock.MagicMock()
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.test_dir / ".fx-root").touch()
+
+    def test_lint_code_action_empty(self) -> None:
+        ctx = adapters.HookContext(repo_root=self.test_dir, is_agent=True)
+        self.assertTrue(adapters.lint_code_action(ctx, []))
+
+    def test_lint_code_action_human_skips_slow_linters(self) -> None:
+        ctx = adapters.HookContext(repo_root=self.test_dir, is_agent=False)
+        with (
+            mock.patch("shutil.which", return_value="/bin/fx"),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            mock_cmd.return_value = self.make_completed_process()
+            self.assertTrue(adapters.lint_code_action(ctx, ["foo.py"]))
+            base = ["fx", "lint", "--skip=check_licenses"]
+            self.assertEqual(
+                mock_cmd.call_args_list,
+                [
+                    mock.call(
+                        [*base, "--fix", "--files=foo.py"], cwd=self.test_dir
+                    ),
+                    mock.call([*base, "--files=foo.py"], cwd=self.test_dir),
+                ],
+            )
+
+    def test_lint_code_action_runs_fx_lint_for_agent(self) -> None:
+        ctx = adapters.HookContext(repo_root=self.test_dir, is_agent=True)
+        with (
+            mock.patch("shutil.which", return_value="/bin/fx"),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            mock_cmd.return_value = self.make_completed_process()
+            ok = adapters.lint_code_action(ctx, ["a.py", "b.cc"])
+            self.assertTrue(ok)
+            self.assertEqual(
+                mock_cmd.call_args_list,
+                [
+                    mock.call(
+                        ["fx", "lint", "--fix", "--files=a.py,b.cc"],
+                        cwd=self.test_dir,
+                    ),
+                    mock.call(
+                        ["fx", "lint", "--files=a.py,b.cc"], cwd=self.test_dir
+                    ),
+                ],
+            )
+
+    def test_lint_code_action_fix_pass_exit_code_does_not_gate(self) -> None:
+        """`shac fix` exits 0 with findings left, so only the check pass gates."""
+        mock_reporter = self.make_mock_reporter(ConsoleReporter)
+        ctx = adapters.HookContext(
+            repo_root=self.test_dir,
+            is_agent=True,
+            reporter=mock_reporter,
+        )
+        with (
+            mock.patch("shutil.which", return_value="/bin/fx"),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            # Fix pass "succeeds" but the check pass still reports a finding.
+            mock_cmd.side_effect = [
+                self.make_completed_process(),
+                self.make_completed_process(
+                    returncode=1, stderr="Lint finding remains"
+                ),
+            ]
+            self.assertFalse(adapters.lint_code_action(ctx, ["foo.py"]))
+            self.assertEqual(mock_cmd.call_count, 2)
+            mock_reporter.on_error.assert_called_once_with(
+                "Lint finding remains"
+            )
+
+    def test_lint_code_action_check_only_omits_fix(self) -> None:
+        ctx = adapters.HookContext(
+            repo_root=self.test_dir,
+            check_only=True,
+            is_agent=True,
+        )
+        with (
+            mock.patch("shutil.which", return_value="/bin/fx"),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            mock_cmd.return_value = self.make_completed_process()
+            ok = adapters.lint_code_action(ctx, ["foo.py"])
+            self.assertTrue(ok)
+            mock_cmd.assert_called_once_with(
+                ["fx", "lint", "--files=foo.py"],
+                cwd=self.test_dir,
+            )
+
+    def test_lint_code_action_error_reporting(self) -> None:
+        mock_reporter = self.make_mock_reporter(ConsoleReporter)
+        ctx = adapters.HookContext(
+            repo_root=self.test_dir,
+            is_agent=True,
+            reporter=mock_reporter,
+        )
+        with (
+            mock.patch("shutil.which", return_value="/bin/fx"),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            mock_cmd.return_value = self.make_completed_process(
+                returncode=1, stderr="Linter error found"
+            )
+            ok = adapters.lint_code_action(ctx, ["foo.py"])
+            self.assertFalse(ok)
+            mock_reporter.on_error.assert_called_once_with("Linter error found")
+
+    def test_lint_code_action_missing_fx_agent(self) -> None:
+        mock_reporter = self.make_mock_reporter(ConsoleReporter)
+        ctx = adapters.HookContext(
+            repo_root=self.test_dir,
+            is_agent=True,
+            reporter=mock_reporter,
+        )
+        with (
+            mock.patch("shutil.which", return_value=None),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            ok = adapters.lint_code_action(ctx, ["foo.py"])
+            self.assertFalse(ok)
+            mock_reporter.on_error.assert_called_once()
+            mock_cmd.assert_not_called()
+
+    def test_lint_code_action_missing_fx_human(self) -> None:
+        mock_reporter = self.make_mock_reporter(ConsoleReporter)
+        ctx = adapters.HookContext(
+            repo_root=self.test_dir,
+            is_agent=False,
+            reporter=mock_reporter,
+        )
+        with (
+            mock.patch("shutil.which", return_value=None),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            ok = adapters.lint_code_action(ctx, ["foo.py"])
+            self.assertTrue(ok)
+            mock_reporter.on_warning.assert_called_once()
+            mock_cmd.assert_not_called()
+
+    def test_lint_code_action_prioritizes_scripts_fx_over_ambient_path(
+        self,
+    ) -> None:
+        scripts_dir = self.test_dir / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        fx_script = scripts_dir / "fx"
+        fx_script.touch()
+
+        ctx = adapters.HookContext(
+            repo_root=self.test_dir,
+            is_agent=True,
+        )
+        with (
+            mock.patch("shutil.which", return_value="/ambient/bin/fx"),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            mock_cmd.return_value = self.make_completed_process()
+            ok = adapters.lint_code_action(ctx, ["foo.py"])
+            self.assertTrue(ok)
+            self.assertEqual(
+                mock_cmd.call_args_list,
+                [
+                    mock.call(
+                        [str(fx_script), "lint", "--fix", "--files=foo.py"],
+                        cwd=self.test_dir,
+                    ),
+                    mock.call(
+                        [str(fx_script), "lint", "--files=foo.py"],
+                        cwd=self.test_dir,
+                    ),
+                ],
+            )
+
+    def test_lint_code_action_empty_output_fallback_error(self) -> None:
+        mock_reporter = self.make_mock_reporter(ConsoleReporter)
+        ctx = adapters.HookContext(
+            repo_root=self.test_dir,
+            is_agent=True,
+            reporter=mock_reporter,
+        )
+        with (
+            mock.patch("shutil.which", return_value="/bin/fx"),
+            mock.patch("agents.lib.githooks.adapters.run_cmd") as mock_cmd,
+        ):
+            mock_cmd.return_value = self.make_completed_process(
+                returncode=2, stderr=""
+            )
+            ok = adapters.lint_code_action(ctx, ["foo.py"])
             self.assertFalse(ok)
             mock_reporter.on_error.assert_called_once()
             err_msg = mock_reporter.on_error.call_args[0][0]

@@ -235,6 +235,46 @@ class BazelTargetInfosMapTest(unittest.TestCase):
         assert bar_info is not None
         self.assertFalse(bar_info.update_rust_project)
 
+    def test_extra_bazel_targets_file(self) -> None:
+        from bazel_action_utils import BazelTargetInfosMap
+
+        def entry(name: str, **extra: T.Any) -> dict[str, T.Any]:
+            return {
+                "type": "file",
+                "bazel_target": f"//src:{name}",
+                "bazel_platform_label": "//build/bazel/platforms:host",
+                "bazel_platform_config": "host",
+                "ninja_depfile": f"obj/src/{name}.d",
+                "gn_targets_manifest": "gen/gn_targets.manifest",
+                "stamp_path": f"obj/src/{name}.stamp",
+                "bazel_file": name,
+                "ninja_file": name,
+                "update_rust_project": False,
+                **extra,
+            }
+
+        target_map = BazelTargetInfosMap(
+            [
+                entry("foo", extra_bazel_targets_file="extra_targets.txt"),
+                entry("bar"),
+            ]
+        )
+
+        foo_info = target_map.get_info(
+            "//src:foo", "//build/bazel/platforms:host"
+        )
+        assert foo_info is not None
+        self.assertEqual(foo_info.extra_bazel_targets_file, "extra_targets.txt")
+
+        # The field is optional, and most actions omit it entirely.
+        bar_info = target_map.get_info(
+            "//src:bar", "//build/bazel/platforms:host"
+        )
+        assert bar_info is not None
+        self.assertIsNone(bar_info.extra_bazel_targets_file)
+
+        self.assertEqual(list(target_map.all_infos()), [foo_info, bar_info])
+
 
 if __name__ == "__main__":
     unittest.main()

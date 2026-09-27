@@ -64,6 +64,9 @@
         {
             type: "expect_failure",
             matchers: [
+                // TODO(https://fxbug.dev/564489293): Target error does not deliver EPOLLERR.
+                "EpollTest.TargetErrorDeliversEpollErr",
+
                 // TODO(https://fxbug.dev/351037863)
                 "AshmemTest.SetNameOverflow",
 
@@ -165,6 +168,10 @@
                 "PtracePokeMemory/PokeInPrivateRWXMappingTest.*/Memfd",
                 "PtracePokeMemory/PokeInPrivateRWXMappingTest.*/ReadOnlyFile",
                 "PtracePokeMemory/PokeInPrivateRWXMappingTest.*/WritableFile",
+
+                // TODO(https://fxbug.dev/555727179): Implement PTRACE_SINGLESTEP.
+                "SingleStepTest.InstructionPointerAdvances",
+                "SingleStepTest.ConsecutiveSteps",
 
                 // TODO(https://fxbug.dev/491941184)
                 "SeccompTest.BpfJaWithSourceXRejected",

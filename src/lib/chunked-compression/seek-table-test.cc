@@ -7,9 +7,9 @@
 
 #include <fbl/algorithm.h>
 #include <fbl/array.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
 #include <zxtest/zxtest.h>
 
+#include "src/lib/chunked-compression/chunked-archive.h"
 #include "test-utils.h"
 
 namespace chunked_compression {

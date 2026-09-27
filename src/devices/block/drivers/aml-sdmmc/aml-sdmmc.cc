@@ -146,6 +146,10 @@ zx::result<> AmlSdmmc::Start(fdf::DriverContext context) {
   if (metadata_offer.has_value()) {
     offers.push_back(std::move(metadata_offer.value()));
   }
+  std::optional sdio_metadata_offer = sdio_metadata_server_.CreateOffer(arena);
+  if (sdio_metadata_offer) {
+    offers.push_back(*std::move(sdio_metadata_offer));
+  }
 
   const auto args = fuchsia_driver_framework::wire::NodeAddArgs::Builder(arena)
                         .name(arena, name())
@@ -173,6 +177,10 @@ zx::result<> AmlSdmmc::InitResources(
       result.is_error()) {
     fdf::error("Failed to forward and serve metadata: {}", result);
     return result.take_error();
+  }
+  if (zx::result result = sdio_metadata_server_.ForwardAndServe(*outgoing(), dispatcher(), pdev);
+      result.is_error()) {
+    fdf::warn("Failed to forward and serve SDIO metadata: {}", result);
   }
 
   {

@@ -128,32 +128,11 @@ class LinuxVirtualUsbPowerHubTests(unittest.TestCase):
     def test_power_off_success(
         self, mock_run: mock.Mock, mock_find_bus_id: mock.Mock
     ) -> None:
-        """Test power_off success path without sudo."""
-        hub = linux_virtual_usb_hub.LinuxVirtualUsbPowerHub(use_sudo=False)
+        """Test power_off success path."""
+        hub = linux_virtual_usb_hub.LinuxVirtualUsbPowerHub()
         hub.power_off()
         mock_run.assert_called_once_with(
             cmd=["sh", "-c", "echo 0 > /sys/bus/usb/devices/1-6/authorized"]
-        )
-
-    @mock.patch.object(
-        linux_virtual_usb_hub.LinuxVirtualUsbPowerHub,
-        "_find_usb_bus_id",
-        return_value="1-6",
-    )
-    @mock.patch.object(host_shell, "run", autospec=True)
-    def test_power_off_success_with_sudo(
-        self, mock_run: mock.Mock, mock_find_bus_id: mock.Mock
-    ) -> None:
-        """Test power_off success path with sudo."""
-        hub = linux_virtual_usb_hub.LinuxVirtualUsbPowerHub(use_sudo=True)
-        hub.power_off()
-        mock_run.assert_called_once_with(
-            cmd=[
-                "sudo",
-                "sh",
-                "-c",
-                "echo 0 > /sys/bus/usb/devices/1-6/authorized",
-            ]
         )
 
     @mock.patch.object(
@@ -184,8 +163,8 @@ class LinuxVirtualUsbPowerHubTests(unittest.TestCase):
     def test_power_on_success(
         self, mock_run: mock.Mock, mock_find_bus_id: mock.Mock
     ) -> None:
-        """Test power_on success path without sudo."""
-        hub = linux_virtual_usb_hub.LinuxVirtualUsbPowerHub(use_sudo=False)
+        """Test power_on success path."""
+        hub = linux_virtual_usb_hub.LinuxVirtualUsbPowerHub()
         hub.power_on()
         mock_run.assert_called_once_with(
             cmd=["sh", "-c", "echo 1 > /sys/bus/usb/devices/1-6/authorized"]

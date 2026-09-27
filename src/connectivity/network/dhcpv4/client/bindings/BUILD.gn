@@ -73,7 +73,7 @@ fuchsia_test_component("dhcp-client-test") {
   manifest = "meta/dhcp-client-test.cml"
   deps = [
     ":dhcp_client_test",
-    "//src/connectivity/network/netstack:component-debug",
+    "//src/connectivity/network/netstack3:component-debug",
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
 }

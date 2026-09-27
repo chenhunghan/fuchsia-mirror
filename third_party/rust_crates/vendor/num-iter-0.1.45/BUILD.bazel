@@ -60,6 +60,7 @@ rust_library(
     edition = "2018",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=has_i128",
     ],
     tags = [
         "cargo-bazel",

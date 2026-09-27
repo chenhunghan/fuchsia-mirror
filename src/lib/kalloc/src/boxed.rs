@@ -469,8 +469,11 @@ mod tests {
 
     #[test]
     fn test_box_deref() {
-        let b = Box::<[u32]>::try_new_uninit_slice(1).unwrap();
+        let mut b = Box::<[u32]>::try_new_uninit_slice(1).unwrap();
+        b[0].write(0);
+        // SAFETY: The sole element is initialized, and consuming `b` transfers its unique ownership.
         let mut b = unsafe { b.assume_init() };
+        assert_eq!(b[0], 0);
         b[0] = 42;
         assert_eq!(b[0], 42);
     }
@@ -484,13 +487,18 @@ mod tests {
 
     #[test]
     fn test_box_from_raw() {
-        let b = Box::<[u32]>::try_new_uninit_slice(10).unwrap();
+        let mut b = Box::<[u32]>::try_new_uninit_slice(10).unwrap();
+        b.fill(MaybeUninit::new(0));
         let raw_ptr = Box::into_raw(b);
         let fat_ptr = raw_ptr as *mut [u32];
 
-        // Create a new box from the pointer
+        // SAFETY: Every element is initialized. `MaybeUninit<u32>` has the size and alignment of
+        // `u32`, and the cast preserves the slice length. `into_raw` consumed the sole owning box
+        // without freeing its DefaultAllocator allocation; no references remain, and this is its
+        // only reconstruction.
         let b2: Box<[u32]> = unsafe { Box::from_raw(fat_ptr) };
         assert_eq!(b2.len(), 10);
+        assert_eq!(*b2, [0; 10]);
         // b2 will free the memory on drop.
     }
 
@@ -590,10 +598,8 @@ mod tests {
     #[test]
     fn test_box_try_grow() {
         let mut b = Box::<[u32]>::try_new_uninit_slice(2).unwrap();
-        unsafe {
-            b[0].as_mut_ptr().write(10);
-            b[1].as_mut_ptr().write(20);
-        }
+        b[0].write(10);
+        b[1].write(20);
 
         Box::try_grow(&mut b, 5).unwrap();
         assert_eq!(b.len(), 5);
@@ -604,10 +610,8 @@ mod tests {
     #[test]
     fn test_box_try_shrink() {
         let mut b = Box::<[u32]>::try_new_uninit_slice(5).unwrap();
-        unsafe {
-            b[0].as_mut_ptr().write(10);
-            b[1].as_mut_ptr().write(20);
-        }
+        b[0].write(10);
+        b[1].write(20);
 
         unsafe {
             Box::try_shrink(&mut b, 2).unwrap();
@@ -622,8 +626,7 @@ mod tests {
         use core::alloc::Layout;
         let layout = Layout::new::<u32>();
         let ptr = DefaultAllocator::default().allocate(layout).unwrap();
-        let thin_ptr = unsafe { NonNull::new_unchecked(ptr.as_ptr() as *mut u8) };
-        let casted = thin_ptr.cast::<u32>();
+        let casted = ptr.cast::<u32>();
         unsafe {
             casted.as_ptr().write(42);
         }

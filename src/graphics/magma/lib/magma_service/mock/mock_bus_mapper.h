@@ -32,18 +32,28 @@ class MockBusMapping : public magma::PlatformBusMapper::BusMapping {
 
 class MockBusMapper : public magma::PlatformBusMapper {
  public:
-  MockBusMapper(uint64_t start_addr = 0x0000100000000000) : start_addr_(start_addr) {}
+  MockBusMapper(uint64_t start_addr = 0x0000100000000000, uint64_t end_addr = 0xFFFFFFFFFFFFFFFF)
+      : start_addr_(start_addr), end_addr_(end_addr) {}
 
   std::unique_ptr<magma::PlatformBusMapper::BusMapping> MapPageRangeBus(
       magma::PlatformBuffer* buffer, uint64_t start_page_index, uint64_t page_count) override {
     // Prevent mapping unreasonably large numbers of pages.
     const uint32_t page_size = magma::page_size();
-    if (page_count > (1ul << 33) / page_size)
+    if (page_count > (1ul << 33) / page_size) {
       return nullptr;
+    }
+
+    if (start_addr_ > end_addr_) {
+      return nullptr;
+    }
+
     auto mapping = std::make_unique<MockBusMapping>(start_page_index, page_count);
     for (auto& addr : mapping->page_addr_) {
       addr = start_addr_;
       start_addr_ += page_size;
+      if (start_addr_ > end_addr_) {
+        return nullptr;
+      }
     }
     return mapping;
   }
@@ -57,6 +67,7 @@ class MockBusMapper : public magma::PlatformBusMapper {
 
  private:
   uint64_t start_addr_;
+  uint64_t end_addr_;
 };
 
 // A Mock Bus mapper that tries to always map the same location in a buffer to

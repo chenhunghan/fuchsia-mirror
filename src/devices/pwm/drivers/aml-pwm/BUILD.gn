@@ -28,9 +28,6 @@ fuchsia_cc_driver("aml-pwm-driver") {
     ":common",
     "//src/devices/lib/driver:driver_runtime",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_driver_component("aml-pwm") {
@@ -61,9 +58,6 @@ test("aml-pwm-test-bin") {
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 source_set("common") {

@@ -5,7 +5,6 @@
 //! A shareable fake bindings context.
 
 use alloc::vec::Vec;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 
 use crate::sync::DynDebugReferences;
@@ -143,9 +142,9 @@ impl<Id, Event: Debug, State, FrameMeta> EventContext<Event>
 impl<Id, Event: Debug, State, FrameMeta> ReferenceNotifiers
     for FakeBindingsCtx<Id, Event, State, FrameMeta>
 {
-    type ReferenceReceiver<T: 'static> = Never;
+    type ReferenceReceiver<T: 'static> = !;
 
-    type ReferenceNotifier<T: Send + 'static> = Never;
+    type ReferenceNotifier<T: Send + 'static> = !;
 
     fn new_reference_notifier<T: Send + 'static>(
         debug_references: DynDebugReferences,
@@ -193,5 +192,5 @@ impl<TimerId: Debug, Event: Debug, State, FrameMeta> MatcherBindingsTypes
     for FakeBindingsCtx<TimerId, Event, State, FrameMeta>
 {
     type DeviceClass = ();
-    type BindingsPacketMatcher = Never;
+    type BindingsPacketMatcher = !;
 }

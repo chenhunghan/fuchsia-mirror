@@ -48,9 +48,9 @@ pub(crate) struct RingAllocator {
     // Tracks the last read index evaluated for reclamation so we don't scan slots twice.
     last_reclaimed_read_index: u64,
 
-    // Stores a snapshot of `allocated_bytes` for each slot index. When slots are reclaimed, this is
-    // read to release the unused allocations and advance `freed_bytes` to the reclaim target.
-    reclaim_targets: Box<[Option<u64>]>,
+    // Tracks the bytes allocated for each slot index. When slots are reclaimed, this is added to
+    // `freed_bytes` to release the allocation.
+    slot_allocations: Box<[u64]>,
 }
 
 impl RingAllocator {
@@ -73,7 +73,7 @@ impl RingAllocator {
             allocated_bytes: 0,
             freed_bytes: 0,
             last_reclaimed_read_index: 0,
-            reclaim_targets: vec![None; queue_capacity].into_boxed_slice(),
+            slot_allocations: vec![0; queue_capacity].into_boxed_slice(),
         }
     }
 
@@ -112,16 +112,24 @@ impl RingAllocator {
         }
     }
 
-    // Informs the allocator that the most recent allocation has been successfully queued. Link this
-    // allocation to a slot index for later reclamation.
-    pub(crate) fn commit_allocation_to_slot(&mut self, slot_index: u64, _token: AllocationToken) {
+    // Informs the allocator that the most recent allocation has been successfully queued.
+    // Associates the token's allocated byte count with `slot_index` so those bytes are freed when
+    // the receiver consumes the slot.
+    pub(crate) fn commit_allocation_to_slot(&mut self, slot_index: u64, token: AllocationToken) {
         let index = (slot_index % self.queue_capacity) as usize;
-        self.reclaim_targets[index] = Some(self.allocated_bytes);
+        self.slot_allocations[index] = token.bytes_added();
     }
 
     // Cancel the uncommitted allocation.
     pub(crate) fn cancel_allocation(&mut self, token: AllocationToken) {
         self.allocated_bytes -= token.bytes_added();
+        // If all previously committed allocations have already been reclaimed, the logical buffer
+        // is empty. Reset both counters back to 0 to promote reuse of memory at the start of the
+        // VMO.
+        if self.allocated_bytes == self.freed_bytes {
+            self.allocated_bytes = 0;
+            self.freed_bytes = 0;
+        }
     }
 
     // Frees memory associated with messages that the receiver has finished processing.
@@ -130,17 +138,12 @@ impl RingAllocator {
     pub(crate) fn reclaim_consumed_slots(&mut self, new_read_index: u64) {
         for i in self.last_reclaimed_read_index..new_read_index {
             let slot = (i % self.queue_capacity) as usize;
-
-            if let Some(target) = self.reclaim_targets[slot].take() {
-                if target > self.freed_bytes {
-                    self.freed_bytes = target;
-                }
-            }
+            self.freed_bytes += std::mem::take(&mut self.slot_allocations[slot]);
         }
         self.last_reclaimed_read_index = new_read_index;
 
-        // If the receiver has consumed all outstanding messages, the logical buffer is empty.
-        // Reset both pointers back to 0 to promote reuse of memory already in the cache.
+        // If the receiver has consumed all outstanding payload allocations, the logical buffer is
+        // empty. Reset both counters back to 0 to promote reuse of memory at the start of the VMO.
         if self.allocated_bytes == self.freed_bytes {
             self.allocated_bytes = 0;
             self.freed_bytes = 0;
@@ -214,6 +217,47 @@ mod tests {
         assert_eq!(active_bytes(&allocator), 64);
 
         allocator.reclaim_consumed_slots(2);
+        assert_eq!(active_bytes(&allocator), 0);
+    }
+
+    #[test]
+    fn test_zero_size_allocation_after_nonzero_reclaim() {
+        let mut allocator = RingAllocator::new(65536, 16, 4096);
+        let mut read_index = 0;
+
+        // Slot 0 allocates 8192 bytes.
+        let t0 = allocator.allocate(8192).unwrap();
+        assert_eq!(t0.bytes_added(), 8192);
+        allocator.commit_allocation_to_slot(0, t0);
+
+        // Slot 1 allocates 0 bytes.
+        let t1 = allocator.allocate(0).unwrap();
+        assert_eq!(t1.bytes_added(), 0);
+        allocator.commit_allocation_to_slot(1, t1);
+
+        // Consume slot 0 while slot 1 remains in the queue.
+        read_index += 1;
+        allocator.reclaim_consumed_slots(read_index);
+        assert_eq!(active_bytes(&allocator), 0);
+
+        // Slot 2 allocates 4096 bytes.
+        let t2 = allocator.allocate(4096).unwrap();
+        assert_eq!(t2.bytes_added(), 4096);
+        allocator.commit_allocation_to_slot(2, t2);
+
+        // Consume slot 1 (0 bytes); slot 2 (4096 bytes) remains active.
+        read_index += 1;
+        allocator.reclaim_consumed_slots(read_index);
+        assert_eq!(active_bytes(&allocator), 4096);
+
+        // Slot 3 allocates 4096 bytes (slots 2 and 3 are now active).
+        let t3 = allocator.allocate(4096).unwrap();
+        allocator.commit_allocation_to_slot(3, t3);
+        assert_eq!(active_bytes(&allocator), 8192);
+
+        // Consume slots 2 and 3.
+        read_index += 2;
+        allocator.reclaim_consumed_slots(read_index);
         assert_eq!(active_bytes(&allocator), 0);
     }
 }

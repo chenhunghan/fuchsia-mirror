@@ -312,7 +312,7 @@ mod tests {
         .await?;
 
         // No events were received because neither interaction was granted nor denied.
-        assert!(internal_receiver.try_next().is_err());
+        assert!(internal_receiver.try_recv().is_err());
 
         // Grant one interaction and deny the other.
         let touch_stream = handle_touch_source_watch_requests(
@@ -345,7 +345,7 @@ mod tests {
         );
 
         // No more events are currently available.
-        assert!(internal_receiver.try_next().is_err());
+        assert!(internal_receiver.try_recv().is_err());
 
         // Receive more events from the touch source.
         let _touch_stream = handle_touch_source_watch_requests(

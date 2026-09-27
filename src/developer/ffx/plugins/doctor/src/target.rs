@@ -6,20 +6,20 @@ use crate::ShowToolWrapper;
 use crate::doctor_ledger::{LedgerMode, LedgerNode, LedgerNodeGuard, LedgerOutcome};
 use crate::single_target_diagnostics::run_single_target_diagnostics;
 use anyhow::Result;
+use discovery::{TargetHandle, TargetState};
 use ffx_config::EnvironmentContext;
 use ffx_target::TargetInfoQuery;
-use fidl_fuchsia_developer_ffx::{TargetInfo, TargetState};
 use std::io::Write;
 use std::time::Duration;
 use timeout::timeout;
 
-pub fn target_name(target: &TargetInfo) -> String {
-    target.nodename.clone().unwrap_or_else(|| ffx_target::UNKNOWN_TARGET_NAME.to_string())
+pub fn target_name(target: &TargetHandle) -> String {
+    target.node_name.clone().unwrap_or_else(|| ffx_target::UNKNOWN_TARGET_NAME.to_string())
 }
 
 pub async fn check_single_target_locally<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
-    target: &TargetInfo,
+    target: &TargetHandle,
     env_context: &EnvironmentContext,
     show_tool: Option<&mut ShowToolWrapper>,
     retry_delay: Duration,
@@ -48,20 +48,11 @@ pub async fn check_single_target_locally<W: Write>(
 
 pub async fn check_identify_host<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
-    target: &TargetInfo,
+    target: &TargetHandle,
     env_context: &EnvironmentContext,
     retry_delay: Duration,
 ) -> bool {
-    let handle = match discovery::TargetHandle::try_from(target.clone()) {
-        Ok(h) => h,
-        Err(e) => {
-            ledger
-                .add_node(&format!("Error while communicating with RCS: {e}"), LedgerMode::Verbose)
-                .set_outcome(LedgerOutcome::Failure);
-            return true;
-        }
-    };
-    let resolution = match ffx_target::Resolution::from_target_handle(handle) {
+    let resolution = match ffx_target::Resolution::from_target_handle(target.clone()) {
         Ok(r) => r,
         Err(e) => {
             ledger
@@ -108,7 +99,7 @@ pub fn make_ssh_fix_suggestion(ssh_log: &str) -> Option<&'static str> {
 
 pub async fn run_target_diagnostics<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
-    target: &TargetInfo,
+    target: &TargetHandle,
     env_context: &EnvironmentContext,
     retry_delay: Duration,
 ) {
@@ -131,13 +122,13 @@ pub async fn run_target_diagnostics<W: Write>(
 
 pub async fn show_target<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
-    target: &TargetInfo,
+    target: &TargetHandle,
     show_tool: Option<&mut ShowToolWrapper>,
 ) {
     if let Some(show_tool) = show_tool {
         let mut node =
             ledger.add_node("Running `ffx target show` against device", LedgerMode::Automatic);
-        match show_tool.allocate(target.nodename.clone()).await {
+        match show_tool.allocate(target.node_name.clone()).await {
             Ok(_) => {
                 node.add(LedgerNode::new(
                     "Allocating proxies for `target show`".to_string(),
@@ -187,24 +178,20 @@ pub async fn show_target<W: Write>(
 
 pub fn check_product_state<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
-    target: &TargetInfo,
+    target: &TargetHandle,
 ) -> bool {
-    match target.target_state {
-        None => false,
-        Some(TargetState::Unknown | TargetState::Disconnected | TargetState::Product) => false,
-        Some(TargetState::Fastboot) => {
+    match &target.state {
+        TargetState::Unknown | TargetState::Product { .. } => false,
+        TargetState::Fastboot(fts) => {
             ledger
                 .add_node(
-                    &format!(
-                        "Target found in fastboot mode: {}",
-                        target.serial_number.as_deref().unwrap_or("UNKNOWN serial number")
-                    ),
+                    &format!("Target found in fastboot mode: {}", fts.serial_number),
                     LedgerMode::Automatic,
                 )
                 .set_outcome(LedgerOutcome::Success);
             true
         }
-        Some(TargetState::Zedboot) => {
+        TargetState::Zedboot => {
             ledger
                 .add_node(
                     &format!("Skipping target in zedboot: {}", target_name(target)),
@@ -249,8 +236,8 @@ pub async fn check_targets_locally<W: Write>(
 
 pub fn check_target_discovery<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
-    targets_result: Result<Vec<TargetInfo>>,
-) -> Vec<TargetInfo> {
+    targets_result: Result<Vec<TargetHandle>>,
+) -> Vec<TargetHandle> {
     match targets_result {
         Ok(targets) => {
             if !targets.is_empty() {
@@ -277,9 +264,8 @@ pub fn check_target_discovery<W: Write>(
 pub async fn find_targets_locally(
     env_context: &EnvironmentContext,
     query: TargetInfoQuery,
-) -> Result<Vec<TargetInfo>> {
-    let targets = ffx_target::get_discovered_targets(query, true, true, env_context).await?;
-    Ok(targets.into_iter().map(|t| TargetInfo::from(t)).collect::<Vec<TargetInfo>>())
+) -> Result<Vec<TargetHandle>> {
+    ffx_target::get_discovered_targets(query, true, true, env_context).await.map_err(Into::into)
 }
 
 #[cfg(test)]

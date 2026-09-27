@@ -164,6 +164,29 @@ unsafe extern "C" {
         handle_value: zx_types::zx_handle_t,
     ) -> *mut core::ffi::c_void;
 
+    /// Returns the KOID of the handle table for the given process.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher`.
+    pub fn cpp_process_dispatcher_handle_table_koid(
+        process: *const ProcessDispatcher,
+    ) -> zx_types::zx_koid_t;
+
+    /// Looks up a dispatcher of `expected_type` with `rights` in `process`'s handle table.
+    ///
+    /// # Safety
+    ///
+    /// `process` must point to a valid `ProcessDispatcher` and `out_dispatcher` must point to
+    /// valid uninitialized memory for a `fbl::RefPtr<Dispatcher>`.
+    pub fn cpp_process_dispatcher_get_dispatcher_with_rights(
+        process: *const ProcessDispatcher,
+        handle_value: HandleValue,
+        expected_type: zx_types::zx_obj_type_t,
+        rights: zx_rights_t,
+        out_dispatcher: *mut fbl::RefPtr<Dispatcher>,
+    ) -> zx_status_t;
+
     /// Retrieves process info from C++.
     ///
     /// # Safety

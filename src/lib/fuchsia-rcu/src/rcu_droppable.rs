@@ -147,6 +147,8 @@ unsafe impl<T: RcuDroppable + Sync> RcuDroppable for crate::RcuArc<T> {}
 unsafe impl<T: ?Sized + RcuDroppable> RcuDroppable for fuchsia_sync::Mutex<T> {}
 // SAFETY: RwLock drops its inner value T, which is RcuDroppable.
 unsafe impl<T: ?Sized + RcuDroppable> RcuDroppable for fuchsia_sync::RwLock<T> {}
+// SAFETY: Completion does not have custom drop logic and does not block on drop.
+unsafe impl RcuDroppable for fuchsia_sync::Completion {}
 
 // SAFETY: Dropping `zx::Clock` closes the underlying Zircon kernel handle, which is
 // non-blocking and has no thread affinity. The timeline parameters `T` and `U` are
@@ -213,6 +215,7 @@ mod tests {
         assert_rcu_droppable::<TestEnum<u64>>();
         assert_rcu_droppable::<ComplexStruct>();
         assert_rcu_droppable::<bstr::BString>();
+        assert_rcu_droppable::<fuchsia_sync::Completion>();
         assert_rcu_droppable::<futures::channel::mpsc::UnboundedSender<u32>>();
     }
 }

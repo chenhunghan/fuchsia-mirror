@@ -15,7 +15,7 @@ use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use net_declare::{fidl_mac, fidl_subnet, net_ip_v4, net_ip_v6, net_mac, std_socket_addr};
 use netemul::RealmUdpSocket as _;
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, TestSandboxExt as _, constants,
+    KnownServiceProvider, Netstack, Netstack3, TestSandboxExt as _, constants,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, get_component_moniker,
@@ -36,12 +36,12 @@ use std::pin::pin;
 use test_case::test_case;
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn log_packets<N: Netstack>(name: &str) {
+async fn log_packets(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     // Modify debug netstack args so that it does not log packets.
     let (realm, stack_log) = {
-        let mut netstack = fnetemul::ChildDef::from(&KnownServiceProvider::Netstack(N::VERSION));
+        let mut netstack =
+            fnetemul::ChildDef::from(&KnownServiceProvider::Netstack(Netstack3::VERSION));
         let fnetemul::ChildDef { program_args, .. } = &mut netstack;
         if let Some(program_args) = program_args {
             program_args.retain(|arg| arg != "--log-packets");
@@ -93,10 +93,9 @@ async fn log_packets<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn disable_interface_loopback<N: Netstack>(name: &str) {
+async fn disable_interface_loopback(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let interface_state = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
@@ -164,14 +163,13 @@ async fn disable_interface_loopback<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn reject_multicast_mac_address<N: Netstack>(name: &str) {
+async fn reject_multicast_mac_address(name: &str) {
     const BAD_MAC_ADDRESS: net_types::ethernet::Mac = net_mac!("CF:AA:BB:CC:DD:EE");
     assert_eq!(net_types::UnicastAddr::new(BAD_MAC_ADDRESS), None);
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let net = sandbox.create_network("net").await.expect("created network");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let result = realm
         .join_network_with(
             &net,
@@ -230,7 +228,6 @@ fn test_forwarding_v6(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     "v4_none_forward_icmp_v4",
     test_forwarding_v4(
@@ -291,7 +288,7 @@ fn test_forwarding_v6(
         Some(ForwardingConfiguration::Iface2Only(fidl_fuchsia_net::IpVersion::V6)),
         false,
     ); "v6_iface2_forward_v6_icmp_v6")]
-async fn test_forwarding<I: IpExt + IcmpIpExt, N: Netstack>(
+async fn test_forwarding<I: IpExt + IcmpIpExt>(
     test_name: &str,
     sub_test_name: &str,
     test_case: ForwardingTestCase<I>,
@@ -317,7 +314,7 @@ async fn test_forwarding<I: IpExt + IcmpIpExt, N: Netstack>(
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let sandbox = &sandbox;
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let realm = &realm;
 
     let net_ep_iface = |net_num: u8, addr: fidl_fuchsia_net::Subnet| async move {

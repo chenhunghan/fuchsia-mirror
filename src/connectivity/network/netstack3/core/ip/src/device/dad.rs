@@ -4,7 +4,6 @@
 
 //! Duplicate Address Detection.
 
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::mem;
 use core::num::{NonZero, NonZeroU16};
@@ -164,7 +163,7 @@ impl DadIpExt for Ipv6 {
     type ReceivedPacketData<'a> = Option<NdpNonce<&'a [u8]>>;
     type TentativeState = Ipv6TentativeDadState;
     // Dad for IPv6 addresses does not have an announcing period.
-    type AnnouncingState = Never;
+    type AnnouncingState = !;
     type IncomingPacketResultMeta = Ipv6PacketResultMetadata;
     type RetransmitTimerData = NonZeroDuration;
 

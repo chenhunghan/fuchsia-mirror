@@ -201,19 +201,13 @@ async fn download_trace(
         peeked += n;
     }
 
+    let mut reader = io::Cursor::new(magic[..peeked].to_vec()).chain(progress_reader);
+
     let result = if peeked == 4 && u32::from_le_bytes(magic) == ZSTD_MAGIC_NUMBER {
         log::info!("Detected Zstd compression. Decompressing on the fly.");
-        // Add the prefix in front of the stream, and decompress.
-        decompress_zstd(io::Cursor::new(magic).chain(progress_reader), &mut output).await
+        decompress_zstd(&mut reader, &mut output).await
     } else {
-        // Not Zstd or too short, write what we read and copy the rest
-        if peeked > 0 {
-            use futures::AsyncWriteExt;
-            AsyncWriteExt::write_all(&mut output, &magic[..peeked])
-                .await
-                .map_err(|e| bug!("Write error: {e}"))?;
-        }
-        io::copy(&mut progress_reader, &mut output).await
+        io::copy(&mut reader, &mut output).await
     };
 
     if let Ok(bytes) = &result {
@@ -375,5 +369,16 @@ mod tests {
         let bytes_written = decompress_zstd(reader, &mut output).await.unwrap();
         assert_eq!(bytes_written, 150_000);
         assert_eq!(output.len(), 150_000);
+    }
+
+    #[fuchsia::test]
+    async fn test_uncompressed_stream_passthrough() {
+        let original_data = b"Uncompressed data stream to be passed through without compression.";
+        let mut reader = Cursor::new(original_data);
+        let mut output = Vec::new();
+
+        let bytes_written = futures::io::copy(&mut reader, &mut output).await.unwrap();
+        assert_eq!(bytes_written, original_data.len() as u64);
+        assert_eq!(output, original_data);
     }
 }

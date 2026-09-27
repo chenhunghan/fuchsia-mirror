@@ -15,6 +15,7 @@
 #include <lib/trace/event.h>
 #include <threads.h>
 
+#include <atomic>
 #include <optional>
 #include <queue>
 
@@ -96,6 +97,7 @@ class CodecAdapterSW : public CodecAdapter {
       return;
     }
     std::vector<CodecPacket*> all_packets;
+    all_packets.reserve(packets.size());
     for (auto& packet : packets) {
       all_packets.push_back(packet.get());
     }
@@ -106,6 +108,10 @@ class CodecAdapterSW : public CodecAdapter {
   }
 
   void CoreCodecStartStream() override {
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      stream_active_ = true;
+    }
     // It's ok for RecycleInputPacket to make a packet free anywhere in this
     // sequence. Nothing else ought to be happening during CoreCodecStartStream
     // (in this or any other thread).
@@ -133,7 +139,7 @@ class CodecAdapterSW : public CodecAdapter {
     input_queue_.Push(CodecInputItem::FormatDetails(per_stream_override_format_details));
   }
 
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override {
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override {
     TRACE_INSTANT("codec_runner", "Media:PacketReceived", TRACE_SCOPE_THREAD);
     input_queue_.Push(CodecInputItem::Packet(packet));
   }
@@ -143,6 +149,12 @@ class CodecAdapterSW : public CodecAdapter {
   }
 
   void CoreCodecStopStream() override {
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      stream_active_ = false;
+      output_reconfig_pending_ = false;
+      reconfig_cond_.notify_all();
+    }
     input_queue_.StopAllWaits();
     free_output_packets_.StopAllWaits();
     output_buffer_pool_.StopAllWaits();
@@ -155,7 +167,6 @@ class CodecAdapterSW : public CodecAdapter {
       CodecInputItem input_item = std::move(queued_input_items.front());
       queued_input_items.pop();
       if (input_item.is_packet()) {
-        input_item.packet()->SetBuffer(nullptr);
         events_->onCoreCodecInputPacketDone(input_item.packet());
       }
     }
@@ -218,7 +229,14 @@ class CodecAdapterSW : public CodecAdapter {
     // Nothing to do here.
   }
 
-  void CoreCodecMidStreamOutputBufferReConfigFinish() override { LoadStagedOutputBuffers(); }
+  void CoreCodecMidStreamOutputBufferReConfigFinish() override {
+    LoadStagedOutputBuffers();
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      output_reconfig_pending_ = false;
+      reconfig_cond_.notify_all();
+    }
+  }
 
   std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
       uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
@@ -316,6 +334,10 @@ class CodecAdapterSW : public CodecAdapter {
 
   async::Loop input_processing_loop_;
   thrd_t input_processing_thread_;
+
+  bool output_reconfig_pending_ FXL_GUARDED_BY(lock_) = false;
+  bool stream_active_ FXL_GUARDED_BY(lock_) = false;
+  std::condition_variable reconfig_cond_;
 };
 
 #endif  // SRC_MEDIA_CODEC_CODECS_SW_CODEC_ADAPTER_SW_H_

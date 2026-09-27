@@ -63,6 +63,15 @@ rust_library(
     edition = "2021",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=has_copysign",
+        "--cfg=has_div_euclid",
+        "--cfg=has_float_to_from_bytes",
+        "--cfg=has_int_to_from_bytes",
+        "--cfg=has_is_subnormal",
+        "--cfg=has_leading_trailing_ones",
+        "--cfg=has_reverse_bits",
+        "--cfg=has_to_int_unchecked",
+        "--cfg=has_total_cmp",
     ],
     tags = [
         "cargo-bazel",

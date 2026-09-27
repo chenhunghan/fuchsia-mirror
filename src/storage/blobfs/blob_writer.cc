@@ -833,6 +833,7 @@ zx::result<> Blob::Writer::ParseDeliveryBlob() {
   if (data_size_ != expected_data_size) {
     FX_LOGS(ERROR) << "Delivery blob length mismatch: actual = " << data_size_
                    << ", expected = " << expected_data_size;
+    return zx::error(ZX_ERR_IO_DATA_INTEGRITY);
   }
 
   header_complete_ = true;

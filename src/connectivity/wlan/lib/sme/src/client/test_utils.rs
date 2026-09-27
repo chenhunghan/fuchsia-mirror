@@ -134,12 +134,7 @@ pub fn expect_stream_empty<T: std::fmt::Debug>(
     stream: &mut mpsc::UnboundedReceiver<T>,
     error_msg: &str,
 ) {
-    assert_matches!(
-        stream.try_next(),
-        Ok(None) | Err(..),
-        "error, receiver not empty: {}",
-        error_msg
-    );
+    assert_matches!(stream.try_recv(), Err(..), "error, receiver not empty: {}", error_msg);
 }
 
 fn mock_supplicant(auth_cfg: auth::Config) -> (MockSupplicant, MockSupplicantController) {

@@ -54,8 +54,6 @@ cases are handled. There are a couple techniques that make this possible:
 
 Putting these together, we get something like the following:
 ```
-use core::convert::Infallible as Never;
-
 trait StateContext<I: IpExt> {
    type DualStackContext: DualStackStateContext<I>;
    type SingleStackContext: SingleStackStateContext<I>;
@@ -67,7 +65,7 @@ trait DualStackStateContext<I: IpExt> { /* ... */ }
 trait SingleStackStateContext<I: IpExt> { /* ... */ }
 
 impl StateContext<Ipv4> for &SyncCtx {
-   type DualStackContext = Never; // uninstantiable
+   type DualStackContext = !; // uninstantiable
    type SingleStackContext = Self;
    fn dual_stack_context(&mut self)
       -> Either<&mut Self::DualStackContext, &mut Self::SingleStackContext> {
@@ -77,7 +75,7 @@ impl StateContext<Ipv4> for &SyncCtx {
 
 impl StateContext<Ipv6> for &SyncCtx {
    type DualStackContext = Self;
-   type SingleStackContext = Never; // uninstantiable
+   type SingleStackContext = !; // uninstantiable
    fn dual_stack_context(&mut self)
       -> Either<&mut Self::DualStackContext, &mut Self::SingleStackContext> {
          Either::Left(self)
@@ -89,8 +87,8 @@ impl DualStackStateContext<Ipv6> for &SyncCtx { /* ... */ }
 impl SingleStackStateContext<Ipv4> for &SyncCtx { /* ... */ }
 
 // Implementations on uninstantiable types with unreachable method impls.
-impl<I: IpExt> DualStackStateContext<I> for Never { /* ... */ }
-impl<I: IpExt> SingleStackStateContext<I> for Never { /* ... */ }
+impl<I: IpExt> DualStackStateContext<I> for ! { /* ... */ }
+impl<I: IpExt> SingleStackStateContext<I> for ! { /* ... */ }
 ```
 
 ## Holding dual-stack state
@@ -166,5 +164,4 @@ impl SingleStackContext<Ipv4> for &SyncCtx {
 
 [IPv4-mapped IPv6]: https://en.wikipedia.org/wiki/IPv6#IPv4-mapped_IPv6_addresses
 [RFC 3493]: https://datatracker.ietf.org/doc/html/rfc3493
-[`core::convert::Infallible`]: https://doc.rust-lang.org/std/convert/enum.Infallible.html
 [UnreachableExt]: https://fuchsia-docs.firebaseapp.com/rust/explicit/trait.UnreachableExt.html

@@ -90,10 +90,10 @@ pub struct TypedPathBuf<P: PathTypeMarker> {
     _marker: PhantomData<P>,
 }
 
-fn path_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-    let mut schema: schemars::schema::SchemaObject = <String>::json_schema(generator).into();
-    schema.format = Some("Utf8PathBuf".to_owned());
-    schema.into()
+fn path_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <String>::json_schema(generator);
+    schema.insert("format".to_owned(), "Utf8PathBuf".into());
+    schema
 }
 
 /// This derefs into the typed version of utf8 path, not utf8 path itself, so

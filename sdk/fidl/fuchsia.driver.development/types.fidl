@@ -108,6 +108,62 @@ type ThreadInfo = table {
     3: scheduler_role string:MAX;
 };
 
+/// The lifecycle state of a dispatcher.
+@available(added=HEAD)
+type DispatcherState = flexible enum {
+    RUNNING = 1;
+    SHUTTING_DOWN = 2;
+    SHUTDOWN = 3;
+    DESTROYED = 4;
+};
+
+/// Breakdown of reasons why requests were not inlined by the driver runtime.
+@available(added=HEAD)
+type NonInlinedRequestStats = table {
+    /// Calling from a non-blocking to a blocking (`ALLOW_SYNC_CALLS`) dispatcher.
+    1: allow_sync_calls uint64;
+    /// Another thread was already dispatching a request.
+    2: parallel_dispatch uint64;
+    /// The request was a task.
+    3: task uint64;
+    /// The request was queued from an unknown thread.
+    4: unknown_thread uint64;
+    /// The request would have been reentrant.
+    5: reentrant uint64;
+    /// Channel wait was not yet registered when the message was received.
+    6: channel_wait_not_yet_registered uint64;
+    /// Called into a dispatcher that wasn't allowed to migrate threads.
+    7: no_thread_migration uint64;
+};
+
+/// Request and inlining statistics for a dispatcher.
+@available(added=HEAD)
+type DispatcherDebugStats = table {
+    /// Total number of requests processed by this dispatcher.
+    1: num_total_requests uint64;
+    /// Number of requests that were inlined.
+    2: num_inlined_requests uint64;
+    /// Breakdown of reasons why requests were not inlined.
+    3: non_inlined NonInlinedRequestStats;
+};
+
+/// Diagnostic information for a task queued on a dispatcher.
+@available(added=HEAD)
+type QueuedTaskInfo = table {
+    /// Address of the queued `async_task_t`.
+    1: ptr uint64;
+    /// Address of the task handler function.
+    2: handler uint64;
+    /// Address of the dispatcher that queued this task, if queued from a runtime thread.
+    3: initiating_dispatcher uint64;
+    /// Name of the dispatcher that queued this task, if known.
+    4: initiating_dispatcher_name string:MAX;
+    /// Address of the driver that queued this task, if queued from a runtime thread.
+    5: initiating_driver uint64;
+    /// URL of the driver that queued this task, if known.
+    6: initiating_driver_url fuchsia.url.Url;
+};
+
 /// Contains information for a dispatcher.
 @available(added=27)
 type DispatcherInfo = table {
@@ -122,6 +178,46 @@ type DispatcherInfo = table {
 
     /// The scheduler role of the dispatcher.
     4: scheduler_role string:MAX;
+
+    /// Address of the dispatcher in the driver host process.
+    @available(added=HEAD)
+    5: dispatcher_ptr uint64;
+
+    /// Address of the driver owner in the driver host process.
+    @available(added=HEAD)
+    6: driver_ptr uint64;
+
+    /// Whether the dispatcher is synchronized.
+    @available(added=HEAD)
+    7: synchronized bool;
+
+    /// Whether the dispatcher allows blocking synchronous calls.
+    @available(added=HEAD)
+    8: allow_sync_calls bool;
+
+    /// Current lifecycle state of the dispatcher.
+    @available(added=HEAD)
+    9: state DispatcherState;
+
+    /// Name of the dispatcher that initiated destruction, if `Destroy` was called.
+    @available(added=HEAD)
+    10: destroy_context string:MAX;
+
+    /// Whether `Destroy` was user-initiated (`true`) or environment-initiated (`false`).
+    @available(added=HEAD)
+    11: destroy_user_initiated bool;
+
+    /// Request and inlining statistics for the dispatcher.
+    @available(added=HEAD)
+    12: debug_stats DispatcherDebugStats;
+
+    /// Currently queued tasks on the dispatcher.
+    @available(added=HEAD)
+    13: queued_tasks vector<QueuedTaskInfo>:MAX;
+
+    /// Total number of queued tasks on the dispatcher prior to any truncation.
+    @available(added=HEAD)
+    14: num_queued_tasks uint64;
 };
 
 /// Contains information for a driver host.

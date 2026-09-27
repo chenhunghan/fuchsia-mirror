@@ -158,11 +158,16 @@ int CodecAdapterFfmpegDecoder::GetBuffer(
     return avcodec_default_get_buffer2(avcodec_context, frame, flags);
   }
 
+  ZX_ASSERT(decoded_output_info.buffer_bytes_needed <= buffer->size());
+  ZX_ASSERT(decoded_output_info.buffer_bytes_needed + kFfmpegOutputFramePaddingBytes <=
+            buffer->raw_vmo_size() - buffer->vmo_offset());
+
   AVPixelFormat pix_fmt = FourccToPixelFormat(decoded_output_info.format.fourcc);
   if (pix_fmt == AV_PIX_FMT_NONE) {
     events_->onCoreCodecFailCodec("Unsupported format: %d", pix_fmt);
     return -1;
   }
+  ZX_ASSERT(frame->format == pix_fmt);
 
   AVBufferRef* buffer_ref = av_buffer_create(buffer->base(), static_cast<int>(buffer->size()),
                                              FfmpegFreeBufferCallback, this, flags);
@@ -291,8 +296,7 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
     ZX_DEBUG_ASSERT(port == kOutputPort);
     // NV12, based on min stride.
     per_packet_buffer_bytes_min = uncompressed_format.primary_line_stride_bytes *
-                                      uncompressed_format.primary_height_pixels * 3 / 2 +
-                                  kFfmpegOutputFramePaddingBytes;
+                                  uncompressed_format.primary_height_pixels * 3 / 2;
     // At least for now, don't cap the per-packet buffer size for output.  The
     // HW only cares about the portion we set up for output anyway, and the
     // client has no way to force output to occur into portions of the output
@@ -341,6 +345,7 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
     image_constraints.max_width_times_height() = 3840 * 2160;
     image_constraints.size_alignment() = {16, 16};
     image_constraints.bytes_per_row_divisor() = 16;
+    image_constraints.pad_beyond_image_size_bytes() = kFfmpegOutputFramePaddingBytes;
 
     // TODO(dustingreen): Since this is a producer that will always produce at
     // offset 0 of a physical page, we don't really care if this field is

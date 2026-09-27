@@ -4,8 +4,6 @@
 
 //! Provides an [`Error`] type for all errors observable by bindings.
 
-use std::convert::Infallible as Never;
-
 use netstack3_core::device_socket::SendFrameErrorReason;
 use netstack3_core::error::{
     LocalAddressError, NotFoundError, NotSupportedError, RemoteAddressError, SocketError,
@@ -22,7 +20,7 @@ use netstack3_core::socket::{
 use netstack3_core::{PendingDatagramSocketError, tcp, udp};
 use thiserror::Error;
 
-use crate::bindings::socket::datagram::{IcmpSendError, UdpSendError};
+use crate::bindings::socket::datagram::{IcmpSendError, SendBufferError, UdpSendError};
 use crate::bindings::util::{
     DeviceNotFoundError, MulticastMembershipConversionError, SocketAddressError,
     WrongIpVersionError,
@@ -106,6 +104,8 @@ pub(crate) enum Error {
     #[error(transparent)]
     IcmpSendError(#[from] IcmpSendError),
     #[error(transparent)]
+    SendBufferError(#[from] SendBufferError),
+    #[error(transparent)]
     WrongIpVersionError(#[from] WrongIpVersionError),
     #[error(transparent)]
     ZonedAddressError(#[from] ZonedAddressError),
@@ -120,8 +120,8 @@ impl<A: Into<Error>, B: Into<Error>> From<either::Either<A, B>> for Error {
     }
 }
 
-impl From<Never> for Error {
-    fn from(value: Never) -> Self {
+impl From<!> for Error {
+    fn from(value: !) -> Self {
         match value {}
     }
 }

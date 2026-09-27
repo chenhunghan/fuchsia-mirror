@@ -26,9 +26,15 @@ cc_test_executable("amlogic-decoder-unittest-bin") {
     "test_binding.cc",
     "test_pts_manager.cc",
     "test_vdec1.cc",
+    "test_vp9_utils.cc",
   ]
 }
 
 fuchsia_unittest_package("amlogic-decoder-unittest") {
   deps = [ ":amlogic-decoder-unittest-bin" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }

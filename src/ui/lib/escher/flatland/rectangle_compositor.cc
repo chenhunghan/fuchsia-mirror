@@ -5,12 +5,14 @@
 #include "src/ui/lib/escher/flatland/rectangle_compositor.h"
 
 #include "src/ui/lib/escher/defaults/default_shader_program_factory.h"
+#include "src/ui/lib/escher/escher.h"
 #include "src/ui/lib/escher/impl/naive_image.h"
 #include "src/ui/lib/escher/renderer/render_funcs.h"
 #include "src/ui/lib/escher/resources/resource_recycler.h"
 #include "src/ui/lib/escher/third_party/granite/vk/render_pass.h"
 #include "src/ui/lib/escher/util/image_utils.h"
 #include "src/ui/lib/escher/util/trace_macros.h"
+#include "src/ui/lib/escher/vk/impl/framebuffer.h"
 #include "src/ui/lib/escher/vk/impl/render_pass_cache.h"
 #include "src/ui/lib/escher/vk/pipeline_builder.h"
 #include "src/ui/lib/escher/vk/shader_program.h"
@@ -26,8 +28,10 @@ const vk::ImageUsageFlags RectangleCompositor::kTextureUsageFlags =
 
 namespace {
 
-static constexpr uint32_t kTransientTargetAttachmentIndex = 0;
-static constexpr uint32_t kOutputTargetAttachmentIndex = 1;
+static constexpr uint32_t kTransientTargetAttachmentIndex =
+    RectangleCompositor::kTransientTargetAttachmentIndex;
+static constexpr uint32_t kOutputTargetAttachmentIndex =
+    RectangleCompositor::kOutputTargetAttachmentIndex;
 
 // Helper function which factors out common code from the two InitRenderPassInfo() variants.
 static void InitRenderPassInfoHelper(RenderPassInfo* rp,
@@ -97,8 +101,11 @@ static void InitRenderPassInfoHelper(RenderPassInfo* rp,
 // framebuffer. Since color-conversion doesn't require knowledge of adjacent
 // pixels, subpasses are a relatively straightforward way to handle it.
 bool SetupColorConversionDualPass(RenderPassInfo* rp, vk::Rect2D render_area,
-                                  const ImagePtr& transient_image, const ImagePtr& output_image,
-                                  const TexturePtr& depth_texture) {
+                                  ImageViewPtr transient_image_view, ImageViewPtr output_image_view,
+                                  TexturePtr depth_texture) {
+  FX_DCHECK(output_image_view);
+  const auto& output_image = output_image_view->image();
+  FX_DCHECK(output_image);
   FX_DCHECK(output_image->info().sample_count == 1);
   rp->render_area = render_area;
 
@@ -110,12 +117,7 @@ bool SetupColorConversionDualPass(RenderPassInfo* rp, vk::Rect2D render_area,
                         "swapchain layout.";
       return false;
     }
-    if (output_image->swapchain_layout() != output_image->layout()) {
-      FX_LOGS(ERROR) << "SetupColorConversionDualPass(): Current layout of output image "
-                        "does not match its swapchain layout.";
-      return false;
-    }
-    transient_info.InitFromImage(transient_image);
+    transient_info.InitFromImage(transient_image_view->image());
     output_info.InitFromImage(output_image);
   }
 
@@ -123,11 +125,9 @@ bool SetupColorConversionDualPass(RenderPassInfo* rp, vk::Rect2D render_area,
 
   InitRenderPassInfoHelper(rp, transient_info, output_info, depth_stencil_info);
 
-  ImageViewPtr transient_image_view = ImageView::New(transient_image);
-  ImageViewPtr output_image_view = ImageView::New(output_image);
   rp->color_attachments[kTransientTargetAttachmentIndex] = std::move(transient_image_view);
   rp->color_attachments[kOutputTargetAttachmentIndex] = std::move(output_image_view);
-  rp->depth_stencil_attachment = depth_texture;
+  rp->depth_stencil_attachment = std::move(depth_texture);
   return true;
 }
 
@@ -264,90 +264,127 @@ RectangleCompositor::RectangleCompositor(EscherWeakPtr escher)
       color_conversion_program_(
           escher->shader_program_factory()->GetProgram(kFlatlandColorConversionProgram)) {}
 
-// DrawBatch generates the Vulkan data needed to render the batch (e.g. renderpass,
-// bounds, etc) and calls |TraverseBatch| which iterates over the renderables and
-// submits them for rendering.
+impl::FramebufferPtr RectangleCompositor::CreateFramebuffer(ImageViewPtr output_image_view,
+                                                            TexturePtr depth_texture) {
+  TRACE_DURATION("gfx", "RectangleCompositor::CreateFramebuffer");
+  FX_DCHECK(output_image_view && depth_texture);
+  RenderPassInfo render_pass_info;
+  vk::Rect2D render_area = {{0, 0}, {output_image_view->width(), output_image_view->height()}};
+
+  if (!RenderPassInfo::InitRenderPassInfo(&render_pass_info, render_area,
+                                          std::move(output_image_view), std::move(depth_texture))) {
+    FX_LOGS(ERROR) << "RectangleCompositor::CreateFramebuffer(): InitRenderPassInfo failed.";
+    return nullptr;
+  }
+
+  auto& render_pass = escher_->render_pass_cache()->ObtainRenderPass(
+      render_pass_info, /*allow_render_pass_creation=*/true);
+  if (!render_pass) {
+    FX_LOGS(ERROR) << "RectangleCompositor::CreateFramebuffer(): ObtainRenderPass failed.";
+    return nullptr;
+  }
+
+  return fxl::MakeRefCounted<impl::Framebuffer>(escher_->resource_recycler(), render_pass,
+                                                render_pass_info);
+}
+
+impl::FramebufferPtr RectangleCompositor::CreateColorConversionFramebuffer(
+    ImageViewPtr output_image_view, TexturePtr depth_texture, ImagePtr transient_image) {
+  TRACE_DURATION("gfx", "RectangleCompositor::CreateColorConversionFramebuffer");
+  FX_DCHECK(output_image_view && depth_texture);
+  RenderPassInfo render_pass_info;
+  vk::Rect2D render_area = {{0, 0}, {output_image_view->width(), output_image_view->height()}};
+
+  if (!transient_image) {
+    transient_image = CreateTransientImage(output_image_view->image());
+    if (!transient_image) {
+      FX_LOGS(ERROR) << "RectangleCompositor::CreateColorConversionFramebuffer(): "
+                        "CreateTransientImage failed.";
+      return nullptr;
+    }
+  }
+
+  auto transient_image_view = ImageView::New(std::move(transient_image));
+  if (!SetupColorConversionDualPass(&render_pass_info, render_area, std::move(transient_image_view),
+                                    std::move(output_image_view), std::move(depth_texture))) {
+    FX_LOGS(ERROR) << "RectangleCompositor::CreateColorConversionFramebuffer(): "
+                      "SetupColorConversionDualPass failed.";
+    return nullptr;
+  }
+
+  auto& render_pass = escher_->render_pass_cache()->ObtainRenderPass(
+      render_pass_info, /*allow_render_pass_creation=*/true);
+  if (!render_pass) {
+    FX_LOGS(ERROR) << "RectangleCompositor::CreateColorConversionFramebuffer(): "
+                      "ObtainRenderPass failed.";
+    return nullptr;
+  }
+
+  return fxl::MakeRefCounted<impl::Framebuffer>(escher_->resource_recycler(), render_pass,
+                                                render_pass_info);
+}
+
+ImagePtr RectangleCompositor::GetTransientImage(
+    const impl::FramebufferPtr& color_conversion_framebuffer) {
+  if (!color_conversion_framebuffer) {
+    return nullptr;
+  }
+  const auto& view = color_conversion_framebuffer->GetAttachment(kTransientTargetAttachmentIndex);
+  return view ? view->image() : nullptr;
+}
+
+bool RectangleCompositor::CanShareTransientImage(const ImagePtr& transient_image,
+                                                 const ImagePtr& target_image) {
+  if (!transient_image || !target_image) {
+    return false;
+  }
+  const auto& t_info = transient_image->info();
+  const auto& target_info = target_image->info();
+  return t_info.width == target_info.width && t_info.height == target_info.height &&
+         t_info.format == target_info.format && t_info.color_space == target_info.color_space &&
+         transient_image->use_protected_memory() == target_image->use_protected_memory();
+}
+
 void RectangleCompositor::DrawBatch(CommandBuffer* cmd_buf, std::span<const Rectangle2D> rectangles,
                                     std::span<const TexturePtr> textures,
                                     std::span<const ColorData> color_data,
-                                    const ImagePtr& output_image, const TexturePtr& depth_buffer,
-                                    bool apply_color_conversion) {
+                                    const impl::FramebufferPtr& framebuffer) {
   TRACE_DURATION("gfx", "RectangleCompositor::DrawBatch");
-  // TODO(https://fxbug.dev/42119564): Add custom clear colors. We could either pass in another
-  // parameter to this function or try to embed clear-data into the existing api. For example, one
-  // could check to see if the back rectangle is fullscreen and solid-color, in which case we can
-  // treat it as a clear instead of rendering it as a renderable.
-  FX_CHECK(cmd_buf && output_image && depth_buffer);
-
-  // Inputs need to be the same length.
+  FX_CHECK(cmd_buf && framebuffer);
   FX_CHECK(rectangles.size() == textures.size());
   FX_CHECK(rectangles.size() == color_data.size());
 
-  // Initialize the render pass.
-  RenderPassInfo render_pass;
-  vk::Rect2D render_area = {{0, 0}, {output_image->width(), output_image->height()}};
+  const auto& render_pass_info = framebuffer->render_pass_info();
+  vec3 bounds(static_cast<float>(framebuffer->width() * 0.5),
+              static_cast<float>(framebuffer->height() * 0.5), rectangles.size());
 
-  // Construct the bounds that are used in the vertex shader to convert the
-  // renderable positions into normalized device coordinates (NDC). The width
-  // and height are divided by 2 to pre-optimize the shift that happens in the
-  // shader which realigns the NDC coordinates so that (0,0) is in the center
-  // instead of in the top-left-hand corner.
-  vec3 bounds(static_cast<float>(output_image->width() * 0.5),
-              static_cast<float>(output_image->height() * 0.5), rectangles.size());
+  // Color conversion is applied iff the framebuffer was created for the dual-pass color-conversion
+  // render pass; see SetupColorConversionDualPass().  The standard render pass explicitly specifies
+  // no subpasses, allowing a single default subpass to be created for it.
+  const size_t num_subpasses = render_pass_info.subpasses.size();
+  FX_DCHECK(num_subpasses == 0 || num_subpasses == 2);
+  const bool apply_color_conversion = (num_subpasses == 2);
 
-  // If we don't have any color conversion data, stick to a single subpass.
   if (!apply_color_conversion) {
-    // Setup a standard 1-pass renderpass where we render directly into the output image.
-    if (!RenderPassInfo::InitRenderPassInfo(&render_pass, render_area, output_image,
-                                            depth_buffer)) {
-      FX_LOGS(ERROR) << "RectangleCompositor::DrawBatch(): RenderPassInfo initialization failed. "
-                        "Exiting.";
-      return;
-    }
-
-    // Start the render pass.
-    cmd_buf->BeginRenderPass(render_pass);
-
-    // Iterate over all the renderables and draw them.
+    cmd_buf->BeginRenderPass(framebuffer);
     TraverseBatch(cmd_buf, bounds, standard_program_, rectangles, textures, color_data);
-
-    // End the render pass.
     cmd_buf->EndRenderPass();
-
-  }
-  // Here we'll need to setup the dual pass system.
-  else {
-    auto transient_image = CreateOrFindTransientImage(output_image);
-
-    // Setup a 2-pass render pass where we first render into an intermediate buffer (not really:
-    // we try to use a transient buffer to avoid flushing memory from GPU caches to GPU-external
-    // memory) and then use that as an input attachment for the output pass, where we finally
-    // apply color correction.
-    if (!SetupColorConversionDualPass(&render_pass, render_area, transient_image, output_image,
-                                      depth_buffer)) {
-      FX_LOGS(ERROR) << "RectangleCompositor::DrawBatch(): RenderPassInfo initialization failed. "
-                        "Exiting.";
-      return;
-    }
-
+  } else {
+    const auto& transient_image =
+        render_pass_info.color_attachments[kTransientTargetAttachmentIndex]->image();
     if (transient_image->layout() != vk::ImageLayout::eColorAttachmentOptimal) {
       cmd_buf->impl()->TransitionImageLayout(transient_image, vk::ImageLayout::eUndefined,
                                              vk::ImageLayout::eColorAttachmentOptimal);
     }
 
-    // Start the render pass.
-    cmd_buf->BeginRenderPass(render_pass);
-
-    // Iterate over all the renderables and draw them.
+    cmd_buf->BeginRenderPass(framebuffer);
     TraverseBatch(cmd_buf, bounds, standard_program_, rectangles, textures, color_data);
-
     cmd_buf->NextSubpass();
 
     ApplyColorConversion(cmd_buf, color_conversion_program_,
-                         render_pass.color_attachments[kTransientTargetAttachmentIndex],
+                         render_pass_info.color_attachments[kTransientTargetAttachmentIndex],
                          color_conversion_params_);
 
-    // End the render pass.
     cmd_buf->EndRenderPass();
   }
 }
@@ -360,13 +397,8 @@ void RectangleCompositor::SetColorConversionParams(
 
 // TODO(https://fxbug.dev/42176127): It doesn't seem like all platforms actually support transient
 // images. So this is going to be a regular image for now.
-ImagePtr RectangleCompositor::CreateOrFindTransientImage(const ImagePtr& image) {
-  TRACE_DURATION("gfx", "RectangleCompositor::CreateOrFindTransientImage");
-  auto itr = transient_image_map_.find(image->info());
-  if (itr != transient_image_map_.end()) {
-    return itr->second;
-  }
-
+ImagePtr RectangleCompositor::CreateTransientImage(const ImagePtr& image) {
+  TRACE_DURATION("gfx", "RectangleCompositor::CreateTransientImage");
   ImageInfo info;
   info.format = image->info().format;
   info.width = image->info().width;
@@ -381,15 +413,22 @@ ImagePtr RectangleCompositor::CreateOrFindTransientImage(const ImagePtr& image) 
 
   vk::Image vk_image =
       image_utils::CreateVkImage(escher_->vk_device(), info, vk::ImageLayout::eUndefined);
+  if (!vk_image) {
+    FX_LOGS(ERROR) << "RectangleCompositor::CreateTransientImage(): CreateVkImage failed.";
+    return nullptr;
+  }
 
   auto allocator = escher_->gpu_allocator();
   auto mem_requirements = escher_->vk_device().getImageMemoryRequirements(vk_image);
   auto memory = allocator->AllocateMemory(mem_requirements, info.memory_flags);
-  auto result = impl::NaiveImage::AdoptVkImage(escher_->resource_recycler(), info, vk_image, memory,
-                                               vk::ImageLayout::eUndefined);
+  if (!memory) {
+    FX_LOGS(ERROR) << "RectangleCompositor::CreateTransientImage(): AllocateMemory failed.";
+    escher_->vk_device().destroyImage(vk_image);
+    return nullptr;
+  }
 
-  transient_image_map_[image->info()] = result;
-  return result;
+  return impl::NaiveImage::AdoptVkImage(escher_->resource_recycler(), info, vk_image, memory,
+                                        vk::ImageLayout::eUndefined);
 }
 
 // https://developer.arm.com/documentation/101897/0300/Buffers-and-textures/AFBC-textures-for-Vulkan

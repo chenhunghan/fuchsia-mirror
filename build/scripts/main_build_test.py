@@ -690,19 +690,30 @@ class BuildInvocationTest(MainBuildTestBase):
                 "projects/fuchsia-infra/instances/default_instance",
             )
 
-    def test_get_build_env_no_forward_when_matching_disk_defaults(self) -> None:
+    def test_get_build_env_unconditional_forward_even_when_matching_defaults(
+        self,
+    ) -> None:
         context = self.create_context(
-            resultstore_instance="projects/rbe-fuchsia-prod/instances/default",
-            cas_instance="projects/rbe-fuchsia-prod/instances/default",
-            rbe_instance="projects/rbe-fuchsia-prod/instances/default",
+            resultstore_instance=main_build.DEFAULT_RESULTSTORE_INSTANCE,
+            cas_instance=main_build.DEFAULT_CAS_INSTANCE,
+            rbe_instance=main_build.DEFAULT_RBE_INSTANCE,
         )
         context.env = {"USER": "fuchsia-user"}
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
             env = invocation.get_build_env()
-            self.assertNotIn("RS_rs_instance", env)
-            self.assertNotIn("RS_cas_instance", env)
-            self.assertNotIn("RBE_instance", env)
+            self.assertEqual(
+                env["RS_rs_instance"],
+                main_build.DEFAULT_RESULTSTORE_INSTANCE,
+            )
+            self.assertEqual(
+                env["RS_cas_instance"],
+                main_build.DEFAULT_CAS_INSTANCE,
+            )
+            self.assertEqual(
+                env["RBE_instance"],
+                main_build.DEFAULT_RBE_INSTANCE,
+            )
 
     def test_build_service_env_empty_defaults(self) -> None:
         context = self.create_context()

@@ -20,6 +20,11 @@ use fdf_core::shutdown_observer::ShutdownObserver;
 
 pub mod test;
 
+const FDF_DISPATCHER_STATE_RUNNING: fdf_dispatcher_state_t = 0;
+const FDF_DISPATCHER_STATE_SHUTTING_DOWN: fdf_dispatcher_state_t = 1;
+const FDF_DISPATCHER_STATE_SHUTDOWN: fdf_dispatcher_state_t = 2;
+const FDF_DISPATCHER_STATE_DESTROYED: fdf_dispatcher_state_t = 3;
+
 /// Create the dispatcher as configured by this object. This must be called from a
 /// thread managed by the driver runtime. The dispatcher returned is owned by the caller,
 /// and will initiate asynchronous shutdown when the object is dropped unless
@@ -509,6 +514,227 @@ impl Environment {
         }
     }
 
+    /// Returns structured runtime diagnostic dumps for all dispatchers currently tracked by the
+    /// driver runtime environment.
+    pub fn dump_all_dispatchers(&self) -> Vec<DispatcherDumpEntry> {
+        struct DumpEntriesGuard {
+            ptr: *mut fdf_dispatcher_dump_entry_t,
+            count: usize,
+        }
+
+        impl Drop for DumpEntriesGuard {
+            fn drop(&mut self) {
+                if !self.ptr.is_null() {
+                    // SAFETY: `self.ptr` and `self.count` were populated by a single call to
+                    // `fdf_env_get_all_dispatchers_dump`, which allocated the entry array and its
+                    // nested string/task buffers on the C++ heap and transferred exclusive
+                    // ownership to the caller. `DumpEntriesGuard` is dropped only after all temporary
+                    // slices and `CStr` borrows derived from `self.ptr` have gone out of scope, so
+                    // no dangling references can exist and the allocation is freed at most once.
+                    unsafe {
+                        fdf_env_free_all_dispatchers_dump(self.ptr, self.count);
+                    }
+                }
+            }
+        }
+
+        let mut raw_entries: *mut fdf_dispatcher_dump_entry_t = null_mut();
+        let mut count: usize = 0;
+        // SAFETY: `raw_entries` and `count` are valid, initialized, and properly aligned stack
+        // variables passed via exclusive mutable references (`&mut`). The C++ implementation of
+        // `fdf_env_get_all_dispatchers_dump` writes the newly allocated buffer pointer and element
+        // count into these out-parameters synchronously before returning and does not retain the
+        // addresses of `raw_entries` or `count`, preserving Rust's aliasing and lifetime rules.
+        unsafe {
+            fdf_env_get_all_dispatchers_dump(&mut raw_entries, &mut count);
+        }
+        let guard = DumpEntriesGuard { ptr: raw_entries, count };
+        if guard.ptr.is_null() || guard.count == 0 {
+            return Vec::new();
+        }
+        // SAFETY: We verified that `guard.ptr` is non-null and `guard.count > 0`. By the FFI
+        // contract of `fdf_env_get_all_dispatchers_dump`, `guard.ptr` points to a single
+        // contiguous heap allocation of `guard.count` initialized and properly aligned
+        // `fdf_dispatcher_dump_entry_t` values whose total byte size does not exceed `isize::MAX`.
+        // Exclusive ownership of the allocation was transferred to this function and is held by
+        // `guard` for the entire lifetime of `entries`, ensuring the memory is neither mutated nor
+        // deallocated while the immutable slice borrow is active.
+        let entries = unsafe { core::slice::from_raw_parts(guard.ptr, guard.count) };
+        let mut result = Vec::with_capacity(guard.count);
+        for entry in entries {
+            let name = if entry.name.is_null() {
+                String::new()
+            } else {
+                // SAFETY: `entry.name` was checked to be non-null. `fdf_env_get_all_dispatchers_dump`
+                // initializes `entry.name` via `CopyStringToHeap` (`malloc` + `memcpy` + NUL-terminator)
+                // from a valid string view, guaranteeing a valid, NUL-terminated sequence of bytes
+                // within a single allocation smaller than `isize::MAX`. The underlying buffer is
+                // exclusively owned by `guard` and is not mutated or freed until `guard` is dropped
+                // after this loop, and `.to_string_lossy()` immediately copies the bytes into an
+                // owned Rust `String`.
+                unsafe { ffi::CStr::from_ptr(entry.name) }.to_string_lossy().into_owned()
+            };
+            let scheduler_role = if entry.scheduler_role.is_null() {
+                String::new()
+            } else {
+                // SAFETY: `entry.scheduler_role` was checked to be non-null. By the FFI contract of
+                // `fdf_env_get_all_dispatchers_dump`, it points to a heap-allocated, NUL-terminated
+                // C string created via `CopyStringToHeap` (`malloc` + `memcpy` + NUL-terminator)
+                // with size less than `isize::MAX`. The memory is exclusively owned by `guard`,
+                // remains immutable for the duration of this borrow, and is copied into an owned
+                // `String` before `guard` is dropped.
+                unsafe { ffi::CStr::from_ptr(entry.scheduler_role) }.to_string_lossy().into_owned()
+            };
+            let destroy_context = if entry.destroy_context.is_null() {
+                String::new()
+            } else {
+                // SAFETY: `entry.destroy_context` was checked to be non-null. By the FFI contract of
+                // `fdf_env_get_all_dispatchers_dump`, it points to a heap-allocated, NUL-terminated
+                // C string created via `CopyStringToHeap` (`malloc` + `memcpy` + NUL-terminator)
+                // with size less than `isize::MAX`. The memory is exclusively owned by `guard`,
+                // remains immutable for the duration of this borrow, and is copied into an owned
+                // `String` before `guard` is dropped.
+                unsafe { ffi::CStr::from_ptr(entry.destroy_context) }.to_string_lossy().into_owned()
+            };
+            let state = match entry.state {
+                FDF_DISPATCHER_STATE_RUNNING => DispatcherState::Running,
+                FDF_DISPATCHER_STATE_SHUTTING_DOWN => DispatcherState::ShuttingDown,
+                FDF_DISPATCHER_STATE_SHUTDOWN => DispatcherState::Shutdown,
+                FDF_DISPATCHER_STATE_DESTROYED => DispatcherState::Destroyed,
+                _ => DispatcherState::Running,
+            };
+            let mut queued_tasks = Vec::with_capacity(entry.num_queued_tasks);
+            if !entry.queued_tasks.is_null() && entry.num_queued_tasks > 0 {
+                // SAFETY: We verified that `entry.queued_tasks` is non-null and
+                // `entry.num_queued_tasks > 0`. By the contract of `fdf_env_get_all_dispatchers_dump`,
+                // `entry.queued_tasks` points to a contiguous heap allocation of
+                // `entry.num_queued_tasks` initialized and properly aligned `fdf_task_debug_info_t`
+                // structs whose total byte length is at most `isize::MAX`. The memory is exclusively
+                // owned by `guard` and is not mutated or freed until `guard` is dropped after the
+                // loop finishes copying the scalar fields into `queued_tasks`.
+                let tasks = unsafe {
+                    core::slice::from_raw_parts(entry.queued_tasks, entry.num_queued_tasks)
+                };
+                for task in tasks {
+                    queued_tasks.push(QueuedTaskDebugInfo {
+                        ptr: task.ptr,
+                        handler: task.handler,
+                        initiating_dispatcher: task.initiating_dispatcher,
+                        initiating_driver: task.initiating_driver as u64,
+                    });
+                }
+            }
+            result.push(DispatcherDumpEntry {
+                driver: entry.driver as u64,
+                dispatcher_ptr: entry.dispatcher_ptr,
+                name,
+                scheduler_role,
+                options: entry.options,
+                synchronized: entry.synchronized,
+                allow_sync_calls: entry.allow_sync_calls,
+                state,
+                destroy_context,
+                destroy_user_initiated: entry
+                    .has_destroy_user_initiated
+                    .then_some(entry.destroy_user_initiated),
+                debug_stats: DispatcherDebugStats {
+                    num_total_requests: entry.debug_stats.num_total_requests,
+                    num_inlined_requests: entry.debug_stats.num_inlined_requests,
+                    non_inlined: NonInlinedStats {
+                        allow_sync_calls: entry.debug_stats.non_inlined.allow_sync_calls,
+                        parallel_dispatch: entry.debug_stats.non_inlined.parallel_dispatch,
+                        task: entry.debug_stats.non_inlined.task,
+                        unknown_thread: entry.debug_stats.non_inlined.unknown_thread,
+                        reentrant: entry.debug_stats.non_inlined.reentrant,
+                        channel_wait_not_yet_registered: entry
+                            .debug_stats
+                            .non_inlined
+                            .channel_wait_not_yet_registered,
+                        no_thread_migration: entry.debug_stats.non_inlined.no_thread_migration,
+                    },
+                },
+                queued_tasks,
+            });
+        }
+        result
+    }
+
+    /// Returns structured runtime diagnostic dumps for all threads currently spawned by the
+    /// driver runtime environment.
+    pub fn dump_all_threads(&self) -> Vec<ThreadDumpEntry> {
+        struct ThreadDumpEntriesGuard {
+            ptr: *mut fdf_thread_dump_entry_t,
+            count: usize,
+        }
+
+        impl Drop for ThreadDumpEntriesGuard {
+            fn drop(&mut self) {
+                if !self.ptr.is_null() {
+                    // SAFETY: `self.ptr` and `self.count` were populated by a single call to
+                    // `fdf_env_get_all_threads_dump`, which allocated the entry array and its
+                    // nested string buffers on the C++ heap and transferred exclusive ownership to
+                    // the caller. `ThreadDumpEntriesGuard` is dropped only after all temporary
+                    // slices and `CStr` borrows derived from `self.ptr` have gone out of scope, so
+                    // no dangling references can exist and the allocation is freed at most once.
+                    unsafe {
+                        fdf_env_free_all_threads_dump(self.ptr, self.count);
+                    }
+                }
+            }
+        }
+
+        let mut raw_entries: *mut fdf_thread_dump_entry_t = null_mut();
+        let mut count: usize = 0;
+        // SAFETY: `raw_entries` and `count` are valid, initialized, and properly aligned stack
+        // variables passed via exclusive mutable references (`&mut`). The C++ implementation of
+        // `fdf_env_get_all_threads_dump` writes the newly allocated buffer pointer and element
+        // count into these out-parameters synchronously before returning and does not retain the
+        // addresses of `raw_entries` or `count`, preserving Rust's aliasing and lifetime rules.
+        unsafe {
+            fdf_env_get_all_threads_dump(&mut raw_entries, &mut count);
+        }
+        let guard = ThreadDumpEntriesGuard { ptr: raw_entries, count };
+        if guard.ptr.is_null() || guard.count == 0 {
+            return Vec::new();
+        }
+        // SAFETY: We verified that `guard.ptr` is non-null and `guard.count > 0`. By the FFI
+        // contract of `fdf_env_get_all_threads_dump`, `guard.ptr` points to a single contiguous
+        // heap allocation of `guard.count` initialized and properly aligned
+        // `fdf_thread_dump_entry_t` values whose total byte size does not exceed `isize::MAX`.
+        // Exclusive ownership of the allocation was transferred to this function and is held by
+        // `guard` for the entire lifetime of `entries`, ensuring the memory is neither mutated nor
+        // deallocated while the immutable slice borrow is active.
+        let entries = unsafe { core::slice::from_raw_parts(guard.ptr, guard.count) };
+        let mut result = Vec::with_capacity(guard.count);
+        for entry in entries {
+            let name = if entry.name.is_null() {
+                String::new()
+            } else {
+                // SAFETY: `entry.name` was checked to be non-null. `fdf_env_get_all_threads_dump`
+                // initializes `entry.name` via `CopyStringToHeap` (`malloc` + `memcpy` + NUL-terminator)
+                // from a valid string view, guaranteeing a valid, NUL-terminated sequence of bytes
+                // within a single allocation smaller than `isize::MAX`. The underlying buffer is
+                // exclusively owned by `guard` and is not mutated or freed until `guard` is dropped
+                // after this loop, and `.to_string_lossy()` immediately copies the bytes into an
+                // owned Rust `String`.
+                unsafe { ffi::CStr::from_ptr(entry.name) }.to_string_lossy().into_owned()
+            };
+            let scheduler_role = if entry.scheduler_role.is_null() {
+                String::new()
+            } else {
+                // SAFETY: `entry.scheduler_role` was checked to be non-null. By the FFI contract of
+                // `fdf_env_get_all_threads_dump`, it points to a heap-allocated, NUL-terminated C
+                // string created via `CopyStringToHeap` (`malloc` + `memcpy` + NUL-terminator) with
+                // size less than `isize::MAX`. The memory is exclusively owned by `guard`, remains
+                // immutable for the duration of this borrow, and is copied into an owned `String`
+                // before `guard` is dropped.
+                unsafe { ffi::CStr::from_ptr(entry.scheduler_role) }.to_string_lossy().into_owned()
+            };
+            result.push(ThreadDumpEntry { koid: entry.koid, name, scheduler_role });
+        }
+        result
+    }
+
     /// Returns the current maximum number of threads which will be spawned for thread pool associated
     /// with the given scheduler role.
     ///
@@ -617,4 +843,100 @@ impl ResumeRequesterRegistration {
 
         self.requester_ptr = null_mut();
     }
+}
+
+/// The lifecycle state of a dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatcherState {
+    /// The dispatcher is running and accepting callbacks.
+    Running,
+    /// The dispatcher is currently shutting down.
+    ShuttingDown,
+    /// The dispatcher has completed shutdown.
+    Shutdown,
+    /// The dispatcher has been destroyed.
+    Destroyed,
+}
+
+/// Breakdown of reasons why requests were not inlined by the driver runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NonInlinedStats {
+    /// Calling from a non-blocking to a blocking (`ALLOW_SYNC_CALLS`) dispatcher.
+    pub allow_sync_calls: u64,
+    /// Another thread was already dispatching a request.
+    pub parallel_dispatch: u64,
+    /// The request was a task.
+    pub task: u64,
+    /// The request was queued from an unknown thread.
+    pub unknown_thread: u64,
+    /// The request would have been reentrant.
+    pub reentrant: u64,
+    /// Channel wait was not yet registered when the message was received.
+    pub channel_wait_not_yet_registered: u64,
+    /// Called into a dispatcher that wasn't allowed to migrate threads.
+    pub no_thread_migration: u64,
+}
+
+/// Request statistics for a dispatcher.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DispatcherDebugStats {
+    /// Total number of requests processed by this dispatcher.
+    pub num_total_requests: u64,
+    /// Number of requests that were inlined.
+    pub num_inlined_requests: u64,
+    /// Breakdown of reasons why requests were not inlined.
+    pub non_inlined: NonInlinedStats,
+}
+
+/// Diagnostic information for a task queued on a dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueuedTaskDebugInfo {
+    /// Address of the queued `async_task_t`.
+    pub ptr: u64,
+    /// Address of the task handler function.
+    pub handler: u64,
+    /// Address of the dispatcher that queued this task, if queued from a runtime thread.
+    pub initiating_dispatcher: u64,
+    /// Address of the driver that queued this task, if queued from a runtime thread.
+    pub initiating_driver: u64,
+}
+
+/// Structured diagnostic dump entry for a dispatcher in the driver runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatcherDumpEntry {
+    /// Address of the driver owner of this dispatcher.
+    pub driver: u64,
+    /// Address of the dispatcher object.
+    pub dispatcher_ptr: u64,
+    /// Name of the dispatcher.
+    pub name: String,
+    /// Scheduler role configured for the dispatcher.
+    pub scheduler_role: String,
+    /// Options mask the dispatcher was created with.
+    pub options: u32,
+    /// Whether the dispatcher is synchronized.
+    pub synchronized: bool,
+    /// Whether the dispatcher allows blocking synchronous calls.
+    pub allow_sync_calls: bool,
+    /// Current lifecycle state of the dispatcher.
+    pub state: DispatcherState,
+    /// Name of the dispatcher that initiated destruction, if `Destroy` was called.
+    pub destroy_context: String,
+    /// Whether `Destroy` was user-initiated (`true`) or environment-initiated (`false`).
+    pub destroy_user_initiated: Option<bool>,
+    /// Request and inlining statistics for the dispatcher.
+    pub debug_stats: DispatcherDebugStats,
+    /// Currently queued tasks on the dispatcher.
+    pub queued_tasks: Vec<QueuedTaskDebugInfo>,
+}
+
+/// Structured diagnostic dump entry for a thread spawned by the driver runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadDumpEntry {
+    /// Kernel object ID (KOID) of the thread.
+    pub koid: u64,
+    /// Name of the thread.
+    pub name: String,
+    /// Scheduler role of the thread pool that spawned this thread.
+    pub scheduler_role: String,
 }

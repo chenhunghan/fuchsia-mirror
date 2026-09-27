@@ -24,6 +24,14 @@ pub enum Outcome {
     },
 }
 
+// Extends `Outcome` by adding setup/teardown results needed for ResultDB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtendedOutcome {
+    pub outcome: Outcome,
+    pub setup_succeeded: Option<bool>,
+    pub teardown_succeeded: Option<bool>,
+}
+
 impl Outcome {
     pub(crate) fn error<E: Into<RunTestSuiteError>>(e: E) -> Self {
         Self::Error { origin: Arc::new(e.into()) }
@@ -130,7 +138,7 @@ pub struct ConnectionError(pub anyhow::Error);
 /// Lifecycle of a test suite or test case.
 /// This is internal implementation for ::crate::run, but is located here so it can be reported
 /// for debugging via RunTestSuiteError.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Lifecycle {
     Found,
     Started,

@@ -34,7 +34,9 @@ if (is_fuchsia) {
     "src/pinned_buffer_allocator.rs",
   ]
   lib_deps += [
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
     "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-runtime",
     "//src/storage/lib/block_client/rust",
   ]

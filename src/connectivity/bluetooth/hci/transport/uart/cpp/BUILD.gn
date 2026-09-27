@@ -53,7 +53,6 @@ source_set("common") {
     "//sdk/lib/driver/metadata/cpp",
     "//sdk/lib/driver/outgoing/cpp",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
-    "//src/devices/bind/fuchsia.serial:fuchsia.serial_cpp",
     "//src/devices/lib/driver:driver_runtime",
     "//src/lib/ddk",
     "//zircon/system/ulib/sync",

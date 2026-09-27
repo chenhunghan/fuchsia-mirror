@@ -72,6 +72,7 @@ group("tests") {
     "bazel_sdk:tests",
     "fuchsia_idk:tests",
     "scripts:tests",
+    "update-rustc-third-party:generate_crate_annotations_test($host_toolchain)",
   ]
 }
 
@@ -326,6 +327,13 @@ if (current_toolchain == default_toolchain) {
     deps = [
       "//build/bazel/config:bazel_args_json($default_toolchain)",
       "//build/bazel/config:bazel_args_json($host_toolchain)",
+    ]
+  }
+
+  group("bazel_default_configs_json") {
+    deps = [
+      "//build/bazel/config:bazel_default_configs_json($default_toolchain)",
+      "//build/bazel/config:bazel_default_configs_json($host_toolchain)",
     ]
   }
 }

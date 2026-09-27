@@ -1694,6 +1694,7 @@ mod tests {
     #[derive(Default)]
     struct MockInterface {
         info: Option<DeviceInfo>,
+        attached_vmos: AtomicU64,
         read_hook: Option<
             Box<
                 dyn Fn(u64, u32, &Arc<zx::Vmo>, u64) -> BoxFuture<'static, Result<(), zx::Status>>
@@ -1708,7 +1709,12 @@ mod tests {
 
     impl super::async_interface::Interface for MockInterface {
         async fn on_attach_vmo(&self, _vmo: &zx::Vmo) -> Result<(), zx::Status> {
+            self.attached_vmos.fetch_add(1, Ordering::Relaxed);
             Ok(())
+        }
+
+        fn on_detach_vmo(&self, _vmo: &zx::Vmo) {
+            self.attached_vmos.fetch_sub(1, Ordering::Relaxed);
         }
 
         fn get_info(&self) -> Cow<'_, DeviceInfo> {
@@ -4727,5 +4733,41 @@ mod tests {
 
         // The child session should be closed as well.
         child_session_proxy.on_closed().await.unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn test_mapper_session_detaches_vmo_on_close() {
+        let interface = Arc::new(MockInterface::default());
+        let block_server = BlockServer::new(BLOCK_SIZE, interface.clone());
+
+        let (mapper_proxy, mapper_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
+        let server_fut = async move {
+            block_server.handle_mapper_requests(mapper_stream).await.unwrap();
+        };
+
+        let interface_ref = &interface;
+        let client_fut = async move {
+            let (session_proxy, session_server) =
+                fidl::endpoints::create_proxy::<fblock::MapperSessionMarker>();
+            let mapping_vmo = zx::Vmo::create(4096).unwrap();
+            mapper_proxy
+                .open_session(session_server, mapping_vmo, None, None)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let _paged_vmo = session_proxy
+                .create_vmo(1, 4096, fblock::CreateVmoOptions::empty())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(interface_ref.attached_vmos.load(Ordering::Relaxed), 1);
+
+            session_proxy.close().await.unwrap().unwrap();
+        };
+
+        futures::join!(server_fut, client_fut);
+        assert_eq!(interface.attached_vmos.load(Ordering::Relaxed), 0);
     }
 }

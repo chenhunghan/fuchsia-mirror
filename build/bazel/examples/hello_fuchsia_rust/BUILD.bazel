@@ -18,9 +18,6 @@ rust_binary(
     name = "hello_fuchsia_rust_native",
     srcs = ["src/main.rs"],
     edition = "2024",
-    rustc_flags = [
-        "-Cpanic=abort",
-    ],
 
     # TODO(https://fxbug.dev/42065890) make this be included automatically for all rust binaries.
     deps = [
@@ -53,10 +50,6 @@ fuchsia_package(
 rust_test(
     name = "hello_fuchsia_rust_test_native",
     crate = ":hello_fuchsia_rust_native",
-    rustc_flags = [
-        "-Zpanic_abort_tests",
-        "-Cpanic=abort",
-    ],
     deps = [
         "//third_party/rust_crates/vendor:assert_matches",
         "@fuchsia_sdk//pkg/fdio",

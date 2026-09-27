@@ -150,6 +150,8 @@ bitflags! {
         const IP    = AddressTypes::IPV4.bits() | AddressTypes::IPV6.bits();
         const USB   = 0x04;
         const VSOCK = 0x08;
+        /// Filters target listings to include targets connected via UART serial transport.
+        const UART  = 0x10;
     }
 }
 
@@ -171,9 +173,10 @@ impl std::str::FromStr for AddressTypes {
                 "ipv6" | "ip6" | "6" => ret.insert(AddressTypes::IPV6),
                 "usb" => ret.insert(AddressTypes::USB),
                 "vsock" => ret.insert(AddressTypes::VSOCK),
+                "uart" => ret.insert(AddressTypes::UART),
                 _ => {
                     return Err(anyhow!(
-                        "expected 'ip', 'ipv4', 'ip4', '4' 'ipv6', 'ip6', '6' 'usb', 'vsock', 'none', or 'all'"
+                        "expected 'ip', 'ipv4', 'ip4', '4' 'ipv6', 'ip6', '6' 'usb', 'vsock', 'uart', 'none', or 'all'"
                     ));
                 }
             }

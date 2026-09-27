@@ -232,15 +232,44 @@ impl<'a> HandleRef<'a> {
 }
 
 unsafe extern "C" {
+    /// Duplicates a C++ `Handle` with the specified rights.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be null or point to a valid live `Handle`.
     fn cpp_handle_dup(
         handle: *const core::ffi::c_void,
         rights: zx_rights_t,
     ) -> *mut core::ffi::c_void;
+
+    /// Destroys the C++ `Handle` and decrements reference count on the underlying dispatcher.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must point to an owned, valid `Handle`.
     fn cpp_handle_destroy(handle: *mut core::ffi::c_void);
+
+    /// Checks if the handle possesses the required rights.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must point to a valid `Handle`.
     fn cpp_handle_has_rights(handle: *const core::ffi::c_void, rights: zx_rights_t) -> bool;
+
+    /// Retrieves a cloned reference-counted pointer to the handle's dispatcher.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must point to a valid `Handle`, and `out_dispatcher` must point to writable uninitialized memory.
     fn cpp_handle_get_dispatcher(
         handle: *const core::ffi::c_void,
         out_dispatcher: *mut MaybeUninit<RefPtr<Dispatcher>>,
     );
+
+    /// Returns the rights of the handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must point to a valid `Handle`.
     fn cpp_handle_get_rights(handle: *const core::ffi::c_void) -> zx_rights_t;
 }

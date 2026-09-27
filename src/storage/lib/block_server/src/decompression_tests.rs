@@ -704,7 +704,7 @@ async fn test_decompression_buffer_exhaustion() {
 
     // Make sure we're blocked.
     fasync::Timer::new(std::time::Duration::from_millis(100)).await;
-    assert!(rx.try_next().is_err());
+    assert!(rx.try_recv().is_err());
 
     requests.shuffle(&mut rand::rng());
 

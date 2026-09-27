@@ -254,6 +254,15 @@ TEST(SeLinuxFsContext, NormalizeCategories) {
   EXPECT_EQ(ValidateContext(kTwoCategoryContextFormA), ValidateContext(kTwoCategoryContextFormB));
 }
 
+// Validate that a range whose high level is equal to its low level results in the same Security
+// Context as specifying that level on its own.
+TEST(SeLinuxFsContext, NormalizeSingleLevelRange) {
+  EXPECT_EQ(ValidateContext("test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s0-s0"),
+            ValidateContext("test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s0"));
+  EXPECT_EQ(ValidateContext("test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s2:c0.c2-s2:c0.c2"),
+            ValidateContext("test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s2:c0.c2"));
+}
+
 // Validate that Security Contexts for new "process" class instances inherit the source role & type.
 TEST(SeLinuxFsCreate, DefaultComputeCreateForProcess) {
   constexpr std::string_view kSourceContext =
@@ -339,6 +348,52 @@ TEST(SeLinuxFsCreate, ComputeCreateForFifoFile) {
 
   EXPECT_THAT(ComputeCreateContext(kSourceContext, kTargetContext, "fifo_file"),
               SyscallResultIsOk("test_selinuxfs_u:object_r:test_selinuxfs_create_target_t:s0"));
+}
+
+// Validate that the "glblub" default range gives the new object the greater of the two low levels
+// and the lesser of the two high levels, with the categories at each end intersected.
+TEST(SeLinuxFsCreate, ComputeCreateGlblubRange) {
+  constexpr std::string_view kSourceContext =
+      "test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s0:c0-s2:c0.c2";
+  constexpr std::string_view kTargetContext =
+      "test_selinuxfs_create_target_u:test_selinuxfs_create_target_r:test_selinuxfs_create_target_t:"
+      "s1:c1-s2:c0.c1";
+
+  EXPECT_THAT(
+      ComputeCreateContext(kSourceContext, kTargetContext, "test_selinuxfs_glblub_class"),
+      SyscallResultIsOk("test_selinuxfs_u:object_r:test_selinuxfs_create_target_t:s1-s2:c0,c1"));
+}
+
+// Validate that a "glblub" range whose bounds resolve to the same level describes a single level.
+TEST(SeLinuxFsCreate, ComputeCreateGlblubSingleLevelRange) {
+  constexpr std::string_view kSourceContext =
+      "test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s0:c0-s2:c0.c2";
+  constexpr std::string_view kTargetContext =
+      "test_selinuxfs_create_target_u:test_selinuxfs_create_target_r:test_selinuxfs_create_target_t:s0";
+
+  EXPECT_THAT(ComputeCreateContext(kSourceContext, kTargetContext, "test_selinuxfs_glblub_class"),
+              SyscallResultIsOk("test_selinuxfs_u:object_r:test_selinuxfs_create_target_t:s0"));
+}
+
+// Validate that "glblub" fails if the source and target ranges do not overlap, in either direction.
+TEST(SeLinuxFsCreate, ComputeCreateGlblubNonOverlappingRanges) {
+  constexpr std::string_view kLowSourceContext =
+      "test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s0";
+  constexpr std::string_view kHighSourceContext =
+      "test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s2";
+  constexpr std::string_view kLowTargetContext =
+      "test_selinuxfs_create_target_u:test_selinuxfs_create_target_r:test_selinuxfs_create_target_t:"
+      "s0-s1";
+  constexpr std::string_view kHighTargetContext =
+      "test_selinuxfs_create_target_u:test_selinuxfs_create_target_r:test_selinuxfs_create_target_t:"
+      "s1-s2";
+
+  EXPECT_THAT(
+      ComputeCreateContext(kLowSourceContext, kHighTargetContext, "test_selinuxfs_glblub_class"),
+      SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(
+      ComputeCreateContext(kHighSourceContext, kLowTargetContext, "test_selinuxfs_glblub_class"),
+      SyscallResultIsErrno(EINVAL));
 }
 
 // Validate handling of whitespace between request elements.

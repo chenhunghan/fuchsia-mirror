@@ -5,6 +5,7 @@
 #ifndef SRC_DEVELOPER_FFX_LIB_PROFILER_SYS_UNWINDER_WRAPPER_H_
 #define SRC_DEVELOPER_FFX_LIB_PROFILER_SYS_UNWINDER_WRAPPER_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -12,7 +13,7 @@ extern "C" {
 
 // LINT.IfChange
 typedef struct ffi_unwinder_t ffi_unwinder_t;
-// LINT.ThenChange(src/developer/ffx/lib/profiler/src/unwinder.rs)
+// LINT.ThenChange(//src/developer/ffx/lib/profiler/src/unwinder.rs)
 
 ffi_unwinder_t* ffi_unwinder_new();
 void ffi_unwinder_free(ffi_unwinder_t* unwinder);
@@ -33,8 +34,12 @@ void ffi_unwinder_add_module(ffi_unwinder_t* unwinder, uint64_t load_address, co
 typedef struct {
   uint64_t pc;
   uint64_t sp;
+  // Indicates whether pc is a return address (e.g., from a call instruction)
+  // or the exact instruction pointer (e.g., the leaf frame). When true, the
+  // symbolizer will subtract 1 to determine the call site location.
+  bool pc_is_return_address;
 } ffi_frame_t;
-// LINT.ThenChange(src/developer/ffx/lib/profiler/src/unwinder.rs)
+// LINT.ThenChange(//src/developer/ffx/lib/profiler/src/unwinder.rs)
 
 // Unwinds the stack and populates output_frames with up to max_depth frames. Returns the number of
 // frames populated.

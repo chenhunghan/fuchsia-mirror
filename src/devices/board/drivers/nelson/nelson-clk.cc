@@ -101,9 +101,8 @@ zx_status_t Nelson::ClkInit() {
   fidl::Arena<> fidl_arena;
   fdf::Arena arena('CLK_');
 
-  auto composite_spec = fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena)
-                            .name("amlogic_clock")
-                            .Build();
+  auto composite_spec =
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("nelson-clk").Build();
 
   auto result =
       pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, clk_dev), composite_spec);

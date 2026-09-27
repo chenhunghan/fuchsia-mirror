@@ -62,7 +62,7 @@ cc_test_executable("arp_test") {
   sources = [ "arp_test.cc" ]
   deps = [
     ":sim_test",
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/connectivity/wlan/drivers/lib/macaddr",
     "//src/connectivity/wlan/drivers/testing/lib/sim-env",
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
@@ -80,7 +80,7 @@ cc_test_executable("auth_test") {
   sources = [ "auth_test.cc" ]
   deps = [
     ":sim_test",
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/connectivity/wlan/drivers/lib/macaddr",
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:core",
@@ -189,7 +189,8 @@ cc_test_executable("connect_test") {
   sources = [ "connect_test.cc" ]
   deps = [
     ":sim_test",
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
+    "//sdk/fidl/fuchsia.wlan.stats:fuchsia.wlan.stats_cpp",
     "//src/connectivity/wlan/drivers/lib/macaddr",
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:core",
@@ -223,7 +224,7 @@ cc_test_executable("create_softap_test") {
   sources = [ "create_softap_test.cc" ]
   deps = [
     ":sim_test",
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/connectivity/wlan/drivers/lib/macaddr",
     "//src/connectivity/wlan/drivers/testing/lib/sim-env",
     "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:core",
@@ -257,7 +258,7 @@ cc_test_executable("disconnect_test") {
   sources = [ "disconnect_test.cc" ]
   deps = [
     ":sim_test",
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/connectivity/wlan/drivers/lib/macaddr",
     "//src/connectivity/wlan/lib/common/cpp:common",
   ]
@@ -272,7 +273,7 @@ cc_test_executable("dynamic_if_test") {
   sources = [ "dynamic_if_test.cc" ]
   deps = [
     ":sim_test",
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/connectivity/wlan/drivers/lib/macaddr",
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:core",
@@ -406,7 +407,7 @@ cc_test_executable("mfg_test") {
     "//zircon/system/ulib/zxtest",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:core",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
   ]

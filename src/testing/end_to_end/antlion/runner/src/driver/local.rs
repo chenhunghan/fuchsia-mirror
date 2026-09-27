@@ -235,6 +235,7 @@ mod test {
 
     use indoc::formatdoc;
     use pretty_assertions::assert_eq;
+    use std::process::ExitCode;
     use tempfile::{NamedTempFile, TempDir};
 
     const FUCHSIA_NAME: &'static str = "fuchsia-1234-5678-9abc";
@@ -323,7 +324,7 @@ mod test {
         )
         .unwrap();
 
-        generate_config_and_run(runner, driver, None).unwrap();
+        assert_eq!(generate_config_and_run(runner, driver, None).unwrap(), ExitCode::SUCCESS);
 
         let got = std::fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 
@@ -384,7 +385,7 @@ mod test {
         )
         .unwrap();
 
-        generate_config_and_run(runner, driver, None).unwrap();
+        assert_eq!(generate_config_and_run(runner, driver, None).unwrap(), ExitCode::SUCCESS);
 
         let got = std::fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 
@@ -452,7 +453,10 @@ mod test {
         ";
         let params = serde_yaml::from_str(params_yaml).unwrap();
 
-        generate_config_and_run(runner, driver, Some(params)).unwrap();
+        assert_eq!(
+            generate_config_and_run(runner, driver, Some(params)).unwrap(),
+            ExitCode::SUCCESS
+        );
 
         let got = std::fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 
@@ -519,7 +523,7 @@ mod test {
         )
         .unwrap();
 
-        generate_config_and_run(runner, driver, None).unwrap();
+        assert_eq!(generate_config_and_run(runner, driver, None).unwrap(), ExitCode::SUCCESS);
 
         let got = std::fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 

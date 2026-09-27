@@ -638,6 +638,43 @@ func TestRunChecks_GlobalEnrichment(t *testing.T) {
 	}
 }
 
+func TestRunChecks_EmptyFailureReasonNotEnriched(t *testing.T) {
+	outputsDir := t.TempDir()
+	preexistingErr := &runtests.FailureReasonError{Message: "pre-existing error"}
+	summary := runtests.TestSummary{
+		Tests: []runtests.TestDetails{
+			{
+				Name:   "failing_test",
+				Status: runtests.TestFailure,
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{
+						{
+							CaseName: "failed_case",
+							Status:   runtests.TestFailure,
+							FailureReason: &runtests.FailureReason{
+								Errors: []*runtests.FailureReasonError{preexistingErr},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Check with empty FailureReason() (inheriting baseCheck.FailureReason()).
+	check := mockCheck{name: "empty_reason_check", failureReason: ""}
+	if _, err := RunChecks([]FailureModeCheck{check}, &TestingOutputs{TestSummary: &summary}, outputsDir); err != nil {
+		t.Fatalf("RunChecks() failed: %v", err)
+	}
+
+	if summary.Tests[0].FailureReason != nil {
+		t.Errorf("top-level FailureReason = %+v, want nil", summary.Tests[0].FailureReason)
+	}
+	if got := summary.Tests[0].Cases[0].FailureReason.Errors; len(got) != 1 || got[0] != preexistingErr {
+		t.Errorf("case FailureReason.Errors = %+v, want [%+v]", got, preexistingErr)
+	}
+}
+
 type exonerationCheck struct {
 	syntheticCheck
 	testName string

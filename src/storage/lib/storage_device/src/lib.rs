@@ -131,6 +131,16 @@ pub trait Device: Send + Sync {
     fn poison(&self) -> Result<(), Error> {
         bail!("Not supported");
     }
+
+    /// Connects to the device's Mapper protocol.
+    #[cfg(target_os = "fuchsia")]
+    async fn connect_mapper(
+        &self,
+        server_end: fidl::endpoints::ServerEnd<fidl_fuchsia_storage_block::MapperMarker>,
+    ) -> Result<(), zx::Status> {
+        let _ = server_end.close_with_epitaph(zx::Status::NOT_SUPPORTED);
+        Err(zx::Status::NOT_SUPPORTED)
+    }
 }
 
 // Arc<dyn Device> can easily be cloned and supports concurrent access, but sometimes exclusive

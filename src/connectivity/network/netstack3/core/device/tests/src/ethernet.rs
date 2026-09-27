@@ -100,6 +100,7 @@ fn test_receive_ip_frame<I: TestIpExt + IpExt>(enable: bool) {
         RecvEthernetFrameMeta {
             device_id: eth_device,
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         Buf::new(bytes, ..),
     );

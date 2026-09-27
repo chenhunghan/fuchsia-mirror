@@ -70,8 +70,6 @@ mdns
 ?netcfg-basic
 ?netcfg-config
 ?netdevice-migration
-?netstack
-?netstack-migration
 ?netstack3
 ?network
 ?network-device

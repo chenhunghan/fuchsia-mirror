@@ -85,10 +85,11 @@ void VirtualKeyboardManager::SetVisibility(bool is_visible) {
 
 void VirtualKeyboardManager::MaybeNotifyWatcher() {
   if (watch_callback_ && pending_config_) {
-    watch_callback_(pending_config_->text_type, pending_config_->is_visible);
-    last_sent_config_ = pending_config_;
+    auto callback = std::move(watch_callback_);
+    auto config = *pending_config_;
+    last_sent_config_ = config;
     pending_config_.reset();
-    watch_callback_ = {};
+    callback(config.text_type, config.is_visible);
   }
 }
 

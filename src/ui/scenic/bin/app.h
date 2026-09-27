@@ -107,7 +107,7 @@ class App {
   metrics::MetricsImpl metrics_logger_;
   inspect::Node inspect_node_;
 
-  // FrameScheduler must be initialized early, since it must outlive all its
+  // `FrameScheduler` must be initialized early, since it must outlive all its
   // dependencies.
   scheduling::DefaultFrameScheduler frame_scheduler_;
 
@@ -115,11 +115,8 @@ class App {
   std::optional<display::DisplayManager> display_manager_;
   std::optional<display::SingletonDisplayService> singleton_display_service_;
   std::optional<DisplayInfoDelegate> display_info_delegate_;
-  // DisplayPowerManager has a reference to |display_manager_|, so it should be
-  // destroyed before |display_manager_|.
-  std::optional<display::DisplayPowerManager> display_power_manager_;
-  // VsyncSourceManager has a reference to |display_manager_|, so it should be
-  // destroyed before |display_manager_|.
+  // `VsyncSourceManager` has a reference to `display_manager_`, so it should be
+  // destroyed before `display_manager_`.
   std::optional<display::VsyncSourceManager> vsync_source_manager_;
   escher::EscherUniquePtr escher_;
 
@@ -135,6 +132,9 @@ class App {
   std::unique_ptr<flatland::TrustedFlatlandFactoryImpl> trusted_flatland_factory_;
   std::shared_ptr<flatland::DisplayCompositor> flatland_compositor_;
   std::shared_ptr<flatland::Engine> flatland_engine_;
+  // Its closure calls into `flatland_compositor_` and `frame_scheduler_`, so it is
+  // declared after them and destroyed first.
+  std::optional<display::DisplayPowerManager> display_power_manager_;
 
   display::ColorConverter color_converter_;
 
@@ -152,7 +152,7 @@ class App {
   const bool enable_snapshot_dump_ = false;
 
   // Must be last to ensure it is destroyed before the members it references
-  // (e.g., display_manager_, display_power_manager_).
+  // (e.g., `display_manager_`, `display_power_manager_`).
   HealthInspector health_inspector_;
 };
 

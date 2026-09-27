@@ -2,9 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::writer::private::InspectTypeInternal;
-use crate::writer::{ArrayProperty, Inner, InnerValueType, InspectType, State};
-use inspect_format::BlockIndex;
+use crate::writer::{ArrayProperty, Inner, InnerValueType, InspectType};
 use std::borrow::Cow;
 
 #[derive(Debug, PartialEq, Eq, Default)]
@@ -18,46 +16,7 @@ impl InspectType for StringArrayProperty {
     }
 }
 
-impl InspectTypeInternal for StringArrayProperty {
-    fn new(state: State, block_index: BlockIndex) -> Self {
-        Self { inner: Inner::new(state, block_index) }
-    }
-
-    fn is_valid(&self) -> bool {
-        self.inner.is_valid()
-    }
-
-    fn new_no_op() -> Self {
-        Self { inner: Inner::None }
-    }
-
-    fn state(&self) -> Option<State> {
-        Some(self.inner.inner_ref()?.state.clone())
-    }
-
-    fn block_index(&self) -> Option<BlockIndex> {
-        Some(self.inner.inner_ref()?.block_index)
-    }
-
-    fn atomic_access<R, F: FnOnce(&Self) -> R>(&self, f: F) -> R {
-        match self.inner.inner_ref() {
-            None => {
-                // If the node was a no-op we still execute the `update_fn` even if all operations
-                // inside it will be no-ops to return `R`.
-                f(self)
-            }
-            Some(inner_ref) => {
-                // Silently ignore the error when fail to lock (as in any regular operation).
-                // All operations performed in the `update_fn` won't update the vmo
-                // generation count since we'll be holding one lock here.
-                inner_ref.state.begin_transaction();
-                let result = f(self);
-                inner_ref.state.end_transaction();
-                result
-            }
-        }
-    }
-}
+crate::impl_inspect_type_internal!(StringArrayProperty);
 
 impl ArrayProperty for StringArrayProperty {
     type Type<'a> = Cow<'a, str>;
@@ -95,6 +54,7 @@ impl Drop for StringArrayProperty {
 mod tests {
     use super::*;
     use crate::writer::Length;
+    use crate::writer::private::InspectTypeInternal;
     use crate::writer::testing_utils::GetBlockExt;
     use crate::{Inspector, assert_update_is_atomic};
     use diagnostics_assertions::assert_json_diff;

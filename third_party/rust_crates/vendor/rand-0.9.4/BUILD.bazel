@@ -54,9 +54,11 @@ rust_library(
     ),
     crate_features = [
         "alloc",
+        "default",
         "os_rng",
         "std",
         "std_rng",
+        "sys_rng",
         "thread_rng",
     ],
     crate_root = "src/lib.rs",
@@ -80,6 +82,8 @@ rust_library(
     }),
     version = "0.9.4",
     deps = [
+        "//third_party/rust_crates/vendor/chacha20-0.10.2:chacha20",
+        "//third_party/rust_crates/vendor/getrandom-0.4.3:getrandom",
         "//third_party/rust_crates/vendor/rand_chacha-0.9.0:rand_chacha",
         "//third_party/rust_crates/vendor/rand_core-0.9.5:rand_core",
     ],

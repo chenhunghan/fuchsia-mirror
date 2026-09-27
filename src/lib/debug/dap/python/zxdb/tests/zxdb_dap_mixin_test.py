@@ -372,6 +372,27 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.body.reason, "started")
         self.assertEqual(event.body.thread_id, 1234)
 
+    def test_thread_event_is_stopped(self) -> None:
+        event_dict = {
+            "seq": 1,
+            "type": "event",
+            "event": "thread",
+            "body": {
+                "reason": "started",
+                "threadId": 1234,
+                "processId": 5678,
+                "isStopped": True,
+            },
+        }
+        event = ZxdbThreadEvent.model_validate(event_dict)
+        self.assertEqual(event.event, "thread")
+        self.assertEqual(event.body.reason, "started")
+        self.assertEqual(event.body.thread_id, 1234)
+        self.assertEqual(event.body.process_id, 5678)
+        self.assertEqual(event.body.is_stopped, True)
+        dap_dict = event.body.dump_dap()
+        self.assertEqual(dap_dict["isStopped"], True)
+
     def test_zxdb_thread_dump_dap_process_id(self) -> None:
         thread = ZxdbThread(id=1, name="test", process_id=1234)
         dap_dict = thread.dump_dap()

@@ -16,7 +16,6 @@ fuchsia_unittest_package("tests") {
 
     # The tests depend `fuchsia.posix.socket/Provider` and
     # `fuchsia.posix.socket.packet/Provider` which the netstack exposes.
-    "//src/connectivity/network/netstack:component-debug",
     "//src/connectivity/network/netstack3:component-debug",
 
     # TCPDump is under test.
@@ -28,16 +27,10 @@ rustc_test("bin") {
   edition = "2021"
   output_name = "tcpdump_integration_test"
   deps = [
-    "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
-    "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
-    "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
-    "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
     "//sdk/fidl/fuchsia.posix.socket.packet:fuchsia.posix.socket.packet_rust",
     "//sdk/rust/zx",
     "//src/connectivity/lib/net-declare",
-    "//src/connectivity/lib/net-types",
-    "//src/connectivity/lib/packet-formats",
     "//src/connectivity/network/testing/netemul/rust:lib",
     "//src/connectivity/network/tests/integration/common:netstack_testing_common",
     "//src/connectivity/network/tests/integration/macros:netstack_testing_macros",
@@ -47,8 +40,6 @@ rustc_test("bin") {
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-runtime",
-    "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
-    "//src/lib/network/packet",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:libc",
     "//third_party/rust_crates:regex",

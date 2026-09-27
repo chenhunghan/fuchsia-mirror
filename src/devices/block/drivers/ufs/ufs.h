@@ -5,7 +5,9 @@
 #ifndef SRC_DEVICES_BLOCK_DRIVERS_UFS_UFS_H_
 #define SRC_DEVICES_BLOCK_DRIVERS_UFS_UFS_H_
 
+#include <fidl/fuchsia.hardware.inlineencryption/cpp/wire.h>
 #include <fidl/fuchsia.hardware.platform.device/cpp/wire.h>
+#include <fidl/fuchsia.hardware.ufs.phy/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.ufs/cpp/fidl.h>
 #include <fidl/fuchsia.power.broker/cpp/fidl.h>
 #include <lib/async/cpp/irq.h>
@@ -148,7 +150,9 @@ using HostControllerCallback = fit::function<zx::result<>(NotifyEvent, uint64_t 
 //
 // This class is the parent class for both UfsPci and UfsPdev drivers, which bind the UFS
 // controller via PCI and PDev respectively.
-class Ufs : public fdf::DriverBase2, public scsi::Controller {
+class Ufs : public fdf::DriverBase2,
+            public scsi::Controller,
+            public fidl::WireServer<fuchsia_hardware_inlineencryption::Device> {
  public:
   static constexpr char kDriverName[] = "ufs";
   static constexpr char kHardwarePowerElementName[] = "ufs-hardware";
@@ -178,6 +182,14 @@ class Ufs : public fdf::DriverBase2, public scsi::Controller {
                                  iovec data) override;
   void ExecuteCommandsAsync(uint8_t target, uint16_t lun,
                             std::span<scsi::ScsiRequest> batch) override;
+  bool SupportsInlineEncryption() const override { return crypto_supported_; }
+  void ServeInlineEncryption(
+      fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) override;
+
+  // fidl::WireServer<fuchsia_hardware_inlineencryption::Device>
+  void ProgramKey(ProgramKeyRequestView request, ProgramKeyCompleter::Sync &completer) override;
+  void DeriveRawSecret(DeriveRawSecretRequestView request,
+                       DeriveRawSecretCompleter::Sync &completer) override;
 
   const fdf::MmioBuffer &GetMmio() const {
     ZX_ASSERT(mmio_.has_value());
@@ -406,6 +418,10 @@ class Ufs : public fdf::DriverBase2, public scsi::Controller {
   fidl::WireSyncClient<fuchsia_power_broker::ElementControl> hardware_power_element_control_client_;
   zx::event hardware_power_assertive_token_;
   fuchsia_power_broker::LeaseToken hardware_power_lease_control_token_;
+
+  bool crypto_supported_ = false;
+  fidl::WireSyncClient<fuchsia_hardware_inlineencryption::Device> inline_encryption_client_;
+  fidl::ServerBindingGroup<fuchsia_hardware_inlineencryption::Device> inline_encryption_bindings_;
 };
 
 }  // namespace ufs

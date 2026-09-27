@@ -53,9 +53,6 @@ fuchsia_cc_driver("ti-ina231-driver") {
     ":common",
     "//src/devices/lib/driver:driver_runtime",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_driver_component("ti-ina231") {

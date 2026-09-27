@@ -380,6 +380,14 @@ func TestGenArgs(t *testing.T) {
 			expectedArgs: []string{`target_cpu="arm64"`, `compilation_mode="release"`},
 		},
 		{
+			name: "x64 sanitizer",
+			staticSpec: &fintpb.Static{
+				TargetArch:      fintpb.Static_X64,
+				CompilationMode: fintpb.Static_COMPILATION_MODE_SANITIZER,
+			},
+			expectedArgs: []string{`target_cpu="x64"`, `compilation_mode="sanitizer"`},
+		},
+		{
 			name: "clang toolchain",
 			contextSpec: &fintpb.Context{
 				ClangToolchainDir: "/tmp/clang_toolchain",

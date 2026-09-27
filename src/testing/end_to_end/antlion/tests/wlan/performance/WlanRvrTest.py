@@ -19,10 +19,10 @@ from antlion.controllers.attenuator import (
     get_attenuators_for_device,
 )
 from antlion.controllers.fuchsia_device import FuchsiaDevice
-from antlion.controllers.iperf_server import IPerfResult
 from antlion.utils import rand_ascii_str
 from antlion.validation import MapValidator
 from fuchsia_wlan_base_test.deprecated.wifi import base_test
+from iperf.iperf_server import IPerfResult
 from mobly import asserts, signals, test_runner
 from mobly.config_parser import TestRunConfig
 from mobly.records import TestResultRecord

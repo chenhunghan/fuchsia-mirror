@@ -1,0 +1,101 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "ebpf_api",
+    srcs = [
+        "src/lib.rs",
+        "src/program_type.rs",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "src/helpers.rs",
+            "src/maps/array.rs",
+            "src/maps/buffer.rs",
+            "src/maps/hashmap.rs",
+            "src/maps/lock.rs",
+            "src/maps/lpm_trie.rs",
+            "src/maps/mod.rs",
+            "src/maps/ring_buffer.rs",
+            "src/maps/vmar.rs",
+        ],
+        "//conditions:default": [],
+    }),
+    crate_name = "ebpf_api",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = [
+        "//src/connectivity/network:__subpackages__",
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/lib/ebpf_loader:__pkg__",
+        "//src/starnix/tests/ebpf_bench:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf_rust",
+        "//src/starnix/lib/ebpf",
+        "//src/starnix/lib/linux_uapi",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//src/lib/diagnostics/inspect/contrib/stubs:inspect_stubs",
+            "//src/lib/fuchsia-runtime",
+            "//third_party/rust_crates/vendor:rand",
+            "//third_party/rust_crates/vendor:siphasher",
+            "//third_party/rust_crates/vendor:smallvec",
+            "//third_party/rust_crates/vendor:static_assertions",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# The unit tests are declared separately instead of with `with_unit_tests`
+# because Bazel would apply the library's `lint_config`, which includes the
+# production-only lints, to the test code as well.
+rustc_test(
+    name = "ebpf_api_lib_test",
+    srcs = [
+        "src/lib.rs",
+        "src/program_type.rs",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "src/helpers.rs",
+            "src/maps/array.rs",
+            "src/maps/buffer.rs",
+            "src/maps/hashmap.rs",
+            "src/maps/lock.rs",
+            "src/maps/lpm_trie.rs",
+            "src/maps/mod.rs",
+            "src/maps/ring_buffer.rs",
+            "src/maps/vmar.rs",
+        ],
+        "//conditions:default": [],
+    }),
+    edition = "2024",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    deps = [
+        "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf_rust",
+        "//src/starnix/lib/ebpf",
+        "//src/starnix/lib/linux_uapi",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//src/lib/diagnostics/inspect/contrib/stubs:inspect_stubs",
+            "//src/lib/fuchsia",
+            "//src/lib/fuchsia-runtime",
+            "//third_party/rust_crates/vendor:rand",
+            "//third_party/rust_crates/vendor:siphasher",
+            "//third_party/rust_crates/vendor:smallvec",
+            "//third_party/rust_crates/vendor:static_assertions",
+            "//third_party/rust_crates/vendor:test-case",
+        ],
+        "//conditions:default": [],
+    }),
+)

@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fuchsia-inspect-derive",
+    srcs = [
+        "src/inspect.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//src/lib/diagnostics/inspect/derive/macro:fuchsia-inspect-derive-macro",
+        "//third_party/rust_crates/vendor:paste",
+    ],
+    version = "0.1.0",
+    # Used widely across the repository (connectivity, diagnostics, settings, starnix, examples, vendor).
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+alias(
+    name = "derive",
+    actual = ":fuchsia-inspect-derive",
+    # Used widely across the repository (connectivity, diagnostics, settings, starnix, examples, vendor).
+    visibility = ["//visibility:public"],
+)

@@ -5,13 +5,17 @@
 #ifndef SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_BUFFER_H_
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_BUFFER_H_
 
+#include <fidl/fuchsia.sysmem2/cpp/fidl.h>
 #include <fuchsia/media/cpp/fidl.h>
 #include <lib/async/cpp/wait.h>
 #include <lib/fit/defer.h>
 #include <lib/media/codec_impl/codec_port.h>
 #include <lib/media/codec_impl/codec_vmo_range.h>
+#include <zircon/assert.h>
+#include <zircon/compiler.h>
 
 #include <memory>
+#include <mutex>
 
 #include <fbl/macros.h>
 
@@ -97,6 +101,9 @@ class CodecBuffer {
   CodecPort port() const { return buffer_info_.port; }
 
   bool is_secure() const { return buffer_info_.is_secure; }
+  fuchsia_sysmem2::CoherencyDomain coherency_domain() const {
+    return buffer_info_.coherency_domain;
+  }
   // The vaddr of the start of the mapped VMO for this buffer.
   //
   // This will return nullptr if there's no VMO mapping because CPU access isn't
@@ -110,7 +117,17 @@ class CodecBuffer {
   // This will ZX_PANIC() if the buffer hasn't been pinned yet, or if !is_known_contiguous().
   zx_paddr_t physical_base() const;
 
+  // The max size in bytes of meaningful/valid content starting at vmo_offset()
+  // (from sysmem BufferMemorySettings.size_bytes). Producers must fit all
+  // valid image/packet data within size().
   size_t size() const;
+
+  // The total VMO size in bytes (from sysmem BufferMemorySettings.raw_vmo_size /
+  // zx_vmo_get_size). When sysmem pad_* constraints are used, raw_vmo_size()
+  // includes trailing padding space beyond vmo_offset() + size() that is mapped
+  // and accessible for padding/over-read/over-write, but must not hold
+  // meaningful content.
+  size_t raw_vmo_size() const;
 
   // This VMO is owned by CodecBuffer, but can be used temporarily (in a
   // non-owned fashion) to get VMO info or similar.
@@ -142,9 +159,15 @@ class CodecBuffer {
   // duplicate and/or descendent), the CodecAdapter can continue doing DMA
   // to/from the buffer until its own unpin.
   //
+  // Calling GetChildVmo() (directly or indirectly via CodecPacket::SetBuffer())
+  // after the first buffer-relevant CoreCodecRemoveBuffer or
+  // CoreCodecEnsureBuffersNotConfigured is only valid while the CodecAdapter
+  // still holds at least one open handle derived from an earlier GetChildVmo()
+  // call.
+  //
   // The CodecAdapter should not rely on the returned VMO to be derived from
   // vmo(), though the returned vmo does refer to the same underlying buffer.
-  zx::vmo GetChildVmo() const;
+  zx::vmo GetChildVmo() const __TA_EXCLUDES(until_remove_started_child_vmo_lock_);
 
   // The offset within the main VMO where data of this CodecBuffer starts.  The vmo_offset() is not
   // required to be divisible by page size.
@@ -210,20 +233,13 @@ class CodecBuffer {
 
   void AssertMagic() const { ZX_ASSERT(magic_ == kMagic); }
 
-  // The rest is protected for the benefit of tests. Sub-classes outside tests
-  // are not supported.
+  // Info, constructor, destructor, and Map() are protected for the benefit of
+  // CodecBufferForTest. Sub-classes outside tests are not supported.
  protected:
-  friend class CodecImpl;
-  friend class std::unique_ptr<CodecBuffer>;
-  friend struct std::default_delete<CodecBuffer>;
-  friend class CodecBufferForTest;
-  friend class CodecPacket;
-
-  using DoDelete = fit::callback<void(CodecBuffer* buffer)>;
-
   // Helper struct for encapsulating the properties of a Buffer
   struct Info {
     CodecPort port = kFirstPort;
+    fuchsia_sysmem2::CoherencyDomain coherency_domain = fuchsia_sysmem2::CoherencyDomain::kCpu;
     // aka buffer_lifetime_ordinal
     uint64_t lifetime_ordinal;
     // For non-dynamic buffers these values will be from 0..num_buffers-1. For
@@ -239,12 +255,21 @@ class CodecBuffer {
   CodecBuffer(CodecImpl* parent, Info buffer_info, CodecVmoRange vmo_range);
   ~CodecBuffer();
 
-  // Separate from constructor because some tests don't need this.
-  void SetDoDelete(DoDelete do_delete);
-
   // Maps a page-aligned portion of the VMO including vmo_usable_start to vmo_usable_start +
   // vmo_usable_size.
   bool Map();
+
+ private:
+  friend class CodecImpl;
+  friend class std::unique_ptr<CodecBuffer>;
+  friend struct std::default_delete<CodecBuffer>;
+  friend class CodecBufferForTest;
+  friend class CodecPacket;
+
+  using DoDelete = fit::callback<void(CodecBuffer* buffer)>;
+
+  // Separate from constructor because some tests don't need this.
+  void SetDoDelete(DoDelete do_delete);
 
   // FakeMap() exists because most CodecAdapter(s) expect to have a CodecBuffer::base() and "data"
   // vaddr(s) within the buffer, even when buffers are secure.  IIUC, mapping to secure buffer +
@@ -280,6 +305,7 @@ class CodecBuffer {
 
   class KeepAlive {
    public:
+    KeepAlive() = default;
     KeepAlive(const KeepAlive& to_copy) = delete;
     KeepAlive& operator=(const KeepAlive& to_copy) = delete;
     KeepAlive(KeepAlive&& to_move) = default;
@@ -291,12 +317,22 @@ class CodecBuffer {
     // all KeepAlive instances to originate directly from GetKeepAlive().
     friend class CodecBuffer;
 
-    KeepAlive(std::shared_ptr<zx::vmo> kept_alive) : kept_alive_(kept_alive) {}
+    explicit KeepAlive(std::shared_ptr<zx::vmo> kept_alive) : kept_alive_(std::move(kept_alive)) {}
 
-    // This is a shared_ptr to same zx::vmo as until_remove_started_child_vmo_.
+    // This is a shared_ptr to the same zx::vmo as until_remove_started_child_vmo_ when
+    // GetKeepAlive() is called before until_remove_started_child_vmo_ is reset, or to a child
+    // VMO of parent_vmo_ created when GetKeepAlive() is called after removal has started while the
+    // CodecAdapter still holds a child VMO from GetChildVmo(). In both cases, the zx::vmo is a
+    // child (directly or indirectly) under parent_vmo_.
     std::shared_ptr<zx::vmo> kept_alive_;
   };
-  KeepAlive GetKeepAlive() const;
+  // We may want to make this public as a cheaper alternative to GetChildVmo(), with a borrow-able
+  // zx::vmo, as the zx::vmo within the KeepAlive is always a child of CodecBuffer::parent_vmo_.
+  KeepAlive GetKeepAlive() const __TA_EXCLUDES(until_remove_started_child_vmo_lock_);
+  zx::vmo CreateChildVmoFromParent() const;
+  void ResetUntilRemoveStartedChildVmo() __TA_EXCLUDES(until_remove_started_child_vmo_lock_);
+  bool HasUntilRemoveStartedChildVmoForDebug() const
+      __TA_EXCLUDES(until_remove_started_child_vmo_lock_);
 
   // The parent CodecImpl instance.  Just so we can call parent_->Fail().
   // The parent_ CodecImpl out-lives the CodecImpl::Buffer.
@@ -315,6 +351,7 @@ class CodecBuffer {
 
   // This owns the vmo handle originally used to create this CodecBuffer.
   CodecVmoRange vmo_range_;
+  size_t raw_vmo_size_ = 0;
   // This is a child of vmo_range_.vmo that's returned from vmo(). This is part of enforcing that
   // the CodecAdapter can't assume that vmo(s) returned from GetChildVmo() are derived from vmo().
   //
@@ -325,6 +362,8 @@ class CodecBuffer {
   //
   // Child VMOs of this VMO are handled out to the CodecAdapter via GetChildVmo.
   zx::vmo parent_vmo_;
+  // Leaf lock protecting until_remove_started_child_vmo_.
+  mutable std::mutex until_remove_started_child_vmo_lock_;
   // This is a child of parent_vmo_ that's closed by CodecImpl just after the first relevant
   // CoreCodecRemoveBuffer or CoreCodecEnsureBuffersNotConfigured. This handle being open is how the
   // CodecImpl ensures that CodecBuffer will remain allocated until said call even if the
@@ -333,7 +372,8 @@ class CodecBuffer {
   //
   // This is a std::shared_ptr to allow items in the output queue to prevent completion of
   // RemoveBuffer until after items in the output queue are sent.
-  std::shared_ptr<zx::vmo> until_remove_started_child_vmo_;
+  std::shared_ptr<zx::vmo> until_remove_started_child_vmo_
+      __TA_GUARDED(until_remove_started_child_vmo_lock_);
 
   std::optional<async::WaitMethod<CodecBuffer, &CodecBuffer::OnZeroChildren>> zero_children_wait_;
   DoDelete do_delete_;

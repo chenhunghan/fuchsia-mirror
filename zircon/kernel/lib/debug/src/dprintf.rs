@@ -79,8 +79,6 @@ pub const fn dprintf_enabled(level: u32) -> bool {
         CRITICAL
     } else if cfg!(debug_print_level = "1") {
         INFO
-    } else if cfg!(debug_print_level = "2") {
-        SPEW
     } else {
         SPEW
     };

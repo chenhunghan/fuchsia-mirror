@@ -5,9 +5,6 @@ use crate::{
     EmulatorInstanceData, EmulatorInstanceError, EmulatorInstanceInfo, EmulatorInstances,
     EngineOption, NetworkingMode, Result, SerialMode,
 };
-use ffx::{TargetAddrInfo, TargetVSockCtx};
-use fidl_fuchsia_developer_ffx::{self as ffx, TargetVSockNamespace};
-use fidl_fuchsia_net::{IpAddress, Ipv4Address};
 use futures::SinkExt;
 use futures::channel::mpsc::{self, Receiver, Sender};
 use futures::stream::StreamExt;
@@ -51,13 +48,32 @@ pub(crate) enum EmulatorInstanceEvent {
     Name(String, EventKind),
     Data(Box<EmulatorInstanceData>),
 }
+
+/// Address for communicating with an emulator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EmulatorAddr {
+    /// Direct connection to VM guest using virtio-vsock.
+    Vsock { cid: u32 },
+    /// SSH connection forwarded to host loopback port (127.0.0.1:<port>).
+    LoopbackPort(u16),
+}
+
+/// Target representation emitted by emulator watcher.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EmulatorTargetInfo {
+    pub nodename: String,
+    pub addresses: Vec<EmulatorAddr>,
+    pub serial_number: Option<String>,
+    pub ssh_port: Option<u16>,
+}
+
 /// Action to take for a Target based on an
 /// emulator instance. Either Add/Update it
 /// or Remove it.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmulatorTargetAction {
-    Add(ffx::TargetInfo),
-    Remove(ffx::TargetInfo),
+    Add(EmulatorTargetInfo),
+    Remove(EmulatorTargetInfo),
 }
 #[derive(Debug)]
 /// This struct handles the events from the Watcher.
@@ -231,9 +247,11 @@ impl EmulatorWatcher {
                             // Only remove if the kind is Remove. It is possible to get
                             // DoesNotExist if the json file for the instance is not written completely.
                             if kind == Remove(RemoveKind::Folder) {
-                                let target_info = ffx::TargetInfo {
-                                    nodename: Some(instance_name),
-                                    ..Default::default()
+                                let target_info = EmulatorTargetInfo {
+                                    nodename: instance_name,
+                                    addresses: vec![],
+                                    serial_number: None,
+                                    ssh_port: None,
                                 };
                                 return Some(EmulatorTargetAction::Remove(target_info));
                             }
@@ -241,9 +259,11 @@ impl EmulatorWatcher {
                         Err(e) => {
                             log::trace!("Cannot read emulator instance: {e:?}");
                             if kind == Remove(RemoveKind::Folder) {
-                                let target_info = ffx::TargetInfo {
-                                    nodename: Some(instance_name),
-                                    ..Default::default()
+                                let target_info = EmulatorTargetInfo {
+                                    nodename: instance_name,
+                                    addresses: vec![],
+                                    serial_number: None,
+                                    ssh_port: None,
                                 };
                                 return Some(EmulatorTargetAction::Remove(target_info));
                             }
@@ -271,7 +291,7 @@ impl EmulatorWatcher {
         }
         Ok(())
     }
-    fn handle_instance(instance: &EmulatorInstanceData) -> Option<ffx::TargetInfo> {
+    fn handle_instance(instance: &EmulatorInstanceData) -> Option<EmulatorTargetInfo> {
         if instance.is_running() {
             log::debug!(
                 "Making target from {} using ssh port {:?}",
@@ -283,17 +303,14 @@ impl EmulatorWatcher {
             None
         }
     }
-    fn make_target(instance: &EmulatorInstanceData) -> Option<ffx::TargetInfo> {
+    fn make_target(instance: &EmulatorInstanceData) -> Option<EmulatorTargetInfo> {
         let nodename: String = instance.get_name().into();
         let mut addresses = Vec::with_capacity(2);
         let vsock_device =
             instance.emulator_configuration.device.vsock.clone().filter(|x| x.enabled);
 
         if let Some(v) = &vsock_device {
-            addresses.push(TargetAddrInfo::Vsock(TargetVSockCtx {
-                cid: v.cid,
-                namespace: TargetVSockNamespace::Vsock,
-            }));
+            addresses.push(EmulatorAddr::Vsock { cid: v.cid });
         }
 
         if nodename.is_empty() {
@@ -308,45 +325,33 @@ impl EmulatorWatcher {
             return None;
         }
         let ssh_port = instance.get_ssh_port();
-        let ssh_address = if ssh_port.is_none() {
-            if vsock_device.is_none() {
-                // No ssh port assigned so don't create a target.
-                log::debug!(
-                    "Skipping making target for {}, since ssh port and vsock device are both none",
-                    nodename
-                );
-                return None;
-            }
-            None
-        } else {
-            // All emulators run on loopback ipv4.
-            let ip = IpAddress::Ipv4(Ipv4Address { addr: [127, 0, 0, 1] });
-            let loopback = ffx::TargetIpPort { ip, scope_id: 0, port: ssh_port.unwrap() };
-            addresses.push(TargetAddrInfo::IpPort(loopback.clone()));
-            Some(ffx::TargetIpAddrInfo::IpPort(loopback))
-        };
+        if ssh_port.is_none() && vsock_device.is_none() {
+            // No ssh port assigned and no vsock device, so don't create a target.
+            log::debug!(
+                "Skipping making target for {}, since ssh port and vsock device are both none",
+                nodename
+            );
+            return None;
+        }
+        if let Some(port) = ssh_port {
+            addresses.push(EmulatorAddr::LoopbackPort(port));
+        }
 
         let serial_number = match &instance.emulator_configuration.runtime.serial_number {
             SerialMode::Enabled(serial) => Some(serial.clone()),
             _ => None,
         };
 
-        Some(ffx::TargetInfo {
-            nodename: Some(nodename),
-            addresses: Some(addresses),
-            serial_number,
-            ssh_address,
-            ..Default::default()
-        })
+        Some(EmulatorTargetInfo { nodename, addresses, serial_number, ssh_port })
     }
 }
 
-pub fn get_all_targets(instances: &EmulatorInstances) -> Result<Vec<ffx::TargetInfo>> {
+pub fn get_all_targets(instances: &EmulatorInstances) -> Result<Vec<EmulatorTargetInfo>> {
     let items = instances.get_all_instances()?;
-    Ok(items.iter().flat_map(|i| EmulatorWatcher::make_target(i)).collect())
+    Ok(items.iter().flat_map(|i| EmulatorWatcher::handle_instance(i)).collect())
 }
 
-pub fn get_target(instances: &EmulatorInstances, name: &str) -> Result<Option<ffx::TargetInfo>> {
+pub fn get_target(instances: &EmulatorInstances, name: &str) -> Result<Option<EmulatorTargetInfo>> {
     let instance_dir = instances.get_instance_dir(name, false)?;
     match crate::read_from_disk(&instance_dir) {
         Ok(EngineOption::DoesExist(emu_instance)) => {
@@ -560,9 +565,9 @@ mod tests {
             }
             let mut actual_events: Vec<Option<EmulatorInstanceEvent>> = vec![];
             loop {
-                let actual_event = match emu_instance_rx.try_next() {
-                    Ok(emu_event) => emu_event,
-                    // try_next Err() means no messages, but the channel is still open.
+                let actual_event = match emu_instance_rx.try_recv() {
+                    Ok(emu_event) => Some(emu_event),
+                    // try_recv Err() means no messages, or the channel is closed.
                     Err(_) => None,
                 };
                 actual_events.push(actual_event.clone());
@@ -600,40 +605,34 @@ mod tests {
         let mut serial_instance_data = instance_data.clone();
         serial_instance_data.get_emulator_configuration_mut().runtime.serial_number =
             SerialMode::Enabled("EM-123456789".to_string());
-        let ip = IpAddress::Ipv4(Ipv4Address { addr: [127, 0, 0, 1] });
-        let loopback =
-            ffx::TargetAddrInfo::IpPort(ffx::TargetIpPort { ip, scope_id: 0, port: 3322 });
-        let ssh_address =
-            Some(ffx::TargetIpAddrInfo::IpPort(ffx::TargetIpPort { ip, scope_id: 0, port: 3322 }));
-        // not running
-        // not user mode
-        // missing reading
-        //returns  Option<(ffx::TargetInfo, bool)> {
+        let loopback = EmulatorAddr::LoopbackPort(3322);
+
         let testdata = vec![
             (
                 EmulatorInstanceEvent::Name(emu_instance_name.clone(), Remove(RemoveKind::Folder)),
-                Some(EmulatorTargetAction::Remove(ffx::TargetInfo {
-                    nodename: Some(emu_instance_name.clone()),
-                    ..Default::default()
+                Some(EmulatorTargetAction::Remove(EmulatorTargetInfo {
+                    nodename: emu_instance_name.clone(),
+                    addresses: vec![],
+                    serial_number: None,
+                    ssh_port: None,
                 })),
             ),
             (
                 EmulatorInstanceEvent::Data(Box::new(instance_data.clone())),
-                Some(EmulatorTargetAction::Add(ffx::TargetInfo {
-                    nodename: Some(instance_data.get_name().to_string()),
-                    addresses: Some(vec![loopback.clone()]),
-                    ssh_address: ssh_address.clone(),
-                    ..Default::default()
+                Some(EmulatorTargetAction::Add(EmulatorTargetInfo {
+                    nodename: instance_data.get_name().to_string(),
+                    addresses: vec![loopback.clone()],
+                    serial_number: None,
+                    ssh_port: Some(3322),
                 })),
             ),
             (
                 EmulatorInstanceEvent::Data(Box::new(serial_instance_data.clone())),
-                Some(EmulatorTargetAction::Add(ffx::TargetInfo {
-                    nodename: Some(serial_instance_data.get_name().to_string()),
-                    addresses: Some(vec![loopback]),
-                    ssh_address,
+                Some(EmulatorTargetAction::Add(EmulatorTargetInfo {
+                    nodename: serial_instance_data.get_name().to_string(),
+                    addresses: vec![loopback],
                     serial_number: Some("EM-123456789".to_string()),
-                    ..Default::default()
+                    ssh_port: Some(3322),
                 })),
             ),
             (EmulatorInstanceEvent::Data(Box::new(tap_instance_data.clone())), None),
@@ -694,10 +693,63 @@ mod tests {
         let emu_config = serde_json::to_string(&instance_data)?;
         file1.write_all(emu_config.as_bytes())?;
 
+        let path2 = instance_root.join("path2");
+        create_dir_all(path2.as_path())?;
+        let file2_path = path2.join(crate::instances::SERIALIZE_FILE_NAME);
+        let mut file2 = File::create(&file2_path)?;
+        let stopped_instance = crate::EmulatorInstanceData::new_with_state(
+            "stopped-emu-instance",
+            crate::EngineState::Staged,
+        );
+        let stopped_config = serde_json::to_string(&stopped_instance)?;
+        file2.write_all(stopped_config.as_bytes())?;
+
         let targets = get_all_targets(&emulator_instances)?;
-        assert_eq!(targets.first().unwrap().nodename, Some("emu-data-instance".to_string()));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets.first().unwrap().nodename, "emu-data-instance");
         assert_eq!(targets.first().unwrap().serial_number, Some("EM-123456789".to_string()));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_make_target_tap_with_vsock_produces_vsock_target() {
+        let mut instance_data = crate::EmulatorInstanceData::new_with_state(
+            "emu-tap-vsock",
+            crate::EngineState::Running,
+        );
+        instance_data.set_pid(std::process::id());
+        let config = instance_data.get_emulator_configuration_mut();
+        config.host.networking = crate::NetworkingMode::Tap;
+        config.device.vsock = Some(crate::VsockDevice { enabled: true, cid: 42 });
+
+        let target = EmulatorWatcher::make_target(&instance_data)
+            .expect("Should create target for TAP+VSOCK");
+        assert_eq!(target.nodename, "emu-tap-vsock");
+        assert_eq!(target.addresses, vec![EmulatorAddr::Vsock { cid: 42 }]);
+        assert_eq!(target.ssh_port, None);
+    }
+
+    #[test]
+    fn test_make_target_user_with_vsock_and_ssh() {
+        let mut instance_data = crate::EmulatorInstanceData::new_with_state(
+            "emu-user-vsock-ssh",
+            crate::EngineState::Running,
+        );
+        instance_data.set_pid(std::process::id());
+        let config = instance_data.get_emulator_configuration_mut();
+        config.host.networking = crate::NetworkingMode::User;
+        config
+            .host
+            .port_map
+            .insert(String::from("ssh"), crate::PortMapping { guest: 22, host: Some(8022) });
+        config.device.vsock = Some(crate::VsockDevice { enabled: true, cid: 99 });
+
+        let target = EmulatorWatcher::make_target(&instance_data)
+            .expect("Should create target for User+VSOCK+SSH");
+        assert_eq!(target.nodename, "emu-user-vsock-ssh");
+        assert_eq!(target.ssh_port, Some(8022));
+        assert!(target.addresses.contains(&EmulatorAddr::Vsock { cid: 99 }));
+        assert!(target.addresses.contains(&EmulatorAddr::LoopbackPort(8022)));
     }
 }

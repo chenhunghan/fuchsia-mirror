@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::num::NonZeroU16;
 use std::pin::pin;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use fidl_fuchsia_hardware_network as fhardware_network;
@@ -52,8 +51,7 @@ use netstack_testing_common::interfaces::{self, TestInterfaceExt as _};
 use netstack_testing_common::nud::apply_nud_flake_workaround;
 use netstack_testing_common::realms::{
     self, KnownServiceProvider, ManagementAgent, Manager, ManagerConfig, NetCfgBasic,
-    NetCfgVersion, Netstack, Netstack3, NetstackExt, SocketProxyType, TestRealmExt as _,
-    TestSandboxExt,
+    NetCfgVersion, Netstack3, NetstackExt, SocketProxyType, TestRealmExt as _, TestSandboxExt,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
@@ -82,15 +80,14 @@ use test_case::test_case;
 /// to the Netstack.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(ManagerConfig::Empty, "eth"; "no_prefix")]
 #[test_case(ManagerConfig::IfacePrefix, "testeth"; "with_prefix")]
-async fn test_oir<M: Manager, N: Netstack>(name: &str, config: ManagerConfig, prefix: &str) {
-    let if_name = with_netcfg_owned_device::<M, N, _>(
+async fn test_oir<M: Manager>(name: &str, config: ManagerConfig, prefix: &str) {
+    let if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         config,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
             ..Default::default()
@@ -117,7 +114,6 @@ async fn test_oir<M: Manager, N: Netstack>(name: &str, config: ManagerConfig, pr
 // initialized with a predefined ManagerConfig.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(
     ManagerConfig::Empty,
     ManagerConfig::PacketFilterEthernet,
@@ -193,7 +189,7 @@ async fn test_oir<M: Manager, N: Netstack>(name: &str, config: ManagerConfig, pr
     ManagerConfig::Empty,
     fhardware_network::PortClass::WlanAp,
     true; "both_no_filter__both_ports_wlan_ap")]
-async fn test_filtering_udp<M: Manager, N: Netstack>(
+async fn test_filtering_udp<M: Manager>(
     name: &str,
     realm1_manager: ManagerConfig,
     realm2_manager: ManagerConfig,
@@ -208,7 +204,7 @@ async fn test_filtering_udp<M: Manager, N: Netstack>(
     const SENDER_PORT: u16 = 1234;
     const RECEIVER_PORT: u16 = 8080;
 
-    async fn setup_filtering_iface<'a, M: Manager, N: Netstack>(
+    async fn setup_filtering_iface<'a, M: Manager>(
         network: &'a netemul::TestNetwork<'a>,
         realm: &'a netemul::TestRealm<'a>,
         port: u16,
@@ -260,13 +256,13 @@ async fn test_filtering_udp<M: Manager, N: Netstack>(
     }
 
     let sender_realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("{name}-sender_realm"),
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     use_dhcp_server: true,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     config: realm1_manager,
                     socket_proxy_type: SocketProxyType::None,
                 },
@@ -278,13 +274,13 @@ async fn test_filtering_udp<M: Manager, N: Netstack>(
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
         )
         .expect("failed to create sender realm");
-    let (_sender_ep, sender_ep_addr) = setup_filtering_iface::<M, N>(
+    let (_sender_ep, sender_ep_addr) = setup_filtering_iface::<M>(
         &eth_network,
         &sender_realm,
         SENDER_PORT,
@@ -294,13 +290,13 @@ async fn test_filtering_udp<M: Manager, N: Netstack>(
     .await;
 
     let receiver_realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("{name}-receiver_realm"),
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     use_dhcp_server: true,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     config: realm2_manager,
                     socket_proxy_type: SocketProxyType::None,
                 },
@@ -312,13 +308,13 @@ async fn test_filtering_udp<M: Manager, N: Netstack>(
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
         )
         .expect("failed to create receiver realm");
-    let (_receiver_ep, receiver_ep_addr) = setup_filtering_iface::<M, N>(
+    let (_receiver_ep, receiver_ep_addr) = setup_filtering_iface::<M>(
         &eth_network,
         &receiver_realm,
         RECEIVER_PORT,
@@ -413,8 +409,7 @@ async fn test_filtering_udp<M: Manager, N: Netstack>(
 // and does not provision the device (send DHCP packets).
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_install_only_no_provisioning<M: Manager, N: Netstack>(name: &str) {
+async fn test_install_only_no_provisioning<M: Manager>(name: &str) {
     // RFC2131 and RFC8415 specify the ports that DHCP servers
     // must use for sending messages.
     const DHCPV4_SERVER_PORT: u16 = 67;
@@ -422,11 +417,11 @@ async fn test_install_only_no_provisioning<M: Manager, N: Netstack>(name: &str) 
     const DHCPV6_SERVER_PORT: u16 = 546;
     const DHCPV6_CLIENT_PORT: u16 = 547;
 
-    let _if_name: String = with_netcfg_owned_device::<M, N, _>(
+    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::AllDelegated,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
         },
@@ -591,18 +586,17 @@ enum InterfaceWatcherEvent {
 /// that the first interface is removed prior to adding the second interface.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_oir_interface_name_conflict_uninstall_existing<M: Manager, N: Netstack>(name: &str) {
+async fn test_oir_interface_name_conflict_uninstall_existing<M: Manager>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -610,7 +604,7 @@ async fn test_oir_interface_name_conflict_uninstall_existing<M: Manager, N: Nets
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -789,23 +783,22 @@ async fn test_oir_interface_name_conflict_uninstall_existing<M: Manager, N: Nets
 /// different naming identifier and the same name.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(true; "netcfg_managed")]
 #[test_case(false; "not_netcfg_managed")]
-async fn test_oir_interface_name_conflict_reject<M: Manager, N: Netstack>(
+async fn test_oir_interface_name_conflict_reject<M: Manager>(
     name: &str,
     is_conflicting_iface_netcfg_managed: bool,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::DuplicateNames,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -813,7 +806,7 @@ async fn test_oir_interface_name_conflict_reject<M: Manager, N: Netstack>(
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -942,8 +935,7 @@ async fn test_oir_interface_name_conflict_reject<M: Manager, N: Netstack>(
 /// removed from the netstack.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_wlan_ap_dhcp_server<M: Manager, N: Netstack>(name: &str) {
+async fn test_wlan_ap_dhcp_server<M: Manager>(name: &str) {
     // Use a large timeout to check for resolution.
     //
     // These values effectively result in a large timeout of 60s which should avoid
@@ -1225,14 +1217,14 @@ async fn test_wlan_ap_dhcp_server<M: Manager, N: Netstack>(name: &str) {
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: true,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -1242,7 +1234,7 @@ async fn test_wlan_ap_dhcp_server<M: Manager, N: Netstack>(name: &str) {
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1273,20 +1265,19 @@ async fn test_wlan_ap_dhcp_server<M: Manager, N: Netstack>(name: &str) {
 /// Tests that netcfg observes component stop events and exits cleanly.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn observes_stop_events<M: Manager, N: Netstack>(name: &str) {
+async fn observes_stop_events<M: Manager>(name: &str) {
     use component_events::events::{self};
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -1294,7 +1285,7 @@ async fn observes_stop_events<M: Manager, N: Netstack>(name: &str) {
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1334,13 +1325,12 @@ async fn observes_stop_events<M: Manager, N: Netstack>(name: &str) {
 /// that enabled.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_forwarding<M: Manager, N: Netstack>(name: &str) {
-    let _if_name: String = with_netcfg_owned_device::<M, N, _>(
+async fn test_forwarding<M: Manager>(name: &str) {
+    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::Forwarding,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
             ..Default::default()
@@ -1380,18 +1370,17 @@ async fn test_forwarding<M: Manager, N: Netstack>(name: &str) {
 
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_prefix_provider_not_supported<M: Manager, N: Netstack>(name: &str) {
+async fn test_prefix_provider_not_supported<M: Manager>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Empty,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -1399,7 +1388,7 @@ async fn test_prefix_provider_not_supported<M: Manager, N: Netstack>(name: &str)
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1431,18 +1420,17 @@ async fn test_prefix_provider_not_supported<M: Manager, N: Netstack>(name: &str)
 // requesting prefixes is supported.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_prefix_provider_already_acquiring<M: Manager, N: Netstack>(name: &str) {
+async fn test_prefix_provider_already_acquiring<M: Manager>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -1451,7 +1439,7 @@ async fn test_prefix_provider_already_acquiring<M: Manager, N: Netstack>(name: &
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1525,18 +1513,17 @@ async fn test_prefix_provider_already_acquiring<M: Manager, N: Netstack>(name: &
 /// `AlreadyAcquiring` race condition.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_prefix_provider_stop_rapid_cycles<M: Manager, N: Netstack>(name: &str) {
+async fn test_prefix_provider_stop_rapid_cycles<M: Manager>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -1545,7 +1532,7 @@ async fn test_prefix_provider_stop_rapid_cycles<M: Manager, N: Netstack>(name: &
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1581,7 +1568,6 @@ async fn test_prefix_provider_stop_rapid_cycles<M: Manager, N: Netstack>(name: &
 
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(
     fnet_dhcpv6::AcquirePrefixConfig {
         interface_id: Some(42),
@@ -1598,21 +1584,21 @@ async fn test_prefix_provider_stop_rapid_cycles<M: Manager, N: Netstack>(name: &
     fnet_dhcpv6::PrefixControlExitReason::InvalidPrefixLength;
     "invalid prefix length"
 )]
-async fn test_prefix_provider_config_error<M: Manager, N: Netstack>(
+async fn test_prefix_provider_config_error<M: Manager>(
     name: &str,
     config: fnet_dhcpv6::AcquirePrefixConfig,
     want_reason: fnet_dhcpv6::PrefixControlExitReason,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -1621,7 +1607,7 @@ async fn test_prefix_provider_config_error<M: Manager, N: Netstack>(
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1645,18 +1631,17 @@ async fn test_prefix_provider_config_error<M: Manager, N: Netstack>(
 
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_prefix_provider_double_watch<M: Manager, N: Netstack>(name: &str) {
+async fn test_prefix_provider_double_watch<M: Manager>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::Dhcpv6,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::None,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -1665,7 +1650,7 @@ async fn test_prefix_provider_double_watch<M: Manager, N: Netstack>(name: &str) 
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1880,13 +1865,12 @@ mod dhcpv6_helper {
 
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn test_prefix_provider_full_integration<M: Manager, N: Netstack>(name: &str) {
-    let _if_name: String = with_netcfg_owned_device::<M, N, _>(
+async fn test_prefix_provider_full_integration<M: Manager>(name: &str) {
+    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
             ..Default::default()
@@ -2009,13 +1993,12 @@ async fn test_prefix_provider_full_integration<M: Manager, N: Netstack>(name: &s
 // disabled while it was holding a DHCPv6 prefix for it.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
-async fn disable_interface_while_having_dhcpv6_prefix<M: Manager, N: Netstack>(name: &str) {
-    let _if_name: String = with_netcfg_owned_device::<M, N, _>(
+async fn disable_interface_while_having_dhcpv6_prefix<M: Manager>(name: &str) {
+    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
             ..Default::default()
@@ -2212,7 +2195,7 @@ impl MasqueradeTestSetup {
         }
     }
 
-    async fn build<'a, N: Netstack>(
+    async fn build<'a>(
         self,
         sandbox: &'a netemul::TestSandbox,
         name: &str,
@@ -2241,23 +2224,23 @@ impl MasqueradeTestSetup {
         let client2_net = sandbox.create_network("client2").await.expect("create network");
         let server_net = sandbox.create_network("server").await.expect("create network");
         let client1 = sandbox
-            .create_netstack_realm::<N, _>(format!("{}_client1", name))
+            .create_netstack_realm::<Netstack3, _>(format!("{}_client1", name))
             .expect("create realm");
         let client2 = sandbox
-            .create_netstack_realm::<N, _>(format!("{}_client2", name))
+            .create_netstack_realm::<Netstack3, _>(format!("{}_client2", name))
             .expect("create realm");
         let server = sandbox
-            .create_netstack_realm::<N, _>(format!("{}_server", name))
+            .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
             .expect("create realm");
         let router = sandbox
-            .create_netstack_realm_with::<N, _, _>(
+            .create_netstack_realm_with::<Netstack3, _, _>(
                 format!("{name}_router"),
                 [
                     KnownServiceProvider::Manager {
                         agent: ManagementAgent::NetCfg(NetCfgVersion::Advanced),
                         config: ManagerConfig::Empty,
                         use_dhcp_server: false,
-                        use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                        use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                         socket_proxy_type: SocketProxyType::None,
                     },
                     KnownServiceProvider::DnsResolver,
@@ -2265,7 +2248,7 @@ impl MasqueradeTestSetup {
                 ]
                 .into_iter()
                 .chain(
-                    N::USE_OUT_OF_STACK_DHCP_CLIENT
+                    Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                         .then_some(KnownServiceProvider::DhcpClient)
                         .into_iter(),
                 ),
@@ -2408,11 +2391,10 @@ async fn get_src_ip(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
 #[test_case(MasqueradeTestSetup::ipv4(); "ipv4")]
 #[test_case(MasqueradeTestSetup::ipv6(); "ipv6")]
-async fn test_masquerade<N: Netstack, M: Manager>(name: &str, setup: MasqueradeTestSetup) {
+async fn test_masquerade<M: Manager>(name: &str, setup: MasqueradeTestSetup) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
 
     let MasqueradeTestSetup {
@@ -2422,7 +2404,7 @@ async fn test_masquerade<N: Netstack, M: Manager>(name: &str, setup: MasqueradeT
         router_ip,
         ..
     } = setup.clone();
-    let resources = setup.build::<N>(&sandbox, name).await;
+    let resources = setup.build(&sandbox, name).await;
     let MasqueradeTestResources { client1: client, server, router, router_server_iface, .. } =
         &resources;
 
@@ -2473,7 +2455,6 @@ impl MasqueradeErrorTestCase {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
 #[test_case::test_matrix(
     [MasqueradeTestSetup::ipv4(), MasqueradeTestSetup::ipv6()],
@@ -2483,7 +2464,7 @@ impl MasqueradeErrorTestCase {
         MasqueradeErrorTestCase::SubnetWithHostBits
     ]
 )]
-async fn test_masquerade_errors<N: Netstack, M: Manager>(
+async fn test_masquerade_errors<M: Manager>(
     name: &str,
     setup: MasqueradeTestSetup,
     test_case: MasqueradeErrorTestCase,
@@ -2496,7 +2477,7 @@ async fn test_masquerade_errors<N: Netstack, M: Manager>(
         ip_version,
         ..
     } = setup.clone();
-    let resources = setup.build::<N>(&sandbox, name).await;
+    let resources = setup.build(&sandbox, name).await;
     let MasqueradeTestResources { router, router_server_iface, .. } = &resources;
 
     let masq = router
@@ -2531,14 +2512,50 @@ async fn test_masquerade_errors<N: Netstack, M: Manager>(
     );
 }
 
-async fn await_masquerade_removed_ns3(
-    router: &netemul::TestRealm<'_>,
-    masq_control: fnet_masquerade::ControlProxy,
-    client: &netemul::TestRealm<'_>,
-    server: &netemul::TestRealm<'_>,
-    server_ip: std::net::IpAddr,
-    client_ip: std::net::IpAddr,
-) {
+// Verify that the masquerade configuration is associated with the lifetime of
+// the underlying FIDL connection.
+#[netstack_test]
+#[variant(M, Manager)]
+#[test_case(MasqueradeTestSetup::ipv4(); "ipv4")]
+#[test_case(MasqueradeTestSetup::ipv6(); "ipv6")]
+async fn test_masquerade_lifetime<M: Manager>(name: &str, setup: MasqueradeTestSetup) {
+    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
+
+    let MasqueradeTestSetup {
+        client1_ip: client_ip,
+        client1_masquerade_subnet: masquerade_subnet,
+        server_ip,
+        router_ip,
+        ..
+    } = setup.clone();
+    let resources = setup.build(&sandbox, name).await;
+    let MasqueradeTestResources { client1: client, server, router, router_server_iface, .. } =
+        &resources;
+
+    let masq = router
+        .connect_to_protocol::<fnet_masquerade::FactoryMarker>()
+        .expect("connect to fuchsia.net.masquerade/Factory server");
+    let (masq_control, server_end) =
+        fidl::endpoints::create_proxy::<fnet_masquerade::ControlMarker>();
+
+    masq.create(
+        &fnet_masquerade::ControlConfig {
+            src_subnet: masquerade_subnet,
+            output_interface: router_server_iface.id(),
+        },
+        server_end,
+    )
+    .await
+    .expect("masq create fidl")
+    .expect("masq create");
+
+    // Before masquerade, the source IP should be the client IP.
+    assert_eq!(client_ip, get_src_ip(SocketAddr::from((server_ip, 8080)), client, server).await);
+
+    // Once masquerade is enabled, the source IP should appear to be router_ip instead.
+    assert!(!masq_control.set_enabled(true).await.expect("set enabled fidl").expect("set enabled"));
+    assert_eq!(router_ip, get_src_ip(SocketAddr::from((server_ip, 8081)), client, server).await);
+
     let filter_state = router
         .connect_to_protocol::<fnet_filter::StateMarker>()
         .expect("connect to fuchsia.net.filter/State server");
@@ -2576,106 +2593,11 @@ async fn await_masquerade_removed_ns3(
     assert_eq!(client_ip, get_src_ip(SocketAddr::from((server_ip, 8082)), client, server).await);
 }
 
-// TODO(https://fxbug.dev/555371797): Remove this helper when Netstack2 is removed.
-async fn await_masquerade_removed_ns2(
-    masq_control: fnet_masquerade::ControlProxy,
-    client: &netemul::TestRealm<'_>,
-    server: &netemul::TestRealm<'_>,
-    server_ip: std::net::IpAddr,
-    client_ip: std::net::IpAddr,
-) {
-    // Drop the control handle, and verify that the masquerade config is removed.
-    // Note that Netstack2 doesn't have a synchronization mechanism to wait for the
-    // config to be removed. Instead, repeatedly check the source IP with a
-    // timeout until we observe the client IP again.
-    std::mem::drop(masq_control);
-    const MAX_ATTEMPTS: usize = 60;
-    const WAIT: Duration = Duration::from_secs(1);
-    // Ensure each attempt gets a unique port.
-    let port = AtomicU16::new(8082);
-    fuchsia_backoff::retry_or_last_error(std::iter::repeat(WAIT).take(MAX_ATTEMPTS), || async {
-        let port = port.fetch_add(1, Ordering::Relaxed);
-        let actual_ip = get_src_ip(SocketAddr::from((server_ip, port)), client, server).await;
-        if actual_ip == client_ip { Ok(()) } else { Err(actual_ip) }
-    })
-    .await
-    .expect("IP does not match client");
-}
-
-// Verify that the masquerade configuration is associated with the lifetime of
-// the underlying FIDL connection.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
 #[test_case(MasqueradeTestSetup::ipv4(); "ipv4")]
 #[test_case(MasqueradeTestSetup::ipv6(); "ipv6")]
-async fn test_masquerade_lifetime<N: Netstack, M: Manager>(name: &str, setup: MasqueradeTestSetup) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-
-    let MasqueradeTestSetup {
-        client1_ip: client_ip,
-        client1_masquerade_subnet: masquerade_subnet,
-        server_ip,
-        router_ip,
-        ..
-    } = setup.clone();
-    let resources = setup.build::<N>(&sandbox, name).await;
-    let MasqueradeTestResources { client1: client, server, router, router_server_iface, .. } =
-        &resources;
-
-    let masq = router
-        .connect_to_protocol::<fnet_masquerade::FactoryMarker>()
-        .expect("connect to fuchsia.net.masquerade/Factory server");
-    let (masq_control, server_end) =
-        fidl::endpoints::create_proxy::<fnet_masquerade::ControlMarker>();
-
-    masq.create(
-        &fnet_masquerade::ControlConfig {
-            src_subnet: masquerade_subnet,
-            output_interface: router_server_iface.id(),
-        },
-        server_end,
-    )
-    .await
-    .expect("masq create fidl")
-    .expect("masq create");
-
-    // Before masquerade, the source IP should be the client IP.
-    assert_eq!(client_ip, get_src_ip(SocketAddr::from((server_ip, 8080)), client, server).await);
-
-    // Once masquerade is enabled, the source IP should appear to be router_ip instead.
-    assert!(!masq_control.set_enabled(true).await.expect("set enabled fidl").expect("set enabled"));
-    assert_eq!(router_ip, get_src_ip(SocketAddr::from((server_ip, 8081)), client, server).await);
-
-    match N::VERSION {
-        netstack_testing_common::realms::NetstackVersion::Netstack3
-        | netstack_testing_common::realms::NetstackVersion::ProdNetstack3 => {
-            await_masquerade_removed_ns3(
-                router,
-                masq_control,
-                client,
-                server,
-                server_ip,
-                client_ip,
-            )
-            .await;
-        }
-        netstack_testing_common::realms::NetstackVersion::Netstack2 { .. }
-        | netstack_testing_common::realms::NetstackVersion::ProdNetstack2 => {
-            await_masquerade_removed_ns2(masq_control, client, server, server_ip, client_ip).await;
-        }
-    }
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-#[variant(M, Manager)]
-#[test_case(MasqueradeTestSetup::ipv4(); "ipv4")]
-#[test_case(MasqueradeTestSetup::ipv6(); "ipv6")]
-async fn test_masquerade_multiple_controllers<N: Netstack, M: Manager>(
-    name: &str,
-    setup: MasqueradeTestSetup,
-) {
+async fn test_masquerade_multiple_controllers<M: Manager>(name: &str, setup: MasqueradeTestSetup) {
     // Verify that two masquerade controllers can operate independently of one another.
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
 
@@ -2688,7 +2610,7 @@ async fn test_masquerade_multiple_controllers<N: Netstack, M: Manager>(
         router_ip,
         ..
     } = setup.clone();
-    let resources = setup.build::<N>(&sandbox, name).await;
+    let resources = setup.build(&sandbox, name).await;
     let MasqueradeTestResources { client1, client2, server, router, router_server_iface, .. } =
         &resources;
 

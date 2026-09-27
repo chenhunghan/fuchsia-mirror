@@ -510,11 +510,9 @@ impl<'a> StreamerTask<'a> {
     }
 
     async fn wait_initialized(&mut self) -> Result<u64> {
-        let init_rx = self
-            .init_rx
+        self.init_rx
             .take()
-            .ok_or_else(|| streaming_err_helper("StreamerTask already initialized".to_string()))?;
-        init_rx
+            .ok_or_else(|| streaming_err_helper("StreamerTask already initialized".to_string()))?
             .await
             .map_err(|e| streaming_err_helper(format!("Streamer init task failed: {e}")))?
     }
@@ -571,7 +569,12 @@ async fn stream_partition_task<'a, T: FastbootInterface>(
         .await?;
 
     let start_time = Utc::now();
-    try_join!(producer_task, stream_task(prog_client, cmd_rx), server_task(prog_server))?;
+    let (stream_res, server_res) = futures::join!(
+        async { try_join!(producer_task, stream_task(prog_client, cmd_rx)) },
+        server_task(prog_server),
+    );
+    stream_res?;
+    server_res?;
     let duration = Utc::now().signed_duration_since(start_time);
     messenger
         .send(Event::FlashPartitionFinished { partition_name: partition_name.to_owned(), duration })
@@ -1565,10 +1568,10 @@ mod test {
             Upload(OnReady { partition: "zircon_a".to_owned(), files: 1 }),
             Upload(OnStarted { size: 0xc000 }),
             Upload(OnProgress { bytes_written: 0x2000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
             Upload(OnProgress { bytes_written: 0x4000 }),
-            Upload(OnProgress { bytes_written: 0x8000 }),
-            Upload(OnProgress { bytes_written: 0xA000 }),
-            Upload(OnProgress { bytes_written: 0xC000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
             Upload(OnFinished),
             FlashPartitionFinished {
                 partition_name: "zircon_a".to_owned(),
@@ -1590,6 +1593,7 @@ mod test {
         let (mut sparse_file, tmp_path) = NamedTempFile::new().unwrap().into_parts();
         SparseImageBuilder::new()
             .add_source(DataSource::Buffer(data.clone()))
+            .add_source(DataSource::Skip(4096))
             .add_source(DataSource::Fill(0, 4096))
             .add_source(DataSource::Buffer(data.clone()))
             .build(&mut sparse_file)
@@ -1657,12 +1661,12 @@ mod test {
 
         let server_expected = &[
             Upload(OnReady { partition: "zircon_a".to_owned(), files: 1 }),
-            Upload(OnStarted { size: 0xc000 }),
+            Upload(OnStarted { size: 0xD000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
             Upload(OnProgress { bytes_written: 0x2000 }),
             Upload(OnProgress { bytes_written: 0x4000 }),
-            Upload(OnProgress { bytes_written: 0x8000 }),
-            Upload(OnProgress { bytes_written: 0xA000 }),
-            Upload(OnProgress { bytes_written: 0xC000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
+            Upload(OnProgress { bytes_written: 0x2000 }),
             Upload(OnFinished),
             FlashPartitionFinished {
                 partition_name: "zircon_a".to_owned(),
@@ -1690,13 +1694,9 @@ mod test {
 
         let mut test_transport = TestTransport::new();
         test_transport.extend([
-            Reply::Okay("0x1000".to_owned()),      // Stream segment size
-            Reply::Okay("0x2000".to_owned()),      // Partition zircon_a start
-            Reply::Okay("0x1000000".to_owned()),   // Partition zircon_a size
-            Reply::Okay("0x2000".to_owned()),      // Max download size
-            Reply::Data(0x2000),                   // Download request
-            Reply::Okay("".to_owned()),            // Download
-            Reply::Fail("Flash error".to_owned()), // Stream flash fails
+            Reply::Okay("0x2000".to_owned()),            // Max download size
+            Reply::Data(0x2000),                         // Download request
+            Reply::Fail("Download ack fail".to_owned()), // Download ack fails -> sends OnError
         ]);
 
         let mut fastboot_client = FastbootProxy::<TestTransport>::new(
@@ -1705,20 +1705,30 @@ mod test {
             TestTransportFactory {},
         );
 
-        let (var_client, _var_server): (Sender<Event>, Receiver<Event>) = mpsc::channel(3);
-        let mut resolver = TestResolver::new();
-        let result = flash_partition(
-            var_client,
-            &mut resolver,
+        let (var_client, mut var_server): (Sender<Event>, Receiver<Event>) = mpsc::channel(10);
+        let result = streaming_flash_impl(
+            &var_client,
             "zircon_a",
             tmp_path.to_str().unwrap(),
             &mut fastboot_client,
-            360,
-            1000.0,
+            0x1000,
+            0x2000,
+            0x1000000,
+            Duration::seconds(360),
         )
         .await;
+        drop(var_client);
 
         assert!(result.is_err());
+
+        let mut events = vec![];
+        while let Some(event) = var_server.recv().await {
+            events.push(event);
+        }
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Upload(UploadProgress::OnError { .. }))),
+            "Expected UploadProgress::OnError to be forwarded to messenger, got: {events:?}"
+        );
         Ok(())
     }
 

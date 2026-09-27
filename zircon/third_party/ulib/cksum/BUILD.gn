@@ -23,5 +23,8 @@ zx_library("cksum") {
   }
 
   # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
+  configs += [
+    "//build/config:Wno-call-graph-section-no-prototype",
+    "//build/config:Wno-conversion",
+  ]
 }

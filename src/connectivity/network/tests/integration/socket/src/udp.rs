@@ -19,8 +19,6 @@ use fidl_fuchsia_net_ext::IpExt as _;
 use fidl_fuchsia_net_interfaces as fnet_interfaces;
 use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 use fidl_fuchsia_net_interfaces_ext as fnet_interfaces_ext;
-use fidl_fuchsia_net_routes as fnet_routes;
-use fidl_fuchsia_net_routes_ext as fnet_routes_ext;
 use fidl_fuchsia_net_tun as fnet_tun;
 use fidl_fuchsia_posix as fposix;
 use fidl_fuchsia_posix_socket as fposix_socket;
@@ -30,18 +28,15 @@ use fuchsia_async::{self as fasync, DurationExt, TimeoutExt as _};
 use futures::future::{self};
 use futures::{FutureExt as _, StreamExt as _};
 use net_declare::{
-    fidl_ip_v4, fidl_ip_v6, fidl_mac, fidl_socket_addr, fidl_subnet, net_ip_v4, net_ip_v6,
-    net_subnet_v4, net_subnet_v6, std_ip_v4, std_socket_addr,
+    fidl_mac, fidl_socket_addr, fidl_subnet, net_ip_v4, net_ip_v6, net_subnet_v4, std_ip_v4,
+    std_socket_addr,
 };
 use net_types::ip::{Ip, IpAddr, IpAddress as _, IpVersion, Ipv4, Ipv6};
 use netemul::{RealmUdpSocket as _, TestRealm};
-use netstack_testing_common::constants::ipv6 as ipv6_consts;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
-use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, Netstack3, NetstackVersion, TestRealmExt, TestSandboxExt as _,
-};
+use netstack_testing_common::realms::{Netstack3, TestRealmExt as _, TestSandboxExt as _};
 use netstack_testing_common::{
-    ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, Result, devices, ndp,
+    ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, Result, devices,
 };
 use netstack_testing_macros::netstack_test;
 use packet::{
@@ -50,7 +45,6 @@ use packet::{
 use packet_formats::ethernet::{
     ETHERNET_MIN_BODY_LEN_NO_TAG, EtherType, EthernetFrameBuilder, EthernetFrameLengthCheck,
 };
-use packet_formats::icmp::ndp::options::{NdpOptionBuilder, PrefixInformation};
 use packet_formats::ip::IpProto;
 use packet_formats::ipv4::{Ipv4Header as _, Ipv4Packet, Ipv4PacketBuilder};
 use packet_formats::ipv6::Ipv6PacketBuilder;
@@ -105,53 +99,21 @@ pub(super) async fn run_udp_socket_test(
     let ((), ()) = futures::future::join(client_fut, server_fut).await;
 }
 
-enum UdpProtocol {
-    Synchronous,
-    Fast,
-}
-
 #[netstack_test]
-#[variant(N, Netstack)]
-#[test_case(
-    UdpProtocol::Synchronous, false; "synchronous_protocol not mapped to ipv6")]
-#[test_case(
-    UdpProtocol::Fast, false; "fast_protocol not mapped to ipv6")]
-#[test_case(
-    UdpProtocol::Synchronous, true; "synchronous_protocol mapped to ipv6")]
-#[test_case(
-    UdpProtocol::Fast, true; "fast_protocol mapped to ipv6")]
-async fn test_udp_socket<N: Netstack>(name: &str, protocol: UdpProtocol, mapped_to_ipv6: bool) {
+#[test_case(false; "not mapped to ipv6")]
+#[test_case(true; "mapped to ipv6")]
+async fn test_udp_socket(name: &str, mapped_to_ipv6: bool) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
     let _packet_capture = net.start_capture(name).await.expect("starting packet capture");
 
-    let (client, server) = match protocol {
-        UdpProtocol::Synchronous => {
-            let client = sandbox
-                .create_netstack_realm::<N, _>(format!("{}_client", name))
-                .expect("failed to create client realm");
-            let server = sandbox
-                .create_netstack_realm::<N, _>(format!("{}_server", name))
-                .expect("failed to create server realm");
-            (client, server)
-        }
-        UdpProtocol::Fast => {
-            let version = match N::VERSION {
-                NetstackVersion::Netstack2 { tracing, fast_udp: _ } => {
-                    NetstackVersion::Netstack2 { tracing, fast_udp: true }
-                }
-                version => version,
-            };
-            let client = sandbox
-                .create_realm(format!("{}_client", name), [KnownServiceProvider::Netstack(version)])
-                .expect("failed to create client realm");
-            let server = sandbox
-                .create_realm(format!("{}_client", name), [KnownServiceProvider::Netstack(version)])
-                .expect("failed to create client realm");
-            (client, server)
-        }
-    };
+    let client = sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
+        .expect("failed to create client realm");
+    let server = sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
+        .expect("failed to create server realm");
 
     let client_ep = client
         .join_network_with(
@@ -207,1112 +169,11 @@ async fn test_udp_socket<N: Netstack>(name: &str, protocol: UdpProtocol, mapped_
     run_udp_socket_test(&server, server_addr, &client, client_addr).await
 }
 
-enum UdpCacheInvalidationReason {
-    ConnectCalled,
-    InterfaceDisabled,
-    AddressRemoved,
-    SetConfigurationCalled,
-    RouteRemoved,
-    RouteAdded,
-}
-
-enum ToAddrExpectation {
-    Unspecified,
-    Specified(Option<fnet::SocketAddress>),
-}
-
-struct UdpSendMsgPreflightSuccessExpectation {
-    expected_to_addr: ToAddrExpectation,
-    expect_all_eventpairs_valid: bool,
-}
-
-enum UdpSendMsgPreflightExpectation {
-    Success(UdpSendMsgPreflightSuccessExpectation),
-    Failure(fposix::Errno),
-}
-
-struct UdpSendMsgPreflight {
-    to_addr: Option<fnet::SocketAddress>,
-    expected_result: UdpSendMsgPreflightExpectation,
-}
-
-async fn setup_fastudp_network<'a>(
-    name: &'a str,
-    version: NetstackVersion,
-    sandbox: &'a netemul::TestSandbox,
-    socket_domain: fposix_socket::Domain,
-) -> (
-    netemul::TestNetwork<'a>,
-    netemul::TestRealm<'a>,
-    netemul::TestInterface<'a>,
-    fposix_socket::DatagramSocketProxy,
-) {
-    let net = sandbox.create_network("net").await.expect("create network");
-    let version = match version {
-        NetstackVersion::Netstack2 { tracing, fast_udp: _ } => {
-            NetstackVersion::Netstack2 { tracing, fast_udp: true }
-        }
-        version => version,
-    };
-    let netstack = sandbox
-        .create_realm(name, [KnownServiceProvider::Netstack(version)])
-        .expect("create netstack realm");
-    let iface = netstack.join_network(&net, "ep").await.expect("failed to join network");
-
-    let socket = {
-        let socket_provider = netstack
-            .connect_to_protocol::<fposix_socket::ProviderMarker>()
-            .expect("connect to socket provider");
-        let datagram_socket = socket_provider
-            .datagram_socket(socket_domain, fposix_socket::DatagramSocketProtocol::Udp)
-            .await
-            .expect("call datagram_socket")
-            .expect("create datagram socket");
-        match datagram_socket {
-            fposix_socket::ProviderDatagramSocketResponse::DatagramSocket(socket) => {
-                socket.into_proxy()
-            }
-            socket => panic!("unexpected datagram socket variant: {:?}", socket),
-        }
-    };
-
-    (net, netstack, iface, socket)
-}
-
-fn validate_send_msg_preflight_response(
-    response: &fposix_socket::DatagramSocketSendMsgPreflightResponse,
-    expectation: UdpSendMsgPreflightSuccessExpectation,
-) -> Result {
-    let fposix_socket::DatagramSocketSendMsgPreflightResponse {
-        to, validity, maximum_size, ..
-    } = response;
-    let UdpSendMsgPreflightSuccessExpectation { expected_to_addr, expect_all_eventpairs_valid } =
-        expectation;
-
-    match expected_to_addr {
-        ToAddrExpectation::Specified(to_addr) => {
-            assert_eq!(*to, to_addr, "unexpected to address in boarding pass");
-        }
-        ToAddrExpectation::Unspecified => (),
-    }
-
-    const MAXIMUM_UDP_PACKET_SIZE: u32 = 65535;
-    const UDP_HEADER_SIZE: u32 = 8;
-    assert_eq!(*maximum_size, Some(MAXIMUM_UDP_PACKET_SIZE - UDP_HEADER_SIZE));
-
-    let validity = validity.as_ref().expect("validity was missing");
-    assert!(validity.len() > 0, "validity was empty");
-    let all_eventpairs_valid = {
-        let mut wait_items = validity
-            .iter()
-            .map(|eventpair| eventpair.wait_item(zx::Signals::EVENTPAIR_PEER_CLOSED))
-            .collect::<Vec<_>>();
-        zx::object_wait_many(&mut wait_items, zx::MonotonicInstant::INFINITE_PAST)
-            == Err(zx::Status::TIMED_OUT)
-    };
-    if expect_all_eventpairs_valid != all_eventpairs_valid {
-        return Err(anyhow!(
-            "mismatched expectation on eventpair validity: expected {}, got {}",
-            expect_all_eventpairs_valid,
-            all_eventpairs_valid
-        ));
-    }
-    Ok(())
-}
-
-/// Executes a preflight for each of the passed preflight configs, validating
-/// the result against the passed expectation and returning all successful responses.
-async fn execute_and_validate_preflights(
-    preflights: impl IntoIterator<Item = UdpSendMsgPreflight>,
-    proxy: &fposix_socket::DatagramSocketProxy,
-) -> Vec<fposix_socket::DatagramSocketSendMsgPreflightResponse> {
-    futures::stream::iter(preflights)
-        .then(|preflight| {
-            let UdpSendMsgPreflight { to_addr, expected_result } = preflight;
-            let result =
-                proxy.send_msg_preflight(&fposix_socket::DatagramSocketSendMsgPreflightRequest {
-                    to: to_addr,
-                    ..Default::default()
-                });
-            async move { (expected_result, result.await) }
-        })
-        .filter_map(|(expected, actual)| async move {
-            let actual = actual.expect("send_msg_preflight fidl error");
-            match expected {
-                UdpSendMsgPreflightExpectation::Success(success_expectation) => {
-                    let response = actual.expect("send_msg_preflight failed");
-                    validate_send_msg_preflight_response(&response, success_expectation)
-                        .expect("validate preflight response");
-                    Some(response)
-                }
-                UdpSendMsgPreflightExpectation::Failure(expected_errno) => {
-                    assert_eq!(Err(expected_errno), actual);
-                    None
-                }
-            }
-        })
-        .collect::<Vec<_>>()
-        .await
-}
-
-trait UdpSendMsgPreflightTestIpExt: Ip {
-    const PORT: u16;
-    const SOCKET_DOMAIN: fposix_socket::Domain;
-    const INSTALLED_ADDR: fnet::Subnet;
-    const REACHABLE_ADDR1: fnet::SocketAddress;
-    const REACHABLE_ADDR2: fnet::SocketAddress;
-    const UNREACHABLE_ADDR: fnet::SocketAddress;
-    const OTHER_SUBNET: fnet::Subnet;
-
-    fn forwarding_config() -> fnet_interfaces_admin::Configuration;
-}
-
-impl UdpSendMsgPreflightTestIpExt for net_types::ip::Ipv4 {
-    const PORT: u16 = 80;
-    const SOCKET_DOMAIN: fposix_socket::Domain = fposix_socket::Domain::Ipv4;
-    const INSTALLED_ADDR: fnet::Subnet = fidl_subnet!("192.0.2.1/24");
-    const REACHABLE_ADDR1: fnet::SocketAddress =
-        fnet::SocketAddress::Ipv4(fnet::Ipv4SocketAddress {
-            address: fidl_ip_v4!("192.0.2.101"),
-            port: Self::PORT,
-        });
-    const REACHABLE_ADDR2: fnet::SocketAddress =
-        fnet::SocketAddress::Ipv4(fnet::Ipv4SocketAddress {
-            address: fidl_ip_v4!("192.0.2.102"),
-            port: Self::PORT,
-        });
-    const UNREACHABLE_ADDR: fnet::SocketAddress =
-        fnet::SocketAddress::Ipv4(fnet::Ipv4SocketAddress {
-            address: fidl_ip_v4!("198.51.100.1"),
-            port: Self::PORT,
-        });
-    const OTHER_SUBNET: fnet::Subnet = fidl_subnet!("203.0.113.0/24");
-
-    fn forwarding_config() -> fnet_interfaces_admin::Configuration {
-        fnet_interfaces_admin::Configuration {
-            ipv4: Some(fnet_interfaces_admin::Ipv4Configuration {
-                unicast_forwarding: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-}
-
-impl UdpSendMsgPreflightTestIpExt for net_types::ip::Ipv6 {
-    const PORT: u16 = 80;
-    const SOCKET_DOMAIN: fposix_socket::Domain = fposix_socket::Domain::Ipv6;
-    const INSTALLED_ADDR: fnet::Subnet = fidl_subnet!("2001:db8::1/64");
-    const REACHABLE_ADDR1: fnet::SocketAddress =
-        fnet::SocketAddress::Ipv6(fnet::Ipv6SocketAddress {
-            address: fidl_ip_v6!("2001:db8::1001"),
-            port: Self::PORT,
-            zone_index: 0,
-        });
-    const REACHABLE_ADDR2: fnet::SocketAddress =
-        fnet::SocketAddress::Ipv6(fnet::Ipv6SocketAddress {
-            address: fidl_ip_v6!("2001:db8::1002"),
-            port: Self::PORT,
-            zone_index: 0,
-        });
-    const UNREACHABLE_ADDR: fnet::SocketAddress =
-        fnet::SocketAddress::Ipv6(fnet::Ipv6SocketAddress {
-            address: fidl_ip_v6!("2001:db8:ffff:ffff::1"),
-            port: Self::PORT,
-            zone_index: 0,
-        });
-    const OTHER_SUBNET: fnet::Subnet = fidl_subnet!("2001:db8:eeee:eeee::/64");
-
-    fn forwarding_config() -> fnet_interfaces_admin::Configuration {
-        fnet_interfaces_admin::Configuration {
-            ipv6: Some(fnet_interfaces_admin::Ipv6Configuration {
-                unicast_forwarding: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-}
-
-async fn udp_send_msg_preflight_fidl_setup<I: UdpSendMsgPreflightTestIpExt>(
-    iface: &netemul::TestInterface<'_>,
-    socket: &fposix_socket::DatagramSocketProxy,
-) -> Vec<fposix_socket::DatagramSocketSendMsgPreflightResponse> {
-    iface
-        .add_address_and_subnet_route(I::INSTALLED_ADDR)
-        .await
-        .expect("failed to add subnet route");
-
-    let successful_preflights = execute_and_validate_preflights(
-        [
-            UdpSendMsgPreflight {
-                to_addr: Some(I::UNREACHABLE_ADDR),
-                expected_result: UdpSendMsgPreflightExpectation::Failure(
-                    fposix::Errno::Ehostunreach,
-                ),
-            },
-            UdpSendMsgPreflight {
-                to_addr: None,
-                expected_result: UdpSendMsgPreflightExpectation::Failure(
-                    fposix::Errno::Edestaddrreq,
-                ),
-            },
-        ],
-        &socket,
-    )
-    .await;
-    assert_eq!(successful_preflights, []);
-
-    let connected_addr = I::REACHABLE_ADDR1;
-    socket.connect(&connected_addr).await.expect("connect fidl error").expect("connect failed");
-
-    // We deliberately repeat an address here to ensure that the preflight can
-    // be called > 1 times with the same address.
-    let mut preflights: Vec<UdpSendMsgPreflight> =
-        vec![I::REACHABLE_ADDR1, I::REACHABLE_ADDR2, I::REACHABLE_ADDR2]
-            .iter()
-            .map(|socket_address| UdpSendMsgPreflight {
-                to_addr: Some(*socket_address),
-                expected_result: UdpSendMsgPreflightExpectation::Success(
-                    UdpSendMsgPreflightSuccessExpectation {
-                        expected_to_addr: ToAddrExpectation::Specified(None),
-                        expect_all_eventpairs_valid: true,
-                    },
-                ),
-            })
-            .collect();
-    preflights.push(UdpSendMsgPreflight {
-        to_addr: None,
-        expected_result: UdpSendMsgPreflightExpectation::Success(
-            UdpSendMsgPreflightSuccessExpectation {
-                expected_to_addr: ToAddrExpectation::Specified(Some(connected_addr)),
-                expect_all_eventpairs_valid: true,
-            },
-        ),
-    });
-
-    execute_and_validate_preflights(preflights, &socket).await
-}
-
-fn assert_preflights_invalidated(
-    successful_preflights: impl IntoIterator<
-        Item = fposix_socket::DatagramSocketSendMsgPreflightResponse,
-    >,
-) {
-    for successful_preflight in successful_preflights {
-        validate_send_msg_preflight_response(
-            &successful_preflight,
-            UdpSendMsgPreflightSuccessExpectation {
-                expected_to_addr: ToAddrExpectation::Unspecified,
-                expect_all_eventpairs_valid: false,
-            },
-        )
-        .expect("validate preflight response");
-    }
-}
-
 #[netstack_test]
-#[variant(N, Netstack)]
-#[variant(I, Ip)]
-#[test_case("connect_called", UdpCacheInvalidationReason::ConnectCalled)]
-#[test_case("Control.Disable", UdpCacheInvalidationReason::InterfaceDisabled)]
-#[test_case("Control.RemoveAddress", UdpCacheInvalidationReason::AddressRemoved)]
-#[test_case("Control.SetConfiguration", UdpCacheInvalidationReason::SetConfigurationCalled)]
-#[test_case("route_removed", UdpCacheInvalidationReason::RouteRemoved)]
-#[test_case("route_added", UdpCacheInvalidationReason::RouteAdded)]
-async fn udp_send_msg_preflight_fidl<N: Netstack, I: UdpSendMsgPreflightTestIpExt>(
-    root_name: &str,
-    test_name: &str,
-    invalidation_reason: UdpCacheInvalidationReason,
-) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm_name = format!("{}_{}", root_name, test_name);
-    let (_net, _netstack, iface, socket) =
-        setup_fastudp_network(&realm_name, N::VERSION, &sandbox, I::SOCKET_DOMAIN).await;
-
-    let successful_preflights = udp_send_msg_preflight_fidl_setup::<I>(&iface, &socket).await;
-
-    match invalidation_reason {
-        UdpCacheInvalidationReason::ConnectCalled => {
-            let connected_addr = I::REACHABLE_ADDR2;
-            socket
-                .connect(&connected_addr)
-                .await
-                .expect("connect fidl error")
-                .expect("connect failed");
-        }
-        UdpCacheInvalidationReason::InterfaceDisabled => {
-            let disabled = iface
-                .control()
-                .disable()
-                .await
-                .expect("disable_interface fidl error")
-                .expect("failed to disable interface");
-            assert_eq!(disabled, true);
-        }
-        UdpCacheInvalidationReason::AddressRemoved => {
-            let installed_subnet = I::INSTALLED_ADDR;
-            let removed = iface
-                .control()
-                .remove_address(&installed_subnet)
-                .await
-                .expect("remove_address fidl error")
-                .expect("failed to remove address");
-            assert!(removed, "address was not removed from interface");
-        }
-        UdpCacheInvalidationReason::RouteRemoved => {
-            iface.del_subnet_route(I::INSTALLED_ADDR).await.expect("failed to delete subnet route");
-        }
-        UdpCacheInvalidationReason::RouteAdded => {
-            let () =
-                iface.add_subnet_route(I::OTHER_SUBNET).await.expect("failed to add subnet route");
-        }
-        UdpCacheInvalidationReason::SetConfigurationCalled => {
-            let _prev_config = iface
-                .control()
-                .set_configuration(&I::forwarding_config())
-                .await
-                .expect("set_configuration fidl error")
-                .expect("failed to set interface configuration");
-        }
-    }
-
-    assert_preflights_invalidated(successful_preflights);
-}
-
-enum UdpCacheInvalidationReasonV4 {
-    BroadcastCalled,
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-#[test_case("broadcast_called", UdpCacheInvalidationReasonV4::BroadcastCalled)]
-async fn udp_send_msg_preflight_fidl_v4only<N: Netstack>(
-    root_name: &str,
-    test_name: &str,
-    invalidation_reason: UdpCacheInvalidationReasonV4,
-) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm_name = format!("{}_{}", root_name, test_name);
-    let (_net, _netstack, iface, socket) =
-        setup_fastudp_network(&realm_name, N::VERSION, &sandbox, Ipv4::SOCKET_DOMAIN).await;
-
-    let successful_preflights = udp_send_msg_preflight_fidl_setup::<Ipv4>(&iface, &socket).await;
-
-    match invalidation_reason {
-        UdpCacheInvalidationReasonV4::BroadcastCalled => {
-            socket
-                .set_broadcast(true)
-                .await
-                .expect("set_so_broadcast fidl error")
-                .expect("failed to set so_broadcast");
-        }
-    }
-
-    assert_preflights_invalidated(successful_preflights);
-}
-
-enum UdpCacheInvalidationReasonV6 {
-    Ipv6OnlyCalled,
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-#[test_case("ipv6_only_called", UdpCacheInvalidationReasonV6::Ipv6OnlyCalled)]
-async fn udp_send_msg_preflight_fidl_v6only<N: Netstack>(
-    root_name: &str,
-    test_name: &str,
-    invalidation_reason: UdpCacheInvalidationReasonV6,
-) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm_name = format!("{}_{}", root_name, test_name);
-    let (_net, _netstack, iface, socket) =
-        setup_fastudp_network(&realm_name, N::VERSION, &sandbox, Ipv6::SOCKET_DOMAIN).await;
-
-    let successful_preflights = udp_send_msg_preflight_fidl_setup::<Ipv6>(&iface, &socket).await;
-
-    match invalidation_reason {
-        UdpCacheInvalidationReasonV6::Ipv6OnlyCalled => {
-            socket
-                .set_ipv6_only(true)
-                .await
-                .expect("set_ipv6_only fidl error")
-                .expect("failed to set ipv6 only");
-        }
-    }
-
-    assert_preflights_invalidated(successful_preflights);
-}
-
-enum UdpCacheInvalidationReasonNdp {
-    RouterAdvertisement,
-    RouterAdvertisementWithPrefix,
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-#[test_case("ra", UdpCacheInvalidationReasonNdp::RouterAdvertisement)]
-#[test_case("ra_with_prefix", UdpCacheInvalidationReasonNdp::RouterAdvertisementWithPrefix)]
-async fn udp_send_msg_preflight_fidl_ndp<N: Netstack>(
-    root_name: &str,
-    test_name: &str,
-    invalidation_reason: UdpCacheInvalidationReasonNdp,
-) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm_name = format!("{}_{}", root_name, test_name);
-    let (net, realm, iface, socket) =
-        setup_fastudp_network(&realm_name, N::VERSION, &sandbox, Ipv6::SOCKET_DOMAIN).await;
-    let fake_ep = net.create_fake_endpoint().expect("create fake endpoint");
-
-    let successful_preflights = udp_send_msg_preflight_fidl_setup::<Ipv6>(&iface, &socket).await;
-
-    // Note that the following prefix must not overlap with
-    // `<Ipv6 as UdpSendMsgPreflightTestIpExt>::INSTALLED_ADDR`, as there is already a subnet
-    // route for the installed addr and so discovering the same prefix will not cause a route
-    // to be added and induce cache invalidation.
-    const PREFIX: net_types::ip::Subnet<net_types::ip::Ipv6Addr> =
-        net_subnet_v6!("2001:db8:ffff:ffff::/64");
-    const SOCKADDR_IN_PREFIX: fnet::SocketAddress =
-        fidl_socket_addr!("[2001:db8:ffff:ffff::1]:9999");
-
-    // These are arbitrary large lifetime values so that the information
-    // contained within the RA are not deprecated/invalidated over the course
-    // of the test.
-    const LARGE_ROUTER_LIFETIME: u16 = 9000;
-    const LARGE_PREFIX_LIFETIME: u32 = 99999;
-    async fn send_ra(
-        fake_ep: &netemul::TestFakeEndpoint<'_>,
-        router_lifetime: u16,
-        prefix_lifetime: Option<u32>,
-    ) {
-        let options = prefix_lifetime
-            .into_iter()
-            .map(|lifetime| {
-                NdpOptionBuilder::PrefixInformation(PrefixInformation::new(
-                    PREFIX.prefix(),  /* prefix_length */
-                    true,             /* on_link_flag */
-                    true,             /* autonomous_address_configuration_flag */
-                    lifetime,         /* valid_lifetime */
-                    lifetime,         /* preferred_lifetime */
-                    PREFIX.network(), /* prefix */
-                ))
-            })
-            .collect::<Vec<_>>();
-        ndp::send_ra_with_router_lifetime(
-            &fake_ep,
-            router_lifetime,
-            &options,
-            ipv6_consts::LINK_LOCAL_ADDR,
-        )
-        .await
-        .expect("failed to fake RA message");
-    }
-    fn route_found(
-        fnet_routes_ext::InstalledRoute {
-            route: fnet_routes_ext::Route { destination, action, properties: _ },
-            effective_properties: _,
-            table_id: _,
-        }: fnet_routes_ext::InstalledRoute<Ipv6>,
-        want: net_types::ip::Subnet<net_types::ip::Ipv6Addr>,
-        interface_id: u64,
-    ) -> bool {
-        let route_found = destination == want;
-        if route_found {
-            assert_eq!(
-                action,
-                fnet_routes_ext::RouteAction::Forward(fnet_routes_ext::RouteTarget {
-                    outbound_interface: interface_id,
-                    next_hop: None,
-                }),
-            );
-        }
-        route_found
-    }
-    let routes_state = realm
-        .connect_to_protocol::<fnet_routes::StateV6Marker>()
-        .expect("connect to route state FIDL");
-    let event_stream = fnet_routes_ext::event_stream_from_state::<Ipv6>(&routes_state)
-        .expect("routes event stream from state");
-    let mut event_stream = pin!(event_stream);
-    let mut routes = std::collections::HashSet::new();
-
-    match invalidation_reason {
-        // Send a RA message with an arbitrarily chosen but large router lifetime value to
-        // indicate to Netstack that a router is present. Netstack will add a default route,
-        // and invalidate the cache.
-        UdpCacheInvalidationReasonNdp::RouterAdvertisement => {
-            send_ra(&fake_ep, LARGE_ROUTER_LIFETIME, None /* prefix_lifetime */).await;
-
-            // Wait until a default IPv6 route is added in response to the RA.
-            let mut interface_state =
-                fnet_interfaces_ext::InterfaceState::<(), _>::Unknown(iface.id());
-            fnet_interfaces_ext::wait_interface_with_id(
-                realm.get_interface_event_stream().expect("get interface event stream"),
-                &mut interface_state,
-                |iface| iface.properties.has_default_ipv6_route.then_some(()),
-            )
-            .await
-            .expect("failed to wait for default IPv6 route");
-        }
-        // Send a RA message with router lifetime of 0 (otherwise the router information
-        // also induces a default route and this test case tests a strict superset of the
-        // `RouterAdvertisement` test case), but containing a prefix information option. Since
-        // the prefix is on-link, Netstack will add a subnet route, and invalidate the cache.
-        UdpCacheInvalidationReasonNdp::RouterAdvertisementWithPrefix => {
-            send_ra(
-                &fake_ep,
-                0,                           /* router_lifetime */
-                Some(LARGE_PREFIX_LIFETIME), /* prefix_lifetime */
-            )
-            .await;
-
-            fnet_routes_ext::wait_for_routes(event_stream.by_ref(), &mut routes, |routes| {
-                routes
-                    .iter()
-                    .any(|installed_route| route_found(*installed_route, PREFIX, iface.id()))
-            })
-            .await
-            .expect("failed to wait for subnet route to appear");
-        }
-    }
-
-    assert_preflights_invalidated(successful_preflights);
-
-    // Note that `SOCKADDR_IN_PREFIX` is reachable in both cases because there
-    // is either a route to the prefix or a default route.
-    let successful_preflights = execute_and_validate_preflights(
-        [SOCKADDR_IN_PREFIX, Ipv6::REACHABLE_ADDR1].into_iter().map(|socket_address| {
-            UdpSendMsgPreflight {
-                to_addr: Some(socket_address),
-                expected_result: UdpSendMsgPreflightExpectation::Success(
-                    UdpSendMsgPreflightSuccessExpectation {
-                        expected_to_addr: ToAddrExpectation::Specified(None),
-                        expect_all_eventpairs_valid: true,
-                    },
-                ),
-            }
-        }),
-        &socket,
-    )
-    .await;
-
-    match invalidation_reason {
-        // Send an RA message invalidating the existence of the router, causing
-        // the default route to be removed, and the cache to be invalidated.
-        UdpCacheInvalidationReasonNdp::RouterAdvertisement => {
-            send_ra(&fake_ep, 0 /* router_lifetime */, None /* prefix_lifetime */).await;
-
-            // Wait until the default IPv6 route is removed.
-            let mut interface_state =
-                fnet_interfaces_ext::InterfaceState::<(), _>::Unknown(iface.id());
-            fnet_interfaces_ext::wait_interface_with_id(
-                realm.get_interface_event_stream().expect("get interface event stream"),
-                &mut interface_state,
-                |iface| (!iface.properties.has_default_ipv6_route).then_some(()),
-            )
-            .await
-            .expect("failed to wait for default IPv6 route");
-        }
-        // Send an RA message invalidating the prefix, causing the subnet
-        // route to be removed, and the cache to be invalidated.
-        UdpCacheInvalidationReasonNdp::RouterAdvertisementWithPrefix => {
-            let routes_state = realm
-                .connect_to_protocol::<fnet_routes::StateV6Marker>()
-                .expect("connect to route state FIDL");
-            let event_stream = fnet_routes_ext::event_stream_from_state::<Ipv6>(&routes_state)
-                .expect("routes event stream from state");
-            let mut event_stream = pin!(event_stream);
-            let _: Vec<_> = fnet_routes_ext::collect_routes_until_idle(event_stream.by_ref())
-                .await
-                .expect("collect routes until idle");
-
-            send_ra(&fake_ep, 0 /* router_lifetime */, Some(0) /* prefix_lifetime */).await;
-
-            fnet_routes_ext::wait_for_routes(event_stream, &mut routes, |routes| {
-                routes
-                    .iter()
-                    .all(|installed_route| !route_found(*installed_route, PREFIX, iface.id()))
-            })
-            .await
-            .expect("failed to wait for subnet route to disappear");
-        }
-    }
-
-    assert_preflights_invalidated(successful_preflights);
-}
-
-async fn connect_socket_and_validate_preflight(
-    socket: &fposix_socket::DatagramSocketProxy,
-    addr: fnet::SocketAddress,
-) -> fposix_socket::DatagramSocketSendMsgPreflightResponse {
-    socket.connect(&addr).await.expect("call connect").expect("connect socket");
-
-    let response = socket
-        .send_msg_preflight(&fposix_socket::DatagramSocketSendMsgPreflightRequest::default())
-        .await
-        .expect("call send_msg_preflight")
-        .expect("preflight check should succeed");
-
-    validate_send_msg_preflight_response(
-        &response,
-        UdpSendMsgPreflightSuccessExpectation {
-            expected_to_addr: ToAddrExpectation::Specified(Some(addr)),
-            expect_all_eventpairs_valid: true,
-        },
-    )
-    .expect("validate preflight response");
-
-    response
-}
-
-async fn assert_preflight_response_invalidated(
-    preflight: &fposix_socket::DatagramSocketSendMsgPreflightResponse,
-) {
-    async fn invoke_with_retries(
-        retries: usize,
-        delay: zx::MonotonicDuration,
-        op: impl Fn() -> Result,
-    ) -> Result {
-        for _ in 0..retries {
-            if let Ok(()) = op() {
-                return Ok(());
-            }
-            fasync::Timer::new(delay).await;
-        }
-        op()
-    }
-
-    // NB: cache invalidation that results from internal state changes (such as
-    // auto-generated address invalidation or DAD failure) is not guaranteed to
-    // occur synchronously with the associated events emitted by the Netstack (such
-    // as notification of address removal on the interface watcher or address state
-    // provider). This means that the cache might not have been invalidated
-    // immediately after observing the relevant emitted event.
-    //
-    // We avoid flakes due to this behavior by retrying multiple times with an
-    // arbitrary delay.
-    const RETRY_COUNT: usize = 3;
-    const RETRY_DELAY: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(500);
-    let result = invoke_with_retries(RETRY_COUNT, RETRY_DELAY, || {
-        validate_send_msg_preflight_response(
-            &preflight,
-            UdpSendMsgPreflightSuccessExpectation {
-                expected_to_addr: ToAddrExpectation::Unspecified,
-                expect_all_eventpairs_valid: false,
-            },
-        )
-    })
-    .await;
-    assert_matches!(
-        result,
-        Ok(()),
-        "failed to observe expected cache invalidation after auto-generated address was invalidated"
-    );
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-async fn udp_send_msg_preflight_autogen_addr_invalidation<N: Netstack>(name: &str) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let (net, netstack, iface, socket) =
-        setup_fastudp_network(name, N::VERSION, &sandbox, fposix_socket::Domain::Ipv6).await;
-
-    let interfaces_state = netstack
-        .connect_to_protocol::<fnet_interfaces::StateMarker>()
-        .expect("connect to protocol");
-
-    // Send a Router Advertisement with the autoconf flag set to trigger
-    // SLAAC, but specify a very short valid lifetime so the address
-    // will expire quickly.
-    let fake_ep = net.create_fake_endpoint().expect("create fake endpoint");
-    // NB: we want this lifetime to be short so the test does not take too long
-    // to run. However, if we make it too short, the test will be flaky, because
-    // it's possible for the address lifetime to expire before the subsequent
-    // SendMsgPreflight call.
-    const VALID_LIFETIME_SECONDS: u32 = 10;
-    let options = [NdpOptionBuilder::PrefixInformation(PrefixInformation::new(
-        ipv6_consts::GLOBAL_PREFIX.prefix(),  /* prefix_length */
-        false,                                /* on_link_flag */
-        true,                                 /* autonomous_address_configuration_flag */
-        VALID_LIFETIME_SECONDS,               /* valid_lifetime */
-        0,                                    /* preferred_lifetime */
-        ipv6_consts::GLOBAL_PREFIX.network(), /* prefix */
-    ))];
-    ndp::send_ra_with_router_lifetime(&fake_ep, 0, &options, ipv6_consts::LINK_LOCAL_ADDR)
-        .await
-        .expect("send router advertisement");
-
-    // Wait for an address to be auto generated.
-    let autogen_address = fnet_interfaces_ext::wait_interface_with_id(
-        fnet_interfaces_ext::event_stream_from_state::<fnet_interfaces_ext::DefaultInterest>(
-            &interfaces_state,
-            Default::default(),
-        )
-        .expect("create event stream"),
-        &mut fnet_interfaces_ext::InterfaceState::<(), _>::Unknown(iface.id()),
-        |iface| {
-            iface.properties.addresses.iter().find_map(
-                |fnet_interfaces_ext::Address {
-                     addr: fnet::Subnet { addr, prefix_len: _ },
-                     assignment_state,
-                     ..
-                 }| {
-                    assert_eq!(
-                        *assignment_state,
-                        fnet_interfaces::AddressAssignmentState::Assigned
-                    );
-                    match addr {
-                        fnet::IpAddress::Ipv4(_) => None,
-                        fnet::IpAddress::Ipv6(addr @ fnet::Ipv6Address { addr: bytes }) => {
-                            ipv6_consts::GLOBAL_PREFIX
-                                .contains(&net_types::ip::Ipv6Addr::from_bytes(*bytes))
-                                .then_some(*addr)
-                        }
-                    }
-                },
-            )
-        },
-    )
-    .await
-    .expect("wait for address assignment");
-
-    let preflight = connect_socket_and_validate_preflight(
-        &socket,
-        fnet::SocketAddress::Ipv6(fnet::Ipv6SocketAddress {
-            address: autogen_address,
-            port: 9999, // arbitrary remote port
-            zone_index: 0,
-        }),
-    )
-    .await;
-
-    // Wait for the address to be invalidated and removed.
-    fnet_interfaces_ext::wait_interface_with_id(
-        fnet_interfaces_ext::event_stream_from_state::<fnet_interfaces_ext::DefaultInterest>(
-            &interfaces_state,
-            Default::default(),
-        )
-        .expect("create event stream"),
-        &mut fnet_interfaces_ext::InterfaceState::<(), _>::Unknown(iface.id()),
-        |iface| {
-            (!iface.properties.addresses.iter().any(
-                |fnet_interfaces_ext::Address {
-                     addr: fnet::Subnet { addr, prefix_len: _ },
-                     assignment_state,
-                     ..
-                 }| {
-                    assert_eq!(
-                        *assignment_state,
-                        fnet_interfaces::AddressAssignmentState::Assigned
-                    );
-                    match addr {
-                        fnet::IpAddress::Ipv4(_) => false,
-                        fnet::IpAddress::Ipv6(addr) => addr == &autogen_address,
-                    }
-                },
-            ))
-            .then_some(())
-        },
-    )
-    .await
-    .expect("wait for address removal");
-
-    assert_preflight_response_invalidated(&preflight).await;
-
-    // Now that the address has been invalidated and removed, subsequent calls to
-    // preflight using the connected address should fail.
-    let result = socket
-        .send_msg_preflight(&fposix_socket::DatagramSocketSendMsgPreflightRequest {
-            to: None,
-            ..Default::default()
-        })
-        .await
-        .expect("call send_msg_preflight");
-    assert_eq!(result, Err(fposix::Errno::Ehostunreach));
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-async fn udp_send_msg_preflight_dad_failure<N: Netstack>(name: &str) {
-    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let (net, _netstack, iface, socket) =
-        setup_fastudp_network(name, N::VERSION, &sandbox, fposix_socket::Domain::Ipv6).await;
-
-    let preflight = connect_socket_and_validate_preflight(
-        &socket,
-        fnet_ext::SocketAddress((std::net::Ipv6Addr::LOCALHOST, 9999).into()).into(),
-    )
-    .await;
-
-    // Create the fake endpoint before adding an address to the netstack to ensure
-    // that we receive all NDP messages sent by the client.
-    let fake_ep = net.create_fake_endpoint().expect("create fake endpoint");
-
-    let (address_state_provider, server) =
-        fidl::endpoints::create_proxy::<fnet_interfaces_admin::AddressStateProviderMarker>();
-    // Create the state stream before adding the address to ensure that all
-    // generated events are observed.
-    let state_stream = fnet_interfaces_ext::admin::assignment_state_stream(address_state_provider);
-    iface
-        .control()
-        .add_address(
-            &fnet::Subnet {
-                addr: fnet::IpAddress::Ipv6(fnet::Ipv6Address {
-                    addr: ipv6_consts::LINK_LOCAL_ADDR.ipv6_bytes(),
-                }),
-                prefix_len: ipv6_consts::LINK_LOCAL_SUBNET_PREFIX,
-            },
-            &fnet_interfaces_admin::AddressParameters::default(),
-            server,
-        )
-        .expect("call add address");
-
-    // Expect the netstack to send a DAD message, and simulate another node already
-    // owning the address. Expect DAD to fail as a result.
-    let _: Vec<u8> = ndp::expect_dad_neighbor_solicitation(&fake_ep).await;
-    ndp::fail_dad_with_na(&fake_ep).await;
-    ndp::assert_dad_failed(state_stream).await;
-
-    assert_preflight_response_invalidated(&preflight).await;
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum CmsgType {
-    IpTos,
-    IpTtl,
-    Ipv6Tclass,
-    Ipv6Hoplimit,
-    Ipv6PktInfo,
-    SoTimestamp,
-    SoTimestampNs,
-}
-
-struct RequestedCmsgSetExpectation {
-    requested_cmsg_type: Option<CmsgType>,
-    valid: bool,
-}
-
-fn validate_recv_msg_postflight_response(
-    response: &fposix_socket::DatagramSocketRecvMsgPostflightResponse,
-    expectation: RequestedCmsgSetExpectation,
-) {
-    let fposix_socket::DatagramSocketRecvMsgPostflightResponse {
-        validity,
-        requests,
-        timestamp,
-        ..
-    } = response;
-    let RequestedCmsgSetExpectation { valid, requested_cmsg_type } = expectation;
-    let cmsg_expected =
-        |cmsg_type| requested_cmsg_type.is_some_and(|req_type| req_type == cmsg_type);
-
-    use fposix_socket::{CmsgRequests, TimestampOption};
-
-    let bits_cmsg_requested = |cmsg_type| {
-        !(requests.unwrap_or_else(|| CmsgRequests::from_bits_allow_unknown(0)) & cmsg_type)
-            .is_empty()
-    };
-
-    assert_eq!(bits_cmsg_requested(CmsgRequests::IP_TOS), cmsg_expected(CmsgType::IpTos));
-    assert_eq!(bits_cmsg_requested(CmsgRequests::IP_TTL), cmsg_expected(CmsgType::IpTtl));
-    assert_eq!(bits_cmsg_requested(CmsgRequests::IPV6_TCLASS), cmsg_expected(CmsgType::Ipv6Tclass));
-    assert_eq!(
-        bits_cmsg_requested(CmsgRequests::IPV6_HOPLIMIT),
-        cmsg_expected(CmsgType::Ipv6Hoplimit)
-    );
-    assert_eq!(
-        bits_cmsg_requested(CmsgRequests::IPV6_PKTINFO),
-        cmsg_expected(CmsgType::Ipv6PktInfo)
-    );
-    assert_eq!(
-        *timestamp == Some(TimestampOption::Nanosecond),
-        cmsg_expected(CmsgType::SoTimestampNs)
-    );
-    assert_eq!(
-        *timestamp == Some(TimestampOption::Microsecond),
-        cmsg_expected(CmsgType::SoTimestamp)
-    );
-
-    let expected_validity =
-        if valid { Err(zx::Status::TIMED_OUT) } else { Ok(zx::Signals::EVENTPAIR_PEER_CLOSED) };
-    let validity = validity.as_ref().expect("expected validity present");
-    assert_eq!(
-        validity
-            .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
-            .to_result(),
-        expected_validity,
-    );
-}
-
-async fn toggle_cmsg(
-    requested: bool,
-    proxy: &fposix_socket::DatagramSocketProxy,
-    cmsg_type: CmsgType,
-) {
-    match cmsg_type {
-        CmsgType::IpTos => {
-            proxy
-                .set_ip_receive_type_of_service(requested)
-                .await
-                .expect("set_ip_receive_type_of_service fidl error")
-                .expect("set_ip_receive_type_of_service failed");
-        }
-        CmsgType::IpTtl => {
-            proxy
-                .set_ip_receive_ttl(requested)
-                .await
-                .expect("set_ip_receive_ttl fidl error")
-                .expect("set_ip_receive_ttl failed");
-        }
-        CmsgType::Ipv6Tclass => {
-            proxy
-                .set_ipv6_receive_traffic_class(requested)
-                .await
-                .expect("set_ipv6_receive_traffic_class fidl error")
-                .expect("set_ipv6_receive_traffic_class failed");
-        }
-        CmsgType::Ipv6Hoplimit => {
-            proxy
-                .set_ipv6_receive_hop_limit(requested)
-                .await
-                .expect("set_ipv6_receive_hop_limit fidl error")
-                .expect("set_ipv6_receive_hop_limit failed");
-        }
-        CmsgType::Ipv6PktInfo => {
-            proxy
-                .set_ipv6_receive_packet_info(requested)
-                .await
-                .expect("set_ipv6_receive_packet_info fidl error")
-                .expect("set_ipv6_receive_packet_info failed");
-        }
-        CmsgType::SoTimestamp => {
-            let option = if requested {
-                fposix_socket::TimestampOption::Microsecond
-            } else {
-                fposix_socket::TimestampOption::Disabled
-            };
-            proxy
-                .set_timestamp(option)
-                .await
-                .expect("set_timestamp fidl error")
-                .expect("set_timestamp failed");
-        }
-        CmsgType::SoTimestampNs => {
-            let option = if requested {
-                fposix_socket::TimestampOption::Nanosecond
-            } else {
-                fposix_socket::TimestampOption::Disabled
-            };
-            proxy
-                .set_timestamp(option)
-                .await
-                .expect("set_timestamp fidl error")
-                .expect("set_timestamp failed");
-        }
-    }
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-#[test_case("ip_tos", CmsgType::IpTos)]
-#[test_case("ip_ttl", CmsgType::IpTtl)]
-#[test_case("ipv6_tclass", CmsgType::Ipv6Tclass)]
-#[test_case("ipv6_hoplimit", CmsgType::Ipv6Hoplimit)]
-#[test_case("ipv6_pktinfo", CmsgType::Ipv6PktInfo)]
-#[test_case("so_timestamp_ns", CmsgType::SoTimestampNs)]
-#[test_case("so_timestamp", CmsgType::SoTimestamp)]
-async fn udp_recv_msg_postflight_fidl<N: Netstack>(
-    root_name: &str,
-    test_name: &str,
-    cmsg_type: CmsgType,
-) {
-    let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let version = match N::VERSION {
-        NetstackVersion::Netstack2 { tracing, fast_udp: _ } => {
-            NetstackVersion::Netstack2 { tracing, fast_udp: true }
-        }
-        version => version,
-    };
-    let netstack = sandbox
-        .create_realm(
-            format!("{}_{}", root_name, test_name),
-            [KnownServiceProvider::Netstack(version)],
-        )
-        .expect("failed to create netstack realm");
-
-    let socket_provider = netstack
-        .connect_to_protocol::<fposix_socket::ProviderMarker>()
-        .expect("failed to connect to socket provider");
-
-    let datagram_socket = socket_provider
-        .datagram_socket(fposix_socket::Domain::Ipv4, fposix_socket::DatagramSocketProtocol::Udp)
-        .await
-        .expect("datagram_socket fidl error")
-        .expect("failed to create datagram socket");
-
-    let datagram_socket = match datagram_socket {
-        fposix_socket::ProviderDatagramSocketResponse::DatagramSocket(socket) => socket,
-        socket => panic!("unexpected datagram socket variant: {:?}", socket),
-    };
-
-    let proxy = datagram_socket.into_proxy();
-
-    // Expect no cmsgs requested by default.
-    let response = proxy
-        .recv_msg_postflight()
-        .await
-        .expect("recv_msg_postflight fidl error")
-        .expect("recv_msg_postflight failed");
-    validate_recv_msg_postflight_response(
-        &response,
-        RequestedCmsgSetExpectation { requested_cmsg_type: None, valid: true },
-    );
-
-    toggle_cmsg(true, &proxy, cmsg_type).await;
-
-    // Expect requesting a cmsg invalidates the returned cmsg set.
-    validate_recv_msg_postflight_response(
-        &response,
-        RequestedCmsgSetExpectation { requested_cmsg_type: None, valid: false },
-    );
-
-    // Expect the cmsg is returned in the latest requested set.
-    let response = proxy
-        .recv_msg_postflight()
-        .await
-        .expect("recv_msg_postflight fidl error")
-        .expect("recv_msg_postflight failed");
-    validate_recv_msg_postflight_response(
-        &response,
-        RequestedCmsgSetExpectation { requested_cmsg_type: Some(cmsg_type), valid: true },
-    );
-
-    toggle_cmsg(false, &proxy, cmsg_type).await;
-
-    // Expect unrequesting a cmsg invalidates the returned cmsg set.
-    validate_recv_msg_postflight_response(
-        &response,
-        RequestedCmsgSetExpectation { requested_cmsg_type: Some(cmsg_type), valid: false },
-    );
-
-    // Expect the cmsg is no longer returned in the latest requested set.
-    let response = proxy
-        .recv_msg_postflight()
-        .await
-        .expect("recv_msg_postflight fidl error")
-        .expect("recv_msg_postflight failed");
-    validate_recv_msg_postflight_response(
-        &response,
-        RequestedCmsgSetExpectation { requested_cmsg_type: None, valid: true },
-    );
-}
-
-#[netstack_test]
-#[variant(N, Netstack)]
-async fn udp_sendto_unroutable_leaves_socket_bound<N: Netstack>(name: &str) {
+async fn udp_sendto_unroutable_leaves_socket_bound(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let interface = realm.join_network(&network, "stack").await.expect("join network failed");
     interface
         .add_address_and_subnet_route(fidl_subnet!("192.168.1.10/16"))
@@ -1331,16 +192,7 @@ async fn udp_sendto_unroutable_leaves_socket_bound<N: Netstack>(name: &str) {
         .send_to(&buf, addr.into())
         .await
         .map_err(|e| e.raw_os_error().and_then(fposix::Errno::from_primitive));
-    assert_eq!(
-        send_result,
-        Err(Some(if N::VERSION == NetstackVersion::Netstack3 {
-            // TODO(https://fxbug.dev/42051708): Figure out what code is expected
-            // here and make Netstack2 and Netstack3 return codes consistent.
-            fposix::Errno::Enetunreach
-        } else {
-            fposix::Errno::Ehostunreach
-        }))
-    );
+    assert_eq!(send_result, Err(Some(fposix::Errno::Enetunreach)));
 
     let bound_addr = socket.local_addr().expect("should be bound");
     let bound_ipv4 = bound_addr.as_socket_ipv4().expect("must be IPv4");
@@ -1349,12 +201,11 @@ async fn udp_sendto_unroutable_leaves_socket_bound<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn udp_receive_on_bound_to_devices<N: Netstack>(name: &str) {
+async fn udp_receive_on_bound_to_devices(name: &str) {
     const NUM_PEERS: u8 = 3;
     const PORT: u16 = 80;
     const BUFFER_SIZE: usize = 1024;
-    crate::with_multinic_and_peers::<N, UdpSocket, Ipv4, _, _>(
+    crate::with_multinic_and_peers::<UdpSocket, Ipv4, _, _>(
         name,
         NUM_PEERS,
         net_subnet_v4!("192.168.0.0/16"),
@@ -1410,13 +261,12 @@ async fn udp_receive_on_bound_to_devices<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn udp_send_from_bound_to_device<N: Netstack>(name: &str) {
+async fn udp_send_from_bound_to_device(name: &str) {
     const NUM_PEERS: u8 = 3;
     const PORT: u16 = 80;
     const BUFFER_SIZE: usize = 1024;
 
-    crate::with_multinic_and_peers::<N, UdpSocket, Ipv4, _, _>(
+    crate::with_multinic_and_peers::<UdpSocket, Ipv4, _, _>(
         name,
         NUM_PEERS,
         net_subnet_v4!("192.168.0.0/16"),
@@ -1473,16 +323,15 @@ async fn udp_send_from_bound_to_device<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_udp_source_address_has_zone<N: Netstack>(name: &str) {
+async fn test_udp_source_address_has_zone(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_client", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
         .expect("failed to create client realm");
     let server = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_server", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
         .expect("failed to create server realm");
 
     let client_ep = client
@@ -1576,12 +425,13 @@ async fn test_udp_source_address_has_zone<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn get_bound_device_errors_after_device_deleted<N: Netstack>(name: &str) {
+async fn get_bound_device_errors_after_device_deleted(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
-    let host = sandbox.create_netstack_realm::<N, _>(format!("{name}_host")).expect("create realm");
+    let host = sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_host"))
+        .expect("create realm");
 
     let bound_interface =
         host.join_network(&net, "bound-device").await.expect("host failed to join network");
@@ -1639,8 +489,7 @@ async fn get_bound_device_errors_after_device_deleted<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn send_to_remote_with_zone<N: Netstack>(name: &str) {
+async fn send_to_remote_with_zone(name: &str) {
     const PORT: u16 = 80;
     const NUM_BYTES: usize = 10;
 
@@ -1650,7 +499,7 @@ async fn send_to_remote_with_zone<N: Netstack>(name: &str) {
             .expect("failed to create socket")
     }
 
-    crate::with_multinic_and_peer_networks::<N, net_types::ip::Ipv6, _>(
+    crate::with_multinic_and_peer_networks::<net_types::ip::Ipv6, _>(
         name,
         2,
         net_types::ip::Ipv6::LINK_LOCAL_UNICAST_SUBNET,
@@ -1705,14 +554,13 @@ async fn send_to_remote_with_zone<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(0)]
 #[test_case(1)]
-async fn multicast_send<N: Netstack, I: MulticastTestIpExt>(name: &str, target_interface: usize) {
+async fn multicast_send<I: MulticastTestIpExt>(name: &str, target_interface: usize) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
     let networks = crate::init_multicast_test_networks::<I>(&sandbox, &client).await;
 
@@ -1791,14 +639,13 @@ async fn multicast_send<N: Netstack, I: MulticastTestIpExt>(name: &str, target_i
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(None, 0, false)]
 #[test_case(Some(true), 0, false)]
 #[test_case(Some(true), 1, true)]
 #[test_case(Some(false), 0, false)]
 #[test_case(Some(false), 1, true)]
-async fn multicast_loop<N: Netstack, I: MulticastTestIpExt>(
+async fn multicast_loop<I: MulticastTestIpExt>(
     name: &str,
     multicast_loop_value: Option<bool>,
     target_interface: usize,
@@ -1806,7 +653,7 @@ async fn multicast_loop<N: Netstack, I: MulticastTestIpExt>(
 ) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
 
     let networks = crate::init_multicast_test_networks::<I>(&sandbox, &client).await;
@@ -1840,13 +687,8 @@ async fn multicast_loop<N: Netstack, I: MulticastTestIpExt>(
                     .expect("failed to set IPV6_MULTICAST_LOOP");
 
                 // Set the IPv4 option to the reverse value. It's expected to
-                // have no effect on IPv6 packets. NS2 doesn't implement this
-                // correctly, so we only set this option in NS3.
-                if N::VERSION == NetstackVersion::Netstack3 {
-                    send_socket
-                        .set_multicast_loop_v4(!value)
-                        .expect("failed to set IP_MULTICAST_LOOP");
-                }
+                // have no effect on IPv6 packets.
+                send_socket.set_multicast_loop_v4(!value).expect("failed to set IP_MULTICAST_LOOP");
             }
         }
     };
@@ -1916,17 +758,16 @@ async fn multicast_loop<N: Netstack, I: MulticastTestIpExt>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(true)]
 #[test_case(false)]
-async fn multicast_loop_on_loopback_dev<N: Netstack, I: MulticastTestIpExt>(
+async fn multicast_loop_on_loopback_dev<I: MulticastTestIpExt>(
     name: &str,
     multicast_loop_value: bool,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
 
     let loopback_id: u32 =
@@ -1990,8 +831,7 @@ async fn multicast_loop_on_loopback_dev<N: Netstack, I: MulticastTestIpExt>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn broadcast_recv<N: Netstack>(name: &str) {
+async fn broadcast_recv(name: &str) {
     const SUBNET: fnet::Subnet = fidl_subnet!("192.0.2.1/24");
     const PORT: u16 = 3513;
 
@@ -2001,7 +841,7 @@ async fn broadcast_recv<N: Netstack>(name: &str) {
 
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
     let net = sandbox.create_network(format!("net0")).await.expect("failed to create network");
     let iface = client.join_network(&net, format!("if0")).await.expect("failed to join network");
@@ -2072,16 +912,15 @@ async fn broadcast_recv<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn broadcast_send<N: Netstack, I: TestIpExt>(name: &str) {
+async fn broadcast_send<I: TestIpExt>(name: &str) {
     const NETWORK: fnet::Subnet = fidl_subnet!("192.0.2.1/24");
     const PORT: u16 = 3513;
     const BROADCAST_ADDR: std::net::SocketAddr = std_socket_addr!("192.0.2.255:3513");
 
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
 
     let net = sandbox.create_network(format!("net0")).await.expect("failed to create network");
@@ -2167,17 +1006,15 @@ async fn broadcast_send<N: Netstack, I: TestIpExt>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 async fn tos_tclass_send<
-    N: Netstack,
     I: TestIpExt + packet_formats::ethernet::EthernetIpExt + packet_formats::ip::IpExt,
 >(
     name: &str,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
 
     let net = sandbox.create_network(format!("net0")).await.expect("failed to create network");
@@ -2267,12 +1104,11 @@ async fn tos_tclass_send<
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn udp_send_backpressure<N: Netstack>(name: &str) {
+async fn udp_send_backpressure(name: &str) {
     const CLIENT_ADDR: fnet::Subnet = fidl_subnet!("192.0.2.1/24");
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let realm = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
 
     let (tun_device, _device) = devices::create_tun_device_with(fnet_tun::DeviceConfig {
@@ -2483,11 +1319,11 @@ async fn set_so_bindtodevice_conflict(
 // Verify that Netstack3 ignores packets it receives from the network that are
 // destined to localhost.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn ignore_localhost_traffic_from_net<N: Netstack, I: Ip>(name: &str) {
+async fn ignore_localhost_traffic_from_net<I: Ip>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create realm");
 
     let net = sandbox.create_network("net").await.expect("failed to create network");
 

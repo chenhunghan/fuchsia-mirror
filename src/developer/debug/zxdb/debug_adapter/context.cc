@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/developer/debug/ipc/records.h"
 #include "src/developer/debug/shared/logging/logging.h"
 #include "src/developer/debug/zxdb/client/breakpoint.h"
 #include "src/developer/debug/zxdb/client/filter.h"
@@ -364,19 +365,44 @@ void DebugAdapterContext::OnStreamReadable() {
 }
 
 void DebugAdapterContext::DidCreateThread(Thread* thread) {
+  bool is_stopped = thread->CurrentStopSupportsFrames();
+
   dap::ThreadEventZxdb event;
   event.reason = "started";
   event.threadId = thread->GetKoid();
+  event.isStopped = is_stopped;
+
   if (thread->GetProcess()) {
     event.processId = thread->GetProcess()->GetKoid();
   }
   dap_->send(event);
+
+  // It's possible for the thread to be implicitly suspended depending on previous actions by the
+  // user, for example, by requesting a system or process pause. This is inherently racy with the
+  // creation of new threads in the process. To handle this, DebugAgent will suspend newly created
+  // threads _before_ sending us the starting event, which means we can get a "thread starting"
+  // event with the thread already in a suspended state for which we will never be notified. This is
+  // unique compared to other events such as the thread crashing very shortly after being created,
+  // which will result in a separate exception notification coming from DebugAgent that we will
+  // handle later.
+  //
+  // In the case of a thread already being suspended when we receive this notification, then go
+  // ahead and also queue up a stopped event. Otherwise rely on |OnThreadStopped| below like normal.
+  if (is_stopped && thread->GetState() &&
+      *thread->GetState() == debug_ipc::ThreadRecord::State::kSuspended) {
+    dap::StoppedEvent stopped_event;
+    stopped_event.reason = "pause";
+    stopped_event.threadId = thread->GetKoid();
+
+    dap_->send(stopped_event);
+  }
 }
 
 void DebugAdapterContext::WillDestroyThread(Thread* thread) {
   dap::ThreadEventZxdb event;
   event.reason = "exited";
   event.threadId = thread->GetKoid();
+
   if (thread->GetProcess()) {
     event.processId = thread->GetProcess()->GetKoid();
   }

@@ -5,19 +5,17 @@
 pub mod extents;
 pub mod file;
 pub mod page_request;
-pub mod pager;
 pub mod protocol;
 pub mod reader;
 pub mod testing;
 
 pub use extents::{Extent, Extents, ExtentsIterator};
 pub use file::{
-    DecodedBlobMetadata, DeliveryHandler, File, Files, NoopDeliveryHandler, Transform,
+    DecodedBlobMetadata, DeliveryHandler, File, Files, NoopDeliveryHandler, PagerThread, Transform,
     process_mapping_command, read_blob_metadata,
 };
 pub use fxfs_crypto::Cipher;
 pub use page_request::{NullPageRequest, PageRequest};
-pub use pager::{PagerThread, run_pager_loop};
 pub use protocol::{
     CLOSE_BLOB_COMMAND, DELIVERY_DATA_COMMAND, DELIVERY_DATA_SIZE, DELIVERY_REGISTER_BLOB_COMMAND,
     DELIVERY_VMO_SIZE, DeliveryCommand, ENCRYPTION_KEY_SIZE, MAPPING_VMO_SIZE, MAPPINGS_COMMAND,

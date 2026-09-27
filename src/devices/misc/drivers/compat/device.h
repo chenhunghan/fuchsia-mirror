@@ -175,7 +175,12 @@ class Device : public std::enable_shared_from_this<Device>, public devfs_fidl::D
     // shutdown/reboot flows to emulate DFv1 shutdown. The fdf::Node client should have been torn
     // down by the driver runtime canceling all outstanding waits by the time stop has been called,
     // allowing shutdown to proceed.
-    return parent_ && system_power_state() == fuchsia_system_state::SystemPowerState::kFullyOn;
+    //
+    // Don't call release if the device was not added to the parent's children list
+    // (`added_to_parent_children_`). In that scenario, we do not own the device and so we should
+    // not release it.
+    return added_to_parent_children_ && parent_ &&
+           system_power_state() == fuchsia_system_state::SystemPowerState::kFullyOn;
   }
 
   bool HasChildNamed(std::string_view name) const;
@@ -247,7 +252,14 @@ class Device : public std::enable_shared_from_this<Device>, public devfs_fidl::D
   fidl::WireSharedClient<fuchsia_driver_framework::Node> node_;
   fidl::WireSharedClient<fuchsia_driver_framework::NodeController> controller_;
 
+  // The parent of the device *if* `Add()` is called. Check `added_to_parent_children_` to make sure
+  // if this device is actually a child of `parent_`. This is `std::nullopt` for the root device.
   std::optional<Device*> parent_;
+
+  // Whether or not the device was successfully added to `parent_`'s children list. This would be
+  // false if `Add()` failed.
+  bool added_to_parent_children_ = false;
+
   // If true, the release op will be called after the dispatcher has been shutdown.
   // This is to keep with DFv1 behavior which only applies to the last remaining
   // device of a driver.

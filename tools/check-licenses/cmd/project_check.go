@@ -272,7 +272,7 @@ func (c *ProjectCheckCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ..
 			if projectRoot != inputCtx.FuchsiaDir {
 				hasProjectError := false
 				for _, finding := range allFindings {
-					if finding.FilePath == relProjectRoot || strings.HasPrefix(finding.FilePath, relProjectRoot+"/") {
+					if findingMatchesProject(finding.FilePath, relProjectRoot) {
 						hasProjectError = true
 						break
 					}
@@ -339,4 +339,10 @@ func (c *ProjectCheckCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ..
 		return subcommands.ExitFailure
 	}
 	return subcommands.ExitSuccess
+}
+
+func findingMatchesProject(findingPath, relProjectRoot string) bool {
+	return findingPath == relProjectRoot ||
+		strings.HasPrefix(findingPath, relProjectRoot+"/") ||
+		strings.Contains("/"+findingPath, "/tools/check-licenses/assets/readmes/"+relProjectRoot+"/")
 }

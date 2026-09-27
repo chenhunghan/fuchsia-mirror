@@ -451,7 +451,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::StartScan { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::StartScan { req }) => req);
         assert_eq!(driver_req.txn_id, Some(1));
         assert_eq!(driver_req.scan_type, Some(fidl_fullmac::WlanScanType::Passive));
         assert_eq!(
@@ -481,7 +482,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::StartScan { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::StartScan { req }) => req);
         assert_eq!(driver_req.scan_type, Some(fidl_fullmac::WlanScanType::Active));
         assert!(driver_req.ssids.as_ref().unwrap().is_empty());
     }
@@ -501,8 +503,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Err(_));
-        let scan_end = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(fidl_mlme::MlmeEvent::OnScanEnd { end })) => end);
+        assert_matches!(h.driver_calls.try_recv(), Err(_));
+        let scan_end = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(fidl_mlme::MlmeEvent::OnScanEnd { end }) => end);
         assert_eq!(
             scan_end,
             fidl_mlme::ScanEnd { txn_id: 1, code: fidl_mlme::ScanResultCode::InvalidArgs }
@@ -557,12 +559,12 @@ mod handle_mlme_request_tests {
         assert!(h.mlme.is_bss_protected);
 
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req }) => {
               assert_eq!(req.online, Some(false));
           }
         );
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::ConnectReq { req })) => {
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::ConnectReq { req }) => {
             let selected_bss = req.selected_bss.clone().unwrap();
             assert_eq!(selected_bss.bssid, [100u8; 6]);
             assert_eq!(selected_bss.bss_type, fidl_ieee80211::BssType::Infrastructure);
@@ -610,7 +612,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::ReconnectReq { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::ReconnectReq { req }) => req);
         assert_eq!(
             driver_req,
             fidl_fullmac::WlanFullmacImplReconnectRequest {
@@ -630,7 +633,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::AuthResp { resp })) => resp);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::AuthResp { resp }) => resp);
         assert_eq!(
             driver_req,
             fidl_fullmac::WlanFullmacImplAuthRespRequest {
@@ -652,12 +656,13 @@ mod handle_mlme_request_tests {
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req }) => {
               assert_eq!(req.online, Some(false));
           }
         );
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::DeauthReq { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::DeauthReq { req }) => req);
         assert_eq!(driver_req.peer_sta_address, Some([1u8; 6]));
         assert_eq!(driver_req.reason_code, Some(fidl_ieee80211::ReasonCode::LeavingNetworkDeauth));
     }
@@ -675,7 +680,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::AssocResp { resp })) => resp);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::AssocResp { resp }) => resp);
         assert_eq!(driver_req.peer_sta_address, Some([1u8; 6]));
         assert_eq!(driver_req.result_code, Some(fidl_fullmac::WlanAssocResult::Success));
         assert_eq!(driver_req.association_id, Some(2));
@@ -692,13 +698,14 @@ mod handle_mlme_request_tests {
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req }) => {
               assert_eq!(req.online, Some(false));
           }
         );
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::Disassoc{ req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::Disassoc{ req }) => req);
         assert_eq!(driver_req.peer_sta_address, Some([1u8; 6]));
         assert_eq!(
             driver_req.reason_code,
@@ -731,7 +738,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::StartBss { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::StartBss { req }) => req);
 
         assert_eq!(driver_req.ssid, Some(vec![1u8; SSID_LEN]));
         assert_eq!(driver_req.bss_type, Some(fidl_ieee80211::BssType::Infrastructure));
@@ -757,7 +765,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::StopBss { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::StopBss { req }) => req);
         assert_eq!(driver_req.ssid, Some(vec![1u8; SSID_LEN]));
     }
 
@@ -780,7 +789,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::SetKeys { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::SetKeys { req }) => req);
         assert_eq!(driver_req.key_descriptors.as_ref().unwrap().len(), 1 as usize);
         let key_descriptors = driver_req.key_descriptors.as_ref().unwrap();
         assert_eq!(key_descriptors[0].key_id, Some(7));
@@ -793,7 +803,7 @@ mod handle_mlme_request_tests {
             Some(fidl_ieee80211::CipherSuiteType::from_primitive_allow_unknown(11))
         );
 
-        let conf = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(fidl_mlme::MlmeEvent::SetKeysConf { conf })) => conf);
+        let conf = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(fidl_mlme::MlmeEvent::SetKeysConf { conf }) => conf);
         assert_eq!(
             conf,
             fidl_mlme::SetKeysConfirm {
@@ -825,14 +835,15 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::SetKeys { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::SetKeys { req }) => req);
         assert_eq!(driver_req.key_descriptors.as_ref().unwrap().len(), NUM_KEYS as usize);
         let key_descriptors = driver_req.key_descriptors.unwrap();
         for i in 0..NUM_KEYS {
             assert_eq!(key_descriptors[i].key_id, Some(i as u16));
         }
 
-        let conf = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(fidl_mlme::MlmeEvent::SetKeysConf { conf })) => conf);
+        let conf = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(fidl_mlme::MlmeEvent::SetKeysConf { conf }) => conf);
         assert_eq!(
             conf,
             fidl_mlme::SetKeysConfirm {
@@ -864,8 +875,8 @@ mod handle_mlme_request_tests {
         assert!(h.mlme.handle_mlme_request(fidl_req).is_err());
 
         // No SetKeys and SetKeysResp
-        assert_matches!(h.driver_calls.try_next(), Err(_));
-        assert_matches!(h.mlme_event_receiver.try_next(), Err(_));
+        assert_matches!(h.driver_calls.try_recv(), Err(_));
+        assert_matches!(h.mlme_event_receiver.try_recv(), Err(_));
     }
 
     #[test]
@@ -890,10 +901,10 @@ mod handle_mlme_request_tests {
         // An error is expected when converting the response
         assert!(h.mlme.handle_mlme_request(fidl_req).is_err());
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::SetKeys { .. })));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::SetKeys { .. }));
         // No SetKeysConf MLME event because the SetKeysResp from driver has different number of
         // keys.
-        assert_matches!(h.mlme_event_receiver.try_next(), Err(_));
+        assert_matches!(h.mlme_event_receiver.try_recv(), Err(_));
     }
 
     #[test]
@@ -907,7 +918,8 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::EapolTx { req })) => req);
+        let driver_req =
+            assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::EapolTx { req }) => req);
         assert_eq!(driver_req.src_addr, Some([1u8; 6]));
         assert_eq!(driver_req.dst_addr, Some([2u8; 6]));
         assert_eq!(driver_req.data, Some(vec![3u8; 4]));
@@ -933,7 +945,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::OnLinkStateChanged { req }) => {
             assert_eq!(req.online, Some(expected_link_state));
         });
     }
@@ -955,7 +967,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::QueryTelemetrySupport)));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::QueryTelemetrySupport));
         let support = assert_matches!(support_receiver.try_recv(), Ok(Some(support)) => support);
         assert_eq!(support, mocked_support);
     }
@@ -984,7 +996,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::GetIfaceStats)));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::GetIfaceStats));
         let stats = assert_matches!(stats_receiver.try_recv(), Ok(Some(stats)) => stats);
         let stats = assert_matches!(stats, fidl_mlme::GetIfaceStatsResponse::Stats(stats) => stats);
         assert_eq!(
@@ -1057,7 +1069,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::GetIfaceHistogramStats)));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::GetIfaceHistogramStats));
         let stats = assert_matches!(stats_receiver.try_recv(), Ok(Some(stats)) => stats);
         let stats = assert_matches!(stats, fidl_mlme::GetIfaceHistogramStatsResponse::Stats(stats) => stats);
         assert_eq!(stats, mocked_stats);
@@ -1073,7 +1085,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::SaeHandshakeResp { resp })) => resp);
+        let driver_req = assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::SaeHandshakeResp { resp }) => resp);
         assert_eq!(driver_req.peer_sta_address.unwrap(), [1u8; 6]);
         assert_eq!(
             driver_req.status_code.unwrap(),
@@ -1093,7 +1105,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_frame = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::SaeFrameTx { frame })) => frame);
+        let driver_frame = assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::SaeFrameTx { frame }) => frame);
         assert_eq!(driver_frame.peer_sta_address.unwrap(), [1u8; 6]);
         assert_eq!(driver_frame.status_code.unwrap(), fidl_ieee80211::StatusCode::Success);
         assert_eq!(driver_frame.seq_num.unwrap(), 2);
@@ -1107,7 +1119,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::WmmStatusReq)));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::WmmStatusReq));
     }
 
     #[test]
@@ -1118,7 +1130,7 @@ mod handle_mlme_request_tests {
         let fidl_req = wlan_sme::MlmeRequest::SetMacAddress(mac_addr, responder);
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::SetMacAddress { req })) => {
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::SetMacAddress { req }) => {
             assert_eq!(req.mac_addr, mac_addr);
         });
         assert_matches!(receiver.try_recv(), Ok(Some(Ok(()))));
@@ -1139,10 +1151,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::QueryApfPacketFilterSupport))
-        );
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::QueryApfPacketFilterSupport));
         let support = assert_matches!(support_receiver.try_recv(), Ok(Some(support)) => support);
         assert_eq!(support, mocked_support);
     }
@@ -1159,7 +1168,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::InstallApfPacketFilter { req })) => req);
+        let driver_req = assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::InstallApfPacketFilter { req }) => req);
         assert_eq!(driver_req.program, Some(program));
         assert_matches!(receiver.try_recv(), Ok(Some(Ok(()))));
     }
@@ -1178,7 +1187,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::ReadApfPacketFilterData)));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::ReadApfPacketFilterData));
         let response = assert_matches!(receiver.try_recv(), Ok(Some(Ok(resp))) => resp);
         assert_eq!(response.memory, memory);
     }
@@ -1194,7 +1203,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        let driver_req = assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::SetApfPacketFilterEnabled { req })) => req);
+        let driver_req = assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::SetApfPacketFilterEnabled { req }) => req);
         assert_eq!(driver_req.enabled, Some(true));
         assert_matches!(receiver.try_recv(), Ok(Some(Ok(()))));
     }
@@ -1212,7 +1221,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::GetApfPacketFilterEnabled)));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::GetApfPacketFilterEnabled));
         let response = assert_matches!(receiver.try_recv(), Ok(Some(Ok(resp))) => resp);
         assert_eq!(response.enabled, true);
     }
@@ -1230,7 +1239,7 @@ mod handle_mlme_request_tests {
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
 
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::GetScheduledScanEnabled)));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::GetScheduledScanEnabled));
         let response = assert_matches!(receiver.try_recv(), Ok(Some(Ok(resp))) => resp);
         assert!(!response.active_txn_ids.is_empty());
     }
@@ -1349,7 +1358,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let result =
             assert_matches!(event, fidl_mlme::MlmeEvent::OnScanResult { result } => result);
         assert_eq!(result, fidl_mlme::ScanResult { txn_id: 42u64, timestamp_nanos: 1337i64, bss });
@@ -1371,7 +1380,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let end = assert_matches!(event, fidl_mlme::MlmeEvent::OnScanEnd { end } => end);
         assert_eq!(
             end,
@@ -1397,7 +1406,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let conf = assert_matches!(event, fidl_mlme::MlmeEvent::ConnectConf { resp } => resp);
         assert_eq!(
             conf,
@@ -1446,21 +1455,21 @@ mod handle_driver_event_tests {
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req }) => {
               assert_eq!(req.online, Some(false));
           }
         );
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::ConnectReq { .. })));
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::ConnectReq { .. }));
         if expected_online {
             assert_matches!(
-                h.driver_calls.try_next(),
-                Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+                h.driver_calls.try_recv(),
+                Ok(DriverCall::OnLinkStateChanged { req }) => {
                   assert_eq!(req.online, Some(true));
               }
             );
         } else {
-            assert_matches!(h.driver_calls.try_next(), Err(_));
+            assert_matches!(h.driver_calls.try_recv(), Err(_));
         }
     }
 
@@ -1480,7 +1489,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::AuthenticateInd { ind } => ind);
         assert_eq!(
             ind,
@@ -1512,16 +1521,16 @@ mod handle_driver_event_tests {
 
         if mac_role == fidl_common::WlanMacRole::Client {
             assert_matches!(
-                h.driver_calls.try_next(),
-                Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+                h.driver_calls.try_recv(),
+                Ok(DriverCall::OnLinkStateChanged { req }) => {
                   assert_eq!(req.online, Some(false));
               }
             );
         } else {
-            assert_matches!(h.driver_calls.try_next(), Err(_));
+            assert_matches!(h.driver_calls.try_recv(), Err(_));
         }
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let conf =
             assert_matches!(event, fidl_mlme::MlmeEvent::DeauthenticateConf { resp } => resp);
         assert_eq!(conf, fidl_mlme::DeauthenticateConfirm { peer_sta_address: [1u8; 6] });
@@ -1550,16 +1559,16 @@ mod handle_driver_event_tests {
 
         if mac_role == fidl_common::WlanMacRole::Client {
             assert_matches!(
-                h.driver_calls.try_next(),
-                Ok(Some(DriverCall::OnLinkStateChanged { req })) =>{
+                h.driver_calls.try_recv(),
+                Ok(DriverCall::OnLinkStateChanged { req }) =>{
                   assert_eq!(req.online, Some(false));
               }
             );
         } else {
-            assert_matches!(h.driver_calls.try_next(), Err(_));
+            assert_matches!(h.driver_calls.try_recv(), Err(_));
         }
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::DeauthenticateInd { ind } => ind);
         assert_eq!(
             ind,
@@ -1590,7 +1599,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::AssociateInd { ind } => ind);
         assert_eq!(
             ind,
@@ -1626,16 +1635,16 @@ mod handle_driver_event_tests {
 
         if mac_role == fidl_common::WlanMacRole::Client {
             assert_matches!(
-                h.driver_calls.try_next(),
-                Ok(Some(DriverCall::OnLinkStateChanged { req })) =>{
+                h.driver_calls.try_recv(),
+                Ok(DriverCall::OnLinkStateChanged { req }) =>{
                   assert_eq!(req.online, Some(false));
               }
             );
         } else {
-            assert_matches!(h.driver_calls.try_next(), Err(_));
+            assert_matches!(h.driver_calls.try_recv(), Err(_));
         }
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let conf = assert_matches!(event, fidl_mlme::MlmeEvent::DisassociateConf { resp } => resp);
         assert_eq!(conf, fidl_mlme::DisassociateConfirm { status: 1 });
     }
@@ -1663,16 +1672,16 @@ mod handle_driver_event_tests {
 
         if mac_role == fidl_common::WlanMacRole::Client {
             assert_matches!(
-                h.driver_calls.try_next(),
-                Ok(Some(DriverCall::OnLinkStateChanged { req })) =>{
+                h.driver_calls.try_recv(),
+                Ok(DriverCall::OnLinkStateChanged { req }) =>{
                   assert_eq!(req.online, Some(false));
               }
             );
         } else {
-            assert_matches!(h.driver_calls.try_next(), Err(_));
+            assert_matches!(h.driver_calls.try_recv(), Err(_));
         }
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::DisassociateInd { ind } => ind);
         assert_eq!(
             ind,
@@ -1707,16 +1716,16 @@ mod handle_driver_event_tests {
 
         if expected_link_state_changed {
             assert_matches!(
-                h.driver_calls.try_next(),
-                Ok(Some(DriverCall::OnLinkStateChanged { req }))=>{
+                h.driver_calls.try_recv(),
+                Ok(DriverCall::OnLinkStateChanged { req })=>{
                   assert_eq!(req.online, Some(true));
               }
             );
         } else {
-            assert_matches!(h.driver_calls.try_next(), Err(_));
+            assert_matches!(h.driver_calls.try_recv(), Err(_));
         }
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let conf = assert_matches!(event, fidl_mlme::MlmeEvent::StartConf { resp } => resp);
         assert_eq!(conf, fidl_mlme::StartConfirm { result_code: expected_fidl_result_code });
     }
@@ -1736,7 +1745,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let conf = assert_matches!(event, fidl_mlme::MlmeEvent::StopConf { resp } => resp);
         assert_eq!(
             conf,
@@ -1760,7 +1769,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let conf = assert_matches!(event, fidl_mlme::MlmeEvent::EapolConf { resp } => resp);
         assert_eq!(
             conf,
@@ -1795,7 +1804,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let info = assert_matches!(event, fidl_mlme::MlmeEvent::OnChannelSwitched { info } => info);
         assert_eq!(
             info,
@@ -1834,13 +1843,13 @@ mod handle_driver_event_tests {
 
         // Receipt of a roam start causes MLME to close the controlled port.
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req }))=>{
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req })=>{
               assert_eq!(req.online, Some(false));
           }
         );
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::RoamStartInd { ind } => ind);
 
         // SME is notified of the roam start.
@@ -1869,12 +1878,12 @@ mod handle_driver_event_tests {
 
         // Receipt of a roam request causes MLME to close the controlled port.
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req }) => {
                 assert_eq!(req.online, Some(false));
             }
         );
-        assert_matches!(h.driver_calls.try_next(), Ok(Some(DriverCall::RoamReq { req })) => {
+        assert_matches!(h.driver_calls.try_recv(), Ok(DriverCall::RoamReq { req }) => {
             assert_eq!(selected_bss, req.selected_bss.clone().unwrap());
         });
     }
@@ -1908,13 +1917,13 @@ mod handle_driver_event_tests {
 
         // Receipt of a roam result success causes MLME to open the controlled port on an open network.
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req }))=>{
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req })=>{
               assert_eq!(req.online, Some(true));
           }
         );
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::RoamResultInd { ind } => ind);
 
         // SME is notified of the roam result.
@@ -1960,13 +1969,13 @@ mod handle_driver_event_tests {
 
         // Receipt of a roam result success causes MLME to open the controlled port on an open network.
         assert_matches!(
-            h.driver_calls.try_next(),
-            Ok(Some(DriverCall::OnLinkStateChanged { req })) => {
+            h.driver_calls.try_recv(),
+            Ok(DriverCall::OnLinkStateChanged { req }) => {
                 assert_eq!(req.online, Some(true));
             }
         );
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let conf = assert_matches!(event, fidl_mlme::MlmeEvent::RoamConf { conf } => conf);
 
         // SME is notified of the roam result.
@@ -1999,7 +2008,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::SignalReport { ind } => ind);
         assert_eq!(
             ind,
@@ -2024,7 +2033,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::EapolInd { ind } => ind);
         assert_eq!(
             ind,
@@ -2052,7 +2061,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let info = assert_matches!(event, fidl_mlme::MlmeEvent::OnPmkAvailable { info } => info);
         assert_eq!(info, fidl_mlme::PmkInfo { pmk: vec![1u8; 2], pmkid: vec![3u8; 4] });
     }
@@ -2073,7 +2082,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let ind = assert_matches!(event, fidl_mlme::MlmeEvent::OnSaeHandshakeInd { ind } => ind);
         assert_eq!(ind, fidl_mlme::SaeHandshakeIndication { peer_sta_address: [1u8; 6] });
     }
@@ -2096,7 +2105,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let frame = assert_matches!(event, fidl_mlme::MlmeEvent::OnSaeFrameRx { frame } => frame);
         assert_eq!(
             frame,
@@ -2154,7 +2163,7 @@ mod handle_driver_event_tests {
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
-        let event = assert_matches!(h.mlme_event_receiver.try_next(), Ok(Some(ev)) => ev);
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
         let (status, resp) = assert_matches!(event, fidl_mlme::MlmeEvent::OnWmmStatusResp { status, resp } => (status, resp));
         assert_eq!(status, zx::sys::ZX_OK);
         assert_eq!(

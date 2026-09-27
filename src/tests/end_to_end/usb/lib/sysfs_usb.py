@@ -175,8 +175,80 @@ def wait_for_usb_device(
         time.sleep(poll_interval_sec)
 
     raise TimeoutError(
-        f"Timed out after {timeout_sec}s waiting for USB device ({desc}) to enumerate"
+        f"Timed out after {timeout_sec}s waiting for USB device ({desc}) to "
+        f"enumerate. Devices currently present on the host: "
+        f"{describe_usb_devices(target_vid, target_pid, known_devices)}"
     )
+
+
+def describe_usb_devices(
+    target_vid: Optional[int] = None,
+    target_pid: Optional[int] = None,
+    known_devices: Optional[Sequence[Tuple[int, int]]] = None,
+) -> str:
+    """Summarize USB devices in sysfs, for diagnosing failed lookups.
+
+    Restricted to devices matching `target_vid`/`target_pid`/`known_devices`
+    when any of those are supplied, so the summary stays readable on hosts
+    with many attached devices.
+
+    Args:
+        target_vid: Optional USB Vendor ID to filter on.
+        target_pid: Optional USB Product ID to filter on.
+        known_devices: Optional list of (VID, PID) pairs to filter on.
+
+    Returns:
+        A human readable summary of the matching devices and their serials.
+    """
+    if not os.path.exists(SYSFS_USB_DEVICES_PATH):
+        return f"<{SYSFS_USB_DEVICES_PATH} does not exist>"
+    try:
+        entries = sorted(os.listdir(SYSFS_USB_DEVICES_PATH))
+    except OSError as e:
+        return f"<error listing {SYSFS_USB_DEVICES_PATH}: {e}>"
+
+    def _read(path: str) -> str:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except OSError:
+            return "?"
+
+    described: list[str] = []
+    for entry in entries:
+        p = os.path.join(SYSFS_USB_DEVICES_PATH, entry)
+        vid_raw = _read(os.path.join(p, "idVendor"))
+        pid_raw = _read(os.path.join(p, "idProduct"))
+        try:
+            vid = int(vid_raw, 16)
+            pid = int(pid_raw, 16)
+        except ValueError:
+            continue
+        if target_vid is not None and vid != target_vid:
+            continue
+        if target_pid is not None and pid != target_pid:
+            continue
+        if (
+            target_vid is None
+            and target_pid is None
+            and known_devices is not None
+            and (vid, pid) not in known_devices
+        ):
+            continue
+        described.append(
+            f"{entry}: {vid_raw}:{pid_raw} "
+            f"serial={_read(os.path.join(p, 'serial'))!r} "
+            f"product={_read(os.path.join(p, 'product'))!r}"
+        )
+
+    if described:
+        return "; ".join(described)
+    if target_vid is not None or target_pid is not None or known_devices:
+        return (
+            "<nothing matched the filter> all attached devices: "
+            + describe_usb_devices()
+        )
+    return "<no USB devices found>"
 
 
 def get_usb_device_sysfs_path(busnum: int, devnum: int) -> Optional[str]:

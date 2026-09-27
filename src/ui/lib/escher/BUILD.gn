@@ -11,6 +11,7 @@ group("tests") {
   testonly = true
   deps = [ ":escher_tests" ]
 }
+
 config("use_runtime_glsl_config") {
   defines = [ "ESCHER_USE_RUNTIME_GLSL=1" ]
 }
@@ -298,8 +299,6 @@ template("escher_library") {
       "vk/impl/descriptor_set_allocator_cache.h",
       "vk/impl/framebuffer.cc",
       "vk/impl/framebuffer.h",
-      "vk/impl/framebuffer_allocator.cc",
-      "vk/impl/framebuffer_allocator.h",
       "vk/impl/pipeline_layout_cache.cc",
       "vk/impl/pipeline_layout_cache.h",
       "vk/impl/render_pass_cache.cc",

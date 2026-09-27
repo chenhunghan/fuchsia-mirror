@@ -1,0 +1,49 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "goodix-gt92xx",
+    composite_name: "gt92xx_touch",
+    include: [ "driver_component/driver.shard.cml" ],
+    program: {
+        binary: "driver/goodix-gt92xx-rust.so",
+    },
+    use: [
+        {
+            name: "gpio-int",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-int" },
+            },
+        },
+        {
+            name: "i2c",
+            service: "fuchsia.hardware.i2c.Service",
+            primary: true,
+            bind: {
+                service: "fuchsia.hardware.i2c.Service",
+                rules: { "fuchsia.NAME": "i2c" },
+            },
+        },
+        {
+            name: "gpio-reset",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-reset" },
+            },
+        },
+        {
+            name: "pdev",
+            availability: "optional",
+            bind: {
+                compat: "goodix,gt92xx",
+                vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+            },
+        },
+        {
+            name: "gpio-init-0",
+            service: "fuchsia.gpio.Init",
+            availability: "optional",
+        },
+    ],
+}

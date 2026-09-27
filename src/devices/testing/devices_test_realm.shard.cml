@@ -20,6 +20,12 @@
             to: [ "#devices-tests" ],
         },
         {
+            protocol: "fuchsia.diagnostics.ArchiveAccessor",
+            from: "parent/diagnostics-accessors",
+            as: "fuchsia.diagnostics.RealArchiveAccessor",
+            to: [ "#devices-tests" ],
+        },
+        {
             // These hermetic capabilities are offered to be used by tests.
             protocol: [
                 // Tests can write to debug logs
@@ -87,6 +93,9 @@
                 "fuchsia.hardware.audio.StreamConfigConnectorInputService",
                 "fuchsia.hardware.audio.StreamConfigConnectorOutputService",
                 "fuchsia.hardware.gpu.mali.UtilsService",
+                "fuchsia.hardware.i2c.Service",
+                "fuchsia.hardware.power.battery.Service",
+                "fuchsia.hardware.power.sensor.Service",
                 "fuchsia.hardware.radar.Service",
                 "fuchsia.hardware.rpmb.Service",
             ],

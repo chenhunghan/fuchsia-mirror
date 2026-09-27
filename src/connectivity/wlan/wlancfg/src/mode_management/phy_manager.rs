@@ -11,15 +11,21 @@ use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use anyhow::{Error, format_err};
 use async_trait::async_trait;
 use fidl::endpoints::create_proxy;
+use fidl_fuchsia_power_broker as fbroker;
+use fidl_fuchsia_power_system as fsystem;
 use fidl_fuchsia_wlan_common as fidl_common;
 use fidl_fuchsia_wlan_device_service as fidl_service;
 use fidl_fuchsia_wlan_sme as fidl_sme;
 use fuchsia_inspect::{self as inspect, NumericProperty};
+use futures::StreamExt;
+use futures::lock::Mutex;
 use ieee80211::{MacAddr, MacAddrBytes, NULL_ADDR};
 use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::iter::Iterator;
+use std::sync::Arc;
 use thiserror::Error;
+use wlan_power_manager::{POWER_LEVEL_ACTIVE, POWER_LEVEL_SUSPEND, PowerManager};
 
 // Number of seconds that recoverable event histories should be stored.  Store past events for 24
 // hours (86400s).
@@ -66,6 +72,8 @@ pub(crate) struct PhyContainer {
     destroyed_ifaces: HashSet<u16>,
     defects: EventHistory<Defect>,
     recoveries: EventHistory<recovery::RecoveryAction>,
+    power_dependency_token: Option<fbroker::DependencyToken>,
+    power_dependency_lease: Option<fbroker::LeaseToken>,
 }
 
 #[async_trait(?Send)]
@@ -143,6 +151,12 @@ pub trait PhyManagerApi {
 
     /// Take the recovery action proposed by the recovery summary.
     async fn perform_recovery(&mut self, summary: recovery::RecoverySummary);
+
+    /// Handles suspend blocker BeforeSuspend by lowering power element leases to level 1.
+    async fn on_before_suspend(&mut self);
+
+    /// Handles suspend blocker AfterResume by raising power element leases to level 2.
+    async fn on_after_resume(&mut self);
 }
 
 /// Maintains a record of all PHYs that are present and their associated interfaces.
@@ -158,6 +172,7 @@ pub struct PhyManager {
     telemetry_sender: TelemetrySender,
     recovery_action_sender: recovery::RecoveryActionSender,
     phy_add_fail_count: inspect::UintProperty,
+    power_manager: Arc<dyn PowerManager>,
 }
 
 impl PhyContainer {
@@ -171,6 +186,8 @@ impl PhyContainer {
             destroyed_ifaces: HashSet::new(),
             defects: EventHistory::<Defect>::new(DEFECT_RETENTION_SECONDS),
             recoveries: EventHistory::<RecoveryAction>::new(DEFECT_RETENTION_SECONDS),
+            power_dependency_token: None,
+            power_dependency_lease: None,
         }
     }
 }
@@ -188,6 +205,7 @@ impl PhyManager {
         node: inspect::Node,
         telemetry_sender: TelemetrySender,
         recovery_action_sender: recovery::RecoveryActionSender,
+        power_manager: Arc<dyn PowerManager>,
     ) -> Self {
         let phy_add_fail_count = node.create_uint("phy_add_fail_count", 0);
         PhyManager {
@@ -202,6 +220,7 @@ impl PhyManager {
             telemetry_sender,
             recovery_action_sender,
             phy_add_fail_count,
+            power_manager,
         }
     }
     /// Verifies that a given PHY ID is accounted for and, if not, adds a new entry for it.
@@ -324,11 +343,66 @@ impl PhyManager {
         }
         result
     }
+
+    async fn set_phy_power_element_lease(
+        power_manager: &dyn PowerManager,
+        phy_id: u16,
+        phy_container: &mut PhyContainer,
+        level: u8,
+    ) {
+        let token = match &phy_container.power_dependency_token {
+            Some(t) => t,
+            None => {
+                // We can assume the driver is not power-enabled and just return
+                return;
+            }
+        };
+        let token_dup = match token.duplicate_handle(zx::Rights::SAME_RIGHTS) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("Failed to duplicate power element dep token: {:?}", e);
+                return;
+            }
+        };
+        let lease_name = format!("wlancfg-phy-{}-level-{}-dependency", phy_id, level);
+        match power_manager.power_element_lease(&lease_name, token_dup, level).await {
+            Ok(lease) => {
+                phy_container.power_dependency_lease = Some(lease);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to acquire power dependency lease {:?} at level {} for phy {}: {:?}",
+                    lease_name, level, phy_id, e
+                );
+            }
+        }
+    }
 }
 
 #[async_trait(?Send)]
 impl PhyManagerApi for PhyManager {
     async fn add_phy(&mut self, phy_id: u16) -> Result<(), PhyManagerError> {
+        let mut phy_container = PhyContainer::new(vec![]);
+
+        // Set up the power element for the PHY to power it on
+        phy_container.power_dependency_token = self
+            .device_monitor
+            .get_power_element_dependency_token(phy_id)
+            .await
+            .map_err(|e| {
+                warn!("Failed to get power dependency token for phy {}: {}", phy_id, e);
+                PhyManagerError::PhyQueryFailure
+            })?
+            .ok();
+        Self::set_phy_power_element_lease(
+            &*self.power_manager,
+            phy_id,
+            &mut phy_container,
+            POWER_LEVEL_ACTIVE,
+        )
+        .await;
+
+        // Get the PHY's capabilities
         let supported_mac_roles = self
             .device_monitor
             .get_supported_mac_roles(phy_id)
@@ -341,10 +415,7 @@ impl PhyManagerApi for PhyManager {
                 warn!("Unable to get supported MAC roles: {:?}", e);
                 PhyManagerError::PhyQueryFailure
             })?;
-
-        // Create a new container to store the PHY's information.
-        info!("adding PHY ID #{}", phy_id);
-        let mut phy_container = PhyContainer::new(supported_mac_roles);
+        phy_container.supported_mac_roles = HashSet::from_iter(supported_mac_roles);
 
         // Attempt to set the country for the newly-discovered PHY.
         let set_country_result = match self.saved_country_code {
@@ -369,6 +440,7 @@ impl PhyManagerApi for PhyManager {
             let _ = phy_container.client_ifaces.insert(iface_id);
         }
 
+        info!("adding PHY ID #{}", phy_id);
         if self.phys.insert(phy_id, phy_container).is_some() {
             warn!("Unexpectedly replaced existing phy information for id {}", phy_id);
         };
@@ -887,6 +959,64 @@ impl PhyManagerApi for PhyManager {
             }
         }
     }
+
+    async fn on_before_suspend(&mut self) {
+        info!("Modifying WLAN driver lease to 'suspend' level");
+        for (phy_id, phy_container) in self.phys.iter_mut() {
+            Self::set_phy_power_element_lease(
+                &*self.power_manager,
+                *phy_id,
+                phy_container,
+                POWER_LEVEL_SUSPEND,
+            )
+            .await;
+        }
+    }
+
+    async fn on_after_resume(&mut self) {
+        info!("Modifying WLAN driver lease to 'on' level");
+        for (phy_id, phy_container) in self.phys.iter_mut() {
+            Self::set_phy_power_element_lease(
+                &*self.power_manager,
+                *phy_id,
+                phy_container,
+                POWER_LEVEL_ACTIVE,
+            )
+            .await;
+        }
+    }
+}
+
+pub async fn serve_suspend_blocker(
+    phy_manager: Arc<Mutex<dyn PhyManagerApi>>,
+    mut requests: fsystem::SuspendBlockerRequestStream,
+) -> Result<(), Error> {
+    while let Some(req) = requests.next().await {
+        match req {
+            Ok(fsystem::SuspendBlockerRequest::BeforeSuspend { responder }) => {
+                let mut phy_manager = phy_manager.lock().await;
+                phy_manager.on_before_suspend().await;
+                if let Err(e) = responder.send() {
+                    warn!("Failed to respond to BeforeSuspend: {}", e);
+                }
+            }
+            Ok(fsystem::SuspendBlockerRequest::AfterResume { responder }) => {
+                let mut phy_manager = phy_manager.lock().await;
+                phy_manager.on_after_resume().await;
+                if let Err(e) = responder.send() {
+                    warn!("Failed to respond to AfterResume: {}", e);
+                }
+            }
+            Ok(fsystem::SuspendBlockerRequest::_UnknownMethod { ordinal, .. }) => {
+                warn!("Unknown SuspendBlocker method: {}", ordinal);
+            }
+            Err(e) => {
+                error!("SuspendBlocker request stream error: {}", e);
+                return Err(e.into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Destroys the specified interface.
@@ -1019,6 +1149,7 @@ mod tests {
     use futures::task::Poll;
     use std::pin::pin;
     use test_case::test_case;
+    use wlan_power_manager_testing::TestPowerManager;
     use zx::sys::{ZX_ERR_NOT_FOUND, ZX_OK};
 
     /// Hold the client and service ends for DeviceMonitor to allow mocking DeviceMonitor responses
@@ -1032,6 +1163,7 @@ mod tests {
         telemetry_receiver: mpsc::Receiver<TelemetryEvent>,
         recovery_sender: recovery::RecoveryActionSender,
         recovery_receiver: recovery::RecoveryActionReceiver,
+        power_manager: Arc<TestPowerManager>,
     }
 
     /// Create a TestValues for a unit test.
@@ -1046,6 +1178,7 @@ mod tests {
         let telemetry_sender = TelemetrySender::new(sender);
         let (recovery_sender, recovery_receiver) =
             mpsc::channel::<recovery::RecoverySummary>(recovery::RECOVERY_SUMMARY_CHANNEL_CAPACITY);
+        let power_manager = Arc::new(TestPowerManager::new());
 
         TestValues {
             monitor_proxy,
@@ -1056,7 +1189,28 @@ mod tests {
             telemetry_receiver,
             recovery_sender,
             recovery_receiver,
+            power_manager,
         }
+    }
+
+    fn send_get_power_element_dependency_token_response(
+        exec: &mut TestExecutor,
+        server: &mut fidl_service::DeviceMonitorRequestStream,
+        response: Result<fbroker::DependencyToken, zx::sys::zx_status_t>,
+    ) {
+        let _ = assert_matches!(
+            exec.run_until_stalled(&mut server.next()),
+            Poll::Ready(Some(Ok(
+                fidl_service::DeviceMonitorRequest::GetPowerElementDependencyToken {
+                    phy_id: _,
+                    responder,
+                }
+            ))) => {
+                responder.send(response.as_ref().map_err(|status| *status).map(|token| {
+                    token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate token")
+                }))
+            }
+        );
     }
 
     /// Take in the service side of a DeviceMonitor::GetSupportedMacRoles request and respond with
@@ -1189,10 +1343,19 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         {
             let add_phy_fut = phy_manager.add_phy(0);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
             send_get_supported_mac_roles_response(
@@ -1225,11 +1388,20 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         {
             let add_phy_fut = phy_manager.add_phy(1);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
             send_get_supported_mac_roles_response(
@@ -1257,6 +1429,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         let fake_phy_id = 0;
@@ -1265,6 +1438,14 @@ mod tests {
         {
             let add_phy_fut = phy_manager.add_phy(fake_phy_id);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
             send_get_supported_mac_roles_response(
@@ -1288,6 +1469,14 @@ mod tests {
         {
             let add_phy_fut = phy_manager.add_phy(fake_phy_id);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
             send_get_supported_mac_roles_response(
@@ -1317,12 +1506,21 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         for phy_id in 0..2 {
             {
                 let add_phy_fut = phy_manager.add_phy(phy_id);
                 let mut add_phy_fut = pin!(add_phy_fut);
+
+                assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+                send_get_power_element_dependency_token_response(
+                    &mut exec,
+                    &mut test_values.monitor_stream,
+                    Ok(zx::Event::create()),
+                );
 
                 assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
@@ -1393,6 +1591,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         let fake_iface_id = 1;
@@ -1411,6 +1610,14 @@ mod tests {
         {
             let add_phy_fut = phy_manager.add_phy(fake_phy_id);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
             send_get_supported_mac_roles_response(
@@ -1451,6 +1658,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         let fake_phy_id = 1;
@@ -1468,6 +1676,14 @@ mod tests {
         {
             let add_phy_fut = phy_manager.add_phy(fake_phy_id);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
             send_get_supported_mac_roles_response(
@@ -1503,6 +1719,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         {
@@ -1514,6 +1731,14 @@ mod tests {
         {
             let add_phy_fut = phy_manager.add_phy(fake_phy_id);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
 
             send_get_supported_mac_roles_response(
@@ -1559,6 +1784,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         let fake_phy_id = 1;
@@ -1584,6 +1810,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         let fake_phy_id = 1;
@@ -1609,6 +1836,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -1669,6 +1897,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -1736,6 +1965,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -1778,6 +2008,14 @@ mod tests {
             // And then the PHY information is queried.
             assert!(exec.run_until_stalled(&mut on_iface_added_fut).is_pending());
 
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
+
+            assert!(exec.run_until_stalled(&mut on_iface_added_fut).is_pending());
+
             send_get_supported_mac_roles_response(
                 &mut exec,
                 &mut test_values.monitor_stream,
@@ -1810,6 +2048,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -1874,6 +2113,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         {
@@ -1906,6 +2146,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -1940,6 +2181,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -1975,6 +2217,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         let client = phy_manager.get_client();
@@ -1994,6 +2237,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2022,6 +2266,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         phy_manager.client_connections_enabled = true;
 
@@ -2056,6 +2301,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2087,6 +2333,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         assert!(!phy_manager.client_connections_enabled);
 
@@ -2116,6 +2363,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2169,6 +2417,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2212,6 +2461,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so that the request to destroy the interface fails.
@@ -2266,6 +2516,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         let get_ap_future = phy_manager.create_or_get_ap_iface();
@@ -2288,6 +2539,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2332,6 +2584,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so that the request to destroy the interface fails.
@@ -2378,6 +2631,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2415,6 +2669,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2444,6 +2699,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2491,6 +2747,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2537,6 +2794,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so that the request to destroy the interface fails.
@@ -2593,6 +2851,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2646,6 +2905,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2688,6 +2948,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so that the request to destroy the interface fails.
@@ -2747,6 +3008,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2802,6 +3064,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create an initial PhyContainer to be inserted into the test PhyManager before the fake
@@ -2855,6 +3118,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so that the request to create the interface fails.
@@ -2899,6 +3163,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the monitor stream so that the request to create the interface fails.
@@ -2942,6 +3207,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         assert_eq!(phy_manager.get_phy_ids(), Vec::<u16>::new());
     }
@@ -2959,11 +3225,18 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         {
             let add_phy_fut = phy_manager.add_phy(1);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
             send_get_supported_mac_roles_response(
                 &mut exec,
@@ -2989,11 +3262,18 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         {
             let add_phy_fut = phy_manager.add_phy(1);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
             send_get_supported_mac_roles_response(
                 &mut exec,
@@ -3006,6 +3286,12 @@ mod tests {
         {
             let add_phy_fut = phy_manager.add_phy(2);
             let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(zx::Event::create()),
+            );
             assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
             send_get_supported_mac_roles_response(
                 &mut exec,
@@ -3031,6 +3317,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         assert_data_tree!(test_values.inspector, root: {
@@ -3060,31 +3347,12 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Insert a couple fake PHYs.
-        let _ = phy_manager.phys.insert(
-            0,
-            PhyContainer {
-                supported_mac_roles: HashSet::new(),
-                client_ifaces: HashSet::new(),
-                ap_ifaces: HashSet::new(),
-                destroyed_ifaces: HashSet::new(),
-                defects: EventHistory::new(DEFECT_RETENTION_SECONDS),
-                recoveries: EventHistory::new(DEFECT_RETENTION_SECONDS),
-            },
-        );
-        let _ = phy_manager.phys.insert(
-            1,
-            PhyContainer {
-                supported_mac_roles: HashSet::new(),
-                client_ifaces: HashSet::new(),
-                ap_ifaces: HashSet::new(),
-                destroyed_ifaces: HashSet::new(),
-                defects: EventHistory::new(DEFECT_RETENTION_SECONDS),
-                recoveries: EventHistory::new(DEFECT_RETENTION_SECONDS),
-            },
-        );
+        let _ = phy_manager.phys.insert(0, PhyContainer::new(vec![]));
+        let _ = phy_manager.phys.insert(1, PhyContainer::new(vec![]));
 
         // Initially the country code should be unset.
         assert!(phy_manager.saved_country_code.is_none());
@@ -3158,20 +3426,11 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Insert a fake PHY.
-        let _ = phy_manager.phys.insert(
-            0,
-            PhyContainer {
-                supported_mac_roles: HashSet::new(),
-                client_ifaces: HashSet::new(),
-                ap_ifaces: HashSet::new(),
-                destroyed_ifaces: HashSet::new(),
-                defects: EventHistory::new(DEFECT_RETENTION_SECONDS),
-                recoveries: EventHistory::new(DEFECT_RETENTION_SECONDS),
-            },
-        );
+        let _ = phy_manager.phys.insert(0, PhyContainer::new(vec![]));
 
         // Initially the country code should be unset.
         assert!(phy_manager.saved_country_code.is_none());
@@ -3220,6 +3479,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         let fake_mac_roles = vec![fidl_common::WlanMacRole::Client];
 
@@ -3269,19 +3529,20 @@ mod tests {
                 // Make sure that the stalled future has made a FIDL request to create a client
                 // interface.  Send back a response assigning an interface ID equal to the PHY ID.
                 assert_matches!(
-                exec.run_until_stalled(&mut test_values.monitor_stream.next()),
-                Poll::Ready(Some(Ok(
-                    fidl_service::DeviceMonitorRequest::CreateIface {
-                        payload,
-                        responder,
+                    exec.run_until_stalled(&mut test_values.monitor_stream.next()),
+                    Poll::Ready(Some(Ok(
+                        fidl_service::DeviceMonitorRequest::CreateIface {
+                            payload,
+                            responder,
+                        }
+                    ))) => {
+                        let response = fidl_service::DeviceMonitorCreateIfaceResponse {
+                            iface_id: Some(payload.phy_id.unwrap()),
+                            ..Default::default()
+                        };
+                        responder.send(Ok(&response)).expect("sending fake iface id");
                     }
-                ))) => {
-                    let response = fidl_service::DeviceMonitorCreateIfaceResponse {
-                        iface_id: Some(payload.phy_id.unwrap()),
-                        ..Default::default()
-                    };
-                    responder.send(Ok(&response)).expect("sending fake iface id");
-                });
+                );
             }
         }
 
@@ -3305,6 +3566,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         let fake_mac_roles = vec![fidl_common::WlanMacRole::Client];
 
@@ -3357,10 +3619,10 @@ mod tests {
                         // As noted above, let the requests for 0 and 2 "fail" and let the request
                         // for PHY 1 succeed.
                         match payload.phy_id.unwrap() {
-                            1 => {
-                                responder.send(Ok(&response)).expect("sending fake iface id")
-                            },
-                            _ => responder.send(Err(fidl_service::DeviceMonitorError::unknown())).expect("sending fake iface id"),
+                            1 => responder.send(Ok(&response)).expect("sending fake iface id"),
+                            _ => responder
+                                .send(Err(fidl_service::DeviceMonitorError::unknown()))
+                                .expect("sending fake iface id"),
                         };
                     }
                 );
@@ -3392,6 +3654,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Create a fake PHY entry without client interfaces.  Note that client connections have
@@ -3432,6 +3695,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Verify that client connections are initially stopped.
@@ -3486,6 +3750,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         phy_manager.client_connections_enabled = true;
@@ -3504,6 +3769,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         phy_manager.client_connections_enabled = false;
@@ -3521,6 +3787,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Issue a create iface request
@@ -3538,11 +3805,11 @@ mod tests {
 
         // Verify that there is nothing waiting on the telemetry receiver.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceCreationResult {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::IfaceCreationResult {
                 role: fidl_common::WlanMacRole::Client,
                 result: Ok(0),
-            }))
+            })
         )
     }
 
@@ -3557,6 +3824,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         let mut phy_container = PhyContainer::new(vec![]);
         let _ = phy_container.client_ifaces.insert(0);
@@ -3581,11 +3849,11 @@ mod tests {
 
             // Verify that a metric has been logged.
             assert_matches!(
-                test_values.telemetry_receiver.try_next(),
-                Ok(Some(TelemetryEvent::IfaceCreationResult {
+                test_values.telemetry_receiver.try_recv(),
+                Ok(TelemetryEvent::IfaceCreationResult {
                     role: fidl_common::WlanMacRole::Client,
                     result: Err(()),
-                }))
+                })
             );
         }
 
@@ -3608,6 +3876,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         let mut phy_container = PhyContainer::new(vec![]);
         let _ = phy_container.client_ifaces.insert(0);
@@ -3628,11 +3897,11 @@ mod tests {
 
             // Verify that a metric has been logged.
             assert_matches!(
-                test_values.telemetry_receiver.try_next(),
-                Ok(Some(TelemetryEvent::IfaceCreationResult {
+                test_values.telemetry_receiver.try_recv(),
+                Ok(TelemetryEvent::IfaceCreationResult {
                     role: fidl_common::WlanMacRole::Client,
                     result: Err(()),
-                }))
+                })
             );
         }
 
@@ -3669,11 +3938,11 @@ mod tests {
 
         // Verify that there is nothing waiting on the telemetry receiver.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceDestructionResult {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::IfaceDestructionResult {
                 role: fidl_common::WlanMacRole::Client,
                 result: Ok(0),
-            }))
+            })
         )
     }
 
@@ -3701,7 +3970,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Ok(())));
 
         // Verify that no metric has been logged.
-        assert_matches!(test_values.telemetry_receiver.try_next(), Err(_))
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Err(_))
     }
 
     #[fuchsia::test]
@@ -3736,11 +4005,11 @@ mod tests {
 
         // Verify that a metric has been logged.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceDestructionResult {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::IfaceDestructionResult {
                 role: fidl_common::WlanMacRole::Client,
                 result: Err(()),
-            }))
+            })
         )
     }
 
@@ -3768,11 +4037,11 @@ mod tests {
 
         // Verify that a metric has been logged.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceDestructionResult {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::IfaceDestructionResult {
                 role: fidl_common::WlanMacRole::Client,
                 result: Err(()),
-            }))
+            })
         )
     }
 
@@ -3789,6 +4058,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Add some PHYs with interfaces.
@@ -3858,6 +4128,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Add some PHYs with interfaces.
@@ -3892,6 +4163,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Add some PHYs with interfaces.
@@ -3958,6 +4230,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Insert a fake PHY, client interface, and AP interface.
@@ -3973,7 +4246,7 @@ mod tests {
         phy_manager.record_defect(defect);
 
         // Verify that a recovery event was sent.
-        let recovery_action = test_values.recovery_receiver.try_next().unwrap().unwrap();
+        let recovery_action = test_values.recovery_receiver.try_recv().unwrap();
         assert_eq!(recovery_action.defect, defect);
         assert_eq!(
             recovery_action.action,
@@ -4022,6 +4295,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Swap the recovery profile with one that always suggests recovery.
@@ -4031,7 +4305,7 @@ mod tests {
         phy_manager.record_defect(defect);
 
         // Verify that a recovery event was sent.
-        assert!(test_values.recovery_receiver.try_next().is_err());
+        assert!(test_values.recovery_receiver.try_recv().is_err());
     }
 
     #[test_case(
@@ -4118,13 +4392,14 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Send the provided recovery summary and expect the associated telemetry event.
         phy_manager.log_recovery_action(summary);
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::RecoveryEvent { reason } )) => {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::RecoveryEvent { reason } ) => {
         assert_eq!(reason, expected_reason);
             })
     }
@@ -4166,6 +4441,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
         let mut phy_container = PhyContainer::new(vec![]);
         let _ = phy_container.destroyed_ifaces.insert(fake_iface_id);
@@ -4451,6 +4727,7 @@ mod tests {
         node: inspect::Node,
         telemetry_sender: TelemetrySender,
         recovery_action_sender: recovery::RecoveryActionSender,
+        power_manager: Arc<TestPowerManager>,
     ) -> PhyManager {
         let mut phy_manager = PhyManager::new(
             device_monitor,
@@ -4459,6 +4736,7 @@ mod tests {
             node,
             telemetry_sender,
             recovery_action_sender,
+            power_manager,
         );
 
         // Give the PhyManager client and AP interfaces.
@@ -4480,6 +4758,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Suggest a recovery action to destroy nonexistent interface.
@@ -4513,6 +4792,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the DeviceMonitor serving end so that destroying the interface will fail.
@@ -4545,6 +4825,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Suggest a recovery action to destroy the client interface.
@@ -4583,6 +4864,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Drop the DeviceMonitor serving end so that destroying the interface will fail.
@@ -4615,6 +4897,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Suggest a recovery action to destroy the AP interface.
@@ -4659,6 +4942,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Set a country code in the phy manager
@@ -4726,6 +5010,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Suggest a recovery action to disconnect the client interface.
@@ -4779,6 +5064,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Suggest a recovery action to destroy the AP interface.
@@ -4831,6 +5117,7 @@ mod tests {
             test_values.node,
             test_values.telemetry_sender,
             test_values.recovery_sender,
+            test_values.power_manager.clone(),
         );
 
         // Verify that there are no defects to begin with.
@@ -4847,8 +5134,189 @@ mod tests {
 
         // Verify that the defect was reported to telemetry.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::SmeTimeout { source: wlan_telemetry::TimeoutSource::Scan }))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::SmeTimeout { source: wlan_telemetry::TimeoutSource::Scan })
         )
+    }
+
+    #[fuchsia::test]
+    fn test_power_leases_stop_client_connections() {
+        let mut exec = TestExecutor::new();
+        let mut test_values = test_setup();
+        let mut phy_manager = PhyManager::new(
+            test_values.monitor_proxy,
+            recovery::lookup_recovery_profile(""),
+            false,
+            test_values.node,
+            test_values.telemetry_sender,
+            test_values.recovery_sender,
+            test_values.power_manager.clone(),
+        );
+
+        let phy_id = 0;
+        let mut phy_container = PhyContainer::new(vec![fidl_common::WlanMacRole::Client]);
+        let token = zx::Event::create();
+        let (lease_token, _) = zx::EventPair::create();
+        phy_container.power_dependency_token = Some(token);
+        phy_container.power_dependency_lease = Some(lease_token);
+        let _ = phy_container.client_ifaces.insert(10);
+        let _ = phy_manager.phys.insert(phy_id, phy_container);
+        phy_manager.client_connections_enabled = true;
+
+        {
+            let destroy_fut = phy_manager.destroy_all_client_ifaces();
+            let mut destroy_fut = pin!(destroy_fut);
+            assert!(exec.run_until_stalled(&mut destroy_fut).is_pending());
+
+            send_destroy_iface_response(&mut exec, &mut test_values.monitor_stream, ZX_OK);
+
+            assert_matches!(exec.run_until_stalled(&mut destroy_fut), Poll::Ready(Ok(())));
+        }
+
+        // Verify power element lease is retained even when client connections are destroyed.
+        let container = phy_manager.phys.get(&phy_id).unwrap();
+        assert!(container.power_dependency_token.is_some());
+        assert!(container.power_dependency_lease.is_some());
+    }
+
+    #[fuchsia::test]
+    fn test_power_leases_add_phy() {
+        let mut exec = TestExecutor::new();
+        let mut test_values = test_setup();
+        let mut phy_manager = PhyManager::new(
+            test_values.monitor_proxy,
+            recovery::lookup_recovery_profile(""),
+            false,
+            test_values.node,
+            test_values.telemetry_sender,
+            test_values.recovery_sender,
+            test_values.power_manager.clone(),
+        );
+
+        let phy_id = 1;
+        {
+            let add_phy_fut = phy_manager.add_phy(phy_id);
+            let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            let token = zx::Event::create();
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(token),
+            );
+
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_supported_mac_roles_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(&[fidl_common::WlanMacRole::Client]),
+            );
+
+            assert_matches!(exec.run_until_stalled(&mut add_phy_fut), Poll::Ready(Ok(())));
+        }
+
+        let calls = test_values.power_manager.calls.lock();
+        assert!(calls.contains(&"wlancfg-phy-1-level-2-dependency".to_string()));
+
+        let container = phy_manager.phys.get(&phy_id).unwrap();
+        assert!(container.power_dependency_token.is_some());
+        assert!(container.power_dependency_lease.is_some());
+    }
+
+    #[fuchsia::test]
+    fn test_power_leases_suspend_and_resume() {
+        let mut exec = TestExecutor::new();
+        let test_values = test_setup();
+        let mut phy_manager = PhyManager::new(
+            test_values.monitor_proxy,
+            recovery::lookup_recovery_profile(""),
+            false,
+            test_values.node,
+            test_values.telemetry_sender,
+            test_values.recovery_sender,
+            test_values.power_manager.clone(),
+        );
+
+        let phy_id = 0;
+        let mut phy_container = PhyContainer::new(vec![fidl_common::WlanMacRole::Client]);
+        let token = zx::Event::create();
+        let (lease_token, _) = zx::EventPair::create();
+        phy_container.power_dependency_token = Some(token);
+        phy_container.power_dependency_lease = Some(lease_token);
+        let _ = phy_manager.phys.insert(phy_id, phy_container);
+
+        // BeforeSuspend
+        {
+            let suspend_fut = phy_manager.on_before_suspend();
+            let mut suspend_fut = pin!(suspend_fut);
+            assert_matches!(exec.run_until_stalled(&mut suspend_fut), Poll::Ready(()));
+        }
+
+        {
+            let calls = test_values.power_manager.calls.lock();
+            assert!(calls.contains(&"wlancfg-phy-0-level-1-dependency".to_string()));
+        }
+
+        // AfterResume
+        {
+            let resume_fut = phy_manager.on_after_resume();
+            let mut resume_fut = pin!(resume_fut);
+            assert_matches!(exec.run_until_stalled(&mut resume_fut), Poll::Ready(()));
+        }
+
+        {
+            let calls = test_values.power_manager.calls.lock();
+            assert!(calls.contains(&"wlancfg-phy-0-level-2-dependency".to_string()));
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_power_leases_skipped_when_dependency_token_unavailable() {
+        let mut exec = TestExecutor::new();
+        let mut test_values = test_setup();
+        let mut phy_manager = PhyManager::new(
+            test_values.monitor_proxy,
+            recovery::lookup_recovery_profile(""),
+            false,
+            test_values.node,
+            test_values.telemetry_sender,
+            test_values.recovery_sender,
+            test_values.power_manager.clone(),
+        );
+        phy_manager.client_connections_enabled = true;
+
+        let phy_id = 0;
+        {
+            let add_phy_fut = phy_manager.add_phy(phy_id);
+            let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Err(ZX_ERR_NOT_FOUND),
+            );
+
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            send_get_supported_mac_roles_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(&[fidl_common::WlanMacRole::Client]),
+            );
+
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+            send_create_iface_response(&mut exec, &mut test_values.monitor_stream, Some(10));
+
+            assert_matches!(exec.run_until_stalled(&mut add_phy_fut), Poll::Ready(Ok(())));
+        }
+
+        // Interface should still be created even if power dependency token failed.
+        let container = phy_manager.phys.get(&phy_id).unwrap();
+        assert!(container.client_ifaces.contains(&10));
+        assert!(container.power_dependency_token.is_none());
+        assert!(container.power_dependency_lease.is_none());
     }
 }

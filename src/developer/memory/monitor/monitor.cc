@@ -29,7 +29,6 @@
 #include "src/developer/memory/metrics/printer.h"
 #include "src/developer/memory/monitor/high_water.h"
 #include "src/developer/memory/monitor/memory_metrics_registry.cb.h"
-#include "src/developer/memory/pressure_signaler/pressure_observer.h"
 #include "src/lib/files/file.h"
 
 namespace monitor {
@@ -143,7 +142,7 @@ Monitor::Monitor(async_dispatcher_t* dispatcher, memory_monitor_config::Config c
       bucket_matches_(CreateBucketMatchesFromConfigData()),
       digester_(bucket_matches_),
       ram_device_(std::move(ram_device)),
-      level_(pressure_signaler::Level::kNumLevels),
+      level_(PressureLevel::kNumLevels),
       imminent_oom_observer_(imminent_oom_observer) {
   if (metric_event_logger_factory_)
     CreateMetrics();
@@ -500,35 +499,34 @@ void Monitor::UpdateState() {
 }
 
 namespace {
-pressure_signaler::Level ConvertPressureLevel(fuchsia_memorypressure::Level level) {
+PressureLevel ConvertPressureLevel(fuchsia_memorypressure::Level level) {
   switch (level) {
     case fuchsia_memorypressure::Level::kCritical:
-      return pressure_signaler::kCritical;
+      return PressureLevel::kCritical;
     case fuchsia_memorypressure::Level::kWarning:
-      return pressure_signaler::kWarning;
+      return PressureLevel::kWarning;
     case fuchsia_memorypressure::Level::kNormal:
-      return pressure_signaler::kNormal;
+      return PressureLevel::kNormal;
   }
 }
 }  // namespace
 
-void Monitor::OnLevelChanged(pressure_signaler::Level level) {
+void Monitor::OnLevelChanged(PressureLevel level) {
   // In case of imminent oom, pressure_signaler reports a critical memory level;
   // it falls on memory_monitor to disambiguate.
-  if (level == pressure_signaler::Level::kCritical && imminent_oom_observer_ &&
+  if (level == PressureLevel::kCritical && imminent_oom_observer_ &&
       imminent_oom_observer_->IsImminentOom()) {
-    level = pressure_signaler::Level::kImminentOOM;
+    level = PressureLevel::kImminentOOM;
   }
 
   // Don't do anything if the level has not changed.
   if (level == level_) {
     return;
   }
-  FX_LOGS(INFO) << "Memory pressure level changed from " << pressure_signaler::kLevelNames[level_]
-                << " to " << pressure_signaler::kLevelNames[level];
+  FX_LOGS(INFO) << "Memory pressure level changed from " << kLevelNames[level_] << " to "
+                << kLevelNames[level];
   TRACE_INSTANT("memory_monitor", "MemoryPressureLevelChange", TRACE_SCOPE_THREAD, "from",
-                pressure_signaler::kLevelNames[level_], "to",
-                pressure_signaler::kLevelNames[level]);
+                kLevelNames[level_], "to", kLevelNames[level]);
   level_ = level;
   logger_.SetPressureLevel(level_);
 }

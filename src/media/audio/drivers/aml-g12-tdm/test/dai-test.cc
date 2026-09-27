@@ -515,7 +515,7 @@ class AmlG12TdmDaiRingBufferTest : public AmlG12TdmDaiTest {
     dai_format_.bits_per_slot = dai_formats.bits_per_slot[0];
 
     ring_buffer_format_.mutable_pcm_format()->number_of_channels =
-        pcm_formats.channel_sets()[0].attributes().size();
+        static_cast<uint8_t>(pcm_formats.channel_sets()[0].attributes().size());
     ring_buffer_format_.mutable_pcm_format()->sample_format = pcm_formats.sample_formats()[0];
     ring_buffer_format_.mutable_pcm_format()->frame_rate = pcm_formats.frame_rates()[0];
     ring_buffer_format_.mutable_pcm_format()->bytes_per_sample = pcm_formats.bytes_per_sample()[0];

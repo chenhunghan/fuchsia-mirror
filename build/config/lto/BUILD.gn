@@ -188,10 +188,9 @@ variant("lto") {
     "-Zdylib-lto",
   ]
 
-  # TODO(https://fxbug.dev/533045810): WPD is temporarily disabled for all Fuchsia-contexts because
-  # WPD depends on module summaries emitted for all participating bitcode, but
-  # rust currently doesn't emit module summaries for full/fat LTO.
-  if (!is_fuchsia) {
+  # Whole program devirtualization is safe for self-contained binaries that do
+  # not expose the C++ ABI, such as host tools or the kernel.
+  if (!is_fuchsia || is_kernel) {
     configs += [ ":lto-whole-program-devirtualization" ]
   }
 }

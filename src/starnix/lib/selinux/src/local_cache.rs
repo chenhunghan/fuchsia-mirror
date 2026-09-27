@@ -12,9 +12,12 @@ const SIMPLE_ALLOW: PermissionCheckResult =
     PermissionCheckResult { granted: true, audit: false, permissive: false, todo_bug: None };
 
 /// Sizes for the different caches. These have been experimentally determined.
-const FD_USE_CACHE_SIZE: usize = 4;
-const ACCESS_CACHE_SIZE: usize = 8;
-const XPERM_CACHE_SIZE: usize = 2;
+///
+/// These must be powers of two so that modulo indexing (`% *_CACHE_SIZE`) compiles to a single
+/// bitwise mask while allowing the compiler to elide array bounds checks.
+const FD_USE_CACHE_SIZE: usize = 1 << 2;
+const ACCESS_CACHE_SIZE: usize = 1 << 3;
+const XPERM_CACHE_SIZE: usize = 1 << 1;
 
 /// Each nibble in LruState stores the index of the entry in that cache position, from most recent
 /// (least significant nibble) to least recent (most significant nibble).
@@ -147,6 +150,7 @@ impl Default for PerThreadCache {
 }
 
 impl PerThreadCache {
+    #[cold]
     fn reset(&self) {
         self.fd_use_cache.iter().for_each(|c| c.set(SidPair::NONE));
         self.fd_use_lru.set(LruState::new());
@@ -183,7 +187,7 @@ impl PerThreadCache {
         let mut lru = self.fd_use_lru.get();
         let mut sequence = lru.0;
         for hit_idx in 0..FD_USE_CACHE_SIZE {
-            let i = (sequence & 0xF) as usize;
+            let i = (sequence & 0xF) as usize % FD_USE_CACHE_SIZE;
             if self.fd_use_cache[i].get() == key {
                 if hit_idx != 0 {
                     lru.touch_mru_idx(hit_idx);
@@ -193,13 +197,27 @@ impl PerThreadCache {
             }
             sequence >>= 4;
         }
+        self.lookup_fd_use_miss(key, lru, compute)
+    }
+
+    // Outlined to avoid creating a stack frame on the hot cache hit path.
+    #[inline(never)]
+    fn lookup_fd_use_miss<F>(
+        &self,
+        key: SidPair,
+        mut lru: LruState<FD_USE_CACHE_SIZE>,
+        compute: F,
+    ) -> PermissionCheckResult
+    where
+        F: FnOnce() -> PermissionCheckResult,
+    {
         let result = compute();
         // Only cache simple "allow" decisions. This keeps the cache smaller and focuses on the
         // most common case.
         if result == SIMPLE_ALLOW {
             let evicted = lru.evict();
             self.fd_use_lru.set(lru);
-            self.fd_use_cache[evicted].set(key);
+            self.fd_use_cache[evicted % FD_USE_CACHE_SIZE].set(key);
         }
         result
     }
@@ -224,7 +242,7 @@ impl PerThreadCache {
         let mut lru = self.xperm_lru.get();
         let mut sequence = lru.0;
         for hit_idx in 0..XPERM_CACHE_SIZE {
-            let i = (sequence & 0xF) as usize;
+            let i = (sequence & 0xF) as usize % XPERM_CACHE_SIZE;
             if self.xperm_cache[i].get() == key {
                 if hit_idx != 0 {
                     lru.touch_mru_idx(hit_idx);
@@ -234,13 +252,27 @@ impl PerThreadCache {
             }
             sequence >>= 4;
         }
+        self.check_xperm_miss(key, lru, compute)
+    }
+
+    // Outlined to avoid creating a stack frame on the hot cache hit path.
+    #[inline(never)]
+    fn check_xperm_miss<F>(
+        &self,
+        key: XpermCacheKey,
+        mut lru: LruState<XPERM_CACHE_SIZE>,
+        compute: F,
+    ) -> PermissionCheckResult
+    where
+        F: FnOnce() -> PermissionCheckResult,
+    {
         let result = compute();
         // Only cache simple "allow" decisions. This keeps the cache smaller and focuses on the
         // most common case.
         if result == SIMPLE_ALLOW {
             let evicted = lru.evict();
             self.xperm_lru.set(lru);
-            self.xperm_cache[evicted].set(key);
+            self.xperm_cache[evicted % XPERM_CACHE_SIZE].set(key);
         }
         result
     }
@@ -265,7 +297,7 @@ impl PerThreadCache {
         let mut lru = self.access_lru.get();
         let mut sequence = lru.0;
         for hit_idx in 0..ACCESS_CACHE_SIZE {
-            let i = (sequence & 0xF) as usize;
+            let i = (sequence & 0xF) as usize % ACCESS_CACHE_SIZE;
             if key == self.access_cache_sid_idx[i].get()
                 && class == self.access_cache_class_idx[i].get()
             {
@@ -278,7 +310,21 @@ impl PerThreadCache {
             }
             sequence >>= 4;
         }
+        self.lookup_access_decision_miss(key, class, lru, compute)
+    }
 
+    // Outlined to avoid creating a stack frame on the hot cache hit path.
+    #[inline(never)]
+    fn lookup_access_decision_miss<F>(
+        &self,
+        key: SidPair,
+        class: KernelClass,
+        mut lru: LruState<ACCESS_CACHE_SIZE>,
+        compute: F,
+    ) -> KernelAccessDecision
+    where
+        F: FnOnce() -> KernelAccessDecision,
+    {
         let result = compute();
 
         // Only cache decisions that do not have an associated todo bug or flags. This keeps the
@@ -286,9 +332,10 @@ impl PerThreadCache {
         if result.todo_bug.is_none() && result.flags == 0 {
             let evicted = lru.evict();
             self.access_lru.set(lru);
-            self.access_cache_sid_idx[evicted].set(key);
-            self.access_cache_class_idx[evicted].set(class);
-            self.access_cache_result[evicted].set((result.allow, result.audit));
+            let idx = evicted % ACCESS_CACHE_SIZE;
+            self.access_cache_sid_idx[idx].set(key);
+            self.access_cache_class_idx[idx].set(class);
+            self.access_cache_result[idx].set((result.allow, result.audit));
         }
 
         result

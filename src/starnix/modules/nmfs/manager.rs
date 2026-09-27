@@ -22,7 +22,7 @@ use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
 /// Manager for communicating network properties.
 #[derive(Inspect)]
 pub(crate) struct NetworkManager {
-    starnix_networks: fnp_socketproxy::StarnixNetworksSynchronousProxy,
+    network_registry: fnp_socketproxy::NetworkRegistrySynchronousProxy,
     #[inspect(forward)]
     inner: LockDepMutex<IValue<NetworkManagerInner>, NmfsNetworkManagerLock>,
 }
@@ -47,11 +47,11 @@ struct SeenSentData {
     // by the NetworkManager.
     seen: u64,
     // The number of event occurrences that have been
-    // sent successfully to the socketproxy.
+    // sent successfully to netcfg.
     sent: u64,
 }
 
-/// Initialize the connection to the socketproxy.
+/// Initialize the connection to the NetworkRegistry protocol.
 pub fn nmfs_init(kernel: &Kernel) -> Result<(), anyhow::Error> {
     // Register the fuchsia_network_monitor_fs in the FsRegistry.
     let registry = kernel.expando.get::<FsRegistry>();
@@ -62,23 +62,23 @@ pub fn nmfs_init(kernel: &Kernel) -> Result<(), anyhow::Error> {
     );
 
     // Register the NetworkManager.
-    let starnix_networks = connect_to_protocol_sync::<fnp_socketproxy::StarnixNetworksMarker>()?;
+    let network_registry = connect_to_protocol_sync::<fnp_socketproxy::NetworkRegistryMarker>()?;
     kernel
         .expando
-        .get_or_init(|| NetworkManager::new_with_proxy(starnix_networks, &kernel.inspect_node));
+        .get_or_init(|| NetworkManager::new_with_proxy(network_registry, &kernel.inspect_node));
     Ok(())
 }
 
-// The functions that propagate calls to the socketproxy prioritize maintaining
-// a correct version of local state and logging an error if the socketproxy
+// The functions that propagate calls to netcfg prioritize maintaining
+// a correct version of local state and logging an error if the netcfg
 // state is not aligned.
 impl NetworkManager {
-    // Create a NetworkManager with a StarnixNetworks protocol connection  and `nmfs` inspect node.
+    // Create a NetworkManager with a NetworkRegistry protocol connection and `nmfs` inspect node.
     pub(crate) fn new_with_proxy(
-        proxy: fnp_socketproxy::StarnixNetworksSynchronousProxy,
+        proxy: fnp_socketproxy::NetworkRegistrySynchronousProxy,
         node: &fuchsia_inspect::Node,
     ) -> Self {
-        Self { starnix_networks: proxy, inner: Default::default() }
+        Self { network_registry: proxy, inner: Default::default() }
             .with_inspect(node, "nmfs")
             .expect("Failed to attach 'nmfs' node")
     }
@@ -117,7 +117,7 @@ impl NetworkManager {
     }
 
     // Set the default network identifier. Propagate the change
-    // to the socketproxy.
+    // to netcfg.
     pub(crate) fn set_default_network_id(&self, network_id: Option<u32>) {
         {
             let mut inner_guard = self.lock();
@@ -129,22 +129,20 @@ impl NetworkManager {
         // Only log when there is an internal proxy error.
         match self.fidl_set_default_network_id(network_id) {
             Ok(()) => {
-                log_info!(
-                    "Successfully set network with id {network_id:?} as default in socketproxy",
-                );
+                log_info!("Successfully set network with id {network_id:?} as default in netcfg",);
                 let mut inner_guard = self.lock();
                 inner_guard.as_mut().default_ids_set.sent += 1;
             }
             Err(e) => {
                 log_error!(
-                    "Failed to set network with id {network_id:?} as default in socketproxy; {e:?}"
+                    "Failed to set network with id {network_id:?} as default in netcfg; {e:?}"
                 );
             }
         }
     }
 
     // Populate a new element in the Map. This does not
-    // propagate to the socketproxy.
+    // propagate to netcfg.
     //
     // An error will be returned if a network with the id
     // exists in the local state.
@@ -163,7 +161,7 @@ impl NetworkManager {
         Ok(())
     }
 
-    // Add a new network. Propagate the change to the socketproxy.
+    // Add a new network. Propagate the change to netcfg.
     //
     // An error will be returned if a network with the id
     // exists in the local state.
@@ -194,22 +192,19 @@ impl NetworkManager {
         // Only log when there is an internal proxy error.
         match self.fidl_add_network(&fnp_socketproxy::Network::from(&network)) {
             Ok(()) => {
-                log_info!("Successfully added network with id {} to socketproxy", network.netid);
+                log_info!("Successfully added network with id {} to netcfg", network.netid);
                 let mut inner_guard = self.lock();
                 inner_guard.as_mut().added_networks.sent += 1;
             }
             Err(e) => {
-                log_error!(
-                    "Failed to add network with id {:?} to socketproxy; {e:?}",
-                    network.netid
-                );
+                log_error!("Failed to add network with id {:?} to netcfg; {e:?}", network.netid);
             }
         }
 
         Ok(())
     }
 
-    // Update an existing network. Propagate the change to the socketproxy
+    // Update an existing network. Propagate the change to netcfg.
     //
     // An error will be returned if a network with the id does not
     // exist in the local state.
@@ -236,22 +231,19 @@ impl NetworkManager {
         // Only log when there is an internal proxy error.
         match self.fidl_update_network(&fnp_socketproxy::Network::from(&network)) {
             Ok(()) => {
-                log_info!("Successfully updated network with id {} in socketproxy", network.netid);
+                log_info!("Successfully updated network with id {} in netcfg", network.netid);
                 let mut inner_guard = self.lock();
                 inner_guard.as_mut().updated_networks.sent += 1;
             }
             Err(e) => {
-                log_error!(
-                    "Failed to update network with id {} in socketproxy; {e:?}",
-                    network.netid
-                );
+                log_error!("Failed to update network with id {} in netcfg; {e:?}", network.netid);
             }
         }
 
         Ok(())
     }
 
-    // Remove an existing network. Propagate the change to the socketproxy.
+    // Remove an existing network. Propagate the change to netcfg.
     //
     // An error will be returned if a network with the id does not
     // exist in the local state.
@@ -276,18 +268,18 @@ impl NetworkManager {
         // Only log when there is an internal proxy error.
         match self.fidl_remove_network(&network_id) {
             Ok(()) => {
-                log_info!("Successfully removed network with id {network_id} from socketproxy",);
+                log_info!("Successfully removed network with id {network_id} from netcfg",);
                 let mut inner_guard = self.lock();
                 inner_guard.as_mut().removed_networks.sent += 1;
             }
             Err(e) => {
-                log_error!("Failed to remove network with id {network_id} in socketproxy; {e:?}");
+                log_error!("Failed to remove network with id {network_id} in netcfg; {e:?}");
             }
         }
         Ok(())
     }
 
-    // Call `set_default` on `StarnixNetworks`.
+    // Call `set_default` on `NetworkRegistry`.
     fn fidl_set_default_network_id(
         &self,
         network_id: Option<u32>,
@@ -298,44 +290,44 @@ impl NetworkManager {
                 fidl_fuchsia_posix_socket::OptionalUint32::Unset(fidl_fuchsia_posix_socket::Empty)
             }
         };
-        Ok(self.starnix_networks.set_default(&network_id, zx::MonotonicInstant::INFINITE)??)
+        Ok(self.network_registry.set_default(&network_id, zx::MonotonicInstant::INFINITE)??)
     }
 
-    // Call `add` on `StarnixNetworks`.
+    // Call `add` on `NetworkRegistry`.
     fn fidl_add_network(
         &self,
         network: &fnp_socketproxy::Network,
     ) -> Result<(), NetworkManagerError> {
-        Ok(self.starnix_networks.add(&network, zx::MonotonicInstant::INFINITE)??)
+        Ok(self.network_registry.add(&network, zx::MonotonicInstant::INFINITE)??)
     }
 
-    // Call `update` on `StarnixNetworks`.
+    // Call `update` on `NetworkRegistry`.
     fn fidl_update_network(
         &self,
         network: &fnp_socketproxy::Network,
     ) -> Result<(), NetworkManagerError> {
-        Ok(self.starnix_networks.update(&network, zx::MonotonicInstant::INFINITE)??)
+        Ok(self.network_registry.update(&network, zx::MonotonicInstant::INFINITE)??)
     }
 
-    // Call `remove` on `StarnixNetworks`.
+    // Call `remove` on `NetworkRegistry`.
     fn fidl_remove_network(&self, network_id: &u32) -> Result<(), NetworkManagerError> {
-        Ok(self.starnix_networks.remove(*network_id, zx::MonotonicInstant::INFINITE)??)
+        Ok(self.network_registry.remove(*network_id, zx::MonotonicInstant::INFINITE)??)
     }
 }
 
 // Errors produced when communicating updates to
-// the socket proxy.
+// netcfg.
 #[derive(Clone, Debug, Error)]
 pub(crate) enum NetworkManagerError {
-    #[error("Error during socketproxy Add: {0:?}")]
+    #[error("Error during netcfg Add: {0:?}")]
     Add(fnp_socketproxy::NetworkRegistryAddError),
-    #[error("Error calling FIDL on socketproxy: {0:?}")]
+    #[error("Error calling FIDL on netcfg: {0:?}")]
     Fidl(#[from] fidl::Error),
-    #[error("Error during socketproxy Remove: {0:?}")]
+    #[error("Error during netcfg Remove: {0:?}")]
     Remove(fnp_socketproxy::NetworkRegistryRemoveError),
-    #[error("Error during socketproxy SetDefault: {0:?}")]
+    #[error("Error during netcfg SetDefault: {0:?}")]
     SetDefault(fnp_socketproxy::NetworkRegistrySetDefaultError),
-    #[error("Error during socketproxy Update: {0:?}")]
+    #[error("Error during netcfg Update: {0:?}")]
     Update(fnp_socketproxy::NetworkRegistryUpdateError),
 }
 
@@ -391,7 +383,7 @@ mod tests {
             Err(errno) if errno.code.error_code() == EEXIST
         );
         assert_matches!(manager.get_network(&network_id), Some(None));
-        // Empty networks don't get sent to the socketproxy, so they are
+        // Empty networks don't get sent to netcfg, so they are
         // ignored in SeenSentData.
         assert_data_tree!(inspector, root: {
             nmfs: contains {
@@ -403,14 +395,14 @@ mod tests {
         });
     }
 
-    // Set the `StarnixNetworksMarker` in the NetworkManager and mock out
-    // the responses to `StarnixNetworksRequest`s with provided results.
+    // Set the `NetworkRegistryMarker` in the NetworkManager and mock out
+    // the responses to `NetworkRegistryRequest`s with provided results.
     fn setup_proxy(
         inspect_node: &fuchsia_inspect::Node,
         results: Vec<Result<(), NetworkManagerError>>,
     ) -> NetworkManager {
         let (proxy, mut stream) = fidl::endpoints::create_sync_proxy_and_stream::<
-            fnp_socketproxy::StarnixNetworksMarker,
+            fnp_socketproxy::NetworkRegistryMarker,
         >();
         let manager = NetworkManager::new_with_proxy(proxy, inspect_node);
 
@@ -421,7 +413,7 @@ mod tests {
                     .next()
                     .expect("there should be an equivalent # of results and requests");
                 match item.expect("receive request") {
-                    fnp_socketproxy::StarnixNetworksRequest::SetDefault {
+                    fnp_socketproxy::NetworkRegistryRequest::SetDefault {
                         network_id: _,
                         responder,
                     } => {
@@ -431,21 +423,21 @@ mod tests {
                         });
                         responder.send(res).expect("respond to SetDefault");
                     }
-                    fnp_socketproxy::StarnixNetworksRequest::Add { network: _, responder } => {
+                    fnp_socketproxy::NetworkRegistryRequest::Add { network: _, responder } => {
                         let res = result.map_err(|e| match e {
                             NetworkManagerError::Add(err) => err,
                             _ => unreachable!("should have been Add error variant"),
                         });
                         responder.send(res).expect("respond to Add");
                     }
-                    fnp_socketproxy::StarnixNetworksRequest::Update { network: _, responder } => {
+                    fnp_socketproxy::NetworkRegistryRequest::Update { network: _, responder } => {
                         let res = result.map_err(|e| match e {
                             NetworkManagerError::Update(err) => err,
                             _ => unreachable!("should have been Update error variant"),
                         });
                         responder.send(res).expect("respond to Update");
                     }
-                    fnp_socketproxy::StarnixNetworksRequest::Remove {
+                    fnp_socketproxy::NetworkRegistryRequest::Remove {
                         network_id: _,
                         responder,
                     } => {
@@ -549,7 +541,7 @@ mod tests {
 
         // `add_network` returns Ok(()) as long as the network
         // addition is applied locally, regardless of if the call
-        // is sent to the socketproxy successfully.
+        // is sent to netcfg successfully.
         let network1 = test_network_message_from_id(1);
         assert_matches!(manager.add_network(network1.clone()), Ok(()));
 
@@ -557,7 +549,7 @@ mod tests {
         assert_matches!(manager.add_network(network2.clone()), Ok(()));
 
         // Ensure we cannot add a network with the same id twice. This is
-        // observed fully within the NetworkManager and not the socketproxy.
+        // observed fully within the NetworkManager and not netcfg.
         assert_matches!(
             manager.add_network(network2.clone()),
             Err(errno) if errno.code.error_code() == EEXIST
@@ -627,7 +619,7 @@ mod tests {
 
         // `update_network` returns Ok(()) as long as the network
         // update is applied locally, regardless of if the call
-        // is sent to the socketproxy successfully. Use the same
+        // is sent to netcfg successfully. Use the same
         // network information -- another test verifies that the
         // change is applied successfully.
         assert_matches!(manager.update_network(network.clone()), Ok(()));
@@ -688,7 +680,7 @@ mod tests {
 
         // `remove_network` returns Ok(()) as long as the network
         // removal is applied locally, regardless of if the call
-        // is sent to the socketproxy successfully.
+        // is sent to netcfg successfully.
         assert_matches!(manager.remove_network(network_id), Ok(()));
 
         assert_data_tree!(inspector, root: {
@@ -717,32 +709,32 @@ mod tests {
     async fn test_multiple_operations_with_proxy() {
         let inspector = fuchsia_inspect::Inspector::default();
         let results = vec![
-            // Network added to Manager, but not added to socketproxy.
+            // Network added to Manager, but not added to netcfg.
             Err(NetworkManagerError::Add(
                 fnp_socketproxy::NetworkRegistryAddError::MissingNetworkId,
             )),
-            // Network added to Manager and to socketproxy.
+            // Network added to Manager and to netcfg.
             Ok(()),
-            // Network set as default in Manager, but not in socketproxy.
+            // Network set as default in Manager, but not in netcfg.
             Err(NetworkManagerError::SetDefault(
                 fnp_socketproxy::NetworkRegistrySetDefaultError::NotFound,
             )),
-            // Network set as default in Manager and in socketproxy.
+            // Network set as default in Manager and in netcfg.
             Ok(()),
-            // Network updated in Manager, but not in socketproxy.
+            // Network updated in Manager, but not in netcfg.
             Err(NetworkManagerError::Update(fnp_socketproxy::NetworkRegistryUpdateError::NotFound)),
-            // Network updated in Manager and in socketproxy.
+            // Network updated in Manager and in netcfg.
             Ok(()),
             // Unset the default network so the network is eligible to be removed.
             Ok(()),
-            // Network removed from Manager, but not from socketproxy.
+            // Network removed from Manager, but not from netcfg.
             Err(NetworkManagerError::Remove(fnp_socketproxy::NetworkRegistryRemoveError::NotFound)),
-            // Network removed from Manager and from socketproxy.
+            // Network removed from Manager and from netcfg.
             Ok(()),
         ];
         let manager = &setup_proxy(inspector.root(), results);
 
-        // Add a network that doesn't get sent to the socketproxy.
+        // Add a network that doesn't get sent to netcfg.
         let network1 = test_network_message_from_id(1);
         assert_matches!(manager.add_network(network1.clone()), Ok(()));
         assert_data_tree!(inspector, root: {
@@ -754,7 +746,7 @@ mod tests {
             },
         });
 
-        // Add a network that gets sent to the socketproxy.
+        // Add a network that gets sent to netcfg.
         let network2 = test_network_message_from_id(2);
         assert_matches!(manager.add_network(network2.clone()), Ok(()));
         assert_data_tree!(inspector, root: {
@@ -766,7 +758,7 @@ mod tests {
             },
         });
 
-        // Set the default network that isn't known to the socketproxy.
+        // Set the default network that isn't known to netcfg.
         manager.set_default_network_id(Some(1));
         assert_eq!(manager.get_default_network_id(), Some(1));
         assert_data_tree!(inspector, root: {
@@ -778,7 +770,7 @@ mod tests {
             },
         });
 
-        // Set the default network that is known to the socketproxy.
+        // Set the default network that is known to netcfg.
         manager.set_default_network_id(Some(2));
         assert_eq!(manager.get_default_network_id(), Some(2));
         assert_data_tree!(inspector, root: {
@@ -790,7 +782,7 @@ mod tests {
             },
         });
 
-        // Update a network not known to the socketproxy.
+        // Update a network not known to netcfg.
         let mut network1_updated = network1.clone();
         network1_updated.mark = 1;
         assert_matches!(manager.update_network(network1_updated.clone()), Ok(()));
@@ -803,7 +795,7 @@ mod tests {
             },
         });
 
-        // Update a network that is known to the socketproxy.
+        // Update a network that is known to netcfg.
         let mut network2_updated = network2.clone();
         network2_updated.mark = 2;
         assert_matches!(manager.update_network(network2_updated.clone()), Ok(()));
@@ -827,7 +819,7 @@ mod tests {
             },
         });
 
-        // Remove a network that doesn't get sent to the socketproxy.
+        // Remove a network that doesn't get sent to netcfg.
         assert_matches!(manager.remove_network(1), Ok(()));
         assert_data_tree!(inspector, root: {
             nmfs: contains {
@@ -838,7 +830,7 @@ mod tests {
             },
         });
 
-        // Remove a network that gets sent to the socketproxy.
+        // Remove a network that gets sent to netcfg.
         assert_matches!(manager.remove_network(2), Ok(()));
         assert_data_tree!(inspector, root: {
             nmfs: contains {

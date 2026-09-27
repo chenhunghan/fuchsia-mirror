@@ -164,9 +164,8 @@ pub trait AssemblyContainer {
                 // Package manifests are copied via the PackageCopier.
                 FileType::PackageManifest => {
                     let new_path = package_copier.add_package_from_manifest_path(&path)?;
-                    let new_path = diff_paths(&new_path, dir.as_ref()).ok_or_else(|| {
-                        anyhow!("Failed to make the path relative: {}", new_path)
-                    })?;
+                    let new_path = diff_paths(&new_path, dir.as_ref())
+                        .ok_or_else(|| anyhow!("Failed to make the path relative: {}", new_path))?;
                     *path = Utf8PathBuf::try_from(new_path)?;
                 }
 
@@ -369,10 +368,10 @@ where
     }
 }
 
-pub fn path_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-    let mut schema: schemars::schema::SchemaObject = <String>::json_schema(generator).into();
-    schema.format = Some("Utf8PathBuf".to_owned());
-    schema.into()
+pub fn path_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <String>::json_schema(generator);
+    schema.insert("format".to_owned(), "Utf8PathBuf".into());
+    schema
 }
 
 /// A path to a directory that should be copied wholesale inside an

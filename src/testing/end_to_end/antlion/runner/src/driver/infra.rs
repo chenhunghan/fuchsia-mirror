@@ -420,6 +420,7 @@ mod test {
     use crate::runner::{ExitStatus, Runner};
 
     use std::ffi::OsStr;
+    use std::process::ExitCode;
 
     use assert_matches::assert_matches;
     use indoc::formatdoc;
@@ -573,7 +574,7 @@ mod test {
             Some(ffx_subtools.path().to_path_buf()),
         )
         .unwrap();
-        generate_config_and_run(runner, driver, None).unwrap();
+        assert_eq!(generate_config_and_run(runner, driver, None).unwrap(), ExitCode::SUCCESS);
 
         let got = fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 
@@ -656,7 +657,10 @@ mod test {
                 can_overwrite: true
         ";
         let params = serde_yaml::from_str(params).unwrap();
-        generate_config_and_run(runner, driver, Some(params)).unwrap();
+        assert_eq!(
+            generate_config_and_run(runner, driver, Some(params)).unwrap(),
+            ExitCode::SUCCESS
+        );
 
         let got = fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 
@@ -771,7 +775,7 @@ mod test {
             Some(ffx_subtools.path().to_path_buf()),
         )
         .unwrap();
-        generate_config_and_run(runner, driver, None).unwrap();
+        assert_eq!(generate_config_and_run(runner, driver, None).unwrap(), ExitCode::SUCCESS);
 
         let got = std::fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 
@@ -893,7 +897,7 @@ mod test {
             Some(ffx_subtools.path().to_path_buf()),
         )
         .unwrap();
-        generate_config_and_run(runner, driver, None).unwrap();
+        assert_eq!(generate_config_and_run(runner, driver, None).unwrap(), ExitCode::SUCCESS);
 
         let got = std::fs::read_to_string(out_dir.path().join("config.yaml")).unwrap();
 

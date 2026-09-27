@@ -298,11 +298,11 @@ pub use host::Timestamp;
 
 #[cfg(feature = "json_schema")]
 impl JsonSchema for Timestamp {
-    fn schema_name() -> String {
-        "integer".to_owned()
+    fn schema_name() -> Cow<'static, str> {
+        "integer".into()
     }
 
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         i64::json_schema(generator)
     }
 }
@@ -353,6 +353,7 @@ pub struct LogsMetadata {
 
     /// The url with which the component was launched.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "json_schema", schemars(with = "Option<String>"))]
     pub component_url: Option<FlyStr>,
 
     /// Boot time in nanos.

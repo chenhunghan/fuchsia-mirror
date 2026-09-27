@@ -924,7 +924,7 @@ mod tests {
             Poll::Ready(Err(_))
         );
         assert_matches!(TestExecutor::poll_until_stalled(&mut resp_fut).await, Poll::Ready(Ok(())));
-        assert!(matches!(driver_event_stream.try_next(), Ok(None)));
+        assert!(matches!(driver_event_stream.try_recv(), Err(e) if e.is_closed()));
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -951,8 +951,8 @@ mod tests {
         assert_matches!(TestExecutor::poll_until_stalled(&mut resp_fut).await, Poll::Ready(Ok(())));
 
         assert!(matches!(
-            driver_event_stream.try_next(),
-            Ok(Some(DriverEvent::ScanComplete { status: Ok(()), scan_id: 754 }))
+            driver_event_stream.try_recv(),
+            Ok(DriverEvent::ScanComplete { status: Ok(()), scan_id: 754 })
         ));
     }
 
@@ -1019,7 +1019,7 @@ mod tests {
         assert_matches!(TestExecutor::poll_until_stalled(&mut server_fut).await, Poll::Pending);
         assert_matches!(TestExecutor::poll_until_stalled(&mut resp_fut).await, Poll::Ready(Ok(())));
 
-        match driver_event_stream.try_next().unwrap().unwrap() {
+        match driver_event_stream.try_recv().unwrap() {
             DriverEvent::TxResultReport { tx_result } => {
                 assert_eq!(
                     tx_result,

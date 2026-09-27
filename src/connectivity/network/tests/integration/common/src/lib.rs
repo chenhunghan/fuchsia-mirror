@@ -20,14 +20,8 @@ pub mod realms;
 
 use anyhow::Context as _;
 use component_events::events::EventStream;
-use diagnostics_hierarchy::{DiagnosticsHierarchy, HierarchyMatcher, filter_hierarchy};
-use fidl::endpoints::DiscoverableProtocolMarker;
-use fidl_fuchsia_diagnostics::Selector;
-use fidl_fuchsia_inspect_deprecated::InspectMarker;
-use fidl_fuchsia_io as fio;
 use fidl_fuchsia_netemul as fnetemul;
 use fuchsia_async::{self as fasync, DurationExt as _};
-use fuchsia_component::client;
 use futures::future::FutureExt as _;
 use futures::stream::{Stream, StreamExt as _, TryStreamExt as _};
 use futures::{Future, select};
@@ -204,35 +198,6 @@ pub async fn get_inspect_property(
         .get_property_by_path(&property_selector)
         .ok_or_else(|| anyhow::anyhow!("property not found in hierarchy: {hierarchy:?}"))?;
     Ok(property.clone())
-}
-
-/// Read an Inspect hierarchy and filter it down to properties of interest from the diagnostics
-/// directory of Netstack2. For any other component, please use `get_inspect_data`, this function
-/// doesn't apply to any other component and won't work.
-// TODO(https://fxbug.dev/324494668): remove when Netstack2 is gone.
-pub async fn get_deprecated_netstack2_inspect_data(
-    diagnostics_dir: &fio::DirectoryProxy,
-    subdir: &str,
-    selectors: impl IntoIterator<Item = Selector>,
-) -> DiagnosticsHierarchy {
-    let matcher = HierarchyMatcher::new(selectors.into_iter()).expect("invalid selectors");
-    loop {
-        // NOTE: For current test purposes we just need to read from the deprecated inspect
-        // protocol. If this changes in the future, then we'll need to update this code to be able
-        // to read from other kind-of files such as fuchsia.inspect.Tree or a *.inspect VMO file.
-        let proxy = client::connect_to_named_protocol_at_dir_root::<InspectMarker>(
-            diagnostics_dir,
-            &format!("{subdir}/{}", InspectMarker::PROTOCOL_NAME),
-        )
-        .unwrap();
-        match inspect_fidl_load::load_hierarchy(proxy).await {
-            Ok(hierarchy) => return filter_hierarchy(hierarchy, &matcher).unwrap(),
-            Err(err) => {
-                println!("Failed to load hierarchy, retrying. Error: {err:?}")
-            }
-        }
-        fasync::Timer::new(fasync::MonotonicDuration::from_millis(100)).await;
-    }
 }
 
 /// Sets up a realm with a network with no required services.

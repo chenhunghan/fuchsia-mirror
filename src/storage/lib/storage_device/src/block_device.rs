@@ -169,6 +169,13 @@ impl<T: BlockClient> Device for BlockDevice<T> {
     fn supports_trim(&self) -> bool {
         self.remote.block_flags().contains(BlockDeviceFlag::TRIM_SUPPORT)
     }
+
+    async fn connect_mapper(
+        &self,
+        server_end: fidl::endpoints::ServerEnd<fidl_fuchsia_storage_block::MapperMarker>,
+    ) -> Result<(), Status> {
+        self.remote.connect_mapper(server_end).await
+    }
 }
 
 impl<T> Drop for BlockDevice<T> {

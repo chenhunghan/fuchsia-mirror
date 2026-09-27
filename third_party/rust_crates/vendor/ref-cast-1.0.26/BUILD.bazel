@@ -58,6 +58,9 @@ rust_library(
     proc_macro_deps = [
         "//third_party/rust_crates/vendor/ref-cast-impl-1.0.26:ref_cast_impl",
     ],
+    rustc_env = {
+        "CARGO_PKG_VERSION_PATCH": "26",
+    },
     rustc_flags = [
         "--cap-lints=allow",
     ],

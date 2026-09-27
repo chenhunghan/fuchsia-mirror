@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fidl/fuchsia.driver.test/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.clock/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/device-watcher/cpp/device-watcher.h>
@@ -133,6 +134,27 @@ TEST_F(GenericBoardTest, DriversEnumerate) {
   }
   ASSERT_TRUE(found) << "fake-device did not appear in devfs";
   FX_LOGS(INFO) << "Found fake-device: " << device_name;
+
+  // Connect to fake-device via devfs and verify it received the interrupt from fake-clock.
+  auto channel = device_watcher::RecursiveWaitForFile(dev_fd, ("test/" + device_name).c_str());
+  ASSERT_TRUE(channel.is_ok()) << channel.status_string();
+
+  fidl::WireSyncClient<fuchsia_hardware_clock::Clock> clock_client(
+      fidl::ClientEnd<fuchsia_hardware_clock::Clock>(std::move(channel.value())));
+
+  bool interrupt_received = false;
+  for (int i = 0; i < 30; ++i) {
+    auto is_enabled = clock_client->IsEnabled();
+    ASSERT_TRUE(is_enabled.ok()) << is_enabled.FormatDescription();
+    ASSERT_TRUE(is_enabled->is_ok()) << zx_status_get_string(is_enabled->error_value());
+    if (is_enabled->value()->enabled) {
+      interrupt_received = true;
+      break;
+    }
+    zx::nanosleep(zx::deadline_after(zx::msec(100)));
+  }
+  EXPECT_TRUE(interrupt_received) << "fake-device did not receive interrupt from fake-clock";
+
   close(dev_fd);
 }
 

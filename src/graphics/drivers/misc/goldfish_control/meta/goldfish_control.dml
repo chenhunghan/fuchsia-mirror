@@ -1,0 +1,49 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "goldfish_control_composite-bind",
+    composite_name: "goldfish_control_2",
+    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
+    program: {
+        compat: "driver/goldfish_control.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+    },
+    capabilities: [
+        { service: "fuchsia.hardware.goldfish.ControlService" },
+        { service: "fuchsia.hardware.goldfish.pipe.Service" },
+    ],
+    use: [
+        { protocol: "fuchsia.hardware.sysmem.Sysmem" },
+        { protocol: "fuchsia.sysmem2.Allocator" },
+        {
+            name: "goldfish-pipe",
+            service: "fuchsia.hardware.goldfish.pipe.Service",
+            primary: true,
+            bind: {
+                service: "fuchsia.hardware.goldfish.pipe.Service",
+                vid: "fuchsia.google.platform.BIND_PLATFORM_DEV_VID.GOOGLE",
+                pid: "fuchsia.google.platform.BIND_PLATFORM_DEV_PID.GOLDFISH",
+                did: "fuchsia.google.platform.BIND_PLATFORM_DEV_DID.GOLDFISH_PIPE_CONTROL",
+            },
+        },
+        {
+            name: "goldfish-sync",
+            service: "fuchsia.hardware.goldfish.SyncService",
+        },
+        {
+            name: "goldfish-address-space",
+            service: "fuchsia.hardware.goldfish.AddressSpaceService",
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.goldfish.ControlService",
+            from: "self",
+        },
+        {
+            service: "fuchsia.hardware.goldfish.pipe.Service",
+            from: "self",
+        },
+    ],
+}

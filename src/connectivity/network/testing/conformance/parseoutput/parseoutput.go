@@ -21,14 +21,13 @@ var (
 		`\[network-conformance case end\] (.*)$`,
 	)
 	caseIdentifierPattern = regexp.MustCompile(
-		`(.+)--(.+)-(\d+).(\d+)`,
+		`(.+)-(\d+)\.(\d+)`,
 	)
 )
 
 const NetworkConformanceFormatName = "NetworkConformanceTest"
 
 type CaseIdentifier struct {
-	Platform    string `json:"platform"`
 	SuiteName   string `json:"suite_name"`
 	MajorNumber int    `json:"major_number"`
 	MinorNumber int    `json:"minor_number"`
@@ -36,8 +35,7 @@ type CaseIdentifier struct {
 
 func (i CaseIdentifier) String() string {
 	return fmt.Sprintf(
-		"%s--%s-%d.%d",
-		i.Platform,
+		"%s-%d.%d",
 		i.SuiteName,
 		i.MajorNumber,
 		i.MinorNumber,
@@ -53,18 +51,16 @@ func ParseCaseIdentifier(s string) (CaseIdentifier, error) {
 			caseIdentifierPattern,
 		)
 	}
-	platform := m[1]
-	suiteName := m[2]
-	majNum, err := strconv.Atoi(m[3])
+	suiteName := m[1]
+	majNum, err := strconv.Atoi(m[2])
 	if err != nil {
 		return CaseIdentifier{}, err
 	}
-	minNum, err := strconv.Atoi(m[4])
+	minNum, err := strconv.Atoi(m[3])
 	if err != nil {
 		return CaseIdentifier{}, err
 	}
 	return CaseIdentifier{
-		Platform:    platform,
 		SuiteName:   suiteName,
 		MajorNumber: majNum,
 		MinorNumber: minNum,

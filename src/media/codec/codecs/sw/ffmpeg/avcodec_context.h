@@ -75,6 +75,9 @@ class AvCodecContext {
   // be allocated for it.
   FrameBufferRequest frame_buffer_request(AVFrame* frame) const;
 
+  static AVPixelFormat GetFormatCallback(AVCodecContext* avcodec_context,
+                                         const AVPixelFormat* pix_fmts);
+
   static int GetBufferCallbackRouter(AVCodecContext* avcodec_context, AVFrame* frame, int flag);
 
   int GetBufferHandler(AVCodecContext* avcodec_context, AVFrame* frame, int flag);

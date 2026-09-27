@@ -15,7 +15,7 @@ namespace media {
 
 class VaapiWrapper {
  public:
-  bool UploadVideoFrameToSurface(media::VideoFrame& frame, VASurfaceID input_surface_id,
+  bool UploadVideoFrameToSurface(const media::VideoFrame& frame, VASurfaceID input_surface_id,
                                  const gfx::Size& input_surface_size);
   bool ExecuteAndDestroyPendingBuffers(VASurfaceID surface_id);
   uint64_t GetEncodedChunkSize(VABufferID buffer_id, VASurfaceID surface_id);

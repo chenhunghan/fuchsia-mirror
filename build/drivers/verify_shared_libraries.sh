@@ -39,7 +39,7 @@ fi
  fi
 
 # Remove any beginning paths and lines that aren't actually .so libraries.
-LIBRARIES_USED_STRIPPED=$(sed -n 's/^.*\/\(.*\.so\)$/\1/p' "${LIBRARIES_USED}")
+LIBRARIES_USED_STRIPPED=$(sed -n 's/^.*\/\(.*\.so\)$/\1/p' "${LIBRARIES_USED}" | sed 's/^libstd-.*\.so$/libstd.so/')
 
 VIOLATIONS=$(comm -23 <(echo "${LIBRARIES_USED_STRIPPED}" | sort) <(sort "${LIBRARIES_ALLOWLIST}"))
 if [[ -n "${VIOLATIONS}" ]]; then

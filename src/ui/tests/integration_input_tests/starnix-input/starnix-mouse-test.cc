@@ -79,6 +79,15 @@ TEST_F(StarnixMouseTest, Scroll) {
   // `input_dump` is ready to receive events.
   WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
 
+  // Empty event that wakes container.
+  // TODO(b/438244012): Starnix input relay doubles the first event received from InputPipeline
+  // upon container wakeup.
+  SimulateMouseScroll({}, 0, 0);
+
+  // Scroll down 1 tick before input_dump opens the device.
+  // This lazily registers the mouse device in Starnix and buffers the event.
+  SimulateMouseScroll({}, 0, -1);
+
   std::stringstream ss;
   // This test expects 3 scroll event sequences.
   ss << relay_api::kEventCmd << " " << relay_api::kScrollNumPackets * 3;
@@ -87,13 +96,6 @@ TEST_F(StarnixMouseTest, Scroll) {
   // Wait for `input_dump` to be ready for event injection.
   WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
 
-  // Empty event that wakes container.
-  // TODO(b/438244012): Starnix input relay doubles the first event received from InputPipeline
-  // upon container wakeup.
-  SimulateMouseScroll({}, 0, 0);
-
-  // Scroll down 1 tick.
-  SimulateMouseScroll({}, 0, -1);
   {
     auto events = GetMouseEventSequenceOfLen(out_socket, 1);
     EXPECT_EQ(events[0].scroll_v, -1);
@@ -131,18 +133,20 @@ TEST_F(StarnixMouseTest, EventsDuringFileCloseAreIgnored) {
   // `input_dump` is ready to receive events.
   WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
 
-  std::stringstream ss;
-  ss << relay_api::kEventCmd << " " << relay_api::kScrollNumPackets;
-  WriteMessageToSocket(in_socket, ss.str());
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
   // Empty event that wakes container.
   // TODO(b/438244012): Starnix input relay doubles the first event received from InputPipeline
   // upon container wakeup.
   SimulateMouseScroll({}, 0, 0);
 
-  // Scroll down 1 tick.
+  // Scroll down 1 tick before input_dump opens the device.
+  // This lazily registers the mouse device in Starnix and buffers the event.
   SimulateMouseScroll({}, 0, -1);
+
+  std::stringstream ss;
+  ss << relay_api::kEventCmd << " " << relay_api::kScrollNumPackets;
+  WriteMessageToSocket(in_socket, ss.str());
+  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
   {
     auto events = GetMouseEventSequenceOfLen(out_socket, 1);
     EXPECT_EQ(events[0].scroll_v, -1);

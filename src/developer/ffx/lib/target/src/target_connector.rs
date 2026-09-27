@@ -11,7 +11,13 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 
-pub(crate) const BUFFER_SIZE: usize = 65536;
+// LINT.IfChange
+pub(crate) const BUFFER_SIZE: usize = 256 * 1024;
+// LINT.ThenChange(
+//     //src/developer/remote-control/fdomain-runner/src/main.rs,
+//     //src/developer/remote-control/runner/src/main.rs,
+//     //src/lib/fdomain/container/src/lib.rs
+// )
 
 #[derive(thiserror::Error, Debug)]
 pub enum TargetConnectionError {

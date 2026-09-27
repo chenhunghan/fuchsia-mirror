@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "linux_uapi",
+    srcs = [
+        "src/lib.rs",
+        "src/macros.rs",
+        "src/manual.rs",
+        "src/types.rs",
+    ] + select({
+        "@platforms//cpu:x86_64": [
+            "src/arch32_stub.rs",
+            "src/x86_64.rs",
+        ],
+        "@platforms//cpu:arm64": [
+            "src/arm.rs",
+            "src/arm64.rs",
+            "src/arm_manual.rs",
+            "src/arm_manual_kgsl.rs",
+        ],
+        "@platforms//cpu:riscv64": [
+            "src/arch32_stub.rs",
+            "src/riscv64.rs",
+        ],
+    }),
+    crate_name = "linux_uapi",
+    disable_clippy = True,
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    deps = [
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

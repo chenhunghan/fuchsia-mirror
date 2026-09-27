@@ -147,6 +147,125 @@ TEST(MountTest, FsContextRequiresRelabelFromAndTo) {
   }));
 }
 
+// Verifies that the relabelfrom and relabelto checks are applied even when "fscontext=" names the
+// label that the filesystem would have been given anyway.
+TEST(MountTest, FsContextToSameLabelStillRequiresRelabel) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping suite.";
+  }
+
+  // "tmpfs_t" is the label the policy already assigns to "tmpfs" mounts, so this relabels the
+  // filesystem to itself.
+  const char* fscontext = "fscontext=system_u:object_r:tmpfs_t:s0";
+  test_helper::ScopedTempDir mount_dir;
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  // 1. Verify that mounting fails when 'relabelfrom' is denied.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_relabelfrom_denied_t:s0", [&] {
+    EXPECT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, fscontext),
+                SyscallFailsWithErrno(EACCES));
+  }));
+
+  // 2. Verify that mounting fails when 'relabelto' is denied.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_relabelto_denied_t:s0", [&] {
+    EXPECT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, fscontext),
+                SyscallFailsWithErrno(EACCES));
+  }));
+
+  // 3. Verify that mounting succeeds when both 'relabelfrom' and 'relabelto' are allowed.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_relabel_self_allowed_t:s0", [&] {
+    EXPECT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, fscontext), SyscallSucceeds());
+  }));
+}
+
+// Verifies that overriding the label of the root node with "rootcontext=" is gated on the caller
+// having "relabelfrom" to the filesystem, and on the overriding label being allowed to "associate"
+// with it. "rootcontext=" does not change the filesystem's own label, so no "relabelto" to the
+// filesystem is required, and the checks are made against the "filesystem" class rather than the
+// class of the node being labeled.
+TEST(MountTest, RootContextRequiresRelabelFromAndAssociate) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping suite.";
+  }
+
+  const char* rootcontext = "rootcontext=test_u:object_r:test_mount_rootcontext_t:s0";
+  test_helper::ScopedTempDir mount_dir;
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  // 1. Verify that mounting fails when 'relabelfrom' to the filesystem is denied, even though
+  //    "rootcontext=" leaves the filesystem's own label untouched.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_relabelfrom_denied_t:s0", [&] {
+    EXPECT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, rootcontext),
+                SyscallFailsWithErrno(EACCES));
+  }));
+
+  // 2. Verify that mounting fails when the overriding label is not allowed to 'associate' with
+  //    the filesystem. "test_mount_fscontext_t" cannot associate with "tmpfs_t".
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_rootcontext_allowed_t:s0", [&] {
+    EXPECT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0,
+                      "rootcontext=test_u:object_r:test_mount_fscontext_t:s0"),
+                SyscallFailsWithErrno(EACCES));
+  }));
+
+  // 3. Verify that mounting succeeds when both 'relabelfrom' and 'associate' are allowed, that the
+  //    root node takes the requested label, and that the filesystem keeps its policy-defined one.
+  //    The domain holds no "dir" class relabel permissions, confirming that they are not consulted.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_rootcontext_allowed_t:s0", [&] {
+    ASSERT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, rootcontext),
+                SyscallSucceeds());
+
+    auto root_label = GetLabel(mount_dir.path());
+    ASSERT_TRUE(root_label.is_ok()) << "failed to read root label: " << root_label.error_value();
+    EXPECT_EQ(root_label.value(), "test_u:object_r:test_mount_rootcontext_t:s0");
+
+    EXPECT_THAT(umount(mount_dir.path().c_str()), SyscallSucceeds());
+  }));
+}
+
+// Verifies the checks applied when "fscontext=" and "context=" are combined, giving the filesystem
+// and the nodes it contains different labels.
+TEST(MountTest, ContextWithFsContextRequiresRelabelFromAndAssociate) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping suite.";
+  }
+
+  const char* fscontext = "fscontext=test_u:object_r:test_mount_fscontext_t:s0";
+  std::string options = std::string(fscontext) + ",context=test_u:object_r:test_mount_context_t:s0";
+  test_helper::ScopedTempDir mount_dir;
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  // 1. Overriding the node labels requires 'relabelfrom' to the filesystem's new label, which
+  //    "test_mount_relabel_allowed_t" does not hold.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_relabel_allowed_t:s0", [&] {
+    EXPECT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, options.c_str()),
+                SyscallFailsWithErrno(EACCES));
+  }));
+
+  // 2. Verify that the 'associate' check is made against the new label: "test_mount_rootcontext_t"
+  //    may associate with "tmpfs_t", but not with "test_mount_fscontext_t".
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_context_and_fscontext_t:s0", [&] {
+    std::string bad_options =
+        std::string(fscontext) + ",context=test_u:object_r:test_mount_rootcontext_t:s0";
+    EXPECT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, bad_options.c_str()),
+                SyscallFailsWithErrno(EACCES));
+  }));
+
+  // 3. Verify that the nodes take the "context=" label, rather than the "fscontext=" one.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_context_and_fscontext_t:s0", [&] {
+    ASSERT_THAT(mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, options.c_str()),
+                SyscallSucceeds());
+
+    auto root_label = GetLabel(mount_dir.path());
+    ASSERT_TRUE(root_label.is_ok()) << "failed to read root label: " << root_label.error_value();
+    EXPECT_EQ(root_label.value(), "test_u:object_r:test_mount_context_t:s0");
+
+    EXPECT_THAT(umount(mount_dir.path().c_str()), SyscallSucceeds());
+  }));
+}
+
 TEST(MountTest, BindRemountWithContext) {
   test_helper::ScopedTempDir source_dir;
   test_helper::ScopedTempDir target_dir;

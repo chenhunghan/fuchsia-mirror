@@ -242,7 +242,6 @@ TEST_F(BtTransportUartTest, Lifetime) {
 
   driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
     EXPECT_EQ(node.children().count("bt-transport-uart"), 1ul);
-    EXPECT_EQ(node.children().count("bt-transport-uart-impl"), 1ul);
   });
 }
 

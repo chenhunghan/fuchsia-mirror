@@ -8,7 +8,14 @@
             matchers: [
                 // TODO(https://fxbug.dev/537322768): These flake on 32-bit architectures.
                 "FcntlLockTest.*",
-            ]
+            ],
+        },
+        {
+            type: "expect_failure",
+            matchers: [
+                // fgetxattr is not implemented on arch32.
+                "XattrTest.FsetxattrValueLengthLimits",
+            ],
         },
     ],
 }

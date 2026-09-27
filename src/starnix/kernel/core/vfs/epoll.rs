@@ -399,9 +399,14 @@ impl EpollFileObject {
                 let wait_object = state.wait_objects.get_mut(key).unwrap();
                 wait_object.deactivate_wakeup_source(current_task);
             }
-            for key in recheck_list {
-                let wait_object = state.wait_objects.get_mut(&key).unwrap();
-                self.do_recheck(current_task, wait_object, key)?;
+            for (idx, key) in recheck_list.iter().enumerate() {
+                let wait_object = state.wait_objects.get_mut(key).unwrap();
+                if let Err(err) = self.do_recheck(current_task, wait_object, *key) {
+                    // Put remaining unprocessed entries (including the failing one) back
+                    // onto `recheck_list` so they aren't lost and can be rechecked on the next wait.
+                    state.recheck_list.extend(recheck_list[idx..].iter().copied());
+                    return Err(err);
+                }
             }
         }
 
@@ -952,6 +957,339 @@ mod tests {
 
             assert!(epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).is_err());
             assert!(current_task.kernel().suspend_resume_manager.lock().can_suspend());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_level_triggered_remains_ready_until_drained() {
+        // Validates standard level-triggered epoll semantics:
+        // A level-triggered file remains ready across consecutive wait() calls as long
+        // as data remains in its buffer. Once drained, wait() returns 0 events.
+        // Once new data arrives, wait() returns ready again.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            let epoll_file_handle = EpollFileObject::new_file(&current_task);
+            let epoll_file = epoll_file_handle.downcast_file::<EpollFileObject>().unwrap();
+            const EVENT_DATA: u64 = 100;
+            epoll_file
+                .add(
+                    &current_task,
+                    &pipe_out,
+                    &epoll_file_handle,
+                    EpollEvent::new(FdEvents::POLLIN, EVENT_DATA),
+                )
+                .unwrap();
+
+            let key: ReadyItemKey = pipe_out.id.as_epoll_key().into();
+
+            // Write 2 bytes.
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[1, 2])).unwrap();
+
+            // First wait: harvests ready event.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data(), EVENT_DATA);
+
+            // Level-triggered files are added to recheck_list so subsequent waits recheck readiness.
+            assert!(epoll_file.state.lock().recheck_list.contains(&key));
+
+            // Second wait without reading data: the file is STILL READY and must be returned again.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data(), EVENT_DATA);
+
+            // Drain the pipe completely.
+            let mut out_buf = VecOutputBuffer::new(10);
+            assert_eq!(pipe_out.read(&current_task, &mut out_buf).unwrap(), 2);
+
+            // Third wait: the file is no longer ready, wait returns 0 events.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 0);
+
+            // Write new data: the wait fires and returns the event.
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[3])).unwrap();
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data(), EVENT_DATA);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_nested_epoll_delayed_drain() {
+        // In nested epoll (ep_outer -> ep_inner -> target), when target has data:
+        // 1. ep_inner.wait() returns target.
+        // 2. Target is not drained immediately (delayed drain).
+        // 3. ep_outer.wait() observes ep_inner is ready.
+        // 4. Target is then drained by user space.
+        // 5. Remote peer writes new data to target.
+        // 6. ep_outer and ep_inner MUST both receive notifications for the new data and not hang.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            let epoll_inner_handle = EpollFileObject::new_file(&current_task);
+            let epoll_inner = epoll_inner_handle.downcast_file::<EpollFileObject>().unwrap();
+            let epoll_outer_handle = EpollFileObject::new_file(&current_task);
+            let epoll_outer = epoll_outer_handle.downcast_file::<EpollFileObject>().unwrap();
+
+            const INNER_DATA: u64 = 1;
+            const OUTER_DATA: u64 = 2;
+
+            epoll_inner
+                .add(
+                    &current_task,
+                    &pipe_out,
+                    &epoll_inner_handle,
+                    EpollEvent::new(FdEvents::POLLIN, INNER_DATA),
+                )
+                .unwrap();
+            epoll_outer
+                .add(
+                    &current_task,
+                    &epoll_inner_handle,
+                    &epoll_outer_handle,
+                    EpollEvent::new(FdEvents::POLLIN, OUTER_DATA),
+                )
+                .unwrap();
+
+            // Step 1: Write initial data to pipe.
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[1, 2])).unwrap();
+
+            // Step 2: Harvest in ep_inner.wait().
+            let inner_events =
+                epoll_inner.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(inner_events.len(), 1);
+
+            // Step 3: Do NOT drain pipe_out yet. It is still ready.
+            // Step 4: ep_outer waits on ep_inner.
+            let outer_events =
+                epoll_outer.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(outer_events.len(), 1);
+            assert_eq!(outer_events[0].data(), OUTER_DATA);
+
+            // Step 5: User drains pipe_out now.
+            let mut out_buf = VecOutputBuffer::new(10);
+            assert_eq!(pipe_out.read(&current_task, &mut out_buf).unwrap(), 2);
+
+            // Step 6: Remote peer sends new data to pipe_out.
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[3, 4])).unwrap();
+
+            // Step 7: ep_outer must observe the new event without hanging.
+            let outer_events2 =
+                epoll_outer.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(outer_events2.len(), 1);
+            assert_eq!(outer_events2[0].data(), OUTER_DATA);
+
+            // ep_inner also sees the new event.
+            let inner_events2 =
+                epoll_inner.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(inner_events2.len(), 1);
+            assert_eq!(inner_events2[0].data(), INNER_DATA);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_epoll_wait_with_external_waiter_preserves_wait_canceler() {
+        // Validates that external waiters registered via wait_async on an epoll object
+        // correctly receive event notifications when target events occur.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            let epoll_file_handle = EpollFileObject::new_file(&current_task);
+            let epoll_file = epoll_file_handle.downcast_file::<EpollFileObject>().unwrap();
+            const EVENT_DATA: u64 = 42;
+            epoll_file
+                .add(
+                    &current_task,
+                    &pipe_out,
+                    &epoll_file_handle,
+                    EpollEvent::new(FdEvents::POLLIN, EVENT_DATA),
+                )
+                .unwrap();
+
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[1])).unwrap();
+
+            // Register an external waiter on epoll_file.
+            let waiter = Waiter::new();
+            let canceler = epoll_file_handle
+                .wait_async(&current_task, &waiter, FdEvents::POLLIN, EventHandler::None)
+                .expect("wait_async on epoll_file");
+
+            assert!(!epoll_file.waiters.is_empty());
+
+            // First wait on epoll_file while external waiter is registered.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 1);
+
+            // Cancel the external waiter.
+            canceler.cancel();
+            assert!(epoll_file.waiters.is_empty());
+
+            // Second wait continues to function properly.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 1);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_multithreaded_epoll_concurrent_recheck() {
+        // Validates multithreaded behavior when multiple workers use the same epoll instance.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            let epoll_file_handle = EpollFileObject::new_file(&current_task);
+            let epoll_file = epoll_file_handle.downcast_file::<EpollFileObject>().unwrap();
+            const EVENT_DATA: u64 = 42;
+            epoll_file
+                .add(
+                    &current_task,
+                    &pipe_out,
+                    &epoll_file_handle,
+                    EpollEvent::new(FdEvents::POLLIN, EVENT_DATA),
+                )
+                .unwrap();
+
+            // Write 2 bytes.
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[1, 2])).unwrap();
+
+            // Worker 1 harvests the event.
+            let events1 = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events1.len(), 1);
+
+            // Worker 2 calls wait() without any read occurring yet:
+            // Worker 2's do_recheck observes data is still present and returns it.
+            let events2 = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events2.len(), 1);
+
+            // Now worker 1 drains the pipe.
+            let mut buf = VecOutputBuffer::new(10);
+            assert_eq!(pipe_out.read(&current_task, &mut buf).unwrap(), 2);
+
+            // Worker 2 calls wait():
+            // Pre-sleep do_recheck finds pipe empty, returns 0 events.
+            let events3 = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events3.len(), 0);
+
+            // Remote peer writes new data: wait fires for Worker 1.
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[3])).unwrap();
+            let events4 = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events4.len(), 1);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_epoll_query_events_checks_recheck_list() {
+        // When an outer epoll checks whether an inner epoll is ready, query_events()
+        // inspects state.recheck_list directly if processing_list and trigger_list are empty.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            let epoll_file_handle = EpollFileObject::new_file(&current_task);
+            let epoll_file = epoll_file_handle.downcast_file::<EpollFileObject>().unwrap();
+            epoll_file
+                .add(
+                    &current_task,
+                    &pipe_out,
+                    &epoll_file_handle,
+                    EpollEvent::new(FdEvents::POLLIN, 42),
+                )
+                .unwrap();
+
+            pipe_in.write(&current_task, &mut VecInputBuffer::new(&[1, 2])).unwrap();
+
+            // Harvesting the event leaves pipe_out on recheck_list.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 1);
+
+            // query_events on the epoll file checks recheck_list and returns POLLIN.
+            let queried = epoll_file_handle.query_events(&current_task).unwrap();
+            assert!(queried.contains(FdEvents::POLLIN));
+
+            // Drain the pipe.
+            let mut buf = VecOutputBuffer::new(10);
+            assert_eq!(pipe_out.read(&current_task, &mut buf).unwrap(), 2);
+
+            // Now query_events sees the file on recheck_list is empty, so returns empty events.
+            let queried = epoll_file_handle.query_events(&current_task).unwrap();
+            assert!(!queried.contains(FdEvents::POLLIN));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_recheck_list_query_error_preserves_remaining_keys() {
+        // In wait(), if do_recheck on one item fails with an error (e.g. query_events returns Err),
+        // remaining unprocessed items must not be dropped from recheck_list.
+        spawn_kernel_and_run(async |current_task| {
+            let epoll_file_handle = EpollFileObject::new_file(&current_task);
+            let epoll_file = epoll_file_handle.downcast_file::<EpollFileObject>().unwrap();
+
+            let ops1 = ControlledEventsFile::new(FdEvents::POLLIN);
+            let file1 = anon_test_file(&current_task, Box::new(ops1.clone()), OpenFlags::RDWR);
+            let ops2 = ControlledEventsFile::new(FdEvents::POLLIN);
+            let file2 = anon_test_file(&current_task, Box::new(ops2.clone()), OpenFlags::RDWR);
+
+            let _key1: ReadyItemKey = file1.id.as_epoll_key().into();
+            let key2: ReadyItemKey = file2.id.as_epoll_key().into();
+
+            epoll_file
+                .add(
+                    &current_task,
+                    &file1,
+                    &epoll_file_handle,
+                    EpollEvent::new(FdEvents::POLLIN, 1),
+                )
+                .unwrap();
+            epoll_file
+                .add(
+                    &current_task,
+                    &file2,
+                    &epoll_file_handle,
+                    EpollEvent::new(FdEvents::POLLIN, 2),
+                )
+                .unwrap();
+
+            // First wait: both files are ready and returned.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 2);
+
+            // Both files are on recheck_list.
+            assert_eq!(epoll_file.state.lock().recheck_list.len(), 2);
+
+            // Make file1 return an error on query_events.
+            ops1.set_events(error!(EPERM));
+
+            // Second wait: do_recheck fails on file1 and returns Err.
+            assert!(epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).is_err());
+
+            // Unprocessed items must be preserved on recheck_list.
+            assert!(
+                epoll_file.state.lock().recheck_list.contains(&key2),
+                "file2 should remain on recheck_list despite file1's error"
+            );
+
+            // Delete file1 so it does not fail subsequent calls.
+            epoll_file.delete(&current_task, &file1).unwrap();
+
+            // Third wait: file2 is still ready and should be returned now.
+            let events = epoll_file.wait(&current_task, 10, zx::MonotonicInstant::ZERO).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data(), 2);
         })
         .await;
     }

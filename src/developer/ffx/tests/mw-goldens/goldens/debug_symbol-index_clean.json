@@ -1,131 +1,131 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "CommandStatus",
-  "oneOf": [
-    {
-      "type": "string",
-      "enum": [
-        "ok"
-      ]
-    },
-    {
-      "description": "Successful execution with information strings.",
-      "type": "object",
-      "required": [
-        "index"
-      ],
-      "properties": {
-        "index": {
-          "$ref": "#/definitions/SymbolIndex"
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "CommandStatus",
+    "oneOf": [
+        {
+            "type": "string",
+            "enum": [
+                "ok"
+            ]
+        },
+        {
+            "description": "Successful execution with information strings.",
+            "type": "object",
+            "properties": {
+                "index": {
+                    "$ref": "#/definitions/SymbolIndex"
+                }
+            },
+            "required": [
+                "index"
+            ],
+            "additionalProperties": false
         }
-      },
-      "additionalProperties": false
+    ],
+    "definitions": {
+        "SymbolIndex": {
+            "type": "object",
+            "properties": {
+                "includes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": []
+                },
+                "build_id_dirs": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/BuildIdDir"
+                    },
+                    "default": []
+                },
+                "ids_txts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/IdsTxt"
+                    },
+                    "default": []
+                },
+                "gcs_flat": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/GcsFlat"
+                    },
+                    "default": []
+                },
+                "debuginfod": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/DebugInfoD"
+                    },
+                    "default": []
+                }
+            }
+        },
+        "BuildIdDir": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string"
+                },
+                "build_dir": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                }
+            },
+            "required": [
+                "path"
+            ]
+        },
+        "IdsTxt": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string"
+                },
+                "build_dir": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                }
+            },
+            "required": [
+                "path"
+            ]
+        },
+        "GcsFlat": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string"
+                },
+                "require_authentication": {
+                    "type": "boolean",
+                    "default": false
+                }
+            },
+            "required": [
+                "url"
+            ]
+        },
+        "DebugInfoD": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string"
+                },
+                "require_authentication": {
+                    "type": "boolean",
+                    "default": false
+                }
+            },
+            "required": [
+                "url"
+            ]
+        }
     }
-  ],
-  "definitions": {
-    "SymbolIndex": {
-      "type": "object",
-      "properties": {
-        "includes": {
-          "default": [],
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "build_id_dirs": {
-          "default": [],
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/BuildIdDir"
-          }
-        },
-        "ids_txts": {
-          "default": [],
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/IdsTxt"
-          }
-        },
-        "gcs_flat": {
-          "default": [],
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/GcsFlat"
-          }
-        },
-        "debuginfod": {
-          "default": [],
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/DebugInfoD"
-          }
-        }
-      }
-    },
-    "BuildIdDir": {
-      "type": "object",
-      "required": [
-        "path"
-      ],
-      "properties": {
-        "path": {
-          "type": "string"
-        },
-        "build_dir": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "IdsTxt": {
-      "type": "object",
-      "required": [
-        "path"
-      ],
-      "properties": {
-        "path": {
-          "type": "string"
-        },
-        "build_dir": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "GcsFlat": {
-      "type": "object",
-      "required": [
-        "url"
-      ],
-      "properties": {
-        "url": {
-          "type": "string"
-        },
-        "require_authentication": {
-          "default": false,
-          "type": "boolean"
-        }
-      }
-    },
-    "DebugInfoD": {
-      "type": "object",
-      "required": [
-        "url"
-      ],
-      "properties": {
-        "url": {
-          "type": "string"
-        },
-        "require_authentication": {
-          "default": false,
-          "type": "boolean"
-        }
-      }
-    }
-  }
 }

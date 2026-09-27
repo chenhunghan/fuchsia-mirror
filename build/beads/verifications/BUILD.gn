@@ -13,8 +13,10 @@ if (is_host) {
       "//build/api/gn_ninja_outputs.py",
       "//build/bazel/scripts/bazel_build_args.py",
       "//build/bazel/scripts/build_utils.py",
-      "//build/beads/scripts/build_command_query_utils.py",
+      "//build/beads/scripts/compare_utils.py",
+      "//build/beads/scripts/flags_differences.py",
       "//build/beads/scripts/gn_runner.py",
+      "//build/beads/scripts/normalize_clang_args.py",
       "//build/beads/scripts/normalize_rustc_args.py",
       "//build/beads/scripts/path_normalizer.py",
       "//build/beads/scripts/shell_utils.py",
@@ -28,9 +30,16 @@ if (is_host) {
 
     testonly = true
     binary_label = ":verify_build_commands"
-    outputs = [ "${target_out_dir}/verify_build_commands_for_example.stamp" ]
 
     _manifest = "//build/beads/verifications/targets_to_compare.json"
+
+    _stamp_file = "${target_out_dir}/${target_name}.stamp"
+    _report_file = "${target_out_dir}/${target_name}.report.txt"
+
+    outputs = [
+      _report_file,
+      _stamp_file,
+    ]
 
     args = [
       "--fuchsia-dir",
@@ -39,10 +48,10 @@ if (is_host) {
       rebase_path(root_build_dir, root_build_dir),
       "--manifest",
       rebase_path(_manifest, root_build_dir),
-      "--temp_dir",
-      rebase_path("${target_gen_dir}", root_build_dir),
+      "--report",
+      rebase_path(_report_file, root_build_dir),
       "--stamp",
-      rebase_path(outputs[0], root_build_dir),
+      rebase_path(_stamp_file, root_build_dir),
     ]
     inputs = [
       "${root_build_dir}/ninja_outputs.json",
@@ -50,11 +59,17 @@ if (is_host) {
       _manifest,
 
       # Any build file changes should trigger rerunning this action.
+      "cc/BUILD.bazel",
+      "cc/BUILD.gn",
       "rust/BUILD.gn",
       "rust/BUILD.bazel",
     ]
     deps = [
       "//:ninja_outputs_json(${default_toolchain})",
+      "//build/beads/verifications/cc:asm_example_lib",
+      "//build/beads/verifications/cc:c_example_lib",
+      "//build/beads/verifications/cc:cc_example_bin",
+      "//build/beads/verifications/cc:cc_example_lib",
       "//build/beads/verifications/rust:rust_example_bin",
       "//build/beads/verifications/rust:rust_example_lib",
     ]

@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/error.rs",
+        "src/fidl.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "ffx_tracing",
+    edition = "2024",
+    target_compatible_with = HOST_CONSTRAINTS,
+    test_deps = [
+        "//src/lib/fuchsia",
+    ],
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx:__subpackages__"],
+    with_host_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_rust",
+        "//sdk/rust/zx-types",
+        "//src/developer/ffx/config:lib",
+        "//src/lib/fidl_codec/rust:fidl_codec_pure",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

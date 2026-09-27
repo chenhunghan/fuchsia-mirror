@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use super::{InterruptPolarity, InterruptTriggerMode};
-use crate::console_rust::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 use core::ffi::{CStr, c_int};
 use debug::dprintf;
 use zx_status::Status;

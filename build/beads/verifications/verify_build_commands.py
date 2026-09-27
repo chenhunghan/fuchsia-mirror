@@ -10,12 +10,8 @@ Verifies build commands for a list of GN and Bazel target pairs defined in a man
 
 import argparse
 import json
-import os
 import pathlib
-import shutil
-import subprocess
 import sys
-import tempfile
 import typing as T
 
 _DEBUG = False
@@ -26,10 +22,9 @@ sys.path.insert(0, str(_FUCHSIA_DIR / "build/bazel/scripts"))
 import build_utils
 
 sys.path.insert(0, str(_FUCHSIA_DIR / "build/beads/scripts"))
-import build_command_query_utils
-import normalize_rustc_args
-import path_normalizer
-import shell_utils
+import compare_utils
+import flags_differences
+from compare_utils import CompareCommandsResult
 
 
 def debug(s: T.Any) -> None:
@@ -64,7 +59,9 @@ def main() -> int:
         help="Print verbose output",
     )
     parser.add_argument(
-        "--temp_dir", type=pathlib.Path, help="Temporary directory path"
+        "--report",
+        type=pathlib.Path,
+        help="Write detailed differences to report file",
     )
     parser.add_argument("--stamp", type=pathlib.Path, help="Stamp file path")
 
@@ -78,120 +75,86 @@ def main() -> int:
     except ValueError as e:
         parser.error(str(e))
 
-    build_command_query_utils.set_debug(args.verbose)
-
     with open(args.manifest) as f:
         targets = json.load(f)
 
     # TODO(https://fxbug.dev/502754609): Add support for clang targets.
-    gn_labels = [t["gn"] for t in targets if t["type"] == "rustc"]
-    bazel_labels = [t["bazel"] for t in targets if t["type"] == "rustc"]
+    target_queries = [
+        compare_utils.CompareCommandsQuery.from_dict(t) for t in targets
+    ]
 
-    if not gn_labels or not bazel_labels:
+    if not target_queries:
         print("No targets to compare.")
         return 0
 
     debug(f"Fuchsia Dir: {paths.fuchsia_dir}")
     debug(f"Build Dir: {paths.build_dir}")
     debug(f"Manifest Path: {args.manifest}")
-    debug(f"GN labels: {gn_labels}")
-    debug(f"Bazel labels: {bazel_labels}")
+    debug(f"Target queries:")
+    for target_query in target_queries:
+        debug(f"  {str(target_query)}")
 
-    ninja_runner = build_utils.NinjaRunner(paths.ninja_path, paths.build_dir)
     bazel_paths = build_utils.BazelPaths(paths.fuchsia_dir, paths.build_dir)
-    bazel_launcher = build_utils.BazelLauncher(bazel_paths.launcher)
 
-    (
-        gn_cmds_map,
-        bazel_cmds_map,
-    ) = build_command_query_utils.query_ninja_and_bazel_commands(
-        gn_labels,
-        bazel_labels,
-        ninja_runner,
-        bazel_launcher,
-        bazel_paths.execroot,
+    results: list[
+        CompareCommandsResult
+    ] = compare_utils.compare_gn_and_bazel_commands_for(
+        target_queries,
+        bazel_paths,
         read_response_files=args.read_response_files,
+        debug=debug,
     )
 
-    temp_dir = tempfile.mkdtemp(
-        prefix="verify_build_commands_", dir=args.temp_dir
-    )
     all_success = True
-    for idx, target in enumerate(targets):
-        if target["type"] != "rustc":
-            continue
+    differences_count = 0
 
-        gn_label = target["gn"]
-        bazel_label = target["bazel"]
+    report_text = ""
 
-        gn_cmd_raw = gn_cmds_map.get(gn_label, "")
-        bazel_cmd_raw = bazel_cmds_map.get(bazel_label, "")
-
-        if not gn_cmd_raw or not bazel_cmd_raw:
-            print(
-                f"Failed to get GN or Bazel rustc command for {gn_label} vs {bazel_label}."
-            )
+    for idx, result in enumerate(results):
+        if result.error:
+            print(result.error)
             all_success = False
             continue
 
-        gn_cmd = shell_utils.ShellCommand(gn_cmd_raw)
-        bazel_cmd = shell_utils.ShellCommand(bazel_cmd_raw)
-
-        gn_rustc_cmd = shell_utils.find_command_with_tool(
-            gn_cmd.split(), "rustc"
-        )
-        bazel_rustc_cmd = shell_utils.find_command_with_tool(
-            bazel_cmd.split(), "rustc"
-        )
-
-        if not gn_rustc_cmd or not bazel_rustc_cmd:
-            print(
-                f"Failed to get GN or Bazel rustc command for {gn_label} vs {bazel_label}."
-            )
-            all_success = False
-            continue
-
-        if _DEBUG:
-            debug(f"GN raw rustc command:\n{gn_rustc_cmd}\n")
-            debug(f"Bazel raw rustc command:\n{bazel_rustc_cmd}\n")
-
-        gn_path_normalizer = path_normalizer.GnPathNormalizer(
-            paths.fuchsia_dir, paths.build_dir
-        )
-        bazel_path_normalizer = path_normalizer.BazelPathNormalizer(bazel_paths)
-
-        normalized_gn_args = normalize_rustc_args.normalize_rustc_cmd(
-            str(gn_rustc_cmd), gn_path_normalizer
-        )
-        normalized_bazel_args = normalize_rustc_args.normalize_rustc_cmd(
-            str(bazel_rustc_cmd), bazel_path_normalizer
-        )
+        normalized_gn_args = result.normalized_gn_args
+        normalized_bazel_args = result.normalized_bazel_args
 
         if _DEBUG:
             debug(f"GN normalized rustc command:\n{normalized_gn_args}\n")
             debug(f"Bazel normalized rustc command:\n{normalized_bazel_args}\n")
 
-        if normalized_gn_args != normalized_bazel_args:
-            debug(f"Mismatch for {gn_label} vs {bazel_label}!")
-            gn_file = os.path.join(temp_dir, f"normalized_gn_args_{idx}.txt")
-            bazel_file = os.path.join(
-                temp_dir, f"normalized_bazel_args_{idx}.txt"
+        gn_label = result.query.gn
+        bazel_label = result.query.bazel
+        action_type = result.query.action_type
+        description = f"{gn_label} vs {bazel_label}, action type {action_type}"
+
+        differences = flags_differences.FlagsDifferences.new_from_lists(
+            normalized_gn_args, normalized_bazel_args
+        )
+
+        if differences.has_differences:
+            debug(f"Mismatch for {description}")
+            differences_count += 1
+
+            flag_categorizer = (
+                flags_differences.categorize_rust_flag
+                if action_type == compare_utils.ACTION_RUSTC
+                else flags_differences.categorize_clang_flag
             )
-            with open(gn_file, "w") as f:
-                f.write("\n".join(normalized_gn_args) + "\n")
-            with open(bazel_file, "w") as f:
-                f.write("\n".join(normalized_bazel_args) + "\n")
 
-            print(f"Mismatch for {gn_label} vs {bazel_label}!")
-            print(f"diff -u {gn_file} {bazel_file}")
-            subprocess.run(["diff", "-u", gn_file, bazel_file])
-
-            all_success = False
+            report_text += "\n\n" + differences.generate_summary(
+                title=description, flag_categorizer=flag_categorizer
+            )
+            if not result.query.allow_differences:
+                all_success = False
         else:
-            debug(f"Match for {gn_label} vs {bazel_label}")
+            debug(f"Match for {description}")
 
-    if not (_DEBUG or args.temp_dir):
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    debug(f"Found {differences_count} targets with differences.")
+
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(report_text)
 
     if all_success and args.stamp:
         with open(args.stamp, "w") as f:

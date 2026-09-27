@@ -49,6 +49,7 @@ enum class CommandTag {
   kWifiStaIfaceGetApfPacketFilterSupport,
   kWifiStaIfaceInstallApfPacketFilter,
   kWifiStaIfaceReadApfPacketFilterData,
+  kWifiStaIfaceGetLinkLayerStats,
   kWifiStaIfaceUnknownMethod,
   kSupplicantAddStaInterface,
   kSupplicantRemoveInterface,
@@ -153,6 +154,7 @@ class FakeWlanix : public fidl::WireServer<fuchsia_wlan_wlanix::Wlanix>,
       fuchsia_wlan_wlanix::wire::WifiStaIfaceInstallApfPacketFilterRequest* request,
       InstallApfPacketFilterCompleter::Sync& completer) override;
   void ReadApfPacketFilterData(ReadApfPacketFilterDataCompleter::Sync& completer) override;
+  void GetLinkLayerStats(GetLinkLayerStatsCompleter::Sync& completer) override;
   void handle_unknown_method(
       fidl::UnknownMethodMetadata<fuchsia_wlan_wlanix::WifiStaIface> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override;

@@ -818,6 +818,11 @@ async fn health_check_service() {
     let status = proxy.get_health_status().await.expect("FIDL error");
     assert_eq!(status, HealthStatus::Healthy);
 
+    // `get_health_status` only blocks until `blob` is mounted and does not wait for `data`, so
+    // `fshost` may still be mounting `data` when it returns. Wait for `data` to finish mounting
+    // before tearing down the realm.
+    fixture.check_fs_type("data", data_fs_type()).await;
+
     fixture.tear_down().await;
 }
 

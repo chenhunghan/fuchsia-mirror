@@ -236,7 +236,7 @@ def _relative_path(path: Path) -> Path:
 
 
 def _depfile_quote(path: str) -> str:
-    """Quote a path properly for depfiles, if necessary.
+    r"""Quote a path properly for depfiles, if necessary.
 
     shlex.quote() does not work because paths with spaces
     are simply encased in single-quotes, while the Ninja
@@ -1194,14 +1194,6 @@ def main() -> int:
     # noise in the failure output.
     _run_command(command_args, check_failure=True, **command_kwargs)
 
-    # Shutdown the Bazel server daemon immediately to avoid Ninja build timeouts
-    # See https://fxbug.dev/498320348
-    _run_command(
-        bazel_startup_args + ["shutdown"],
-        check_failure=False,
-        cwd=workspace_dir,
-    )
-
     if args.stamp_file:
         args.stamp_file.write_bytes(b"")
 
@@ -1273,6 +1265,14 @@ def main() -> int:
                     " ".join(_depfile_quote(str(p)) for p in implicit_inputs),
                 )
             )
+
+    # Shutdown the Bazel server daemon immediately to avoid Ninja build timeouts
+    # See https://fxbug.dev/498320348
+    _run_command(
+        bazel_startup_args + ["shutdown"],
+        check_failure=False,
+        cwd=workspace_dir,
+    )
 
     return 0
 

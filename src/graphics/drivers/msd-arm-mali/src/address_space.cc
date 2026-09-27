@@ -7,6 +7,8 @@
 #include <lib/magma/util/short_macros.h>
 #include <lib/magma/util/utils.h>
 
+#include <algorithm>
+
 enum LpaeEntryType : mali_pte_t {
   kLpaeEntryTypeMask = 0x3,
 
@@ -100,8 +102,10 @@ bool AddressSpace::Insert(gpu_addr_t addr, magma::PlatformBusMapper::BusMapping*
     // TODO(https://fxbug.dev/42080175): optimize walk to not get page table every time.
     uint64_t page_index = i + addr / kMaliPageSize;
     PageTable* page_table = root_page_directory_->GetPageTableLevel0(page_index, true);
-    if (!page_table)
-      return DRETF(false, "Faied to get page table");
+    if (!page_table) {
+      Clear(addr, i * kMaliPageSize);
+      return DRETF(false, "Failed to get page table");
+    }
 
     uint64_t cpu_page_offset = (i % cpu_pages_per_gpu_page) * kMaliPageSize;
     uint64_t bus_addr = bus_addr_array[(start_page_index - bus_mapping->page_offset() + i) /
@@ -128,7 +132,7 @@ bool AddressSpace::Clear(uint64_t start, uint64_t length) {
   if (start_page_index + num_pages > (1l << (kVirtualAddressSize - kMaliPageShift)))
     return DRETF(false, "Virtual address too large");
 
-  std::vector<std::unique_ptr<PageTable>> empty_tables;
+  std::vector<ReapedTable> empty_tables;
   for (uint64_t i = 0; i < num_pages; i++) {
     // TODO(https://fxbug.dev/42080175): optimize walk to not get page table every time.
     uint64_t page_index = i + start_page_index;
@@ -145,7 +149,17 @@ bool AddressSpace::Clear(uint64_t start, uint64_t length) {
     }
   }
 
-  owner_->GetAddressSpaceObserver()->FlushAddressMappingRange(this, start, length, true);
+  uint64_t flush_start = start;
+  uint64_t flush_end = start + length;
+  for (const auto& reaped : empty_tables) {
+    uint64_t table_start = reaped.base_address;
+    uint64_t table_end = table_start + reaped.table->range_size();
+    flush_start = std::min(flush_start, table_start);
+    flush_end = std::max(flush_end, table_end);
+  }
+
+  uint64_t flush_size = flush_end - flush_start;
+  owner_->GetAddressSpaceObserver()->FlushAddressMappingRange(this, flush_start, flush_size, true);
 
   return true;
 }
@@ -210,8 +224,8 @@ void AddressSpace::PageTable::WritePte(uint64_t page_index, mali_pte_t pte) {
     buffer_->CleanCache(page_index * sizeof(gpu_->entry[0]), sizeof(gpu_->entry[0]), false);
 }
 
-void AddressSpace::PageTable::GarbageCollectChildren(
-    uint64_t page_number, bool* is_empty, std::vector<std::unique_ptr<PageTable>>* empty_tables) {
+void AddressSpace::PageTable::GarbageCollectChildren(uint64_t page_number, bool* is_empty,
+                                                     std::vector<ReapedTable>* empty_tables) {
   uint32_t shift = level_ * kPageOffsetBits;
   uint32_t offset = (page_number >> shift) & kPageTableMask;
   if (is_empty)
@@ -223,11 +237,14 @@ void AddressSpace::PageTable::GarbageCollectChildren(
     invalidated_entry = true;
   } else if (next_levels_[offset]) {
     bool next_level_empty = false;
+
     next_levels_[offset]->GarbageCollectChildren(page_number, &next_level_empty, empty_tables);
     if (next_level_empty) {
       WritePte(offset, kLpaeEntryTypeInvalid);
+      uint64_t child_range_size = next_levels_[offset]->range_size();
+      gpu_addr_t child_base = (page_number << kMaliPageShift) & ~(child_range_size - 1);
       // Caller should synchronize MMU before deleting empty tables.
-      empty_tables->push_back(std::move(next_levels_[offset]));
+      empty_tables->push_back({child_base, std::move(next_levels_[offset])});
       invalidated_entry = true;
     }
   }
@@ -252,7 +269,6 @@ std::unique_ptr<AddressSpace::PageTable> AddressSpace::PageTable::Create(Owner* 
                                                                          uint32_t level,
                                                                          bool cache_coherent) {
   constexpr uint32_t kPageCount = 1;
-
   auto buffer = magma::PlatformBuffer::Create(kPageCount * kMaliPageSize, "page-directory");
   if (!buffer)
     return DRETP(nullptr, "couldn't create buffer");

@@ -28,10 +28,10 @@ pub struct FileEntry<D: Destination> {
     pub destination: D,
 }
 
-pub fn path_schema(r#gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-    let mut schema: schemars::schema::SchemaObject = <String>::json_schema(r#gen).into();
-    schema.format = Some("Utf8PathBuf".to_owned());
-    schema.into()
+pub fn path_schema(r#gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <String>::json_schema(r#gen);
+    schema.insert("format".to_owned(), "Utf8PathBuf".into());
+    schema
 }
 
 impl<D: Destination> WalkPaths for FileEntry<D> {

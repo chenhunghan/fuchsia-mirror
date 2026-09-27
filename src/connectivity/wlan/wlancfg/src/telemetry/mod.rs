@@ -4572,8 +4572,8 @@ mod tests {
         let (telemetry_proxy, _telemetry_server) =
             fidl::endpoints::create_proxy::<fidl_sme::TelemetryMarker>();
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::QueryStatus {sender})) => {
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::QueryStatus {sender}) => {
                 sender.send(QueryStatusResult {
                     connection_state: ConnectionStateInfo::Connected {
                         iface_id: 0,
@@ -4591,11 +4591,11 @@ mod tests {
 
         // We should get a timeout defect.
         assert_matches!(
-            defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::Timeout {
+            defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::Timeout {
                 iface_id: 0,
                 source: TimeoutSource::GetHistogramStats,
-            })))
+            }))
         );
     }
 
@@ -4660,11 +4660,11 @@ mod tests {
 
         // Verify that the timeout has been received.
         assert_matches!(
-            defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::Timeout {
+            defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::Timeout {
                 iface_id: 0,
                 source: TimeoutSource::GetIfaceStats,
-            })))
+            }))
         );
     }
 

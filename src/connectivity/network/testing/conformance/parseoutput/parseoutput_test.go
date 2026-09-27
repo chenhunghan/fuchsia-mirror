@@ -15,7 +15,6 @@ import (
 func TestParseNetworkConformanceCaseEnd(t *testing.T) {
 	wantCaseEnd := CaseEnd{
 		Identifier: CaseIdentifier{
-			Platform:    "NS2",
 			SuiteName:   "SOME_Suite-name",
 			MajorNumber: 2,
 			MinorNumber: 3,
@@ -44,7 +43,6 @@ func TestParseNetworkConformanceCaseEnd(t *testing.T) {
 
 func TestCaseIdentifierSerializationRoundtrip(t *testing.T) {
 	wantIdent := CaseIdentifier{
-		Platform:    "NS2",
 		SuiteName:   "SOME_Suite-name",
 		MajorNumber: 2,
 		MinorNumber: 3,

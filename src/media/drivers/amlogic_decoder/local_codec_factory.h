@@ -6,7 +6,10 @@
 #define SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_LOCAL_CODEC_FACTORY_H_
 
 #include <fuchsia/mediacodec/cpp/fidl.h>
+#include <lib/closure-queue/closure_queue.h>
 #include <lib/fidl/cpp/binding.h>
+
+#include <memory>
 
 #include <fbl/macros.h>
 
@@ -98,6 +101,13 @@ class LocalCodecFactory : public fuchsia::mediacodec::CodecFactory {
   bool is_error_handler_set_ = false;
 
   std::vector<zx::eventpair> lifetime_tracking_;
+
+  // We use std::shared_ptr here so that asynchronous callbacks (specifically TryAddCodec's callback
+  // which queues task execution on the dispatcher) can capture a shared reference to the queue.
+  // This guarantees the ClosureQueue remains allocated even if the LocalCodecFactory is destroyed
+  // synchronously. StopAndClear() is called in the destructor to ensure any callbacks enqueued
+  // post-destruction are safely discarded.
+  std::shared_ptr<ClosureQueue> closure_queue_;
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(LocalCodecFactory);
 };

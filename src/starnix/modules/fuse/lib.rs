@@ -6,7 +6,8 @@
 
 use fuchsia_rcu::RcuReadScope;
 use linux_uapi::FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2;
-use starnix_core::mm::{MemoryAccessorExt, PAGE_SIZE};
+use starnix_core::mm::memory::MemoryObject;
+use starnix_core::mm::{MemoryAccessorExt, PAGE_SIZE, ProtectionFlags};
 use starnix_core::mutable_state::Guard;
 use starnix_core::security;
 use starnix_core::task::waiter::WaiterOptions;
@@ -1009,6 +1010,19 @@ impl FileOps for FuseFileObject {
             FuseOperation::Fsync { fh: self.open_out.fh, is_dir, datasync: true },
         )?;
         Ok(())
+    }
+
+    fn get_memory(
+        &self,
+        _file: &FileObject,
+        current_task: &CurrentTask,
+        length: Option<usize>,
+        prot: ProtectionFlags,
+    ) -> Result<Arc<MemoryObject>, Errno> {
+        if let Some(file_object) = self.passthrough_file.upgrade() {
+            return file_object.ops().get_memory(&file_object, current_task, length, prot);
+        }
+        error!(ENODEV)
     }
 
     fn wait_async(

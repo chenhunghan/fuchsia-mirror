@@ -68,7 +68,7 @@ void CompareMeta(StoredVmo<void>* vmo, uint64_t compare) {}
 
 template <typename K>
 K MakeKey(uint64_t key) {
-  return key;
+  return static_cast<K>(key);
 }
 
 template <>

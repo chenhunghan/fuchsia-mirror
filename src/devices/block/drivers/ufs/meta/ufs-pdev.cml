@@ -23,6 +23,13 @@
     ],
     use: [
         {
+            config: "fuchsia.power.StoragePowerManagementEnabled",
+            key: "storage_power_management_enabled",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+        {
             config: "fuchsia.power.SuspendEnabled",
             key: "enable_suspend",
             type: "bool",

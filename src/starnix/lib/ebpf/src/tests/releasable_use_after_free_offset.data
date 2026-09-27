@@ -1,0 +1,19 @@
+# Test that pointer arithmetic on a releasable resource preserves its releasable
+# tracking, so that accessing memory through an offset pointer after the resource
+# is released is rejected by the verifier.
+
+-- asm
+mov %r1, 16
+call 103
+jne %r0, 0, +2
+mov %r0, 1
+exit
+mov %r6, %r0
+mov %r7, %r6
+add %r7, 8
+mov %r1, %r6
+call 104
+ldxdw %r0, [%r7]
+exit
+-- error
+Access to released resource at pc 10

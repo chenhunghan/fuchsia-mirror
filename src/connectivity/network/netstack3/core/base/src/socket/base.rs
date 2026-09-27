@@ -5,7 +5,6 @@
 //! General-purpose socket utilities common to device layer and IP layer
 //! sockets.
 
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::hash::Hash;
 use core::marker::PhantomData;
@@ -260,10 +259,9 @@ where
 /// by the trait with the `dual_stack_context` function.
 ///
 /// In monomorphized code, this type frequently has exactly one template
-/// parameter that is uninstantiable (it contains an instance of
-/// [`core::convert::Infallible`] or some other empty enum, or a reference to
-/// the same)! That lets the compiler optimize it out completely, creating no
-/// actual runtime overhead.
+/// parameter that is uninstantiable (it contains an instance of `!` or some
+/// other empty enum, or a reference to the same)! That lets the compiler
+/// optimize it out completely, creating no actual runtime overhead.
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub enum MaybeDualStack<DS, NDS> {
@@ -552,7 +550,7 @@ impl<'a, T, E: Extend<T>> Inserter<T> for &'a mut E {
     }
 }
 
-impl<T> Inserter<T> for Never {
+impl<T> Inserter<T> for ! {
     fn insert(self, _: T) {
         match self {}
     }

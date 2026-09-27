@@ -80,7 +80,7 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 		if to != nil && to.TestSummary != nil {
 			attributedTestName := check.TestName()
 			foundMatch := false
-			errMsg := check.FailureReason()
+			fr := runtests.FailureReasonFromMessage(check.FailureReason())
 			for i := range to.TestSummary.Tests {
 				test := &to.TestSummary.Tests[i]
 				if runtests.IsFailure(test.Status) {
@@ -90,24 +90,22 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 							foundMatch = true
 						}
 
-						// 1. Dual-write to top-level test.FailureReason.
-						if test.FailureReason == nil {
-							test.FailureReason = &runtests.FailureReason{}
-						}
-						test.FailureReason.Errors = append(test.FailureReason.Errors, &runtests.FailureReasonError{
-							Message: errMsg,
-						})
+						if fr != nil {
+							// 1. Dual-write to top-level test.FailureReason.
+							if test.FailureReason == nil {
+								test.FailureReason = &runtests.FailureReason{}
+							}
+							test.FailureReason.Errors = append(test.FailureReason.Errors, fr.Errors...)
 
-						// 2. Dual-write to all failing test cases.
-						for j := range test.Cases {
-							tc := &test.Cases[j]
-							if runtests.IsFailure(tc.Status) {
-								if tc.FailureReason == nil {
-									tc.FailureReason = &runtests.FailureReason{}
+							// 2. Dual-write to all failing test cases.
+							for j := range test.Cases {
+								tc := &test.Cases[j]
+								if runtests.IsFailure(tc.Status) {
+									if tc.FailureReason == nil {
+										tc.FailureReason = &runtests.FailureReason{}
+									}
+									tc.FailureReason.Errors = append(tc.FailureReason.Errors, fr.Errors...)
 								}
-								tc.FailureReason.Errors = append(tc.FailureReason.Errors, &runtests.FailureReasonError{
-									Message: errMsg,
-								})
 							}
 						}
 					}

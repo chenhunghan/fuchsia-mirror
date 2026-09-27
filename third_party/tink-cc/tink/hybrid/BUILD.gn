@@ -435,6 +435,22 @@ source_set("config_2026") {
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }
 
+# CC Library : key_gen_config_2026
+source_set("key_gen_config_2026") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/hybrid/key_gen_config_2026.cc",
+    "//third_party/tink-cc/src/tink/hybrid/key_gen_config_2026.h",
+  ]
+  public_deps = [
+    "//third_party/abseil-cpp/absl/log:absl_check",
+    "//third_party/tink-cc/tink:key_gen_configuration",
+    "//third_party/tink-cc/tink/hybrid/internal:key_gen_config_2026",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
 # CC Library : config_v0
 source_set("config_v0") {
   configs += [ "//build/config:no_rtti" ]
@@ -444,6 +460,19 @@ source_set("config_v0") {
     ":config_2026",
     "//third_party/abseil-cpp/absl/base:core_headers",
     "//third_party/tink-cc/tink:configuration",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
+# CC Library : key_gen_config_v0
+source_set("key_gen_config_v0") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [ "//third_party/tink-cc/src/tink/hybrid/key_gen_config_v0.h" ]
+  public_deps = [
+    ":key_gen_config_2026",
+    "//third_party/abseil-cpp/absl/base:core_headers",
+    "//third_party/tink-cc/tink:key_gen_configuration",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }

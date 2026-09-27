@@ -359,6 +359,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                             incoming_device,
                             header_info,
                             &incoming,
+                            marks,
                         )
                     }
                     EitherStack::OtherStack(conn_id) => {
@@ -369,6 +370,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                             incoming_device,
                             header_info,
                             &incoming,
+                            marks,
                         )
                     }
                 };
@@ -618,6 +620,7 @@ fn try_handle_incoming_for_connection_dual_stack<SockI, WireI, CC, BC, H>(
     incoming_device: &CC::DeviceId,
     header_info: &H,
     incoming: &VerifiedTcpSegment<'_>,
+    packet_marks: &Marks,
 ) -> ConnectionIncomingSegmentDisposition
 where
     SockI: DualStackIpExt,
@@ -641,6 +644,7 @@ where
             incoming_device,
             conn_id.socket_info(),
             socket_options,
+            packet_marks,
             header_info,
             incoming.tcp_segment(),
         ) {
@@ -1042,11 +1046,14 @@ where
     let ConnIpAddr { local: (local_ip, local_port), remote: (remote_ip, remote_port) } =
         incoming_addrs;
 
+    let marks = BC::update_ingress_marks(*marks, &socket_state.socket_options.ip_options.marks);
+
     match run_socket_ingress_filter(
         bindings_ctx,
         incoming_device,
         listener_id.socket_info(),
         &socket_state.socket_options,
+        &marks,
         header_info,
         incoming.tcp_segment(),
     ) {
@@ -1075,7 +1082,7 @@ where
         bound_device.map(EitherDeviceId::Weak)
     };
 
-    let ip_options = TcpIpSockOptions { marks: *marks, ..socket_state.socket_options.ip_options };
+    let ip_options = TcpIpSockOptions { marks, ..socket_state.socket_options.ip_options };
     let socket_options = SocketOptions { ip_options, ..socket_state.socket_options };
 
     let bound_device = bound_device.as_ref().map(|d| d.as_ref());
@@ -1319,6 +1326,7 @@ fn run_socket_ingress_filter<I, BC, D>(
     incoming_device: &D,
     socket_info: netstack3_base::socket::SocketInfo,
     socket_options: &SocketOptions,
+    packet_marks: &Marks,
     header_info: &impl IpHeaderInfo<I>,
     tcp_segment: &TcpSegment<&'_ [u8]>,
 ) -> SocketIngressFilterResult
@@ -1333,13 +1341,14 @@ where
     let packet = FragmentedByteSlice::new(&mut slices);
     let header_len = ip_prefix.len() + ip_options.len() + tcp_prefix.len() + tcp_options.len();
 
+    let marks = BC::update_ingress_marks(*packet_marks, &socket_options.ip_options.marks);
     bindings_ctx.socket_ops_filter().on_ingress(
         I::VERSION,
         packet,
         header_len,
         incoming_device,
         socket_info,
-        &socket_options.ip_options.marks,
+        &marks,
     )
 }
 

@@ -331,6 +331,9 @@ func parseArgsAndEnv(args []string, env map[string]string) (*setArgs, error) {
 
 	flagSet.StringVar(&cmd.compilationMode, "balanced", defaultCompilationMode, "")
 	flagSet.Lookup("balanced").NoOptDefVal = "balanced"
+
+	flagSet.StringVar(&cmd.compilationMode, "sanitizer", defaultCompilationMode, "")
+	flagSet.Lookup("sanitizer").NoOptDefVal = "sanitizer"
 	flagSet.BoolVar(&cmd.cargoTOMLGen, "cargo-toml-gen", false, "")
 	flagSet.StringSliceVar(&cmd.jsonIDEScripts, "json-ide-script", []string{}, "")
 	flagSet.StringSliceVar(&cmd.targetLabels, "with", []string{}, "")
@@ -367,19 +370,19 @@ func parseArgsAndEnv(args []string, env map[string]string) (*setArgs, error) {
 	}
 
 	modesSet := 0
-	for _, f := range []string{"release", "debug", "balanced", "compilation-mode"} {
+	for _, f := range []string{"release", "debug", "balanced", "sanitizer", "compilation-mode"} {
 		if flagSet.Changed(f) {
 			modesSet++
 		}
 	}
 	if modesSet > 1 {
-		return nil, fmt.Errorf("Only one of --release, --debug, --balanced, or --compilation-mode can be specified.")
+		return nil, fmt.Errorf("Only one of --release, --debug, --balanced, --sanitizer, or --compilation-mode can be specified.")
 	}
 
 	switch cmd.compilationMode {
-	case "release", "debug", "balanced":
+	case "release", "debug", "balanced", "sanitizer":
 	default:
-		return nil, fmt.Errorf("Invalid --compilation-mode: %q. Valid values are 'release', 'balanced', 'debug'.", cmd.compilationMode)
+		return nil, fmt.Errorf("Invalid --compilation-mode: %q. Valid values are 'release', 'balanced', 'debug', 'sanitizer'.", cmd.compilationMode)
 	}
 
 	if cmd.buildDir != "" {
@@ -515,6 +518,8 @@ func constructStaticSpec(checkoutDir string, args *setArgs, canUseRbe bool) (*fi
 		compilationMode = fintpb.Static_COMPILATION_MODE_RELEASE
 	case "debug":
 		compilationMode = fintpb.Static_COMPILATION_MODE_DEBUG
+	case "sanitizer":
+		compilationMode = fintpb.Static_COMPILATION_MODE_SANITIZER
 	}
 
 	variants := args.variants

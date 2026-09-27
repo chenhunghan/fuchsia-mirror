@@ -63,6 +63,11 @@ const IFACE_NAME: &str = "wlan";
 const MIN_MINUTES_BETWEEN_FREQUENT_ERRORS: i64 = 60;
 const INVALID_RSSI: i8 = -127;
 
+// The WW country code is used in Fuchsia for worldwide mode.
+const COUNTRY_CODE_WORLDWIDE_FUCHSIA: [u8; 2] = *b"WW";
+// The 00 country code is commonly used for worldwide mode, so this is the one wlanix sends up.
+const COUNTRY_CODE_WORLDWIDE_COMMON: [u8; 2] = *b"00";
+
 async fn handle_wifi_sta_iface_request<I: IfaceManager, P: PowerManager>(
     req: fidl_wlanix::WifiStaIfaceRequest,
     iface_manager: Arc<I>,
@@ -179,6 +184,28 @@ async fn handle_wifi_sta_iface_request<I: IfaceManager, P: PowerManager>(
                 });
             let result = result.as_ref().map_err(|status| *status);
             responder.send(result).context("send ReadApfPacketFilterData response")?;
+        }
+        fidl_wlanix::WifiStaIfaceRequest::GetLinkLayerStats { responder } => {
+            let _wake_lease = power_manager.take_wake_lease("wlanix-get-link-layer-stats").await;
+            let (iface, _) = get_iface_and_log(
+                "fidl_wlanix::WifiStaIfaceRequest::GetLinkLayerStats",
+                iface_manager,
+                IFACE_NAME,
+            )
+            .await?;
+            let result = iface
+                .get_link_layer_stats()
+                .await
+                .map(|stats| fidl_wlanix::WifiStaIfaceGetLinkLayerStatsResponse {
+                    stats: Some(stats),
+                    ..Default::default()
+                })
+                .map_err(|e| {
+                    warn!("Failed to get link layer stats: {:?}", e);
+                    zx::sys::ZX_ERR_INTERNAL
+                });
+            let result = result.as_ref().map_err(|status| *status);
+            responder.send(result).context("send GetLinkLayerStats response")?;
         }
         fidl_wlanix::WifiStaIfaceRequest::_UnknownMethod { ordinal, .. } => {
             warn!("Unknown WifiStaIfaceRequest ordinal: {}", ordinal);
@@ -698,6 +725,46 @@ impl MlmeMulticastProxySet {
 }
 
 #[derive(Default)]
+struct RegulatoryMulticastProxySet {
+    proxies: Vec<fidl_wlanix::Nl80211MulticastProxy>,
+}
+
+impl MulticastProxySet for RegulatoryMulticastProxySet {
+    const NAME: &'static str = "regulatory";
+
+    fn proxies(&mut self) -> &mut Vec<fidl_wlanix::Nl80211MulticastProxy> {
+        &mut self.proxies
+    }
+}
+
+impl RegulatoryMulticastProxySet {
+    fn send_regulatory_event(&mut self, alpha2: [u8; 2]) {
+        // Fuchsia has used "WW" by convention, but the more broadly accepted value
+        // for worldwide is "00".  Report that instead.
+        let reg_domain = if alpha2 == COUNTRY_CODE_WORLDWIDE_FUCHSIA {
+            info!("Converting country code from WW to 00 for RegChange event.");
+            COUNTRY_CODE_WORLDWIDE_COMMON
+        } else {
+            alpha2
+        };
+
+        // Regulatory domain type 0 is country, 1 is world.
+        let reg_type = if reg_domain == COUNTRY_CODE_WORLDWIDE_COMMON { 1 } else { 0 };
+
+        self.send(|| fidl_wlanix::Nl80211MulticastMessageRequest {
+            message: Some(build_nl80211_message(
+                Nl80211Cmd::RegChange,
+                vec![
+                    Nl80211Attr::RegulatoryRegionAlpha2(reg_domain),
+                    Nl80211Attr::RegulatoryRegionType(reg_type),
+                ],
+            )),
+            ..Default::default()
+        })
+    }
+}
+
+#[derive(Default)]
 struct WifiState {
     started: bool,
     callback: Option<fidl_wlanix::WifiEventCallbackProxy>,
@@ -708,6 +775,7 @@ struct WifiState {
         fidl_fuchsia_power_broker::DependencyToken,
         fidl_fuchsia_power_broker::LeaseToken,
     )>,
+    regulatory_multicast_proxies: RegulatoryMulticastProxySet,
 }
 
 async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
@@ -758,8 +826,8 @@ async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
                     warn!("Phy {} already started", phy_id);
                 }
 
-                // Query the PHY driver for its power element dependency token to check if power
-                // element control is supported.
+                // Query the PHY driver for its power element dependency token. When the driver
+                // doesn't support control via power elements, this will return None.
                 let power_elem_dependency_token = iface_manager
                     .get_power_element_dependency_token(phy_id)
                     .await
@@ -767,7 +835,7 @@ async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
                         warn!("Failed to get power dependency token for phy {}: {}", phy_id, e);
                     })
                     .ok();
-                // Duplicate the dependency token (if available) so we can keep a copy.
+                // Duplicate the dependency token (if it's not None) so we can keep a copy.
                 let token_dup = power_elem_dependency_token.as_ref().and_then(|token| {
                     token
                         .duplicate_handle(zx::Rights::SAME_RIGHTS)
@@ -778,7 +846,8 @@ async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
                         })
                         .ok()
                 });
-                // If the driver supports power element control, acquire an active lease.
+                // If we've gotten tokens (i.e. the driver support power elements), acquire an
+                // active lease on the power element.
                 if let (Some(token_dup), Some(token_orig)) =
                     (token_dup, power_elem_dependency_token)
                 {
@@ -2468,6 +2537,7 @@ async fn handle_nl80211_message<I: IfaceManager>(
                 Ok((client_iface, iface_id)) => {
                     let results = client_iface.get_last_scan_results();
                     info!("Processing {} scan results", results.len());
+
                     let connected_bssid =
                         client_iface.get_connected_network().map(|network| network.bssid);
                     let mut resp = vec![];
@@ -2503,8 +2573,8 @@ async fn handle_nl80211_message<I: IfaceManager>(
                     Ok(mut country) => {
                         // Fuchsia has used "WW" by convention, but the more broadly accepted value
                         // for worldwide is "00".  Report that instead.
-                        if country == *b"WW" {
-                            country = *b"00";
+                        if country == COUNTRY_CODE_WORLDWIDE_FUCHSIA {
+                            country = COUNTRY_CODE_WORLDWIDE_COMMON;
                             info!("Converting country code from WW to 00 for GetReg response.");
                         }
 
@@ -2692,6 +2762,8 @@ async fn handle_nl80211_request<I: IfaceManager>(
                     state.scan_multicast_proxies.add_proxy(multicast.into_proxy());
                 } else if payload.group == Some("mlme".to_string()) {
                     state.mlme_multicast_proxies.add_proxy(multicast.into_proxy());
+                } else if payload.group == Some("regulatory".to_string()) {
+                    state.regulatory_multicast_proxies.add_proxy(multicast.into_proxy());
                 } else {
                     warn!("Dropping channel for unsupported multicast group {:?}", payload.group);
                 }
@@ -3166,6 +3238,11 @@ async fn serve_phy_events(
                     &mut state.callback,
                 );
             }
+            fidl_device_service::PhyEventWatcherEvent::OnCountryCodeChange { alpha2, .. } => {
+                let mut state = state.lock();
+
+                state.regulatory_multicast_proxies.send_regulatory_event(alpha2);
+            }
             other => {
                 warn!("Unknown phy event: {:?}", other);
             }
@@ -3560,10 +3637,10 @@ mod tests {
         }
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientConnectionsToggle {
                 event: wlan_telemetry::ClientConnectionsToggleEvent::Enabled
-            }))
+            })
         );
     }
 
@@ -3619,10 +3696,10 @@ mod tests {
         }
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientConnectionsToggle {
                 event: wlan_telemetry::ClientConnectionsToggleEvent::Enabled
-            }))
+            })
         );
     }
 
@@ -3665,10 +3742,10 @@ mod tests {
         }
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientConnectionsToggle {
                 event: wlan_telemetry::ClientConnectionsToggleEvent::Enabled
-            }))
+            })
         );
     }
 
@@ -3750,10 +3827,10 @@ mod tests {
         }
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientConnectionsToggle {
                 event: wlan_telemetry::ClientConnectionsToggleEvent::Enabled
-            }))
+            })
         );
     }
 
@@ -3792,8 +3869,8 @@ mod tests {
         );
         assert!(response.is_err());
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ChipPowerUpFailure))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ChipPowerUpFailure)
         );
 
         // Expect we turn the chip back off after failure to start
@@ -3846,18 +3923,18 @@ mod tests {
 
         // There was a start and a stop, so expect enabled and disabled mesages.
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientConnectionsToggle {
                 event: wlan_telemetry::ClientConnectionsToggleEvent::Enabled
-            }))
+            })
         );
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientConnectionsToggle {
                 event: wlan_telemetry::ClientConnectionsToggleEvent::Disabled
-            }))
+            })
         );
-        assert!(test_helper.telemetry_receiver.try_next().is_err());
+        assert!(test_helper.telemetry_receiver.try_recv().is_err());
     }
 
     #[fuchsia::test]
@@ -3873,10 +3950,10 @@ mod tests {
         // Clear out the client connections toggle event so that we can test for the telemetry
         // event we are interested in later in this test.
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientConnectionsToggle {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientConnectionsToggle {
                 event: wlan_telemetry::ClientConnectionsToggleEvent::Enabled
-            }))
+            })
         );
 
         let stop_fut = test_helper.wifi_proxy.stop();
@@ -3886,8 +3963,8 @@ mod tests {
 
         // Verify that telemetry event for iface destruction failure is sent.
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceDestructionFailure))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::IfaceDestructionFailure)
         );
     }
 
@@ -4006,10 +4083,7 @@ mod tests {
         );
 
         // Verify telemetry event for iface creation failure is sent
-        assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceCreationFailure))
-        );
+        assert_matches!(telemetry_receiver.try_recv(), Ok(TelemetryEvent::IfaceCreationFailure));
 
         // Verify that OnSubsystemRestart callback was called.
         let callback_event = assert_matches!(
@@ -4100,10 +4174,7 @@ mod tests {
         );
 
         // Verify telemetry event for iface creation failure is sent
-        assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceCreationFailure))
-        );
+        assert_matches!(telemetry_receiver.try_recv(), Ok(TelemetryEvent::IfaceCreationFailure));
 
         // Verify that OnSubsystemRestart callback was not called.
         assert_matches!(exec.run_until_stalled(&mut callback_stream.next()), Poll::Pending);
@@ -4130,8 +4201,8 @@ mod tests {
 
         // Verify telemetry event for iface destruction failure is sent
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::IfaceDestructionFailure))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::IfaceDestructionFailure)
         );
     }
 
@@ -4241,12 +4312,12 @@ mod tests {
 
         // Verify that the telemetry events were sent.
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::RecoveryEvent))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::RecoveryEvent)
         );
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::RecoveryResult { result: Ok(()) }))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::RecoveryResult { result: Ok(()) })
         );
 
         // Verify that the PHY reset was called.
@@ -4300,12 +4371,12 @@ mod tests {
 
         // Verify that the telemetry events were sent.
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::RecoveryEvent))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::RecoveryEvent)
         );
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::RecoveryResult { result: Err(()) }))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::RecoveryResult { result: Err(()) })
         );
 
         // Verify that OnSubsystemRestart callback was not called.
@@ -4344,8 +4415,8 @@ mod tests {
         assert_eq!(power_manager_calls[1], "wlanix-remove-iface");
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ClientIfaceDestroyed { iface_id })) => {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ClientIfaceDestroyed { iface_id }) => {
                 assert_eq!(iface_id, FAKE_IFACE_RESPONSE.id);
             }
         );
@@ -4570,12 +4641,12 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut create_sta_iface_fut), Poll::Ready(Ok(Ok(()))));
         assert!(power_manager.is_lease_dropped("wlanix-create-sta-iface"));
 
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(TelemetryEvent::ClientIfaceCreated { iface_id })) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(TelemetryEvent::ClientIfaceCreated { iface_id }) => {
             assert_eq!(iface_id, FAKE_IFACE_RESPONSE.id);
         });
 
         // Quick check that telemetry event queue is now empty
-        assert_matches!(telemetry_receiver.try_next(), Err(_));
+        assert_matches!(telemetry_receiver.try_recv(), Err(_));
 
         let test_helper = WifiTestHelper {
             _wlanix_proxy: wlanix_proxy,
@@ -4764,8 +4835,8 @@ mod tests {
         assert!(mcast_msg.payload.attrs.contains(&Nl80211Attr::Mac([42, 42, 42, 42, 42, 42])));
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ConnectResult { result, bss, is_credential_rejected: _, is_owe_transition: _ })) => {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ConnectResult { result, bss, is_credential_rejected: _, is_owe_transition: _ }) => {
                 assert_eq!(result, fidl_ieee80211::StatusCode::Success);
                 assert_eq!(bss.ssid, Ssid::try_from("foo").unwrap());
                 assert_eq!(bss.bssid, Bssid::from([42, 42, 42, 42, 42, 42]));
@@ -5174,13 +5245,13 @@ mod tests {
         establish_open_connection(&mut test_helper, &mut test_fut, &mut mcast_stream);
         // Metrics: for this test, we don't care about the contents of the ConnectResult
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ConnectResult {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ConnectResult {
                 result: _,
                 bss: _,
                 is_credential_rejected: _,
                 is_owe_transition: _,
-            }))
+            })
         );
 
         let connection_length_nanos: u16 = rand::random();
@@ -5242,8 +5313,8 @@ mod tests {
         assert_eq!(disconnect_info, mocked_disconnect_source);
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::Disconnect { info })) => {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::Disconnect { info }) => {
                 assert_eq!(info.connected_duration, zx::BootDuration::from_nanos(connection_length_nanos.into()));
                 assert_eq!(info.is_sme_reconnecting, mocked_is_sme_reconnecting);
                 assert_eq!(info.disconnect_source, mocked_disconnect_source);
@@ -5278,13 +5349,13 @@ mod tests {
         establish_open_connection(&mut test_helper, &mut test_fut, &mut mcast_stream);
         // Metrics: for this test, we don't care about the contents of the ConnectResult
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ConnectResult {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ConnectResult {
                 result: _,
                 bss: _,
                 is_credential_rejected: _,
                 is_owe_transition: _,
-            }))
+            })
         );
 
         let connection_length_nanos: u16 = rand::random();
@@ -5319,8 +5390,8 @@ mod tests {
 
         // We should always log a disconnect to the metrics module, even if reconnect is pending
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::Disconnect { info })) => {
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::Disconnect { info }) => {
                 assert_eq!(info.connected_duration, zx::BootDuration::from_nanos(connection_length_nanos.into()));
                 assert_eq!(info.is_sme_reconnecting, mocked_is_sme_reconnecting);
                 assert_eq!(info.disconnect_source, mocked_disconnect_source);
@@ -5379,7 +5450,7 @@ mod tests {
         }
 
         // Metrics: no further messages expected, regardless of if reconnect is successful
-        assert_matches!(test_helper.telemetry_receiver.try_next(), Err(_));
+        assert_matches!(test_helper.telemetry_receiver.try_recv(), Err(_));
     }
 
     #[fuchsia::test]
@@ -6058,10 +6129,7 @@ mod tests {
         let mut trigger_scan_fut = pin!(trigger_scan_fut);
         assert_matches!(exec.run_until_stalled(&mut test_values.nl80211_fut), Poll::Pending);
 
-        assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ScanStart))
-        );
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(TelemetryEvent::ScanStart));
 
         let responses = deserialize(assert_matches!(
             exec.run_until_stalled(&mut trigger_scan_fut),
@@ -6070,10 +6138,8 @@ mod tests {
         assert_matches!(responses[0], fidl_wlanix::Nl80211Message::Ack(_));
 
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ScanResult {
-                result: wlan_telemetry::ScanResult::Complete { .. }
-            }))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ScanResult { result: wlan_telemetry::ScanResult::Complete { .. } })
         );
 
         // With our faked scan results we expect an immediate multicast notification.
@@ -6687,10 +6753,7 @@ mod tests {
         let mut trigger_scan_fut = pin!(trigger_scan_fut);
         assert_matches!(exec.run_until_stalled(&mut test_values.nl80211_fut), Poll::Pending);
 
-        assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ScanStart))
-        );
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(TelemetryEvent::ScanStart));
 
         // While the scan is running, handle a GetStation request.
         {
@@ -6720,10 +6783,8 @@ mod tests {
         assert_matches!(responses[0], fidl_wlanix::Nl80211Message::Ack(_));
 
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ScanResult {
-                result: wlan_telemetry::ScanResult::Complete { .. }
-            }))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ScanResult { result: wlan_telemetry::ScanResult::Complete { .. } })
         );
 
         // With our faked scan results we expect an immediate multicast notification.
@@ -6793,10 +6854,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut trigger_scan_fut), Poll::Ready(_));
         assert_matches!(exec.run_until_stalled(&mut next_mcast), Poll::Pending);
 
-        assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ScanStart))
-        );
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(TelemetryEvent::ScanStart));
 
         // After ending the scan we expect wlanix to broadcast the scan abort.
         scan_end_sender.send(scan_result).expect("Failed to send scan result");
@@ -6805,8 +6863,8 @@ mod tests {
         assert_eq!(message.payload.cmd, Nl80211Cmd::ScanAborted);
 
         let scan_result = assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ScanResult { result })) => result
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ScanResult { result }) => result
         );
         assert_eq!(scan_result, expected_telemetry_result);
     }
@@ -6834,8 +6892,8 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut abort_scan_fut), Poll::Ready(_));
 
         let scan_result = assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ScanResult { result })) => result
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ScanResult { result }) => result
         );
         assert_eq!(scan_result, wlan_telemetry::ScanResult::Cancelled);
     }
@@ -6947,8 +7005,9 @@ mod tests {
         assert!(message.payload.attrs.contains(&Nl80211Attr::RegulatoryRegionAlpha2(*b"XX")));
     }
 
-    #[fuchsia::test]
-    fn get_reg_worldwide_is_zeroes() {
+    #[test_case(COUNTRY_CODE_WORLDWIDE_FUCHSIA; "WW")]
+    #[test_case(COUNTRY_CODE_WORLDWIDE_COMMON; "00")]
+    fn get_reg_worldwide_is_zeroes(country_code: [u8; 2]) {
         let mut exec = fasync::TestExecutor::new();
         let (proxy, stream) = create_proxy_and_stream::<fidl_wlanix::Nl80211Marker>();
 
@@ -6956,7 +7015,7 @@ mod tests {
         let iface_manager = Arc::new(TestIfaceManager::new_with_client());
         {
             // Set the Fake IfaceManager to return country code WW
-            let set_country_fut = iface_manager.set_country(0, *b"WW");
+            let set_country_fut = iface_manager.set_country(0, country_code);
             let mut set_country_fut = pin!(set_country_fut);
             assert_matches!(
                 exec.run_until_stalled(&mut set_country_fut),
@@ -6996,7 +7055,125 @@ mod tests {
         let message = expect_nl80211_message(&responses[0]);
         assert_eq!(message.payload.cmd, Nl80211Cmd::GetReg);
         // The country code 00 should be returned instead of WW
+        assert!(
+            message
+                .payload
+                .attrs
+                .contains(&Nl80211Attr::RegulatoryRegionAlpha2(COUNTRY_CODE_WORLDWIDE_COMMON))
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_serve_phy_events_on_country_code_change() {
+        let mut exec = fasync::TestExecutor::new();
+        let state = Arc::new(Mutex::new(WifiState::default()));
+        let (phy_events_proxy, phy_events_server) =
+            create_proxy::<fidl_device_service::PhyEventWatcherMarker>();
+        let (_phy_events_stream, phy_events_handle) =
+            phy_events_server.into_stream_and_control_handle();
+
+        // Setup the regulatory multicast proxy
+        let (mcast_proxy, mut mcast_stream) =
+            create_proxy_and_stream::<fidl_wlanix::Nl80211MulticastMarker>();
+        state.lock().regulatory_multicast_proxies.add_proxy(mcast_proxy);
+
+        let serve_fut = serve_phy_events(phy_events_proxy, Arc::clone(&state));
+        let mut serve_fut = pin!(serve_fut);
+
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        {
+            // There should be no multicase messages when there have been no events.
+            assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+            let next_mcast_fut = next_mcast_message(&mut mcast_stream);
+            let mut next_mcast_fut = pin!(next_mcast_fut);
+            assert_matches!(exec.run_until_stalled(&mut next_mcast_fut), Poll::Pending);
+        }
+
+        // Test with "US". Send the code up from the phy.
+        phy_events_handle.send_on_country_code_change(1, b"US").expect("Failed to send event");
+
+        {
+            // We should see a multicast message.
+            assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+            let next_mcast_fut = next_mcast_message(&mut mcast_stream);
+            let mut next_mcast_fut = pin!(next_mcast_fut);
+            let message = assert_matches!(
+                exec.run_until_stalled(&mut next_mcast_fut),
+                Poll::Ready(message) => message
+            );
+
+            assert_eq!(message.payload.cmd, Nl80211Cmd::RegChange);
+            assert!(message.payload.attrs.contains(&Nl80211Attr::RegulatoryRegionAlpha2(*b"US")));
+            assert!(message.payload.attrs.contains(&Nl80211Attr::RegulatoryRegionType(0)));
+        }
+
+        {
+            // There should be no more messages to get
+            assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+            let next_mcast_fut = next_mcast_message(&mut mcast_stream);
+            let mut next_mcast_fut = pin!(next_mcast_fut);
+            assert_matches!(exec.run_until_stalled(&mut next_mcast_fut), Poll::Pending);
+        }
+
+        // Test with "CA". Send the code up from the phy.
+        phy_events_handle.send_on_country_code_change(1, b"CA").expect("Failed to send event");
+
+        {
+            // We should see another multicast message.
+            assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+            let next_mcast_fut = next_mcast_message(&mut mcast_stream);
+            let mut next_mcast_fut = pin!(next_mcast_fut);
+            let message = assert_matches!(
+                exec.run_until_stalled(&mut next_mcast_fut),
+                Poll::Ready(message) => message
+            );
+
+            assert_eq!(message.payload.cmd, Nl80211Cmd::RegChange);
+            assert!(message.payload.attrs.contains(&Nl80211Attr::RegulatoryRegionAlpha2(*b"CA")));
+            assert!(message.payload.attrs.contains(&Nl80211Attr::RegulatoryRegionType(0)));
+        }
+    }
+
+    #[test_case(COUNTRY_CODE_WORLDWIDE_FUCHSIA; "WW")]
+    #[test_case(COUNTRY_CODE_WORLDWIDE_COMMON; "00")]
+    fn test_on_country_code_change_world_wide_ww(country_code: [u8; 2]) {
+        let mut exec = fasync::TestExecutor::new();
+        let state = Arc::new(Mutex::new(WifiState::default()));
+        let (phy_events_proxy, phy_events_server) =
+            create_proxy::<fidl_device_service::PhyEventWatcherMarker>();
+        let (_phy_events_stream, phy_events_handle) =
+            phy_events_server.into_stream_and_control_handle();
+
+        // Setup the regulatory multicast proxy
+        let (mcast_proxy, mut mcast_stream) =
+            create_proxy_and_stream::<fidl_wlanix::Nl80211MulticastMarker>();
+        state.lock().regulatory_multicast_proxies.add_proxy(mcast_proxy);
+
+        let serve_fut = serve_phy_events(phy_events_proxy, Arc::clone(&state));
+        let mut serve_fut = pin!(serve_fut);
+
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+
+        // Send up WW from the phy for worldwide mode
+        phy_events_handle
+            .send_on_country_code_change(1, &country_code)
+            .expect("Failed to send event");
+
+        // We should see a multicast message.
+        assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
+        let next_mcast_fut = next_mcast_message(&mut mcast_stream);
+        let mut next_mcast_fut = pin!(next_mcast_fut);
+        let message = assert_matches!(
+            exec.run_until_stalled(&mut next_mcast_fut),
+            Poll::Ready(message) => message
+        );
+
+        // Wlanix should send up 00 with the "country" domain type. 00 should be sent up as
+        // is or if WW is sent up, it will be replaced with 00.
+        assert_eq!(message.payload.cmd, Nl80211Cmd::RegChange);
         assert!(message.payload.attrs.contains(&Nl80211Attr::RegulatoryRegionAlpha2(*b"00")));
+        assert!(message.payload.attrs.contains(&Nl80211Attr::RegulatoryRegionType(1)));
     }
 
     #[test]
@@ -7668,10 +7845,10 @@ mod tests {
 
         // Verify such charge status is logged to telemetry
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::BatteryChargeStatus(
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::BatteryChargeStatus(
                 fidl_fuchsia_power_battery::ChargeStatus::Charging
-            )))
+            ))
         );
 
         // Send battery info through watcher
@@ -7686,10 +7863,10 @@ mod tests {
 
         // Verify such charge status is logged to telemetry
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::BatteryChargeStatus(
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::BatteryChargeStatus(
                 fidl_fuchsia_power_battery::ChargeStatus::Discharging
-            )))
+            ))
         );
 
         let client_calls = iface_manager.get_iface_call_history();
@@ -7876,8 +8053,8 @@ mod tests {
         assert_matches!(response, Err(_));
 
         assert_matches!(
-            test_helper.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ChipPowerDownFailure))
+            test_helper.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ChipPowerDownFailure)
         );
     }
 

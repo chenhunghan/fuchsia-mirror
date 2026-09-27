@@ -41,7 +41,7 @@
 use fuchsia_rcu::{RcuDroppable, RcuDroppableArc, RcuOptionBox};
 use smallvec::SmallVec;
 use starnix_rcu::RcuReadScope;
-use starnix_sync::{Mutex, MutexGuard};
+use starnix_sync::{LockDepGuard, LockDepMutex, LockLevel};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -72,11 +72,11 @@ pub enum IdrAllocMode {
 
 /// A concurrent, lock-free radix tree mapped structure primarily employed to map 32-bit
 /// IDs to objects. Optimized for massively contended reads.
-pub struct Idr<T: RcuDroppable + Send + Sync + 'static> {
+pub struct Idr<T: RcuDroppable + Send + Sync + 'static, L: LockLevel> {
     /// Serializes all mutating writes (allocations and removals) modifying the
     /// tree structure. The protected `u32` value tracks the starting cursor for
     /// cyclic allocations.
-    writer_lock: Mutex<u32>,
+    writer_lock: LockDepMutex<u32, L>,
     /// The top-level entry point descending into the tree. Atomically replaced
     /// whenever the structure grows upwards.
     root: RcuDroppableArc<IdrNode<T>>,
@@ -86,17 +86,17 @@ pub struct Idr<T: RcuDroppable + Send + Sync + 'static> {
     max: AtomicU32,
 }
 
-impl<T: RcuDroppable + Send + Sync + 'static> Default for Idr<T> {
+impl<T: RcuDroppable + Send + Sync + 'static, L: LockLevel> Default for Idr<T, L> {
     fn default() -> Self {
         Self::new(IdrAllocMode::default())
     }
 }
 
-impl<T: RcuDroppable + Send + Sync + 'static> Idr<T> {
+impl<T: RcuDroppable + Send + Sync + 'static, L: LockLevel> Idr<T, L> {
     /// Creates a new `Idr` radix tree with the specified allocation mode.
     pub fn new(alloc_mode: IdrAllocMode) -> Self {
         Self {
-            writer_lock: Mutex::new(0),
+            writer_lock: LockDepMutex::new(0),
             root: RcuDroppableArc::new(Arc::new(IdrNode::new(0))),
             alloc_mode,
             max: AtomicU32::new(u32::MAX),
@@ -119,7 +119,7 @@ impl<T: RcuDroppable + Send + Sync + 'static> Idr<T> {
     }
 
     /// Acquires the writer lock, returning an [`IdrGuard`] that provides mutating operations.
-    pub fn lock(&self) -> IdrGuard<'_, T> {
+    pub fn lock(&self) -> IdrGuard<'_, T, L> {
         IdrGuard { idr: self, cursor: self.writer_lock.lock() }
     }
 
@@ -315,20 +315,22 @@ impl<T: RcuDroppable + Send + Sync + 'static> Idr<T> {
 ///
 /// Holding this guard serializes mutations (allocations, reservations, removals)
 /// to the radix tree while allowing concurrent lock-free reads.
-pub struct IdrGuard<'a, T: RcuDroppable + Send + Sync + 'static> {
-    idr: &'a Idr<T>,
-    cursor: MutexGuard<'a, u32>,
+pub struct IdrGuard<'a, T: RcuDroppable + Send + Sync + 'static, L: LockLevel> {
+    idr: &'a Idr<T, L>,
+    cursor: LockDepGuard<'a, u32>,
 }
 
-impl<'a, T: RcuDroppable + Send + Sync + 'static> std::ops::Deref for IdrGuard<'a, T> {
-    type Target = Idr<T>;
+impl<'a, T: RcuDroppable + Send + Sync + 'static, L: LockLevel> std::ops::Deref
+    for IdrGuard<'a, T, L>
+{
+    type Target = Idr<T, L>;
 
     fn deref(&self) -> &Self::Target {
         self.idr
     }
 }
 
-impl<'a, T: RcuDroppable + Send + Sync + 'static> IdrGuard<'a, T> {
+impl<'a, T: RcuDroppable + Send + Sync + 'static, L: LockLevel> IdrGuard<'a, T, L> {
     /// Allocates the next available ID by calling a factory providing the newly
     /// acquired ID.
     ///
@@ -676,8 +678,15 @@ impl<T: RcuDroppable + Send + Sync + 'static> IdrNode<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use starnix_sync::lock_ordering;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    lock_ordering! {
+        Terminal(TestIdrLock),
+    }
+
+    type Idr<T> = super::Idr<T, TestIdrLock>;
 
     #[derive(RcuDroppable)]
     struct MockItem {
@@ -934,7 +943,7 @@ mod tests {
         let running_clone = Arc::clone(&running);
         let rcu_advancer = std::thread::spawn(move || {
             while running_clone.load(Ordering::Relaxed) {
-                fuchsia_rcu::rcu_synchronize();
+                fuchsia_rcu::rcu_run_callbacks();
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         });
@@ -1089,24 +1098,27 @@ mod tests {
         // Attempting another allocation with min_after_wrap = Some(2) must return None,
         // because all slots >= 2 are full.
         assert!(guard.alloc(|value| Arc::new(MockItem { value })).is_none());
+    }
 
+    #[fuchsia::test]
+    fn test_alloc_cyclic_wrap_without_min_after_wrap() {
         // For an IDR configured without min_after_wrap, wrapping allows allocating slots 0 and 1.
-        let idr_zero = Idr::<MockItem>::new_cyclic(None);
-        let mut guard_zero = idr_zero.lock();
-        let (z0, _) = guard_zero.alloc(|value| Arc::new(MockItem { value })).unwrap();
+        let idr = Idr::<MockItem>::new_cyclic(None);
+        let mut guard = idr.lock();
+        let (z0, _) = guard.alloc(|value| Arc::new(MockItem { value })).unwrap();
         assert_eq!(z0, 0);
-        let (z1, _) = guard_zero.alloc(|value| Arc::new(MockItem { value })).unwrap();
+        let (z1, _) = guard.alloc(|value| Arc::new(MockItem { value })).unwrap();
         assert_eq!(z1, 1);
-        guard_zero.remove(0);
-        guard_zero.remove(1);
-        guard_zero.set_cursor(10);
+        guard.remove(0);
+        guard.remove(1);
+        guard.set_cursor(10);
         for i in 10..64 {
-            guard_zero.reserve_id(i);
+            guard.reserve_id(i);
         }
-        let (id0_after, _) = guard_zero.alloc(|value| Arc::new(MockItem { value })).unwrap();
+        let (id0_after, _) = guard.alloc(|value| Arc::new(MockItem { value })).unwrap();
         assert_eq!(id0_after, 0);
 
-        let (id1_after, _) = guard_zero.alloc(|value| Arc::new(MockItem { value })).unwrap();
+        let (id1_after, _) = guard.alloc(|value| Arc::new(MockItem { value })).unwrap();
         assert_eq!(id1_after, 1);
     }
 

@@ -7,7 +7,6 @@
 // ordering no longer causes overflows.
 #![recursion_limit = "256"]
 
-use core::convert::{Infallible as Never, TryInto as _};
 use core::fmt::Debug;
 use core::time::Duration;
 
@@ -289,7 +288,7 @@ impl core::fmt::Display for FuzzAction {
 trait FuzzablePacket {
     fn try_constraints(&self) -> Option<PacketConstraints>;
 
-    fn serialize(self, buf: Buf<Vec<u8>>) -> Result<Buf<Vec<u8>>, SerializeError<Never>>;
+    fn serialize(self, buf: Buf<Vec<u8>>) -> Result<Buf<Vec<u8>>, SerializeError<!>>;
 }
 
 // Implement for `(B,)` rather than for `B` to avoid a blanket impl conflict.
@@ -298,7 +297,7 @@ impl<B: PacketBuilder<NetworkSerializationContext>> FuzzablePacket for (B,) {
         Some(self.0.constraints())
     }
 
-    fn serialize(self, buf: Buf<Vec<u8>>) -> Result<Buf<Vec<u8>>, SerializeError<Never>> {
+    fn serialize(self, buf: Buf<Vec<u8>>) -> Result<Buf<Vec<u8>>, SerializeError<!>> {
         self.0
             .wrap_body(buf)
             .serialize_vec_outer(&mut NetworkSerializationContext::default())
@@ -320,7 +319,7 @@ impl<
             .and_then(|constraints| constraints.try_encapsulate(&c.constraints()))
     }
 
-    fn serialize(self, buf: Buf<Vec<u8>>) -> Result<Buf<Vec<u8>>, SerializeError<Never>> {
+    fn serialize(self, buf: Buf<Vec<u8>>) -> Result<Buf<Vec<u8>>, SerializeError<!>> {
         let (a, b, c) = self;
         buf.wrap_in(a)
             .wrap_in(b)
@@ -373,6 +372,7 @@ fn dispatch(ctx: &mut FakeCtx, device_id: &EthernetDeviceId<FakeBindingsCtx>, ac
                 RecvEthernetFrameMeta {
                     device_id: device_id.clone(),
                     parsing_context: NetworkParsingContext::default(),
+                    gso_info: None,
                 },
                 buf,
             );

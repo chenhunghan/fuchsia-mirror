@@ -287,16 +287,6 @@ mod tests {
     use fidl_next_fuchsia_hardware_i2c as fidl_i2c;
     use fuchsia_async as fasync;
 
-    /// Runs a future to completion on a single-threaded executor whose port supports
-    /// binding interrupts (`BIND_TO_INTERRUPT`).
-    // TODO(https://fxbug.dev/539658337): Use #[fuchsia::test] directly once it supports enabling
-    // BIND_TO_INTERRUPT on the underlying executor port.
-    fn run_test_with_interrupts<F: std::future::Future<Output = ()>>(fut: F) {
-        let port = zx::Port::create_with_opts(zx::PortOptions::BIND_TO_INTERRUPT);
-        let mut exec = fasync::TestExecutor::builder().port(port).build();
-        exec.run_singlethreaded(fut);
-    }
-
     struct TestFixture {
         mock: MockI2cDevice,
         controller: Controller<zx::VirtualInterruptKind>,
@@ -490,110 +480,98 @@ mod tests {
         fixture.mock.check_all_expectations_replayed();
     }
 
-    #[test]
-    fn test_process_interrupt_idle() {
-        run_test_with_interrupts(async {
-            let mut fixture = TestFixture::new();
-            let idle_report = vec![0x00; 10];
-            fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(idle_report));
+    #[fuchsia::test(allow_interrupts = true)]
+    async fn test_process_interrupt_idle() {
+        let mut fixture = TestFixture::new();
+        let idle_report = vec![0x00; 10];
+        fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(idle_report));
 
-            let interrupt_trigger =
-                fixture.interrupt.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let interrupt_trigger =
+            fixture.interrupt.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
 
-            interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
+        interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
 
-            let has_event =
-                fixture.controller.process_interrupt().await.expect("process_interrupt failed");
-            assert!(!has_event);
+        let has_event =
+            fixture.controller.process_interrupt().await.expect("process_interrupt failed");
+        assert!(!has_event);
 
-            // Trigger again to verify interrupt was acknowledged and remains functional.
-            let idle_report2 = vec![0x00; 10];
-            fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(idle_report2));
-            interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
-            let has_event2 = fixture
-                .controller
-                .process_interrupt()
-                .await
-                .expect("second process_interrupt failed");
-            assert!(!has_event2);
+        // Trigger again to verify interrupt was acknowledged and remains functional.
+        let idle_report2 = vec![0x00; 10];
+        fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(idle_report2));
+        interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
+        let has_event2 =
+            fixture.controller.process_interrupt().await.expect("second process_interrupt failed");
+        assert!(!has_event2);
 
-            fixture.mock.check_all_expectations_replayed();
-        });
+        fixture.mock.check_all_expectations_replayed();
     }
 
-    #[test]
-    fn test_process_interrupt_single_touch() {
-        run_test_with_interrupts(async {
-            let mut fixture = TestFixture::new();
+    #[fuchsia::test(allow_interrupts = true)]
+    async fn test_process_interrupt_single_touch() {
+        let mut fixture = TestFixture::new();
 
-            // EventStatus: coordinates_ready = true (0x80), ContactCount = 1 (0x01)
-            let mut report_bytes = vec![0x80, 0x01];
-            // contact0: id=0, x=530 (0x0212), y=940 (0x03AC), pressure=40 (0x28)
-            let contact0 = [0x00, 0x12, 0x02, 0xAC, 0x03, 0x28, 0x00, 0x00];
-            report_bytes.extend_from_slice(&contact0);
+        // EventStatus: coordinates_ready = true (0x80), ContactCount = 1 (0x01)
+        let mut report_bytes = vec![0x80, 0x01];
+        // contact0: id=0, x=530 (0x0212), y=940 (0x03AC), pressure=40 (0x28)
+        let contact0 = [0x00, 0x12, 0x02, 0xAC, 0x03, 0x28, 0x00, 0x00];
+        report_bytes.extend_from_slice(&contact0);
 
-            fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
-            fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
+        fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
+        fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
 
-            let interrupt_trigger =
-                fixture.interrupt.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let interrupt_trigger =
+            fixture.interrupt.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
 
-            interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
+        interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
 
-            let has_event =
-                fixture.controller.process_interrupt().await.expect("process_interrupt failed");
-            assert!(has_event);
+        let has_event =
+            fixture.controller.process_interrupt().await.expect("process_interrupt failed");
+        assert!(has_event);
 
-            fixture.mock.check_all_expectations_replayed();
-        });
+        fixture.mock.check_all_expectations_replayed();
     }
 
-    #[test]
-    fn test_process_interrupt_ack_on_i2c_error() {
-        run_test_with_interrupts(async {
-            let mut fixture = TestFixture::new();
+    #[fuchsia::test(allow_interrupts = true)]
+    async fn test_process_interrupt_ack_on_i2c_error() {
+        let mut fixture = TestFixture::new();
 
-            // The first read returns an `IO_REFUSED` error.
-            fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Err(zx::Status::IO_REFUSED));
+        // The first read returns an `IO_REFUSED` error.
+        fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Err(zx::Status::IO_REFUSED));
 
-            // Second read returns a valid touch report:
-            // EventStatus: coordinates_ready = true (0x80), ContactCount = 1 (0x01)
-            let mut report_bytes = vec![0x80, 0x01];
-            // contact0: id=0, x=530 (0x0212), y=940 (0x03AC), pressure=40 (0x28)
-            let contact0 = [0x00, 0x12, 0x02, 0xAC, 0x03, 0x28, 0x00, 0x00];
-            report_bytes.extend_from_slice(&contact0);
-            fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
-            fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
+        // Second read returns a valid touch report:
+        // EventStatus: coordinates_ready = true (0x80), ContactCount = 1 (0x01)
+        let mut report_bytes = vec![0x80, 0x01];
+        // contact0: id=0, x=530 (0x0212), y=940 (0x03AC), pressure=40 (0x28)
+        let contact0 = [0x00, 0x12, 0x02, 0xAC, 0x03, 0x28, 0x00, 0x00];
+        report_bytes.extend_from_slice(&contact0);
+        fixture.mock.expect_read(InitialTouchReport::ADDRESS, 10, Ok(report_bytes));
+        fixture.mock.expect_write(EventStatus::ADDRESS, &[0x00], Ok(()));
 
-            let interrupt_trigger =
-                fixture.interrupt.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let interrupt_trigger =
+            fixture.interrupt.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
 
-            interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
-            let err = fixture.controller.process_interrupt().await.unwrap_err();
-            assert_eq!(err, zx::Status::IO_REFUSED);
+        interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
+        let err = fixture.controller.process_interrupt().await.unwrap_err();
+        assert_eq!(err, zx::Status::IO_REFUSED);
 
-            interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
-            let has_event =
-                fixture.controller.process_interrupt().await.expect("second event failed");
-            assert!(has_event);
+        interrupt_trigger.trigger(zx::MonotonicInstant::get()).unwrap();
+        let has_event = fixture.controller.process_interrupt().await.expect("second event failed");
+        assert!(has_event);
 
-            fixture.mock.check_all_expectations_replayed();
-        });
+        fixture.mock.check_all_expectations_replayed();
     }
 
-    #[test]
-    fn test_run_interrupt_stream_cancellation() {
-        run_test_with_interrupts(async {
-            let fixture = TestFixture::new();
+    #[fuchsia::test(allow_interrupts = true)]
+    async fn test_run_interrupt_stream_cancellation() {
+        let fixture = TestFixture::new();
 
-            // Destroying the interrupt handle cancels pending waits and closes the
-            // OnInterrupt stream (yielding zx::Status::CANCELED), simulating driver
-            // unbind/shutdown.
-            fixture.interrupt.destroy().unwrap();
+        // Destroying the interrupt handle cancels pending waits and closes the
+        // OnInterrupt stream (yielding zx::Status::CANCELED), simulating driver
+        // unbind/shutdown.
+        fixture.interrupt.destroy().unwrap();
 
-            fixture.controller.run().await;
-            fixture.mock.check_all_expectations_replayed();
-        });
+        fixture.controller.run().await;
+        fixture.mock.check_all_expectations_replayed();
     }
 
     #[fuchsia::test]

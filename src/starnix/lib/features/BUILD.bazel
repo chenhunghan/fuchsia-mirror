@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "starnix_features",
+    srcs = ["src/lib.rs"],
+    crate_name = "starnix_features",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:strum_macros",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//third_party/rust_crates/vendor:strum",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

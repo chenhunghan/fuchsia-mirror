@@ -299,8 +299,8 @@ App::App(async_dispatcher_t* flatland_dispatcher, async_dispatcher_t* input_disp
       [] { FX_LOGS(WARNING) << "SCENIC IS WAITING FOR DISPLAY TO BE AVAILABLE..."; });
   PostDelayedTaskUntilCancelled(display_wait_log->callback(), kWaitWarningInterval);
 
-  // Instantiate DisplayManager and schedule a task to inject the display coordinator into it, once
-  // it becomes available.
+  // Instantiate `DisplayManager` and schedule a task to inject the display coordinator into it,
+  // once it becomes available.
   display_manager_.emplace(
       GetDisplayId(config_values_), GetDisplayMode(config_values_),
       GetDisplayModeConstraints(config_values_), this->inspect_node_.CreateChild("DisplayManager"),
@@ -329,7 +329,7 @@ App::App(async_dispatcher_t* flatland_dispatcher, async_dispatcher_t* input_disp
       }));
 
   // Schedule a task to finish initialization once all promises have been completed.
-  // This closure is placed on |executor_|, which is owned by App, so it is safe to use |this|.
+  // This closure is placed on `executor_`, which is owned by `App`, so it is safe to use `this`.
   {
     auto p =
         fpromise::join_promises(escher_bridge.consumer.promise(), display_bridge.consumer.promise())
@@ -385,7 +385,7 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
   // Replace Escher's default pipeline builder with one which will log to Cobalt upon each
   // unexpected lazy pipeline creation.  This allows us to detect when this slips through our
   // testing and occurs in the wild.  In order to detect problems ASAP during development, debug
-  // builds CHECK instead of logging to Cobalt.
+  // builds `CHECK` instead of logging to Cobalt.
   if (renderer_type_ == RendererType::VULKAN) {
     auto pipeline_builder = std::make_unique<escher::PipelineBuilder>(escher_->vk_device());
     pipeline_builder->set_log_pipeline_creation_callback(
@@ -423,12 +423,12 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
       flatland_renderer = std::make_shared<flatland::VkRenderer>(escher_->GetWeakPtr());
       break;
   }
-  // TODO(https://fxbug.dev/42158284): flatland::VkRenderer hardcodes the framebuffer pixel format.
-  // Eventually we won't, instead choosing one from the list of acceptable formats advertised by
-  // each plugged-in display.  This will raise the issue of where to do pipeline cache warming: it
-  // will be too early to do it here, since we're not yet aware of any displays nor the formats they
-  // support.  It will probably be OK to warm the cache when a new display is plugged in, because
-  // users don't expect plugging in a display to be completely jank-free.
+  // TODO(https://fxbug.dev/42158284): `flatland::VkRenderer` hardcodes the framebuffer pixel
+  // format.  Eventually we won't, instead choosing one from the list of acceptable formats
+  // advertised by each plugged-in display.  This will raise the issue of where to do pipeline cache
+  // warming: it will be too early to do it here, since we're not yet aware of any displays nor the
+  // formats they support.  It will probably be OK to warm the cache when a new display is plugged
+  // in, because users don't expect plugging in a display to be completely jank-free.
 
   flatland_renderer->WarmPipelineCache();
 
@@ -500,7 +500,7 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
                                    std::move(mouse_source_v2), view_ref_koid);
         });
 
-    // TODO(https://fxbug.dev/42146099): these should be moved into FlatlandManager.
+    // TODO(https://fxbug.dev/42146099): these should be moved into `FlatlandManager`.
     {
       // Note: can't use `fit::bind_member()` here, because `CreateFlatland()` returns non-void.
       FX_CHECK(app_context_->outgoing()->AddProtocol<fuchsia_ui_composition::Flatland>(
@@ -535,7 +535,7 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
                                                     "ScreenCaptureBufferCollectionImporter"),
           flatland_renderer);
 
-  // Allocator service needs Flatland DisplayCompositor to act as a BufferCollectionImporter.
+  // Allocator service needs Flatland `DisplayCompositor` to act as a `BufferCollectionImporter`.
   {
     std::vector<std::shared_ptr<allocation::BufferCollectionImporter>> screen_capture_importers;
     screen_capture_importers.push_back(screen_capture_buffer_collection_importer);
@@ -551,7 +551,7 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
         inspect_node_.CreateChild("Allocator API"));
   }
 
-  // Flatland engine requires FlatlandManager and DisplayCompositor to be constructed first.
+  // Flatland engine requires `FlatlandManager` and `DisplayCompositor` to be constructed first.
   {
     TRACE_DURATION("gfx", "App::InitializeServices[flatland_engine]");
 
@@ -573,14 +573,14 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
         });
   }
 
-  // Make ScreenCaptureManager.
+  // Make `ScreenCaptureManager`.
   {
     TRACE_DURATION("gfx", "App::InitializeServices[screen_capture_manager]");
 
     std::vector<std::shared_ptr<allocation::BufferCollectionImporter>> screen_capture_importers;
     screen_capture_importers.push_back(screen_capture_buffer_collection_importer);
 
-    // Capture flatland_manager since the primary display may not have been initialized yet.
+    // Capture `flatland_manager_` since the primary display may not have been initialized yet.
     screen_capture_manager_.emplace(flatland_engine_, flatland_renderer, flatland_manager_,
                                     std::move(screen_capture_importers));
 
@@ -594,11 +594,11 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
         << add_screen_capture_protocol_result.status_string();
   }
 
-  // Make ScreenCapture2Manager.
+  // Make `ScreenCapture2Manager`.
   {
     TRACE_DURATION("gfx", "App::InitializeServices[screen_capture2_manager]");
 
-    // Capture flatland_manager since the primary display may not have been initialized yet.
+    // Capture `flatland_manager_` since the primary display may not have been initialized yet.
     screen_capture2_manager_.emplace(
         flatland_renderer, screen_capture_buffer_collection_importer, [this]() {
           FX_DCHECK(flatland_manager_);
@@ -624,14 +624,14 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
         << add_screen_capture2_protocol_result.status_string();
   }
 
-  // Make ScreenshotManager for the client-friendly screenshot protocol.
+  // Make `ScreenshotManager` for the client-friendly screenshot protocol.
   {
     TRACE_DURATION("gfx", "App::InitializeServices[screenshot_manager]");
 
     std::vector<std::shared_ptr<allocation::BufferCollectionImporter>> screen_capture_importers;
     screen_capture_importers.push_back(screen_capture_buffer_collection_importer);
 
-    // Capture flatland_manager since the primary display may not have been initialized yet.
+    // Capture `flatland_manager_` since the primary display may not have been initialized yet.
     screenshot_manager_.emplace(
         app_context_.get(), allocator_, flatland_renderer,
         [this]() {
@@ -658,7 +658,28 @@ void App::InitializeGraphics(std::shared_ptr<display::Display> display) {
 
   {
     TRACE_DURATION("gfx", "App::InitializeServices[display_power]");
-    display_power_manager_.emplace(display_manager_.value(), inspect_node_);
+    display_power_manager_.emplace(
+        inspect_node_,
+        /*set_display_power_mode=*/[this](fuchsia_hardware_display_types::PowerMode mode) {
+          // `fuchsia.ui.display.singleton.DisplayPower` controls the default display, the
+          // only one Scenic renders to.
+          const display::Display* display = display_manager_->default_display();
+          if (!display) {
+            FX_LOGS(WARNING) << "SetDisplayPowerMode: no default display";
+            return ZX_ERR_NOT_FOUND;
+          }
+          const display::DisplayId display_id = display->display_id();
+          FX_DCHECK(flatland_compositor_);
+          const bool was_dark = flatland_compositor_->IsDisplayDark(display_id);
+          const zx_status_t status = flatland_compositor_->SetDisplayPowerMode(display_id, mode);
+          // Frames scheduled while dark were skipped, not rendered, so the display is
+          // showing the black config committed at power-off. Render the current scene
+          // now rather than leaving it black until some client presents.
+          if (status == ZX_OK && was_dark && !flatland_compositor_->IsDisplayDark(display_id)) {
+            frame_scheduler_.ForceRenderFrame();
+          }
+          return status;
+        });
     FX_CHECK(app_context_->outgoing()->AddProtocol<fuchsia_ui_display_singleton::DisplayPower>(
                  display_power_manager_->GetHandler()) == ZX_OK);
   }
@@ -678,19 +699,19 @@ void App::InitializeInput() {
   input_manager_.emplace(async_patterns::PassDispatcher, snapshot_holder_,
                          inspect_node_.CreateChild("input"), config_values_.pointer_auto_focus());
 
-  // sys::OutgoingDirectory is thread-hostile. To avoid thread-safety risks and races with
-  // outgoing()->Serve(), all public services must be registered synchronously on the main thread.
+  // `sys::OutgoingDirectory` is thread-hostile. To avoid thread-safety risks and races with
+  // `outgoing()->Serve()`, all public services must be registered synchronously on the main thread.
   // Connection requests are then forwarded asynchronously to the input thread via
   // `input_manager_.AsyncCall()`.
 
-  // Register FocusChainListenerRegistry
+  // Register `FocusChainListenerRegistry`
   FX_CHECK(app_context_->outgoing()->AddProtocol<fuchsia_ui_focus::FocusChainListenerRegistry>(
                [this](fidl::ServerEnd<fuchsia_ui_focus::FocusChainListenerRegistry> server_end) {
                  input_manager_.AsyncCall(&input::InputManager::BindFocusChainListenerRegistry,
                                           std::move(server_end));
                }) == ZX_OK);
 
-  // Register ViewRefInstalled
+  // Register `ViewRefInstalled`
   FX_CHECK(app_context_->outgoing()->AddProtocol<fuchsia_ui_views::ViewRefInstalled>(
                [this](fidl::ServerEnd<fuchsia_ui_views::ViewRefInstalled> server_end) {
                  input_manager_.AsyncCall(&input::InputManager::BindViewRefInstalled,
@@ -729,14 +750,14 @@ void App::InitializeInput() {
       fuchsia_ui_pointerinjector_dso::Registry::kDiscoverableName);
 #endif
 
-  // Register LocalHit upgrade registry
+  // Register `LocalHit` upgrade registry
   FX_CHECK(app_context_->outgoing()->AddProtocol<fuchsia_ui_pointer_augment::LocalHit>(
                [this](fidl::ServerEnd<fuchsia_ui_pointer_augment::LocalHit> server_end) {
                  input_manager_.AsyncCall(&input::InputManager::BindLocalHit,
                                           std::move(server_end));
                }) == ZX_OK);
 
-  // Register Accessibility PointerEventRegistry
+  // Register Accessibility `PointerEventRegistry`
   FX_CHECK(
       app_context_->outgoing()->AddProtocol<fuchsia_ui_input_accessibility::PointerEventRegistry>(
           [this](fidl::ServerEnd<fuchsia_ui_input_accessibility::PointerEventRegistry> server_end) {
@@ -748,10 +769,10 @@ void App::InitializeInput() {
 void App::InitializeHeartbeat(display::Display& display) {
   TRACE_DURATION("gfx", "App::InitializeHeartbeat");
 
-  // Initialize ViewTreeSnapshotter
+  // Initialize `ViewTreeSnapshotter`
   {
-    // These callbacks are be called once per frame (at the end of OnCpuWorkDone()) and the results
-    // used to build the ViewTreeSnapshot.
+    // These callbacks are be called once per frame (at the end of `OnCpuWorkDone()`) and the
+    // results used to build the `ViewTreeSnapshot`.
     // We create one per compositor.
     std::vector<view_tree::SubtreeSnapshotGenerator> subtrees_generator_callbacks;
     subtrees_generator_callbacks.emplace_back([this] {
@@ -783,7 +804,7 @@ void App::InitializeHeartbeat(display::Display& display) {
     view_tree_snapshotter_.emplace(std::move(subtrees_generator_callbacks), std::move(subscribers));
   }
 
-  // Set up what to do each time a FrameScheduler event fires.
+  // Set up what to do each time a `FrameScheduler` event fires.
   frame_scheduler_.Initialize(
       display.vsync_timing(),
       /*update_sessions*/
@@ -804,7 +825,7 @@ void App::InitializeHeartbeat(display::Display& display) {
           // generated whenever the link topology changes.
           flatland_engine_->UpdateLinkWatchersAfterViewTreePublished();
         }
-        // Clears scene state, so must happen after ViewTree update, etc.
+        // Clears scene state, so must happen after `ViewTree` update, etc.
         flatland_engine_->CleanUpFrame();
 
         async::PostTask(async_get_default_dispatcher(), [this] {

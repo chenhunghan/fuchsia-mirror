@@ -5,12 +5,13 @@
 use anyhow::Result;
 use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_driver_test::RealmArgs;
+use fidl_fuchsia_power_system as fps;
+use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_component_test::{ChildOptions, LocalComponentHandles, RealmBuilder};
 use fuchsia_driver_test::{DriverTestRealmBuilder, DriverTestRealmInstance};
 use futures::channel::mpsc;
 use futures::{StreamExt, TryStreamExt};
-use {fidl_fuchsia_power_system as fps, fuchsia_async as fasync};
 
 async fn sag_serve(
     mut stream: fps::ActivityGovernorRequestStream,
@@ -67,7 +68,7 @@ async fn test_power_driver() -> Result<()> {
         })
         .await?;
 
-    let proxy = receiver.try_next()?.ok_or_else(|| anyhow::anyhow!("missing proxy"))?.into_proxy();
+    let proxy = receiver.try_recv()?.into_proxy();
     // Invoke suspend
     proxy.before_suspend().await?;
     // Invoke resume

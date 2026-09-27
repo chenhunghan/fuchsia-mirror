@@ -43,6 +43,7 @@ rustc_library("lib") {
   edition = "2024"
   version = "0.1.0"
   visibility = [
+    ":*",
     "//src/developer/ffx/*",
     "//src/power/tools/cli/*",
   ]

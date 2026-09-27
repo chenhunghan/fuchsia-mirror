@@ -17,7 +17,9 @@ from honeydew import affordances_capable, errors
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx import ffx
+from honeydew.transports.ffx import types as ffx_types
 from honeydew.transports.ffx.types import (
+    DeviceData,
     MachineFormat,
     MonitorTargetInfo,
     TargetInfoData,
@@ -40,6 +42,7 @@ _TARGET_SSH_ADDRESS = custom_types.TargetSshAddress(
 
 _ISOLATE_DIR: str = "/tmp/isolate"
 _LOGS_DIR: str = "/tmp/logs"
+_SHARED_DATA: str = "/tmp/shared_data"
 _BINARY_PATH: str = "ffx"
 _LOGS_LEVEL: str = "debug"
 _MDNS_ENABLED: bool = False
@@ -152,6 +155,7 @@ _INPUT_ARGS: dict[str, Any] = {
         emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
+        shared_data=_SHARED_DATA,
     ),
     "run_cmd": ffx._FFX_CMDS["TARGET_SHOW"],
     "run_machine_cmd": ffx._FFX_CMDS["TARGET_WAIT"],
@@ -221,8 +225,10 @@ class FfxTests(unittest.TestCase):
             ) as mock_ffx_check_connection,
         ):
             self.ffx_obj_wo_ip = ffx.FFX(
-                query=_INPUT_ARGS["target_query"],
-                config_data=_INPUT_ARGS["ffx_config_data"],
+                ffx_types.FfxArgs(
+                    query=_INPUT_ARGS["target_query"],
+                    config_data=_INPUT_ARGS["ffx_config_data"],
+                )
             )
         mock_ffx_check_connection.assert_called()
 
@@ -239,10 +245,12 @@ class FfxTests(unittest.TestCase):
             ) as mock_ffx_check_connection,
         ):
             self.ffx_obj_with_ip = ffx.FFX(
-                query=str(_INPUT_ARGS["target_addr"]),
-                name=_INPUT_ARGS["target_query"],
-                config_data=_INPUT_ARGS["ffx_config_data"],
-                device_ip_change=self.device_ip_change,
+                ffx_types.FfxArgs(
+                    query=str(_INPUT_ARGS["target_addr"]),
+                    name=_INPUT_ARGS["target_query"],
+                    config_data=_INPUT_ARGS["ffx_config_data"],
+                    device_ip_change=self.device_ip_change,
+                )
             )
         mock_ffx_check_connection.assert_called()
 
@@ -262,14 +270,28 @@ class FfxTests(unittest.TestCase):
             ) as mock_ffx_check_running_monitor,
         ):
             self.ffx_obj_with_ip_and_monitor = ffx.FFX(
-                query=str(_INPUT_ARGS["target_addr"]),
-                name=_INPUT_ARGS["target_query"],
-                config_data=_INPUT_ARGS["ffx_config_data"],
-                use_monitor_state=True,
-                device_ip_change=self.device_ip_change,
+                ffx_types.FfxArgs(
+                    query=str(_INPUT_ARGS["target_addr"]),
+                    name=_INPUT_ARGS["target_query"],
+                    config_data=_INPUT_ARGS["ffx_config_data"],
+                    use_monitor_state=True,
+                    device_ip_change=self.device_ip_change,
+                )
             )
         mock_ffx_check_connection.assert_called()
         mock_ffx_check_running_monitor.assert_called()
+
+    def test_ffx_args_dataclass_defaults(self) -> None:
+        """Test case for ffx_types.FfxArgs default values."""
+        args = ffx_types.FfxArgs(
+            query=_INPUT_ARGS["target_query"],
+            config_data=_INPUT_ARGS["ffx_config_data"],
+        )
+        self.assertEqual(args.query, _INPUT_ARGS["target_query"])
+        self.assertEqual(args.config_data, _INPUT_ARGS["ffx_config_data"])
+        self.assertIsNone(args.name)
+        self.assertFalse(args.use_monitor_state)
+        self.assertIsNone(args.device_ip_change)
 
     def test_ffx_init_with_ip_as_target_query(self) -> None:
         """Test case for ffx.FFX() when called with query=<ip>."""
@@ -279,9 +301,11 @@ class FfxTests(unittest.TestCase):
             autospec=True,
         ):
             ffx_obj = ffx.FFX(
-                query="127.0.0.1",
-                config_data=_INPUT_ARGS["ffx_config_data"],
-                device_ip_change=self.device_ip_change,
+                ffx_types.FfxArgs(
+                    query="127.0.0.1",
+                    config_data=_INPUT_ARGS["ffx_config_data"],
+                    device_ip_change=self.device_ip_change,
+                )
             )
         self.assertEqual(ffx_obj._query, "127.0.0.1")
         self.assertEqual(
@@ -295,28 +319,63 @@ class FfxTests(unittest.TestCase):
         """Test case for ffx.FFX() when called with IP and no device_ip_change."""
         with self.assertRaises(ValueError):
             ffx.FFX(
-                query="127.0.0.1",
-                config_data=_INPUT_ARGS["ffx_config_data"],
+                ffx_types.FfxArgs(
+                    query="127.0.0.1",
+                    config_data=_INPUT_ARGS["ffx_config_data"],
+                )
             )
 
-    def test_ffx_init_shared_data_default(self) -> None:
-        """Verify shared_data defaults to logs_dir in __init__."""
-        self.assertEqual(self.ffx_obj_wo_ip.shared_data, _LOGS_DIR)
-
-    def test_ffx_init_shared_data_custom(self) -> None:
-        """Verify shared_data is set to custom value in __init__."""
-        shared_data = "/tmp/custom_shared_data"
-        with mock.patch.object(
-            ffx.FFX,
-            "check_connection",
-            autospec=True,
+    def test_ffx_init_monitor_not_running_raises(self) -> None:
+        """Test case for ffx.FFX() when use_monitor_state=True and no monitor is running."""
+        with (
+            mock.patch.object(
+                ffx.FFX,
+                "_check_running_monitor",
+                return_value=False,
+                autospec=True,
+            ),
+            self.assertRaises(ffx_errors.FfxMonitorNotSupportedError),
         ):
-            ffx_obj = ffx.FFX(
-                query=_INPUT_ARGS["target_query"],
-                config_data=_INPUT_ARGS["ffx_config_data"],
-                shared_data=shared_data,
+            ffx.FFX(
+                ffx_types.FfxArgs(
+                    query=_INPUT_ARGS["target_query"],
+                    name=_INPUT_ARGS["target_query"],
+                    config_data=_INPUT_ARGS["ffx_config_data"],
+                    use_monitor_state=True,
+                )
             )
-        self.assertEqual(ffx_obj.shared_data, shared_data)
+
+    def test_ffx_init_monitor_without_name_raises(self) -> None:
+        """Test case for ffx.FFX() when use_monitor_state=True and name is None."""
+        with (
+            mock.patch.object(
+                ffx.FFX,
+                "_check_running_monitor",
+                return_value=True,
+                autospec=True,
+            ),
+            self.assertRaises(ffx_errors.FfxMonitorRequiresNameError),
+        ):
+            ffx.FFX(
+                ffx_types.FfxArgs(
+                    query=_INPUT_ARGS["target_query"],
+                    config_data=_INPUT_ARGS["ffx_config_data"],
+                    use_monitor_state=True,
+                )
+            )
+
+    @mock.patch.object(
+        ffx.FFX,
+        "get_target_information",
+        return_value=_FFX_TARGET_SHOW_INFO,
+        autospec=True,
+    )
+    def test_serial_number(
+        self, mock_get_target_information: mock.Mock
+    ) -> None:
+        """Verify serial_number property returns serial number from target show."""
+        self.assertEqual(self.ffx_obj_wo_ip.serial_number, "1234321")
+        mock_get_target_information.assert_called_once_with(self.ffx_obj_wo_ip)
 
     @mock.patch.object(ffx.FFX, "wait_for_rcs_connection", autospec=True)
     def test_check_connection(
@@ -594,6 +653,7 @@ class FfxTests(unittest.TestCase):
         """Test case for ffx.run()"""
         expected_config = {
             "log": {"dir": _LOGS_DIR, "level": _LOGS_LEVEL},
+            "shared_data": _SHARED_DATA,
             "ffx": {"subtool-search-paths": [_SUBTOOLS_SEARCH_PATH]},
             "proxy": {"timeout_secs": _PROXY_TIMEOUT_SECS},
             "ssh": {"keepalive_timeout": _SSH_KEEPALIVE_TIMEOUT},
@@ -621,8 +681,6 @@ class FfxTests(unittest.TestCase):
                 "--direct",
                 "-c",
                 json.dumps(expected_config),
-                "-c",
-                json.dumps({"shared_data": _LOGS_DIR}),
             ]
             + ffx._FFX_CMDS["TARGET_SHOW"],
             capture_output=True,
@@ -640,6 +698,7 @@ class FfxTests(unittest.TestCase):
         """Test case for ffx.run()"""
         expected_config = {
             "log": {"dir": _LOGS_DIR, "level": _LOGS_LEVEL},
+            "shared_data": _SHARED_DATA,
             "ffx": {"subtool-search-paths": [_SUBTOOLS_SEARCH_PATH]},
             "proxy": {"timeout_secs": _PROXY_TIMEOUT_SECS},
             "ssh": {"keepalive_timeout": _SSH_KEEPALIVE_TIMEOUT},
@@ -669,8 +728,6 @@ class FfxTests(unittest.TestCase):
                 "--direct",
                 "-c",
                 json.dumps(expected_config),
-                "-c",
-                json.dumps({"shared_data": _LOGS_DIR}),
             ]
             + ffx._FFX_CMDS["TARGET_WAIT"],
             capture_output=True,
@@ -704,6 +761,7 @@ class FfxTests(unittest.TestCase):
             ssh_public_keys=None,
             ssh_auth_sock="/tmp/custom_sock",
             identities_only=True,
+            shared_data=_SHARED_DATA,
         )
         with mock.patch.object(
             ffx.FFX,
@@ -711,14 +769,17 @@ class FfxTests(unittest.TestCase):
             autospec=True,
         ):
             ffx_obj = ffx.FFX(
-                query=str(_INPUT_ARGS["target_addr"]),
-                name=_INPUT_ARGS["target_query"],
-                config_data=config_data,
-                device_ip_change=self.device_ip_change,
+                ffx_types.FfxArgs(
+                    query=str(_INPUT_ARGS["target_addr"]),
+                    name=_INPUT_ARGS["target_query"],
+                    config_data=config_data,
+                    device_ip_change=self.device_ip_change,
+                )
             )
 
         expected_config = {
             "log": {"dir": _LOGS_DIR, "level": _LOGS_LEVEL},
+            "shared_data": _SHARED_DATA,
             "ffx": {"subtool-search-paths": [_SUBTOOLS_SEARCH_PATH]},
             "proxy": {"timeout_secs": _PROXY_TIMEOUT_SECS},
             "ssh": {
@@ -750,8 +811,6 @@ class FfxTests(unittest.TestCase):
                 "--direct",
                 "-c",
                 json.dumps(expected_config),
-                "-c",
-                json.dumps({"shared_data": _LOGS_DIR}),
             ]
             + ffx._FFX_CMDS["TARGET_SHOW"],
             capture_output=True,
@@ -879,6 +938,7 @@ class FfxTests(unittest.TestCase):
 
         expected_config = {
             "log": {"dir": _LOGS_DIR, "level": _LOGS_LEVEL},
+            "shared_data": _SHARED_DATA,
             "ffx": {"subtool-search-paths": [_SUBTOOLS_SEARCH_PATH]},
             "proxy": {"timeout_secs": _PROXY_TIMEOUT_SECS},
             "ssh": {"keepalive_timeout": _SSH_KEEPALIVE_TIMEOUT},
@@ -901,8 +961,6 @@ class FfxTests(unittest.TestCase):
                 "--direct",
                 "-c",
                 json.dumps(expected_config),
-                "-c",
-                json.dumps({"shared_data": _LOGS_DIR}),
             ]
             + ["a", "b", "c"],
             stdout="abc",
@@ -952,7 +1010,8 @@ class FfxTests(unittest.TestCase):
         mock_host_run.assert_called()
         cmd = mock_host_run.call_args[1]["cmd"]
         self.assertIn("-c", cmd)
-        self.assertIn(json.dumps({"shared_data": _LOGS_DIR}), cmd)
+        config_dict = json.loads(cmd[cmd.index("-c") + 1])
+        self.assertEqual(config_dict.get("shared_data"), _SHARED_DATA)
 
     @mock.patch.object(
         host_shell, "run", return_value='{"targets": []}', autospec=True
@@ -965,7 +1024,8 @@ class FfxTests(unittest.TestCase):
         mock_host_run.assert_called()
         cmd = mock_host_run.call_args[1]["cmd"]
         self.assertIn("-c", cmd)
-        self.assertIn(json.dumps({"shared_data": _LOGS_DIR}), cmd)
+        config_dict = json.loads(cmd[cmd.index("-c") + 1])
+        self.assertEqual(config_dict.get("shared_data"), _SHARED_DATA)
 
     @mock.patch.object(ffx.FFX, "popen", autospec=True)
     def test_wait_for_rcs_disconnection(
@@ -1001,6 +1061,7 @@ class FfxTests(unittest.TestCase):
 
         expected_config = {
             "log": {"dir": _LOGS_DIR, "level": _LOGS_LEVEL},
+            "shared_data": _SHARED_DATA,
             "ffx": {"subtool-search-paths": [_SUBTOOLS_SEARCH_PATH]},
             "proxy": {"timeout_secs": _PROXY_TIMEOUT_SECS},
             "ssh": {"keepalive_timeout": _SSH_KEEPALIVE_TIMEOUT},
@@ -1023,8 +1084,6 @@ class FfxTests(unittest.TestCase):
                 "--direct",
                 "-c",
                 json.dumps(expected_config),
-                "-c",
-                json.dumps({"shared_data": "/tmp/logs"}),
                 "target",
                 "status",
             ],
@@ -1126,3 +1185,71 @@ class FfxTests(unittest.TestCase):
         # Should catch and not raise exception
         self.ffx_obj_with_ip_and_monitor.notify_intentional_disconnect()
         mock_run.assert_called_once()
+
+    @parameterized.expand(
+        [
+            ("empty_strings", "", "", "", None, None, None),
+            (
+                "unknown_strings",
+                "unknown",
+                "<unknown>",
+                "UNKNOWN",
+                None,
+                None,
+                None,
+            ),
+            (
+                "whitespace_trimmed",
+                "  SER123\n",
+                " SKU123 ",
+                " ID123 ",
+                "SER123",
+                "SKU123",
+                "ID123",
+            ),
+            ("none_values", None, None, None, None, None, None),
+        ]
+    )
+    def test_device_data_sanitization(
+        self,
+        _: str,
+        serial_number: str | None,
+        retail_sku: str | None,
+        device_id: str | None,
+        expected_serial: str | None,
+        expected_sku: str | None,
+        expected_id: str | None,
+    ) -> None:
+        """Test DeviceData.__post_init__ sanitizes empty/unknown strings to None."""
+        data = DeviceData(
+            serial_number=serial_number,
+            retail_sku=retail_sku,
+            retail_demo=False,
+            device_id=device_id,
+        )
+        self.assertEqual(data.serial_number, expected_serial)
+        self.assertEqual(data.retail_sku, expected_sku)
+        self.assertEqual(data.device_id, expected_id)
+
+    @parameterized.expand(
+        [
+            ("multiline_serial", "SER1\nSER2", None, None),
+            ("multiline_sku", None, "SKU1\nSKU2", None),
+            ("multiline_device_id", None, None, "ID1\nID2"),
+        ]
+    )
+    def test_device_data_multiline_raises(
+        self,
+        _: str,
+        serial_number: str | None,
+        retail_sku: str | None,
+        device_id: str | None,
+    ) -> None:
+        """Test DeviceData.__post_init__ raises ValueError on multi-line strings."""
+        with self.assertRaises(ValueError):
+            DeviceData(
+                serial_number=serial_number,
+                retail_sku=retail_sku,
+                retail_demo=False,
+                device_id=device_id,
+            )

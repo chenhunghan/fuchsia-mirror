@@ -17,6 +17,8 @@
 #include "src/ui/lib/escher/test/common/readback_test.h"
 #include "src/ui/lib/escher/types/color.h"
 #include "src/ui/lib/escher/types/color_histogram.h"
+#include "src/ui/lib/escher/vk/image_view.h"
+#include "src/ui/lib/escher/vk/impl/framebuffer.h"
 #include "src/ui/lib/escher/vk/texture.h"
 
 namespace escher {
@@ -104,6 +106,15 @@ class RectangleCompositorTest : public ReadbackTest {
   // Sets up the environment.
   void frame_setup() { frame_data_ = NewFrame(vk::ImageLayout::eColorAttachmentOptimal); }
 
+  impl::FramebufferPtr CreateFramebuffer(const TexturePtr& depth_texture,
+                                         bool apply_color_conversion = false) {
+    if (apply_color_conversion) {
+      return ren_->CreateColorConversionFramebuffer(ImageView::New(frame_data_.color_attachment),
+                                                    depth_texture);
+    }
+    return ren_->CreateFramebuffer(ImageView::New(frame_data_.color_attachment), depth_texture);
+  }
+
   escher::RectangleCompositor* renderer() const { return ren_.get(); }
 
  public:
@@ -134,8 +145,8 @@ VK_TEST_F(RectangleCompositorTest, SingleRenderableTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, {rectangle}, {default_texture_}, {color_data},
-                  frame_data_.color_attachment, depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, {rectangle}, {default_texture_}, {color_data}, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -166,8 +177,8 @@ VK_TEST_F(RectangleCompositorTest, SimpleTextureTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -202,8 +213,8 @@ VK_TEST_F(RectangleCompositorTest, TwoColorTextureTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -241,8 +252,8 @@ VK_TEST_F(RectangleCompositorTest, ColorConversionTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, frame_data_.color_attachment,
-                  depth_texture, /*apply_color_conversion*/ true);
+  auto framebuffer = CreateFramebuffer(depth_texture, /*apply_color_conversion=*/true);
+  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -263,6 +274,29 @@ VK_TEST_F(RectangleCompositorTest, ColorConversionTest) {
 
   // Reset compositor.
   ren_->SetColorConversionParams({glm::mat4(1), glm::vec4(0), glm::vec4(0)});
+}
+
+// Tests that transient images can be shared between color-conversion framebuffers.
+VK_TEST_F(RectangleCompositorTest, ColorConversionTransientImageSharingTest) {
+  frame_setup();
+
+  auto depth_texture1 = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
+  auto fb1 = ren_->CreateColorConversionFramebuffer(ImageView::New(frame_data_.color_attachment),
+                                                    depth_texture1);
+  ASSERT_TRUE(fb1);
+  auto transient1 = RectangleCompositor::GetTransientImage(fb1);
+  ASSERT_TRUE(transient1);
+
+  // A second target with the same parameters can share transient1.
+  EXPECT_TRUE(
+      RectangleCompositor::CanShareTransientImage(transient1, frame_data_.color_attachment));
+
+  auto depth_texture2 = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
+  auto fb2 = ren_->CreateColorConversionFramebuffer(ImageView::New(frame_data_.color_attachment),
+                                                    depth_texture2, transient1);
+  ASSERT_TRUE(fb2);
+  auto transient2 = RectangleCompositor::GetTransientImage(fb2);
+  EXPECT_EQ(transient1, transient2);
 }
 
 // Render a single full-screen renderable with a texture that has 4 colors but
@@ -291,14 +325,14 @@ VK_TEST_F(RectangleCompositorTest, SimpleTextureNonStandardUVsTest) {
       /*blue*/ {vec2(0.5, 0.5), vec2(1.0, 0.5), vec2(1.0, 1.0), vec2(0.5, 1.0)}};
 
   RectangleCompositor::ColorData color_data(vec4(1), RectangleCompositor::Opacity::Opaque);
+  auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
+  auto framebuffer = CreateFramebuffer(depth_texture);
   for (uint32_t i = 0; i < kNumColors; i++) {
     auto cmd_buf = frame_data_.frame->cmds();
-    auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
 
     Rectangle2D rectangle(vec2(0, 0), vec2(512, 512), uvs[i]);
 
-    ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, frame_data_.color_attachment,
-                    depth_texture);
+    ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, framebuffer);
 
     auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                              frame_data_.color_attachment->swapchain_layout(),
@@ -342,8 +376,8 @@ VK_TEST_F(RectangleCompositorTest, RotatedTextureTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, {rectangle}, {texture}, {color_data}, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -384,8 +418,8 @@ VK_TEST_F(RectangleCompositorTest, MultiRenderableTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -430,8 +464,8 @@ VK_TEST_F(RectangleCompositorTest, OverlapTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -485,8 +519,8 @@ VK_TEST_P(RectangleCompositorParameterizedOpacityTest, TransparencyTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -534,8 +568,8 @@ VK_TEST_F(RectangleCompositorTest, TransparencyFlagOffTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),
@@ -575,8 +609,8 @@ VK_TEST_F(RectangleCompositorTest, StressTest) {
 
   auto cmd_buf = frame_data_.frame->cmds();
   auto depth_texture = CreateDepthBuffer(escher().get(), frame_data_.color_attachment);
-  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, frame_data_.color_attachment,
-                  depth_texture);
+  auto framebuffer = CreateFramebuffer(depth_texture);
+  ren_->DrawBatch(cmd_buf, rectangles, textures, color_datas, framebuffer);
 
   auto bytes = ReadbackFromColorAttachment(frame_data_.frame,
                                            frame_data_.color_attachment->swapchain_layout(),

@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 import fuchsia_base_test
+from honeydew import errors as honeydew_errors
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx.types import MachineFormat
 from mobly import asserts, records
@@ -151,6 +152,25 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         self.driver_controller: UsbTestController | None = None
         self.test_case_path: str = ""
 
+    async def _resolve_target_serial(self) -> str | None:
+        """Resolve the DUT serial while the device is still fully reachable.
+
+        The test replaces the USB functions that carry FIDL and SSH, so the
+        serial must be resolved up front: afterwards `serial_number()` can no
+        longer reach the device and only the weaker fallbacks in
+        `get_dut_serial` remain.
+
+        Returns:
+            The DUT serial number, or None if it could not be resolved.
+        """
+        try:
+            serial = await self.dut.serial_number()
+            if serial:
+                return serial.strip()
+        except (honeydew_errors.HoneydewError, AttributeError) as e:
+            _LOGGER.warning("Could not resolve DUT serial over FIDL: %s", e)
+        return get_dut_serial(self.dut)
+
     async def setup_class(self) -> None:
         """Record initial USB configuration and initialize test harness."""
         await super().setup_class()
@@ -158,14 +178,16 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         self.snapshot_on = fuchsia_base_test.SnapshotOn.NEVER
         self.tracing_on = fuchsia_base_test.TracingOn.NEVER
 
-        # Warm up cached persistent properties needed by Mobly test metadata
+        # Warm up cached persistent properties needed by Mobly test metadata.
+        # These resolve over ffx, which stops working once the USB functions
+        # are switched, so they must be cached while the device is reachable.
         for prop in ("board", "product", "device_name"):
             try:
                 _ = getattr(self.dut, prop, None)
-            except Exception:
-                pass
+            except (honeydew_errors.HoneydewError, AttributeError) as e:
+                _LOGGER.debug("Could not warm up dut.%s: %s", prop, e)
 
-        self.target_serial = get_dut_serial(self.dut)
+        self.target_serial = await self._resolve_target_serial()
 
         self.driver_controller = UsbTestController(
             vendor=USB_ZERO_VID, product=USB_ZERO_PID, alt=0
@@ -205,13 +227,11 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         # ensuring driver binaries are available after USB peripheral switching
         # drops networking.
         pkg_url = driver_url.split("#")[0]
-        ffx_inst = getattr(self.dut, "ffx", None)
-        if ffx_inst and hasattr(ffx_inst, "run_ssh_cmd"):
-            try:
-                _LOGGER.info("Pre-resolving package blobs for %s...", pkg_url)
-                ffx_inst.run_ssh_cmd(f"pkgctl resolve {pkg_url}")
-            except Exception as resolve_err:
-                _LOGGER.warning("pkgctl resolve returned: %s", resolve_err)
+        try:
+            _LOGGER.info("Pre-resolving package blobs for %s...", pkg_url)
+            self.dut.ffx.run_ssh_cmd(f"pkgctl resolve {pkg_url}")
+        except (honeydew_errors.HoneydewError, OSError) as resolve_err:
+            _LOGGER.warning("pkgctl resolve returned: %s", resolve_err)
 
         # Query whether driver is already registered before registering.
         is_registered = False
@@ -226,7 +246,7 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
                     "Driver %s is already registered on target.", driver_url
                 )
                 is_registered = True
-        except Exception as list_err:
+        except honeydew_errors.HoneydewError as list_err:
             _LOGGER.warning("Could not query registered drivers: %s", list_err)
 
         if not is_registered:
@@ -255,7 +275,7 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
                             machine=MachineFormat.RAW,
                             timeout=60,
                         )
-                    except Exception as restart_err:
+                    except honeydew_errors.HoneydewError as restart_err:
                         _LOGGER.warning(
                             "Driver restart failed (may not be bound yet): %s",
                             restart_err,
@@ -302,6 +322,7 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def teardown_class(self) -> None:
         """Restore initial USB configuration and clean up test resources."""
+        restore_err: Exception | None = None
         try:
             # Restoring initial functions unbinds usb-zero-function. Ephemerally
             # registered drivers remain cached until reboot and do not persist.
@@ -312,19 +333,20 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
                     restore_str,
                 )
                 try:
-                    set_usb_config(
-                        self.dut, restore_str, reboot_if_needed=False
-                    )
+                    set_usb_config(self.dut, restore_str)
                 except Exception as e:
-                    _LOGGER.warning(
+                    _LOGGER.error(
                         "Failed to restore initial USB configuration: %s",
                         e,
                     )
+                    restore_err = e
             if self.driver_controller:
                 try:
                     self.driver_controller.unload_driver()
                 except Exception as e:
                     _LOGGER.warning("Failed unloading usbtest driver: %s", e)
+            if restore_err is not None:
+                raise restore_err
             _LOGGER.info("Teardown class completed.")
         finally:
             await super().teardown_class()
@@ -485,11 +507,11 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         with USBTestIoctlBackend(device_path=dev_node) as backend:
             while True:
                 elapsed = time.monotonic() - start_time
-                if elapsed >= duration_sec:
+                if batch > 0 and elapsed >= duration_sec:
                     break
 
                 batch += 1
-                remaining = duration_sec - elapsed
+                remaining = max(0.0, duration_sec - elapsed)
                 _LOGGER.info(
                     "[Batch %d] Running testusb (Elapsed: %.1fs / %.1fs, "
                     "Remaining: %.1fs)...",

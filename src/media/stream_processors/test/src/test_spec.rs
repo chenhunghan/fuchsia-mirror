@@ -118,7 +118,10 @@ async fn run_cases_concurrently(
     Ok(())
 }
 
-pub fn with_large_stack(f: fn() -> Result<()>) -> Result<()> {
+pub fn with_large_stack<F>(f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+{
     // The TestSpec futures are too big to fit on Fuchsia's default stack.
     const MEGABYTE: usize = 1024 * 1024;
     const STACK_SIZE: usize = 4 * MEGABYTE;

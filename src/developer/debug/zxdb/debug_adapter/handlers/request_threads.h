@@ -19,6 +19,7 @@ DAP_DECLARE_STRUCT_TYPEINFO(ThreadZxdb);
 
 struct ThreadEventZxdb : public ThreadEvent {
   optional<integer> processId;
+  optional<boolean> isStopped;
 };
 DAP_DECLARE_STRUCT_TYPEINFO(ThreadEventZxdb);
 

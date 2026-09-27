@@ -2,9 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//src/diagnostics/build/sampler/merge_configs.gni")
+import("//src/diagnostics/build/sampler/generate_configs.gni")
 
-merged_sampler_config("default-config") {
+generate_sampler_config("default-config") {
   cobalt_registry =
       "$root_gen_dir/src/cobalt/bin/app/global_metrics_registry.pb"
   deps = [ "//src/cobalt/bin/app:global_metrics_registry_gen" ]

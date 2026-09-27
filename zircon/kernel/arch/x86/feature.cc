@@ -1035,6 +1035,8 @@ const x86_microarch_config_t* get_microarch_config(const cpu_id::CpuId* cpuid) {
       case 0x97: /* Alder Lake S */
       case 0x9a: /* Alder Lake H/P/U */
       case 0xb7: /* Raptor Lake S */
+      case 0x8f: /* Sapphire Rapids-SP */
+      case 0xcf: /* Emerald Rapids-SP */
         return &alder_lake_config;
 
       /* Small cores */

@@ -5,9 +5,11 @@
 #ifndef SRC_STORAGE_MINFS_COMPONENT_RUNNER_H_
 #define SRC_STORAGE_MINFS_COMPONENT_RUNNER_H_
 
+#include <fidl/fuchsia.fs/cpp/wire.h>
 #include <fidl/fuchsia.io/cpp/markers.h>
 #include <fidl/fuchsia.process.lifecycle/cpp/wire.h>
 #include <lib/async/dispatcher.h>
+#include <lib/fidl/cpp/wire/channel.h>
 #include <lib/fidl/cpp/wire/internal/transport_channel.h>
 #include <lib/fit/function.h>
 #include <lib/zx/result.h>
@@ -31,7 +33,7 @@
 
 namespace minfs {
 
-class ComponentRunner final : public fs::ManagedVfs {
+class ComponentRunner final : public fs::ManagedVfs, public fidl::WireServer<fuchsia_fs::Admin> {
  public:
   explicit ComponentRunner(async_dispatcher_t* dispatcher, bool die_on_mutation_failure = true);
 
@@ -47,10 +49,12 @@ class ComponentRunner final : public fs::ManagedVfs {
   zx::result<fs::FilesystemInfo> GetFilesystemInfo() final;
   void OnNoConnections() final;
 
+  // fuchsia_fs::Admin interface
+  void Shutdown(ShutdownCompleter::Sync& completer) final;
+
   void SetUnmountCallback(fit::closure on_unmount) { on_unmount_ = std::move(on_unmount); }
 
  private:
-  async_dispatcher_t* dispatcher_;
   fit::closure on_unmount_;
   bool die_on_mutation_failure_;
 
@@ -71,6 +75,7 @@ class ComponentRunner final : public fs::ManagedVfs {
   std::optional<zx_status_t> shutdown_result_ __TA_GUARDED(shutdown_lock_);
   // A queue of callbacks for shutdown requests that arrive while shutdown is running.
   std::vector<fs::FuchsiaVfs::ShutdownCallback> shutdown_callbacks_ __TA_GUARDED(shutdown_lock_);
+  fidl::ServerBindingGroup<fuchsia_fs::Admin> admin_bindings_;
 };
 
 }  // namespace minfs

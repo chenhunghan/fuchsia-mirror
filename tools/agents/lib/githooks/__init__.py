@@ -13,6 +13,7 @@ from .adapters import (
     HookContext,
     commit_msg_action,
     format_code_action,
+    lint_code_action,
 )
 from .installer import (
     HookOperationResult,
@@ -45,6 +46,7 @@ __all__ = [
     "get_git_hooks_status",
     "install_git_hook",
     "install_git_hooks",
+    "lint_code_action",
     "main",
     "run_commit_msg_hook",
     "run_pre_commit_hook",

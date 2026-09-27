@@ -5,6 +5,7 @@
 #include <fidl/fuchsia.fs.startup/cpp/wire.h>
 #include <fidl/fuchsia.io/cpp/wire.h>
 #include <fidl/fuchsia.process.lifecycle/cpp/wire.h>
+#include <fidl/fuchsia.update.verify/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async/cpp/task.h>
@@ -184,6 +185,76 @@ TEST_F(BlobfsComponentRunnerTest, DoubleShutdown) {
   // Both callbacks were completed.
   ASSERT_TRUE(callback_called);
   ASSERT_TRUE(callback2_called);
+}
+
+TEST_F(BlobfsComponentRunnerTest, OtaHealthCheckReturnsHealthy) {
+  ASSERT_NO_FATAL_FAILURE(StartServe());
+
+  auto svc_dir = GetSvcDir();
+  MountOptions options;
+  ASSERT_OK(runner_->Configure(std::move(device_), options));
+
+  auto client_end =
+      component::ConnectAt<fuchsia_update_verify::ComponentOtaHealthCheck>(svc_dir.borrow());
+  ASSERT_OK(client_end.status_value());
+
+  std::atomic<bool> health_check_complete = false;
+  fidl::WireClient client(std::move(*client_end), loop_.dispatcher());
+  client->GetHealthStatus().ThenExactlyOnce(
+      [&health_check_complete](
+          fidl::WireUnownedResult<fuchsia_update_verify::ComponentOtaHealthCheck::GetHealthStatus>&
+              result) {
+        EXPECT_TRUE(result.ok()) << result.error();
+        EXPECT_EQ(result->health_status, fuchsia_update_verify::wire::HealthStatus::kHealthy);
+        health_check_complete = true;
+      });
+
+  ASSERT_OK(loop_.RunUntilIdle());
+  EXPECT_TRUE(health_check_complete);
+
+  // Perform clean shutdown
+  std::atomic<bool> callback_called = false;
+  runner_->Shutdown([callback_called = &callback_called](zx_status_t status) {
+    EXPECT_OK(status);
+    *callback_called = true;
+  });
+  ASSERT_STATUS(loop_.RunUntilIdle(), ZX_ERR_CANCELED);
+  EXPECT_TRUE(callback_called);
+}
+
+TEST_F(BlobfsComponentRunnerTest, OtaHealthCheckClosedOnShutdown) {
+  ASSERT_NO_FATAL_FAILURE(StartServe());
+
+  auto svc_dir = GetSvcDir();
+  MountOptions options;
+  ASSERT_OK(runner_->Configure(std::move(device_), options));
+
+  auto client_end =
+      component::ConnectAt<fuchsia_update_verify::ComponentOtaHealthCheck>(svc_dir.borrow());
+  ASSERT_OK(client_end.status_value());
+
+  // Run the loop to establish the binding.
+  ASSERT_OK(loop_.RunUntilIdle());
+
+  fidl::WireSyncClient client(std::move(*client_end));
+
+  // Shutdown the runner.
+  std::atomic<bool> callback_called = false;
+  runner_->Shutdown([callback_called = &callback_called](zx_status_t status) {
+    EXPECT_OK(status);
+    *callback_called = true;
+  });
+  ASSERT_STATUS(loop_.RunUntilIdle(), ZX_ERR_CANCELED);
+  ASSERT_TRUE(callback_called);
+
+  // Run the loop again to process the asynchronous unbind tasks from CloseAll.
+  loop_.ResetQuit();
+  ASSERT_OK(loop_.RunUntilIdle());
+
+  // Now try to call it again. It should fail with ZX_ERR_PEER_CLOSED.
+  auto result = client->GetHealthStatus();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status(), ZX_ERR_PEER_CLOSED);
 }
 
 }  // namespace

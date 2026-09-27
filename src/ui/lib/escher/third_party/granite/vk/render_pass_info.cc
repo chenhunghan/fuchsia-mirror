@@ -323,11 +323,12 @@ static void InitRenderPassInfoHelper(RenderPassInfo* rp,
 }
 
 bool RenderPassInfo::InitRenderPassInfo(RenderPassInfo* rp, vk::Rect2D render_area,
-                                        const ImagePtr& output_image,
-                                        const TexturePtr& depth_texture,
-                                        const TexturePtr& msaa_texture,
-                                        ImageViewAllocator* allocator) {
+                                        ImageViewPtr output_image_view, TexturePtr depth_texture,
+                                        TexturePtr msaa_texture) {
   TRACE_DURATION("gfx", "RenderPassInfo::InitRenderPassInfo");
+  FX_DCHECK(output_image_view);
+  const auto& output_image = output_image_view->image();
+  FX_DCHECK(output_image);
   FX_DCHECK(output_image->info().sample_count == 1);
   rp->render_area = render_area;
 
@@ -338,11 +339,6 @@ bool RenderPassInfo::InitRenderPassInfo(RenderPassInfo* rp, vk::Rect2D render_ar
     if (!output_image->is_swapchain_image()) {
       FX_LOGS(ERROR) << "RenderPassInfo::InitRenderPassInfo(): Output image doesn't have valid "
                         "swapchain layout.";
-      return false;
-    }
-    if (output_image->swapchain_layout() != output_image->layout()) {
-      FX_LOGS(ERROR) << "RenderPassInfo::InitRenderPassInfo(): Current layout of output image "
-                        "does not match its swapchain layout.";
       return false;
     }
     color_info.InitFromImage(output_image);
@@ -356,21 +352,21 @@ bool RenderPassInfo::InitRenderPassInfo(RenderPassInfo* rp, vk::Rect2D render_ar
 
   InitRenderPassInfoHelper(rp, color_info, depth_stencil_info, msaa_texture ? &msaa_info : nullptr);
 
-  // TODO(https://fxbug.dev/42119565): Can we get away sharing image views across multiple RenderPassInfo
-  // structs?
-  ImageViewPtr output_image_view =
-      allocator ? allocator->ObtainImageView(output_image) : ImageView::New(output_image);
-
-  // If MSAA is enabled then we render into |msaa_texture| instead of directly into |output_image|.
-  // Therefore we need to adjust the attachment images.
   if (msaa_texture) {
-    rp->color_attachments[kRenderTargetAttachmentIndex] = msaa_texture;
+    rp->color_attachments[kRenderTargetAttachmentIndex] = std::move(msaa_texture);
     rp->color_attachments[kResolveTargetAttachmentIndex] = std::move(output_image_view);
   } else {
     rp->color_attachments[kRenderTargetAttachmentIndex] = std::move(output_image_view);
   }
-  rp->depth_stencil_attachment = depth_texture;
+  rp->depth_stencil_attachment = std::move(depth_texture);
   return true;
+}
+
+bool RenderPassInfo::InitRenderPassInfo(RenderPassInfo* rp, vk::Rect2D render_area,
+                                        const ImagePtr& output_image, TexturePtr depth_texture,
+                                        TexturePtr msaa_texture) {
+  return InitRenderPassInfo(rp, render_area, ImageView::New(output_image), std::move(depth_texture),
+                            std::move(msaa_texture));
 }
 
 bool RenderPassInfo::InitRenderPassInfo(RenderPassInfo* rp,

@@ -244,11 +244,17 @@ const CodecAdapterFactory kCodecFactories[] = {
 }  // namespace
 
 // device - associated device.
-LocalCodecFactory::LocalCodecFactory(DeviceCtx* device) : device_(device), factory_binding_(this) {
+LocalCodecFactory::LocalCodecFactory(DeviceCtx* device)
+    : device_(device),
+      factory_binding_(this),
+      closure_queue_(
+          std::make_shared<ClosureQueue>(device->driver()->shared_fidl_loop()->dispatcher())) {
   // nothing else to do here
 }
 
 LocalCodecFactory::~LocalCodecFactory() {
+  closure_queue_->StopAndClear();
+
   // We need ~factory_binding_ to run on shared_fidl_thread() else it's not safe
   // to un-bind unilaterally (without the channel closing).  Unless not bound in
   // the first place.
@@ -263,19 +269,21 @@ LocalCodecFactory::~LocalCodecFactory() {
 
 void LocalCodecFactory::SetErrorHandler(fit::closure error_handler) {
   ZX_DEBUG_ASSERT(!factory_binding_.is_bound());
-  factory_binding_.set_error_handler(
-      [this, error_handler = std::move(error_handler)](zx_status_t status) mutable {
-        ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
-        // This queues after the similar posting in CreateDecoder() (via
-        // TryAddCodec()), so that LocalCodecFactory won't get deleted until
-        // after previously-started TryAddCodec()s are done.
-        device_->codec_admission_control()->PostAfterPreviouslyStartedClosesDone(
-            [this, error_handler = std::move(error_handler)] {
-              ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
-              error_handler();
-              // "this" is gone
-            });
-      });
+  factory_binding_.set_error_handler([this, error_handler = std::move(error_handler)](
+                                         zx_status_t status) mutable {
+    ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
+    // This queues after the similar posting in CreateDecoder() (via
+    // TryAddCodec()), so that LocalCodecFactory won't get deleted until
+    // after previously-started TryAddCodec()s are done.
+    device_->codec_admission_control()->PostAfterPreviouslyStartedClosesDone(
+        [this, closure_queue = closure_queue_, error_handler = std::move(error_handler)]() mutable {
+          closure_queue->Enqueue([this, error_handler = std::move(error_handler)] {
+            ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
+            error_handler();
+            // "this" is gone
+          });
+        });
+  });
   is_error_handler_set_ = true;
 }
 
@@ -366,46 +374,54 @@ void LocalCodecFactory::CreateDecoder(
   //
   // The factory pointer remains valid for whole lifetime of this devhost
   // process.
+  auto callback = [this, video_decoder_params = std::move(video_decoder_params),
+                   video_decoder = std::move(video_decoder),
+                   factory](std::unique_ptr<CodecAdmission> codec_admission) mutable {
+    if (!codec_admission) {
+      // We can't create another Codec presently.
+      //
+      // ~video_decoder will take care of closing the channel.
+      return;
+    }
+
+    zx::result allocator_client_result = device_->video()->ConnectToSysmem();
+    if (allocator_client_result.is_error()) {
+      return;
+    }
+    auto sysmem = std::move(*allocator_client_result);
+    if (!sysmem) {
+      return;
+    }
+
+    auto codec =
+        std::make_unique<CodecImpl>(std::move(sysmem), std::move(codec_admission),
+                                    device_->driver()->shared_fidl_loop()->dispatcher(),
+                                    device_->driver()->shared_fidl_thread(),
+                                    std::move(video_decoder_params), std::move(video_decoder));
+
+    codec->SetLifetimeTracking(std::move(lifetime_tracking_));
+    ZX_DEBUG_ASSERT(lifetime_tracking_.empty());
+
+    codec->SetCodecMetrics(&device_->metrics());
+    auto core_codec = factory->create(codec->lock(), codec.get(), device_);
+    // Don't wait for CodecAdapter sub-class to call LogEvent().  Verify this is not
+    // std::nullopt here, as any CodecAdapter sub-class in amlogic_video_decoder is allowed to
+    // call LogEvent() and must override CoreCodecMetricsImplementation().
+    ZX_DEBUG_ASSERT(core_codec->CoreCodecMetricsImplementation());
+    codec->SetCoreCodecAdapter(std::move(core_codec));
+
+    codec->SetCodecDiagnostics(&device_->diagnostics());
+
+    device_->device_fidl()->BindCodecImpl(std::move(codec));
+  };
+
   device_->codec_admission_control()->TryAddCodec(
-      factory->multi_instance, [this, video_decoder_params = std::move(video_decoder_params),
-                                video_decoder = std::move(video_decoder),
-                                factory](std::unique_ptr<CodecAdmission> codec_admission) mutable {
-        if (!codec_admission) {
-          // We can't create another Codec presently.
-          //
-          // ~video_decoder will take care of closing the channel.
-          return;
-        }
-
-        zx::result allocator_client_result = device_->video()->ConnectToSysmem();
-        if (allocator_client_result.is_error()) {
-          return;
-        }
-        auto sysmem = std::move(*allocator_client_result);
-        if (!sysmem) {
-          return;
-        }
-
-        auto codec =
-            std::make_unique<CodecImpl>(std::move(sysmem), std::move(codec_admission),
-                                        device_->driver()->shared_fidl_loop()->dispatcher(),
-                                        device_->driver()->shared_fidl_thread(),
-                                        std::move(video_decoder_params), std::move(video_decoder));
-
-        codec->SetLifetimeTracking(std::move(lifetime_tracking_));
-        ZX_DEBUG_ASSERT(lifetime_tracking_.empty());
-
-        codec->SetCodecMetrics(&device_->metrics());
-        auto core_codec = factory->create(codec->lock(), codec.get(), device_);
-        // Don't wait for CodecAdapter sub-class to call LogEvent().  Verify this is not
-        // std::nullopt here, as any CodecAdapter sub-class in amlogic_video_decoder is allowed to
-        // call LogEvent() and must override CoreCodecMetricsImplementation().
-        ZX_DEBUG_ASSERT(core_codec->CoreCodecMetricsImplementation());
-        codec->SetCoreCodecAdapter(std::move(core_codec));
-
-        codec->SetCodecDiagnostics(&device_->diagnostics());
-
-        device_->device_fidl()->BindCodecImpl(std::move(codec));
+      factory->multi_instance, [closure_queue = closure_queue_, callback = std::move(callback)](
+                                   std::unique_ptr<CodecAdmission> codec_admission) mutable {
+        closure_queue->Enqueue([callback = std::move(callback),
+                                codec_admission = std::move(codec_admission)]() mutable {
+          callback(std::move(codec_admission));
+        });
       });
 }
 

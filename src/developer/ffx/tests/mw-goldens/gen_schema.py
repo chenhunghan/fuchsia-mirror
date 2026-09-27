@@ -134,23 +134,29 @@ def build_command_list(
                 "--machine",
                 "json-pretty",
             ] + cmd_parts[1:]
-            with open(schema_out_path, "w") as schema_out:
-                cmd_rc = subproce = subprocess.run(
-                    schema_cmd, stdout=schema_out
+            cmd_rc = subprocess.run(schema_cmd, capture_output=True, text=True)
+            if cmd_rc.returncode:
+                if not cmd_diagnostics:
+                    cmds_cmd = [
+                        ffx_path,
+                        "--no-environment",
+                        "--config",
+                        f"ffx.subtool-manifest={tool_list}",
+                        "commands",
+                    ]
+                    cmd_diagnostics = subprocess.check_output(cmds_cmd)
+                raise ValueError(
+                    f"Error running {schema_cmd}: {cmd_rc.returncode} {cmd_rc.stdout} {cmd_rc.stderr}\nAll commands {cmd_diagnostics}"
                 )
-                if cmd_rc.returncode:
-                    if not cmd_diagnostics:
-                        cmds_cmd = [
-                            ffx_path,
-                            "--no-environment",
-                            "--config",
-                            f"ffx.subtool-manifest={tool_list}",
-                            "commands",
-                        ]
-                        cmd_diagnostics = subprocess.check_output(cmds_cmd)
-                    raise ValueError(
-                        f"Error running {schema_cmd}: {cmd_rc.returncode} {cmd_rc.stdout} {cmd_rc.stderr}\nAll commands {cmd_diagnostics}"
+            with open(schema_out_path, "w") as schema_out:
+                schema_out.write(
+                    json.dumps(
+                        json.loads(cmd_rc.stdout),
+                        indent=4,
+                        separators=(",", ": "),
                     )
+                    + "\n"
+                )
 
     with open(comparison_path, mode="w") as cmp_file:
         json.dump(comparisons, cmp_file)

@@ -4,13 +4,13 @@
 
 use anyhow::{Context, Error, format_err};
 use cache_manager_config_lib::Config;
+use component_framework_cache_metrics_registry as metrics;
+use fidl_fuchsia_metrics;
+use fidl_fuchsia_sys2 as fsys;
+use fuchsia_async as fasync;
 use fuchsia_component::{self, client as fclient};
 use log::*;
 use std::process;
-use {
-    component_framework_cache_metrics_registry as metrics, fidl_fuchsia_metrics,
-    fidl_fuchsia_sys2 as fsys, fuchsia_async as fasync,
-};
 
 #[fuchsia::main(logging_tags=["cache_manager"])]
 async fn main() -> Result<(), Error> {
@@ -415,30 +415,30 @@ mod tests {
         let _ = exec.run_until_stalled(&mut monitor);
 
         // We expect no query sent to the capability provider since it sleeps first
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
 
         // Move forward to the first check
         advance_time_and_wake(&mut exec, &time_step);
         let _ = exec.run_until_stalled(&mut monitor);
 
         // We expect a status check
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // Since the reported usage is below the threshold, the monitor should do nothing.
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
 
         // Move forward to the next check
         advance_time_and_wake(&mut exec, &time_step);
         let _ = exec.run_until_stalled(&mut monitor);
 
         // Expect a check, where we'll report we're above the cache clearing threshold
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // Expect that the monitor tries to clear storage
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Delete)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Delete));
 
         // Monitor checks after clearing storage
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // Check for the Cobalt metrics
         let cobalt_metrics = drain_cobalt_events(&mut exec, &mut monitor, &mut cobalt_stream);
@@ -451,17 +451,17 @@ mod tests {
         assert_eq!(cobalt_metrics[0].payload, MetricEventPayload::Count(1));
 
         // No call is expected until the timer goes off
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
 
         // advance time
         advance_time_and_wake(&mut exec, &time_step);
         let _ = exec.run_until_stalled(&mut monitor);
 
         // Monitor checks again and we'll respond that usage is below the threshold
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // There should be no call until the next check
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
     }
 
     #[test]
@@ -510,30 +510,30 @@ mod tests {
         let _ = exec.run_until_stalled(&mut monitor);
 
         // We expect no query sent to the capability provider since it sleeps first
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
 
         // Move forward to the first check
         advance_time_and_wake(&mut exec, &time_step);
         let _ = exec.run_until_stalled(&mut monitor);
 
         // We expect a status check
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // Since the reported usage is below the threshold, the monitor should do nothing.
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
 
         // Move forward to the next check
         advance_time_and_wake(&mut exec, &time_step);
         let _ = exec.run_until_stalled(&mut monitor);
 
         // Expect a check, where we'll report we're above the cache clearing threshold
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // Expect that the monitor tries to clear storage
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Delete)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Delete));
 
         // Monitor checks after clearing storage
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // Check for the Cobalt metrics
         let cobalt_metrics = drain_cobalt_events(&mut exec, &mut monitor, &mut cobalt_stream);
@@ -546,23 +546,23 @@ mod tests {
         assert_eq!(cobalt_metrics[0].payload, MetricEventPayload::Count(1));
 
         // No call is expected until the timer goes off
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
 
         // advance time
         advance_time_and_wake(&mut exec, &time_step);
         let _ = exec.run_until_stalled(&mut monitor);
 
         // Monitor checks again and we'll respond that usage is below the threshold
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // Expect that the monitor tries to clear storage again on the next run
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Delete)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Delete));
 
         // Monitor checks after clearing storage
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Ok(Some(CallType::Status)));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Ok(CallType::Status));
 
         // There should be no call until the next check
-        assert_eq!(calls_rx.try_next().map_err(|_| ()), Err(()));
+        assert_eq!(calls_rx.try_recv().map_err(|_| ()), Err(()));
     }
 
     #[test]

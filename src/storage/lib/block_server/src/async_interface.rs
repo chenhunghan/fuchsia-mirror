@@ -6,9 +6,11 @@ use super::{
     ActiveRequests, DecodedRequest, DeviceInfo, FIFO_MAX_REQUESTS, HandleRequestResult,
     IntoOrchestrator, OffsetMap, Operation, SessionHelper, TraceFlowId,
 };
+use crate::mapper::serve_mapper_session;
 use crate::verifier::Verifier;
 use anyhow::Error;
 use block_protocol::{BlockFifoRequest, BlockFifoResponse, ReadOptions, WriteFlags, WriteOptions};
+use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_storage_block as fblock;
 use fidl_fuchsia_storage_block::DeviceFlag;
 use fuchsia_async as fasync;
@@ -76,14 +78,14 @@ pub trait Interface: Send + Sync + Unpin + 'static {
     /// forward them can implement this method.
     fn open_mapper_session(
         session_manager: Arc<SessionManager<Self>>,
-        session: fidl::endpoints::ServerEnd<fblock::MapperSessionMarker>,
+        session: ServerEnd<fblock::MapperSessionMarker>,
         mapping_vmo: zx::Vmo,
         block_size: u32,
         port: Option<zx::Port>,
         delivery_queue: Option<zx::Vmo>,
     ) -> Result<impl Future<Output = Result<(), Error>> + Send + 'static, zx::Status> {
         let buffer_source = BufferSource::new(MAX_READ_BUFFER_SIZE * 16);
-        let vmo_clone = buffer_source.vmo().duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let vmo = buffer_source.vmo().clone();
         let allocator = Arc::new(BufferAllocator::new(
             std::cmp::max(block_size as usize, zx::system_get_page_size() as usize),
             buffer_source,
@@ -96,7 +98,7 @@ pub trait Interface: Send + Sync + Unpin + 'static {
             scope.to_handle(),
         ));
         let interface = session_manager.interface.clone();
-        let session_fut = crate::mapper::serve_mapper_session(
+        let session_fut = serve_mapper_session(
             Arc::new(move |mapping_vmo: &zx::Vmo, dq: zx::Vmo| {
                 interface.on_open_mapper_session(mapping_vmo, dq)
             }),
@@ -107,9 +109,10 @@ pub trait Interface: Send + Sync + Unpin + 'static {
             delivery_queue,
         )?;
         Ok(async move {
-            session_manager.interface.on_attach_vmo(&vmo_clone).await?;
+            session_manager.interface.on_attach_vmo(&vmo).await?;
             let res = session_fut.await;
             scope.cancel().await;
+            session_manager.interface.on_detach_vmo(&vmo);
             res
         })
     }

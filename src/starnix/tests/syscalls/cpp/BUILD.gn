@@ -75,7 +75,6 @@ syscall_tests_without_deps = [
   "test_helper_test",
   "thread_group_lifecycle_test",
   "timerfd_test",
-  "timers_test",
   "tmpfs_test",
   "trivial_test",
   "tun_test",
@@ -85,6 +84,7 @@ syscall_tests_without_deps = [
   "vmsplice_test",
   "waitpid_exit_signal_test",
   "waitpid_flags_test",
+  "xattr_test",
   "zombie_test",
 
   # go/keep-sorted end
@@ -202,6 +202,10 @@ syscall_tests_etc = [
       "test_programs:custom_pt_interp_child",
       "test_programs:exit_zero",
     ]
+  },
+  {
+    name = "timers_test"
+    executables = [ ":timers_test_exec_child" ]
   },
 ]
 
@@ -493,6 +497,7 @@ resource_from_executables("test_helper_executables") {
     ":ptrace_test_exec_child",
     ":signal_handling_test_exec_child",
     ":syscall_test_exec_child",
+    ":timers_test_exec_child",
     "test_programs:clone_exec_helper",
     "test_programs:custom_pt_interp_child",
     "test_programs:exit_zero",
@@ -615,6 +620,15 @@ if (is_linux) {
     testonly = true
     emit_tool_path = false
     sources = [ "syscall_test_exec_child.cc" ]
+
+    exclude_toolchain_tags = [ "coverage" ]
+    deps = [ ":test_utils" ]
+  }
+
+  executable("timers_test_exec_child") {
+    testonly = true
+    emit_tool_path = false
+    sources = [ "timers_test_exec_child.cc" ]
 
     exclude_toolchain_tags = [ "coverage" ]
     deps = [ ":test_utils" ]

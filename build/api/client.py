@@ -1111,6 +1111,12 @@ where each line is in the format <test_label>,<test_env>, where
             required=True,
             help="Path to an input text file that contains one source file path per line. All paths should be relative to the Fuchsia source directory",
         )
+        parser.add_argument(
+            "--format",
+            choices=["text", "json"],
+            default="text",
+            help="Output format. Default is text (<test_label>,<test_env> per line).",
+        )
 
     @staticmethod
     def run(args: argparse.Namespace) -> int:
@@ -1127,12 +1133,30 @@ where each line is in the format <test_label>,<test_env>, where
         bazel_paths = build_utils.BazelPaths(args.fuchsia_dir, args.build_dir)
         bazel_launcher = build_utils.BazelLauncher(bazel_paths.launcher)
 
-        test_targets = affected_tests.find_tests_affected_by_changed_files(
+        result = affected_tests.find_tests_affected_by_changed_files(
             changed_files, args.fuchsia_dir, ninja_runner, bazel_launcher
         )
-        for target in sorted(test_targets, key=lambda x: x.label):
-            env = "device" if target.os_name == "fuchsia" else "host"
-            print(f"{target.label},{env}")
+        sorted_targets = sorted(result.affected_tests, key=lambda x: x.label)
+        if args.format == "json":
+            import json
+
+            json_output = {
+                "test_targets": [
+                    {
+                        "label": target.label,
+                        "env": "device"
+                        if target.os_name == "fuchsia"
+                        else "host",
+                    }
+                    for target in sorted_targets
+                ],
+                "build_not_affected": result.build_not_affected,
+            }
+            print(json.dumps(json_output, indent=2))
+        else:
+            for target in sorted_targets:
+                env = "device" if target.os_name == "fuchsia" else "host"
+                print(f"{target.label},{env}")
         return 0
 
 

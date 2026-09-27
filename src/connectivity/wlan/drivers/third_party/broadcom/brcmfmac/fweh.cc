@@ -26,6 +26,7 @@
 #include "debug.h"
 #include "fwil.h"
 #include "linuxisms.h"
+#include "locks.h"
 #include "proto.h"
 #include "third_party/bcmdhd/crossdriver/wlioctl.h"
 #include "workqueue.h"
@@ -190,7 +191,8 @@ static zx_status_t brcmf_fweh_call_event_handler(struct brcmf_if* ifp,
  * @item: queue entry.
  * @ifpp: interface object (may change upon ADD action).
  */
-void brcmf_fweh_handle_if_event(struct brcmf_pub* drvr, struct brcmf_event_msg* emsg, void* data) {
+void brcmf_fweh_handle_if_event(struct brcmf_pub* drvr, struct brcmf_event_msg* emsg, void* data)
+    __TA_REQUIRES(drvr->if_mutex) {
   struct brcmf_if_event* ifevent = static_cast<decltype(ifevent)>(data);
   struct brcmf_if* ifp;
   zx_status_t err = ZX_OK;
@@ -216,7 +218,10 @@ void brcmf_fweh_handle_if_event(struct brcmf_pub* drvr, struct brcmf_event_msg* 
   if (ifevent->action == BRCMF_E_IF_ADD) {
     BRCMF_DBG(EVENT, "adding ifname '%s' with mac " FMT_MAC, emsg->ifname,
               FMT_MAC_ARGS(emsg->addr));
-    err = brcmf_add_if(drvr, ifevent->bsscfgidx, ifevent->ifidx, emsg->ifname, emsg->addr, &ifp);
+    // The event handler has already locked the correct mutex, proceed to use the locked version of
+    // this call.
+    err = brcmf_add_if_locked(drvr, ifevent->bsscfgidx, ifevent->ifidx, emsg->ifname, emsg->addr,
+                              &ifp);
     if (err != ZX_OK) {
       return;
     }
@@ -238,7 +243,9 @@ void brcmf_fweh_handle_if_event(struct brcmf_pub* drvr, struct brcmf_event_msg* 
     // If no one is waiting for the event, remove interface and don't invoke
     // event handler, since ifp is no longer valid once interface is removed.
     if (!armed) {
-      brcmf_remove_interface(ifp, false);
+      // The event handler has already locked the correct mutex, proceed to use the locked version
+      // of this call.
+      brcmf_remove_interface_locked(drvr, ifp, false);
       return;
     }
   }
@@ -293,22 +300,26 @@ static void brcmf_fweh_handle_event(brcmf_pub* drvr, struct brcmf_fweh_queue_ite
 
   /* special handling of interface event */
   if (event_info->code == BRCMF_E_IF) {
+    ScopedSharedWriteLock lock(drvr->if_mutex);
     brcmf_fweh_handle_if_event(drvr, &emsg, event->data);
     goto event_free;
   }
-  if (event_info->code == BRCMF_E_TDLS_PEER_EVENT) {
-    ifp = drvr->iflist[0];
-  } else if (emsg.bsscfgidx < BRCMF_MAX_IFS) {
-    ifp = drvr->iflist[emsg.bsscfgidx];
-  } else {
-    BRCMF_ERR("invalid bsscfgidx: %u", emsg.bsscfgidx);
-    goto event_free;
-  }
+  {
+    ScopedSharedReadLock lock(drvr->if_mutex);
+    if (event_info->code == BRCMF_E_TDLS_PEER_EVENT) {
+      ifp = drvr->iflist[0];
+    } else if (emsg.bsscfgidx < BRCMF_MAX_IFS) {
+      ifp = drvr->iflist[emsg.bsscfgidx];
+    } else {
+      BRCMF_ERR("invalid bsscfgidx: %u", emsg.bsscfgidx);
+      goto event_free;
+    }
 
-  err = brcmf_fweh_call_event_handler(ifp, event_info->code, &emsg, event->data);
-  if (err != ZX_OK) {
-    BRCMF_ERR("event handler failed (%d)", event_info->code);
-    err = ZX_OK;
+    err = brcmf_fweh_call_event_handler(ifp, event_info->code, &emsg, event->data);
+    if (err != ZX_OK) {
+      BRCMF_ERR("event handler failed (%d)", event_info->code);
+      err = ZX_OK;
+    }
   }
 event_free:
   free(event);
@@ -351,9 +362,12 @@ static void brcmf_fweh_event_worker(WorkItem* work) {
         break;
       case BRCMF_FWEH_EAPOL_FRAME:
         // This is an eapol frame
-        brcmf_if* ifp = brcmf_get_ifp(drvr, event->ifidx);
-        if (ifp) {
-          brcmf_cfg80211_handle_eapol_frame(ifp, event->data, event->datalen);
+        {
+          ScopedSharedReadLock lock(drvr->if_mutex);
+          brcmf_if* ifp = brcmf_get_ifp(drvr, event->ifidx);
+          if (ifp) {
+            brcmf_cfg80211_handle_eapol_frame(ifp, event->data, event->datalen);
+          }
         }
         // Free the event item memory allocated in brcmf_fweh_queue_eapol_frame().
         free(event);

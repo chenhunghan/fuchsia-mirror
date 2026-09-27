@@ -2,7 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <zircon/assert.h>
+
+#include <cstdint>
+#include <cstring>
+#include <map>
+#include <memory>
 #include <set>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <va/va.h>
@@ -19,22 +26,39 @@ static const std::set<VASurfaceID> vaFreeSurfacesDefault = {
     44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63};
 static std::set<VASurfaceID> vaFreeSurfaces = vaFreeSurfacesDefault;
 
-void vaDefaultStubSetReturn() {
-  vaCreateConfigReturn = VA_STATUS_SUCCESS;
-  vaCreateContextReturn = VA_STATUS_SUCCESS;
-  vaCreateSurfacesReturn = VA_STATUS_SUCCESS;
-  vaFreeSurfaces = vaFreeSurfacesDefault;
-}
+namespace {
+
+struct Dimensions {
+  uint32_t width;
+  uint32_t height;
+  std::shared_ptr<std::vector<uint8_t>> backing_buffer;
+};
+
+// Tracks the dimensions of currently-allocated VASurfaces so vaDeriveImage()
+// can populate VAImage pitches, offsets, and data_size accurately for
+// destination bounds checks in UploadVideoFrameToSurface().
+std::map<VASurfaceID, Dimensions> surface_dimensions;
+
+}  // namespace
 
 struct FakeBuffer {
   VABufferType type{};
   size_t size{};
-  std::unique_ptr<std::vector<uint8_t>> mapped_buffer;
+  std::shared_ptr<std::vector<uint8_t>> mapped_buffer;
   std::unique_ptr<VACodedBufferSegment> coded_segment;
 };
 
 static std::map<VABufferID, FakeBuffer> fake_buffer_map_;
 static VABufferID next_buffer_id_;
+
+void vaDefaultStubSetReturn() {
+  vaCreateConfigReturn = VA_STATUS_SUCCESS;
+  vaCreateContextReturn = VA_STATUS_SUCCESS;
+  vaCreateSurfacesReturn = VA_STATUS_SUCCESS;
+  vaFreeSurfaces = vaFreeSurfacesDefault;
+  surface_dimensions.clear();
+  fake_buffer_map_.clear();
+}
 
 void vaCreateConfigStubSetReturn(VAStatus status) { vaCreateConfigReturn = status; }
 
@@ -118,6 +142,11 @@ VAStatus vaCreateSurfaces(VADisplay dpy, unsigned int format, unsigned int width
   for (size_t i = 0; i < num_surfaces; i++) {
     surfaces[i] = *vaFreeSurfaces.begin();
     vaFreeSurfaces.erase(vaFreeSurfaces.begin());
+    uint32_t pitch = (width + 1) & ~1u;
+    uint32_t aligned_height = (height + 1) & ~1u;
+    uint32_t buffer_size = pitch * aligned_height + pitch * (aligned_height / 2);
+    surface_dimensions[surfaces[i]] = {width, height,
+                                       std::make_shared<std::vector<uint8_t>>(buffer_size, 0)};
   }
 
   return VA_STATUS_SUCCESS;
@@ -131,6 +160,7 @@ VAStatus vaDestroySurfaces(VADisplay dpy, VASurfaceID *surfaces, int num_surface
 
   for (int surface_idx = 0; surface_idx < num_surfaces; surface_idx += 1) {
     vaFreeSurfaces.insert(surfaces[surface_idx]);
+    surface_dimensions.erase(surfaces[surface_idx]);
   }
 
   return VA_STATUS_SUCCESS;
@@ -162,19 +192,41 @@ VAStatus vaGetImage(VADisplay dpy, VASurfaceID surface, int x, int y, unsigned i
 }
 
 VAStatus vaDeriveImage(VADisplay dpy, VASurfaceID surface, VAImage *image) {
-  // Arbitrary dimensions that match those in the H264 Encoder tests.
-  constexpr uint32_t kImageBufferSize = 12 * 12 * 3 / 2;
-  fake_buffer_map_[next_buffer_id_].size = kImageBufferSize;
+  // Verify that the surface is currently allocated (in use) and not free.
+  ZX_ASSERT(vaFreeSurfaces.count(surface) == 0);
+  auto it = surface_dimensions.find(surface);
+  ZX_ASSERT(it != surface_dimensions.end());
+
+  // Use the dimensions the surface was created with via vaCreateSurfaces() so
+  // that destination VAImage bounds checks in UploadVideoFrameToSurface()
+  // validate against accurate pitches, offsets, and data_size.
+  uint32_t width = it->second.width;
+  uint32_t height = it->second.height;
+  uint32_t pitch = (width + 1) & ~1u;
+  uint32_t aligned_height = (height + 1) & ~1u;
+  uint32_t main_plane_size = pitch * aligned_height;
+  uint32_t uv_plane_size = pitch * (aligned_height / 2);
+  uint32_t buffer_size = main_plane_size + uv_plane_size;
+  fake_buffer_map_[next_buffer_id_].size = buffer_size;
+  fake_buffer_map_[next_buffer_id_].mapped_buffer = it->second.backing_buffer;
+  image->image_id = next_buffer_id_;
   image->buf = next_buffer_id_++;
+  image->width = static_cast<uint16_t>(width);
+  image->height = static_cast<uint16_t>(height);
+  image->data_size = buffer_size;
+  image->num_planes = 2;
   image->offsets[0] = 0;
-  image->pitches[0] = 10;
-  image->offsets[1] = 10 * 10;
-  image->pitches[1] = 10;
+  image->pitches[0] = pitch;
+  image->offsets[1] = main_plane_size;
+  image->pitches[1] = pitch;
 
   return VA_STATUS_SUCCESS;
 }
 
-VAStatus vaDestroyImage(VADisplay dpy, VAImageID image) { return VA_STATUS_SUCCESS; }
+VAStatus vaDestroyImage(VADisplay dpy, VAImageID image) {
+  fake_buffer_map_.erase(image);
+  return VA_STATUS_SUCCESS;
+}
 
 VAStatus vaCreateBuffer(VADisplay dpy, VAContextID context, VABufferType type, unsigned int size,
                         unsigned int num_elements, void *data, VABufferID *buf_id) {
@@ -198,7 +250,9 @@ VAStatus vaInitialize(VADisplay dpy, int *major_version, int *minor_version) {
 
 VAStatus vaMapBuffer(VADisplay dpy, VABufferID buf_id, void **pbuf) {
   FakeBuffer &buf = fake_buffer_map_[buf_id];
-  buf.mapped_buffer = std::make_unique<std::vector<uint8_t>>(buf.size);
+  if (!buf.mapped_buffer) {
+    buf.mapped_buffer = std::make_shared<std::vector<uint8_t>>(buf.size);
+  }
 
   if (buf.type == VAEncCodedBufferType) {
     buf.coded_segment = std::make_unique<VACodedBufferSegment>();

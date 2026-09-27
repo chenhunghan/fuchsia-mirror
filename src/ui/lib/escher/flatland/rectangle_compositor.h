@@ -12,7 +12,6 @@
 #include "src/ui/lib/escher/flatland/flatland_static_config.h"
 #include "src/ui/lib/escher/forward_declarations.h"
 #include "src/ui/lib/escher/geometry/types.h"
-#include "src/ui/lib/escher/util/hash_map.h"
 #include "src/ui/lib/escher/vk/shader_program.h"
 #include "src/ui/lib/escher/vk/texture.h"
 
@@ -48,6 +47,9 @@ class RectangleCompositor {
   explicit RectangleCompositor(EscherWeakPtr escher);
   ~RectangleCompositor() = default;
 
+  static constexpr uint32_t kTransientTargetAttachmentIndex = 0;
+  static constexpr uint32_t kOutputTargetAttachmentIndex = 1;
+
   // Draws a single batch of renderables into the provided output image.
   // Parameters:
   // - cmd_buf: The command buffer used to record commands.
@@ -58,25 +60,39 @@ class RectangleCompositor {
   //             |opacity| determines use of opaque or transparent rendering.
   // - output_image: the render target the renderables will be rendered into.
   // - depth_buffer: The depth texture to be used for z-buffering.
-  // - apply_color_conversion: Does a color conversion pass over the rendered output
-  //   using the data set with |SetColorConversionParams|.
   //
-  // Depth is implicit. Renderables are drawn in the order they appear in the input
-  // vector, with the first entry being the furthest back, and the last the closest.
+  // Creates a standard 1-subpass Framebuffer suitable for use with DrawBatch().
+  impl::FramebufferPtr CreateFramebuffer(ImageViewPtr output_image_view, TexturePtr depth_texture);
+
+  // Creates a 2-subpass Framebuffer for color conversion. If |transient_image| is provided, it is
+  // reused as the intermediate color attachment for the first subpass; if null, a new transient
+  // image matching |output_image_view| is allocated.
+  impl::FramebufferPtr CreateColorConversionFramebuffer(ImageViewPtr output_image_view,
+                                                        TexturePtr depth_texture,
+                                                        ImagePtr transient_image = nullptr);
+
+  // Returns the transient image from a color-conversion framebuffer (attachment 0).
+  // The framebuffer *MUST* have been created via `CreateColorConversionFramebuffer()`.
+  static ImagePtr GetTransientImage(const impl::FramebufferPtr& color_conversion_framebuffer);
+
+  // Returns true if |transient_image| has matching properties (dimensions, format, color space,
+  // protected memory) to serve as the intermediate target for rendering into |target_image|.
+  static bool CanShareTransientImage(const ImagePtr& transient_image, const ImagePtr& target_image);
+
+  // Draws a batch of renderables into |framebuffer|.  Whether color conversion is applied is
+  // determined by |framebuffer|, i.e. by whether CreateColorConversionFramebuffer() was used.
   void DrawBatch(CommandBuffer* cmd_buf, std::span<const Rectangle2D> rectangles,
                  std::span<const TexturePtr> textures, std::span<const ColorData> color_data,
-                 const ImagePtr& output_image, const TexturePtr& depth_buffer,
-                 bool apply_color_conversion = false);
+                 const impl::FramebufferPtr& framebuffer);
 
-  // Helper to support braced-init-lists (e.g. {rectangle}) on the stack without heap allocations.
+  // Helper to support braced-init-lists with Framebuffer.
   void DrawBatch(CommandBuffer* cmd_buf, std::initializer_list<Rectangle2D> rectangles,
                  std::initializer_list<TexturePtr> textures,
-                 std::initializer_list<ColorData> color_data, const ImagePtr& output_image,
-                 const TexturePtr& depth_buffer, bool apply_color_conversion = false) {
+                 std::initializer_list<ColorData> color_data,
+                 const impl::FramebufferPtr& framebuffer) {
     DrawBatch(cmd_buf, std::span<const Rectangle2D>(rectangles.begin(), rectangles.size()),
               std::span<const TexturePtr>(textures.begin(), textures.size()),
-              std::span<const ColorData>(color_data.begin(), color_data.size()), output_image,
-              depth_buffer, apply_color_conversion);
+              std::span<const ColorData>(color_data.begin(), color_data.size()), framebuffer);
   }
 
   // This data is used to apply a color-conversion post processing effect over the entire
@@ -112,7 +128,7 @@ class RectangleCompositor {
 
  private:
   RectangleCompositor(const RectangleCompositor&) = delete;
-  ImagePtr CreateOrFindTransientImage(const ImagePtr& image);
+  ImagePtr CreateTransientImage(const ImagePtr& image);
 
   // Hold onto escher pointer.
   EscherWeakPtr escher_ = nullptr;
@@ -122,10 +138,6 @@ class RectangleCompositor {
 
   // Color conversion shader program used for post processing.
   ShaderProgramPtr color_conversion_program_ = nullptr;
-
-  // Mapping of targets for the first subpass, to act as a cache.
-  // TODO(https://fxbug.dev/42176116): Make sure this doesn't bloat.
-  HashMap<ImageInfo, ImagePtr> transient_image_map_;
 
   // Color conversion values.
   ColorConversionParams color_conversion_params_;

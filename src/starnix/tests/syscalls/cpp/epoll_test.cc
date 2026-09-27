@@ -424,3 +424,60 @@ TEST(EpollTest, PipeReadFullTriggerEpollOutWithEpollET) {
   // Since the pipe was not full before reading, this read does not trigger EPOLLOUT.
   ASSERT_EQ(0, epoll_wait(epfd.get(), events, 1, 0));
 }
+
+TEST(EpollTest, TargetErrorDeliversEpollErr) {
+  // Test that when a target file descriptor encounters an error condition (such as a full pipe
+  // whose read end has been closed), epoll delivers EPOLLERR for that target without failing
+  // the epoll_wait syscall or dropping events from other ready targets.
+  int pipe_fds[2];
+  SAFE_SYSCALL(pipe2(pipe_fds, O_NONBLOCK));
+  fbl::unique_fd pipe_rd(pipe_fds[0]);
+  fbl::unique_fd pipe_wr(pipe_fds[1]);
+
+  const size_t page_size = sysconf(_SC_PAGE_SIZE);
+  std::vector<std::byte> page_buffer(page_size, std::byte{0xAB});
+  SAFE_SYSCALL(fcntl(pipe_wr.get(), F_SETPIPE_SZ, 2 * page_size));
+  ASSERT_EQ(static_cast<ssize_t>(page_size),
+            write(pipe_wr.get(), page_buffer.data(), page_buffer.size()));
+  ASSERT_EQ(static_cast<ssize_t>(page_size),
+            write(pipe_wr.get(), page_buffer.data(), page_buffer.size()));
+
+  // Close the read end while the pipe is full.
+  pipe_rd.reset();
+
+  // Also create a second, readable pipe to verify that an error on one target does not
+  // prevent ready events on other targets from being processed.
+  int pipe2_fds[2];
+  SAFE_SYSCALL(pipe2(pipe2_fds, O_NONBLOCK));
+  fbl::unique_fd pipe2_rd(pipe2_fds[0]);
+  fbl::unique_fd pipe2_wr(pipe2_fds[1]);
+  char byte = 'x';
+  ASSERT_EQ(1, write(pipe2_wr.get(), &byte, 1));
+
+  fbl::unique_fd epfd(epoll_create1(0));
+  ASSERT_TRUE(epfd.is_valid());
+
+  struct epoll_event ev{};
+  ev.events = EPOLLOUT;
+  ev.data.fd = pipe_wr.get();
+  SAFE_SYSCALL(epoll_ctl(epfd.get(), EPOLL_CTL_ADD, pipe_wr.get(), &ev));
+
+  struct epoll_event ev2{};
+  ev2.events = EPOLLIN;
+  ev2.data.fd = pipe2_rd.get();
+  SAFE_SYSCALL(epoll_ctl(epfd.get(), EPOLL_CTL_ADD, pipe2_rd.get(), &ev2));
+
+  // epoll_wait must succeed and report EPOLLERR on pipe_wr, as well as EPOLLIN on pipe2_rd.
+  struct epoll_event events[2];
+  int n = epoll_wait(epfd.get(), events, 2, 0);
+  ASSERT_GE(n, 1);
+
+  bool found_err = false;
+  for (int i = 0; i < n; ++i) {
+    if (events[i].data.fd == pipe_wr.get()) {
+      EXPECT_TRUE(events[i].events & EPOLLERR);
+      found_err = true;
+    }
+  }
+  EXPECT_TRUE(found_err);
+}

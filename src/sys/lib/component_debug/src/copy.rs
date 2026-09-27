@@ -340,10 +340,14 @@ mod tests {
     const OVER_LIMIT_FILE_ARRAY: [u8; (CHANNEL_SIZE_LIMIT + 1) as usize] =
         [b'a'; (CHANNEL_SIZE_LIMIT + 1) as usize];
 
-    // We can call from_utf8_unchecked as the file arrays only contain the character 'a' which is safe to unwrap.
-    const LARGE_FILE_DATA: &str = unsafe { std::str::from_utf8_unchecked(&LARGE_FILE_ARRAY) };
-    const OVER_LIMIT_FILE_DATA: &str =
-        unsafe { std::str::from_utf8_unchecked(&OVER_LIMIT_FILE_ARRAY) };
+    const LARGE_FILE_DATA: &str = match std::str::from_utf8(&LARGE_FILE_ARRAY) {
+        Ok(data) => data,
+        Err(_) => panic!("test data must be UTF-8"),
+    };
+    const OVER_LIMIT_FILE_DATA: &str = match std::str::from_utf8(&OVER_LIMIT_FILE_ARRAY) {
+        Ok(data) => data,
+        Err(_) => panic!("test data must be UTF-8"),
+    };
 
     #[derive(Clone)]
     struct Input {

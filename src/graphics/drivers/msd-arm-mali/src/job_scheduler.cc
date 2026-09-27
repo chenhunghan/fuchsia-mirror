@@ -243,13 +243,18 @@ void JobScheduler::ScheduleRunnableAtoms() {
       }
       if (new_atom_protected) {
         DASSERT(want_to_switch_to_protected_);
-        owner_->EnterProtectedMode();
+        if (!owner_->EnterProtectedMode()) {
+          MAGMA_LOG(WARNING, "Failed to enter protected mode");
+          return;
+        }
         want_to_switch_to_protected_ = false;
         DASSERT(should_skip_mode[UNPROTECTED]);
       } else {
         DASSERT(want_to_switch_to_unprotected_);
-        if (!owner_->ExitProtectedMode())
+        if (!owner_->ExitProtectedMode()) {
+          MAGMA_LOG(WARNING, "Failed to exit protected mode");
           return;
+        }
         want_to_switch_to_unprotected_ = false;
         DASSERT(should_skip_mode[PROTECTED]);
       }

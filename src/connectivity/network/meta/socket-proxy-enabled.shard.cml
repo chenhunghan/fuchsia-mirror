@@ -53,10 +53,12 @@
     ],
     expose: [
         {
-            protocol: [
-                "fuchsia.net.policy.properties.DefaultNetworkWatcher",
-                "fuchsia.net.policy.socketproxy.StarnixNetworks",
-            ],
+            protocol: [ "fuchsia.net.policy.socketproxy.NetworkRegistry" ],
+            from: "#netcfg",
+            availability: "optional",
+        },
+        {
+            protocol: [ "fuchsia.net.policy.properties.DefaultNetworkWatcher" ],
             from: "#socket-proxy",
             availability: "optional",
         },

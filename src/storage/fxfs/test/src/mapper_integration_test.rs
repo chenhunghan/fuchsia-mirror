@@ -8,7 +8,8 @@ use blob_writer::BlobWriter;
 use block_client::BlockClient as _;
 use delivery_blob::{CompressionMode, Type1Blob, Type3Blob};
 use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions};
-use fidl_fuchsia_fxfs::BlobCreatorMarker;
+use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobReaderMarker};
+use fidl_fuchsia_io as fio;
 use fidl_fuchsia_storage_block as fblock;
 use fidl_fuchsia_storage_mapping::MappingProviderMarker;
 use fidl_fuchsia_storage_partitions as fpartitions;
@@ -16,6 +17,7 @@ use fs_management::filesystem::{BlockConnector as _, Filesystem as FsManagementF
 use fuchsia_component::client::{Service, connect_to_protocol, connect_to_protocol_at_dir_svc};
 use fuchsia_merkle::Hash;
 use std::sync::Arc;
+use test_case::test_case;
 
 struct TestBlob {
     data: Vec<u8>,
@@ -46,7 +48,9 @@ impl TestBlob {
 struct TestPartitionEnv {
     partition: Arc<fpartitions::PartitionServiceProxy>,
     serving: fs_management::filesystem::ServingMultiVolumeFilesystem,
+    volume: fs_management::filesystem::ServingVolume,
     blob_creator: fidl_fuchsia_fxfs::BlobCreatorProxy,
+    blob_reader: fidl_fuchsia_fxfs::BlobReaderProxy,
     mapping_provider: fidl_fuchsia_storage_mapping::MappingProviderProxy,
     mapper_proxy: fblock::MapperProxy,
     _gpt: Option<fs_management::filesystem::ServingMultiVolumeFilesystem>,
@@ -154,13 +158,40 @@ impl TestPartitionEnv {
         let blob_creator =
             connect_to_protocol_at_dir_svc::<BlobCreatorMarker>(volume.exposed_dir())
                 .context("Failed to connect to BlobCreator")?;
+        let blob_reader = connect_to_protocol_at_dir_svc::<BlobReaderMarker>(volume.exposed_dir())
+            .context("Failed to connect to BlobReader")?;
         let mapping_provider =
             connect_to_protocol_at_dir_svc::<MappingProviderMarker>(volume.exposed_dir())
                 .context("Failed to connect to MappingProvider")?;
 
         let mapper_proxy = partition.connect_to_mapper()?;
 
-        Ok(Self { partition, serving, blob_creator, mapping_provider, mapper_proxy, _gpt })
+        Ok(Self {
+            partition,
+            serving,
+            volume,
+            blob_creator,
+            blob_reader,
+            mapping_provider,
+            mapper_proxy,
+            _gpt,
+        })
+    }
+
+    async fn write_blob(&self, blob: &TestBlob) -> Result<(), Error> {
+        let writer_client_end = self
+            .blob_creator
+            .create(&blob.hash.into(), false)
+            .await
+            .context("FIDL error on BlobCreator.Create")?
+            .map_err(|e| anyhow!("CreateBlob error: {e:?}"))
+            .context("Failed to create blob")?;
+        let writer_proxy = writer_client_end.into_proxy();
+        let mut blob_writer = BlobWriter::create(writer_proxy, blob.delivery_data.len() as u64)
+            .await
+            .context("Failed to create BlobWriter")?;
+        blob_writer.write(&blob.delivery_data).await.context("Failed to write blob data")?;
+        Ok(())
     }
 
     async fn shutdown(self) -> Result<(), Error> {
@@ -227,18 +258,7 @@ async fn test_mapper_no_verification_on_gpt_partition() -> Result<(), Error> {
 
     for (idx, blob) in test_blobs.iter().enumerate() {
         log::info!("Writing test blob {idx} (size: {} bytes)...", blob.data.len());
-        let writer_client_end = env
-            .blob_creator
-            .create(&blob.hash.into(), false)
-            .await
-            .context("FIDL error on BlobCreator.Create")?
-            .map_err(|e| anyhow!("CreateBlob error: {e:?}"))
-            .context("Failed to create blob")?;
-        let writer_proxy = writer_client_end.into_proxy();
-        let mut blob_writer = BlobWriter::create(writer_proxy, blob.delivery_data.len() as u64)
-            .await
-            .context("Failed to create BlobWriter")?;
-        blob_writer.write(&blob.delivery_data).await.context("Failed to write blob data")?;
+        env.write_blob(blob).await?;
 
         let key = (idx + 1) as u64;
         log::info!("Opening blob {idx} (key {key}) in mapping session...");
@@ -312,18 +332,7 @@ async fn test_mapper_with_verification_on_gpt_partition() -> Result<(), Error> {
 
     for (idx, blob) in test_blobs.iter().enumerate() {
         log::info!("Writing verified test blob {idx} (size: {} bytes)...", blob.data.len());
-        let writer_client_end = env
-            .blob_creator
-            .create(&blob.hash.into(), false)
-            .await
-            .context("FIDL error on BlobCreator.Create")?
-            .map_err(|e| anyhow!("CreateBlob error: {e:?}"))
-            .context("Failed to create blob")?;
-        let writer_proxy = writer_client_end.into_proxy();
-        let mut blob_writer = BlobWriter::create(writer_proxy, blob.delivery_data.len() as u64)
-            .await
-            .context("Failed to create BlobWriter")?;
-        blob_writer.write(&blob.delivery_data).await.context("Failed to write blob data")?;
+        env.write_blob(blob).await?;
 
         log::info!("Creating verified paged VMO for blob {idx}...");
         let root_hash = <[u8; 32]>::from(blob.hash);
@@ -365,21 +374,7 @@ async fn test_mapper_with_verification_corrupted_block_on_gpt_partition() -> Res
     log::info!("Testing verification failure on corrupted disk blocks...");
     let original_data = vec![0x33u8; 32 * 1024];
     let target_blob = TestBlob::new_uncompressed(original_data);
-    let writer_client_end = env
-        .blob_creator
-        .create(&target_blob.hash.into(), false)
-        .await
-        .context("FIDL error on BlobCreator.Create for test blob")?
-        .map_err(|e| anyhow!("CreateBlob error: {e:?}"))
-        .context("Failed to create test blob")?;
-    let writer_proxy = writer_client_end.into_proxy();
-    let mut blob_writer = BlobWriter::create(writer_proxy, target_blob.delivery_data.len() as u64)
-        .await
-        .context("Failed to create BlobWriter for test blob")?;
-    blob_writer
-        .write(&target_blob.delivery_data)
-        .await
-        .context("Failed to write test blob data")?;
+    env.write_blob(&target_blob).await?;
 
     // Open a temporary mapping session to discover the device block offset of the blob.
     let (temp_session, temp_server) = fidl::endpoints::create_proxy();
@@ -460,5 +455,95 @@ async fn test_mapper_with_verification_corrupted_block_on_gpt_partition() -> Res
     drop(blob_pager);
     env.shutdown().await?;
     log::info!("Corrupted block verification failure test completed successfully!");
+    Ok(())
+}
+
+#[derive(Copy, Clone, Debug)]
+enum PagingBackend {
+    FxBlob,
+    DriverBlobPager,
+}
+
+// Verifies that unlinking an open blob does not deallocate its extents while held open in a mapping
+// session or BlobReader.
+#[test_case(PagingBackend::FxBlob; "fxblob")]
+#[test_case(PagingBackend::DriverBlobPager; "driver_blob_pager")]
+#[fuchsia::test(threads = 4)]
+async fn test_unlink_open_blob(backend: PagingBackend) -> Result<(), Error> {
+    let env = TestPartitionEnv::new().await?;
+
+    let blob_pager = match backend {
+        PagingBackend::DriverBlobPager => {
+            log::info!("Initialising BlobPagerAndVerifier...");
+            Some(
+                BlobPagerAndVerifier::new(&env.mapping_provider, &env.mapper_proxy)
+                    .await
+                    .context("Failed to create BlobPagerAndVerifier")?,
+            )
+        }
+        PagingBackend::FxBlob => None,
+    };
+
+    let blob_a = TestBlob::new_uncompressed(vec![0xAAu8; 65536]);
+    env.write_blob(&blob_a).await?;
+
+    log::info!(backend:?; "Opening Blob A...");
+    let paged_vmo = match backend {
+        PagingBackend::FxBlob => env
+            .blob_reader
+            .get_vmo(&blob_a.hash.into())
+            .await
+            .context("FIDL error on BlobReader.GetVmo")?
+            .map_err(zx::Status::err_from_raw)
+            .context("Failed to get VMO from BlobReader")?,
+        PagingBackend::DriverBlobPager => blob_pager
+            .as_ref()
+            .unwrap()
+            .create_vmo(&blob_a.hash.into())
+            .await
+            .context("Failed to create paged VMO in BlobPagerAndVerifier")?,
+    };
+
+    log::info!("Unlinking Blob A while its VMO is held open...");
+    let unlink_res = env
+        .volume
+        .root()
+        .unlink(&format!("{}", blob_a.hash), &fio::UnlinkOptions::default())
+        .await
+        .context("FIDL error on unlink")?;
+    unlink_res.map_err(zx::Status::err_from_raw).context("Failed to unlink Blob A")?;
+
+    log::info!("Syncing filesystem to flush graveyard entries...");
+    env.volume
+        .root()
+        .sync()
+        .await
+        .context("FIDL error on sync")?
+        .map_err(zx::Status::err_from_raw)
+        .context("Failed to sync filesystem")?;
+
+    log::info!("Writing Blob B to attempt block reuse...");
+    let blob_b = TestBlob::new_uncompressed(vec![0xBBu8; blob_a.data.len()]);
+    env.write_blob(&blob_b).await?;
+
+    log::info!("Reading Blob A from paged VMO...");
+    let expected_len = blob_a.data.len();
+    let paged_vmo_reader = paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+    let reader_thread = std::thread::spawn(move || {
+        let mut read_buf = vec![0u8; expected_len];
+        paged_vmo_reader.read(&mut read_buf, 0).map(|_| read_buf)
+    });
+
+    let read_data = reader_thread.join().unwrap().context("read failed on paged VMO")?;
+
+    ensure!(read_data == blob_a.data, "Paged VMO read corrupted data");
+
+    drop(paged_vmo);
+    drop(blob_pager);
+    env.shutdown().await?;
+    log::info!(
+        backend:?;
+        "Successfully verified unlinked blob remained valid and readable if blob remains opened"
+    );
     Ok(())
 }

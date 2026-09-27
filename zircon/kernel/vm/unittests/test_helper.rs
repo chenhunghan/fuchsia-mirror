@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::user_copy::UserInOutPtr;
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_USER, ARCH_MMU_FLAG_PERM_WRITE, ArchMmuFlags,
 };
@@ -16,6 +17,7 @@ use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use core::num::NonZeroI64;
 use fbl::RefPtr;
+use kprint::kprintln;
 use rand::TryRng;
 use rand::rand_core::utils;
 use test_helper_bindings as bindings;
@@ -32,7 +34,8 @@ pub fn make_committed_pager_vmo<const N: usize>(
     let mut raw_vmo = core::ptr::null_mut();
     let mut page_ptrs = [core::ptr::null_mut(); N];
 
-    // SAFETY: page_ptrs.as_mut_ptr() is valid for writing N pointers, and raw_vmo is a valid out-pointer.
+    // SAFETY: page_ptrs.as_mut_ptr() is valid for writing N pointers, and raw_vmo is a
+    // valid out-pointer.
     let status = unsafe {
         bindings::cpp_make_committed_pager_vmo(
             page_ptrs.len(),
@@ -201,6 +204,56 @@ pub fn fill_and_test(buf: &mut [MaybeUninit<u8>]) -> (&mut [u8], bool) {
 pub fn test_rand(seed: u32) -> u32 {
     // SAFETY: `cpp_test_rand` has no preconditions.
     unsafe { bindings::cpp_test_rand(seed) }
+}
+
+/// just like [`fill_region`], but for user memory
+pub fn fill_region_user(seed: usize, ptr: UserInOutPtr<c_void>, len: usize) {
+    let ptr = ptr.reinterpret::<u32>();
+    assert!(ptr.as_ptr().addr().is_multiple_of(4));
+    let mut val = seed as u32;
+    val ^= (seed >> 32) as u32;
+    for i in 0..(len / 4) {
+        let status = ptr.element_offset(i).copy_to_user(&val);
+        assert!(status.is_ok());
+        val = test_rand(val);
+    }
+}
+
+/// just like [`test_region`], but for user memory
+pub fn test_region_user(seed: usize, ptr: UserInOutPtr<c_void>, len: usize) -> bool {
+    let ptr = ptr.reinterpret::<u32>();
+    assert!(ptr.as_ptr().addr().is_multiple_of(4));
+    let mut val = seed as u32;
+    val ^= (seed >> 32) as u32;
+    for i in 0..(len / 4) {
+        let p = ptr.element_offset(i);
+        let status = p.read();
+        assert!(status.is_ok());
+        let actual = status.unwrap();
+        if actual != val {
+            kprintln!(
+                "value at {:p} ({}) is incorrect: {:#x} vs {:#x}",
+                p.as_ptr(),
+                i,
+                actual,
+                val
+            );
+            return false;
+        }
+        val = test_rand(val);
+    }
+    true
+}
+
+/// just like [`fill_and_test`], but for user memory
+pub fn fill_and_test_user(ptr: UserInOutPtr<c_void>, len: usize) -> bool {
+    let seed = ptr.as_ptr().addr();
+
+    // fill it with a pattern
+    fill_region_user(seed, ptr, len);
+
+    // test that the pattern is read back properly
+    test_region_user(seed, ptr, len)
 }
 
 #[derive(Debug)]

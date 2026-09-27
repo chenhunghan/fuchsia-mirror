@@ -118,7 +118,7 @@ zx_status_t Nelson::OtRadioInit() {
   fdf::WireUnownedResult result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, dev),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "nrf52811_radio", .parents2 = parents}}));
+                                   {.name = "nrf52811-radio", .parents2 = parents}}));
 
   if (!result.ok()) {
     zxlogf(ERROR, "Failed to send AddCompositeNodeSpec request to platform bus: %s",

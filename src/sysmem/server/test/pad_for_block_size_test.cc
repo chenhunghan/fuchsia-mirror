@@ -102,6 +102,37 @@ TEST(PadForBlockSize, PageForPaddingWouldBeProvided) {
   ASSERT_EQ(205u, pages_with_blocks);
 }
 
+TEST(PadForBlockSize, BlockHeightOnlyPadding) {
+  constexpr uint32_t kWidth = 450;
+  constexpr uint32_t kHeight = 450;
+  constexpr uint32_t kBytesPerRowDivisor = 64;
+  fuchsia_sysmem2::ImageFormatConstraints image_constraints;
+  image_constraints.pixel_format() = fuchsia_images2::PixelFormat::kR8G8B8A8;
+  image_constraints.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+  image_constraints.min_size() = {kWidth, kHeight};
+  image_constraints.max_size() = {kWidth, kHeight};
+  image_constraints.bytes_per_row_divisor() = kBytesPerRowDivisor;
+  image_constraints.size_alignment() = {1, 1};
+  image_constraints.max_bytes_per_row() = 0xFFFFFFFF;
+
+  auto image_format_result = ImageConstraintsToFormat(image_constraints, kWidth, kHeight);
+  ZX_DEBUG_ASSERT(image_format_result.is_ok());
+  auto& image_format = image_format_result.value();
+
+  uint64_t without_blocks_bytes = ImageFormatImageSize(image_format);
+  uint64_t buffer_settings_size_bytes = without_blocks_bytes;
+
+  const fuchsia_math::SizeU kBlockSize = {1, 4};
+  image_constraints.pad_for_block_size() = kBlockSize;
+  auto with_blocks_bytes_result =
+      PaddedSizeFromBlockSize(image_constraints, buffer_settings_size_bytes, complain_to_stdout);
+  ASSERT_TRUE(with_blocks_bytes_result.is_ok());
+  uint64_t with_blocks_bytes = with_blocks_bytes_result.value();
+
+  constexpr uint64_t kExpectedWithBlocksBytes = 1856ull * 452;
+  ASSERT_EQ(kExpectedWithBlocksBytes, with_blocks_bytes);
+}
+
 TEST(PadForBlockSize, MinSizeOnlyGivesExactAnswer) {
   // When no extra buffers_settings_size_bytes is created by any other constraint other than what's
   // needed by min_size, the answer from PaddedSizeFromBlockSize will be exactly what's needed by
@@ -554,7 +585,7 @@ TEST(PadForBlockSize, MiniStress) {
   //
   // This does not always apply to max_size, which sometimes has max of {0x7FFFFFFF, 0xFFFFFFFF}.
   constexpr uint32_t kMaxDimension = 16384;
-  constexpr uint32_t kMinSizeAlignmentDimLog2 = 1;
+  constexpr uint32_t kMinSizeAlignmentDimLog2 = 0;
   constexpr uint32_t kMaxSizeAlignmentDimLog2 = 12;
   // bytes_per_row_divisor is intentionally not required to be a power of 2
   constexpr uint32_t kMinBytesPerRowDivisor = 1;
@@ -583,6 +614,7 @@ TEST(PadForBlockSize, MiniStress) {
       fuchsia_images2::PixelFormat::kL8,          fuchsia_images2::PixelFormat::kR8,
       fuchsia_images2::PixelFormat::kR8G8,        fuchsia_images2::PixelFormat::kA2R10G10B10,
       fuchsia_images2::PixelFormat::kA2B10G10R10, fuchsia_images2::PixelFormat::kR8G8B8,
+      fuchsia_images2::PixelFormat::kYuy2,
   };
   // Currently there are no fuchsia_images2::PixelFormatModifier values which could return true from
   // ImageFormatIsNonTiledSinglePlane other than Linear (whether that's by definition doesn't need
@@ -664,9 +696,10 @@ TEST(PadForBlockSize, MiniStress) {
     const uint32_t max_size_height =
         is_max_size_capped ? max_size_height_distribution(prng) : kMaxSizeNotCapped.height();
     const bool is_bytes_per_row_capped = is_bytes_per_row_capped_distribution(prng);
+    const uint32_t min_bytes_per_row =
+        fbl::round_up(allocate_width * stride_bytes_per_width_pixel, bytes_per_row_divisor);
     std::uniform_int_distribution<uint32_t> max_bytes_per_row_distribution(
-        fbl::round_up(allocate_width * stride_bytes_per_width_pixel, bytes_per_row_divisor),
-        kMaxDimension * stride_bytes_per_width_pixel);
+        min_bytes_per_row, min_bytes_per_row + (kMaxDimension * stride_bytes_per_width_pixel));
     const uint32_t max_bytes_per_row =
         is_bytes_per_row_capped ? max_bytes_per_row_distribution(prng) : 0xFFFFFFFF;
 
@@ -775,6 +808,10 @@ TEST(PadForBlockSize, MiniStress) {
         std::min(max_probe_width,
                  fbl::round_down(static_cast<uint64_t>(max_bytes_per_row), bytes_per_row_divisor) /
                      stride_bytes_per_width_pixel);
+    // Without this limit, we'd hit some CheckedNumeric uint32_t overflows. Those are safely caught
+    // and rejected in the sysmem server but we need to avoid triggering those in this test.
+    uint64_t safety_limit = (0xFFFFFFFFull - bytes_per_row_divisor) / stride_bytes_per_width_pixel;
+    max_probe_width = std::min(max_probe_width, safety_limit);
     max_probe_width = fbl::round_down(max_probe_width, size_alignment_width);
     ZX_ASSERT(max_probe_width <= std::numeric_limits<uint32_t>::max());
     std::uniform_int_distribution<uint32_t> probe_width_distribution(
@@ -795,10 +832,6 @@ TEST(PadForBlockSize, MiniStress) {
         static_cast<uint32_t>(min_probe_height), static_cast<uint32_t>(max_probe_height));
 
     for (uint64_t inner_try = 0; inner_try < kInnerTriesPerOuterTry; ++inner_try) {
-      if ((probe_count % 100000) == 0) {
-        printf("probe_count: %" PRIu64 " delta_ms: %" PRId64 "\n", probe_count,
-               (zx::clock::get_monotonic() - begin_time).to_msecs());
-      }
       ++probe_count;
 
       // The goal is to find an image size that fits in buffer_settings_size_bytes but when aligned
@@ -912,11 +945,365 @@ TEST(PadForBlockSize, MiniStress) {
          spent_in_function_under_test.to_msecs(),
          (spent_in_function_under_test / static_cast<int64_t>(outer_try)).to_usecs());
 
-  // see example failing params printf-ed to stdout; we may fail the test here, or we may fail
-  // when the number of failing params examples hits 10 above; this is the main failure this test
-  // is trying to find
+  // see example failing params printf-ed to stdout above; we may fail the test here, or we may fail
+  // when the number of failing params examples hits 10 above; this is the main failure this test is
+  // trying to find
   ASSERT_EQ(0u, result_counts.probe_image_with_blocks_bytes_too_low);
+  ASSERT_EQ(0u, result_counts.padded_size_from_block_size_failed);
+  ASSERT_EQ(0u, result_counts.probe_image_constraints_to_format_non_aligned_failed_count);
+  ASSERT_EQ(0u, result_counts.probe_image_constraints_to_format_aligned_failed_count);
 
+  ASSERT_GT(result_counts.probe_success_count, 0u);
+}
+
+// This test was AI-generated and level of human review so far is low-medium.
+//
+// The additional value of this test on top of MiniStress is the following:
+//   * potential for higher CPU efficiency for more boundary cases covered per second
+//   * direct computation of the worst-case image size, though this is basically using the same math
+//     as the sysmem server itself; this test still includes the probes for even worse cases as a
+//     mitigation against the math being wrong the same way in both places
+//
+// For now we're keeping MiniStress above as well, since that was human-generated and human-reviewed
+// in detail.
+TEST(PadForBlockSize, MiniStress2) {
+  constexpr zx::duration kMaxDuration = zx::msec(3000);
+  constexpr uint64_t kMinProbes = 100000;
+  constexpr uint64_t kMaxProbes = 10000000;
+  constexpr uint32_t kCollectUnexpectedExamplesCount = 5;
+
+  // Capped to smaller dimensions so probes cover a much higher fraction of the state space.
+  constexpr uint32_t kMinBlockSizeDimLog2 = 1;
+  constexpr uint32_t kMaxBlockSizeDimLog2 = 6;
+  constexpr uint32_t kMinDimension = 1;
+  constexpr uint32_t kMaxDimension = 256;
+  constexpr uint32_t kMinSizeAlignmentDimLog2 = 0;
+  constexpr uint32_t kMaxSizeAlignmentDimLog2 = 6;
+  constexpr uint32_t kMinBytesPerRowDivisor = 1;
+  constexpr uint32_t kMaxBytesPerRowDivisorFactor = 8;
+
+  const uint64_t kInnerTriesPerOuterTry = 40;
+
+  std::random_device random_device{};
+  auto seed = random_device();
+  printf("MiniStress2 seed: %u\n", seed);
+  std::mt19937 prng(seed);
+
+  std::uniform_int_distribution<uint32_t> block_dim_log2_distribution(kMinBlockSizeDimLog2,
+                                                                      kMaxBlockSizeDimLog2);
+  std::uniform_int_distribution<uint32_t> dimension_distribution(kMinDimension, kMaxDimension);
+  std::uniform_int_distribution<uint32_t> size_alignment_dim_log2_distribution(
+      kMinSizeAlignmentDimLog2, kMaxSizeAlignmentDimLog2);
+
+  const std::vector<fuchsia_images2::PixelFormat> kPixelFormats = {
+      fuchsia_images2::PixelFormat::kR8G8B8A8,    fuchsia_images2::PixelFormat::kR8G8B8X8,
+      fuchsia_images2::PixelFormat::kB8G8R8A8,    fuchsia_images2::PixelFormat::kB8G8R8X8,
+      fuchsia_images2::PixelFormat::kB8G8R8,      fuchsia_images2::PixelFormat::kR5G6B5,
+      fuchsia_images2::PixelFormat::kR3G3B2,      fuchsia_images2::PixelFormat::kR2G2B2X2,
+      fuchsia_images2::PixelFormat::kL8,          fuchsia_images2::PixelFormat::kR8,
+      fuchsia_images2::PixelFormat::kR8G8,        fuchsia_images2::PixelFormat::kA2R10G10B10,
+      fuchsia_images2::PixelFormat::kA2B10G10R10, fuchsia_images2::PixelFormat::kR8G8B8,
+      fuchsia_images2::PixelFormat::kYuy2,
+  };
+  const fuchsia_images2::PixelFormatModifier kLinear =
+      fuchsia_images2::PixelFormatModifier::kLinear;
+  std::uniform_int_distribution<uint32_t> pixel_format_index_distribution(
+      0, static_cast<uint32_t>(kPixelFormats.size() - 1));
+  std::uniform_int_distribution<uint32_t> bytes_per_row_divisor_distribution(
+      kMinBytesPerRowDivisor, kMaxBytesPerRowDivisorFactor);
+  const fuchsia_math::SizeU kMaxSizeNotCapped = {0x7FFFFFFF, 0xFFFFFFFF};
+  std::uniform_int_distribution<uint32_t> is_max_size_capped_distribution(0, 1);
+  std::uniform_int_distribution<uint32_t> is_bytes_per_row_capped_distribution(0, 1);
+
+  struct ResultCounts {
+    uint64_t padded_size_from_block_size_failed = 0;
+    uint64_t probe_image_constraints_to_format_non_aligned_failed_count = 0;
+    uint64_t probe_image_constraints_to_format_aligned_failed_count = 0;
+    uint64_t probe_exceeds_buffer_settings_size_bytes_count = 0;
+    uint64_t probe_image_with_blocks_bytes_too_low = 0;
+    uint64_t probe_image_with_blocks_bytes_not_tight = 0;
+    uint64_t probe_success_count = 0;
+  };
+  ResultCounts result_counts{};
+  auto print_final_test_output = fit::defer([&result_counts] {
+    printf("[MiniStress2] padded_size_from_block_size_failed: %" PRIu64 "\n",
+           result_counts.padded_size_from_block_size_failed);
+    printf("[MiniStress2] probe_image_constraints_to_format_non_aligned_failed_count: %" PRIu64
+           "\n",
+           result_counts.probe_image_constraints_to_format_non_aligned_failed_count);
+    printf("[MiniStress2] probe_image_constraints_to_format_aligned_failed_count: %" PRIu64 "\n",
+           result_counts.probe_image_constraints_to_format_aligned_failed_count);
+    printf("[MiniStress2] probe_exceeds_buffer_settings_size_bytes_count: %" PRIu64 "\n",
+           result_counts.probe_exceeds_buffer_settings_size_bytes_count);
+    printf("[MiniStress2] probe_image_with_blocks_bytes_too_low: %" PRIu64 "\n",
+           result_counts.probe_image_with_blocks_bytes_too_low);
+    printf("[MiniStress2] probe_image_with_blocks_bytes_not_tight: %" PRIu64 "\n",
+           result_counts.probe_image_with_blocks_bytes_not_tight);
+    printf("[MiniStress2] probe_success_count: %" PRIu64 "\n", result_counts.probe_success_count);
+  });
+
+  zx::duration spent_in_function_under_test = zx::msec(0);
+  uint64_t probe_count = 0;
+  zx::time begin_time = zx::clock::get_monotonic();
+  uint64_t outer_try;
+  for (outer_try = 0;
+       result_counts.probe_success_count == 0 || probe_count < kMinProbes ||
+       (probe_count < kMaxProbes && (zx::clock::get_monotonic() - begin_time) < kMaxDuration);
+       ++outer_try) {
+    const uint32_t block_width = 1u << block_dim_log2_distribution(prng);
+    const uint32_t block_height = 1u << block_dim_log2_distribution(prng);
+    const fuchsia_math::SizeU block_size = {block_width, block_height};
+    const fuchsia_images2::PixelFormat pixel_format =
+        kPixelFormats.at(pixel_format_index_distribution(prng));
+    const uint32_t stride_bytes_per_width_pixel =
+        ImageFormatStrideBytesPerWidthPixel(PixelFormatAndModifier(pixel_format, kLinear));
+    const uint32_t bytes_per_row_divisor =
+        std::lcm(bytes_per_row_divisor_distribution(prng),
+                 stride_bytes_per_width_pixel * block_size.width());
+    const uint32_t size_alignment_width = 1u << size_alignment_dim_log2_distribution(prng);
+    const uint32_t size_alignment_height = 1u << size_alignment_dim_log2_distribution(prng);
+    const uint32_t allocate_width =
+        fbl::round_up(dimension_distribution(prng), size_alignment_width);
+    const uint32_t allocate_height =
+        fbl::round_up(dimension_distribution(prng), size_alignment_height);
+    std::uniform_int_distribution<uint32_t> min_size_width_distribution(kMinDimension,
+                                                                        allocate_width);
+    std::uniform_int_distribution<uint32_t> min_size_height_distribution(kMinDimension,
+                                                                         allocate_height);
+    const uint32_t min_size_width = min_size_width_distribution(prng);
+    const uint32_t min_size_height = min_size_height_distribution(prng);
+    const bool is_max_size_capped = !!is_max_size_capped_distribution(prng);
+    std::uniform_int_distribution<uint32_t> max_size_width_distribution(allocate_width,
+                                                                        kMaxDimension);
+    std::uniform_int_distribution<uint32_t> max_size_height_distribution(allocate_height,
+                                                                         kMaxDimension);
+    const uint32_t max_size_width =
+        is_max_size_capped ? max_size_width_distribution(prng) : kMaxSizeNotCapped.width();
+    const uint32_t max_size_height =
+        is_max_size_capped ? max_size_height_distribution(prng) : kMaxSizeNotCapped.height();
+    const bool is_bytes_per_row_capped = is_bytes_per_row_capped_distribution(prng);
+    const uint32_t min_bytes_per_row =
+        fbl::round_up(allocate_width * stride_bytes_per_width_pixel, bytes_per_row_divisor);
+    std::uniform_int_distribution<uint32_t> max_bytes_per_row_distribution(
+        min_bytes_per_row, min_bytes_per_row + (kMaxDimension * stride_bytes_per_width_pixel));
+    const uint32_t max_bytes_per_row =
+        is_bytes_per_row_capped ? max_bytes_per_row_distribution(prng) : 0xFFFFFFFF;
+
+    fuchsia_sysmem2::ImageFormatConstraints image_constraints;
+    image_constraints.pixel_format() = pixel_format;
+    image_constraints.pixel_format_modifier() = kLinear;
+    image_constraints.min_size() = {min_size_width, min_size_height};
+    image_constraints.required_max_size_list() =
+        std::vector<fuchsia_math::SizeU>{{allocate_width, allocate_height}};
+    image_constraints.pad_for_block_size() = block_size;
+    image_constraints.max_size() = {max_size_width, max_size_height};
+    image_constraints.bytes_per_row_divisor() = bytes_per_row_divisor;
+    image_constraints.size_alignment() = {size_alignment_width, size_alignment_height};
+    image_constraints.max_bytes_per_row() = max_bytes_per_row;
+
+    auto print_unexpected_failure_params = [&image_constraints](
+                                               const char* failure_name,
+                                               std::optional<fuchsia_math::SizeU> probe_size) {
+      printf("#### [MiniStress2] unexpected failure: %s ####\n", failure_name);
+      printf("pixel_format: %u\n", static_cast<uint32_t>(*image_constraints.pixel_format()));
+      printf("min_size: {%u, %u}\n", image_constraints.min_size()->width(),
+             image_constraints.min_size()->height());
+      printf("pad_for_block_size: {%u, %u}\n", image_constraints.pad_for_block_size()->width(),
+             image_constraints.pad_for_block_size()->height());
+      printf("bytes_per_row_divisor: %u\n", *image_constraints.bytes_per_row_divisor());
+      printf("size_alignment: {%u, %u}\n", image_constraints.size_alignment()->width(),
+             image_constraints.size_alignment()->height());
+      if (probe_size) {
+        printf("probe_size: {%u, %u}\n", probe_size->width(), probe_size->height());
+      }
+    };
+
+    auto image_format_result =
+        ImageConstraintsToFormat(image_constraints, allocate_width, allocate_height);
+    if (!image_format_result.is_ok()) {
+      continue;
+    }
+    auto& image_format = image_format_result.value();
+    uint64_t without_blocks_bytes = ImageFormatImageSize(image_format);
+    uint64_t buffer_settings_size_bytes = without_blocks_bytes;
+
+    zx::time before_call = zx::clock::get_monotonic();
+    auto with_blocks_bytes_result =
+        PaddedSizeFromBlockSize(image_constraints, buffer_settings_size_bytes, mute_complain);
+    zx::time after_call = zx::clock::get_monotonic();
+    spent_in_function_under_test += (after_call - before_call);
+    if (!with_blocks_bytes_result.is_ok()) {
+      ++result_counts.padded_size_from_block_size_failed;
+      continue;
+    }
+    const auto& with_blocks_bytes = with_blocks_bytes_result.value();
+
+    // Verify tightness
+    auto constraints_for_block_aligned = image_constraints;
+    constraints_for_block_aligned.max_size().reset();
+    constraints_for_block_aligned.max_bytes_per_row().reset();
+    constraints_for_block_aligned.max_width_times_height().reset();
+    constraints_for_block_aligned.size_alignment().reset();
+
+    auto get_actual_padding = [&](uint32_t height) -> uint64_t {
+      uint64_t max_row_size =
+          fbl::round_down(buffer_settings_size_bytes / height, bytes_per_row_divisor);
+      uint64_t max_width = max_row_size / stride_bytes_per_width_pixel;
+      max_width = std::min(max_width, static_cast<uint64_t>(max_size_width));
+      max_width = std::min(max_width, fbl::round_down(static_cast<uint64_t>(max_bytes_per_row),
+                                                      bytes_per_row_divisor) /
+                                          stride_bytes_per_width_pixel);
+      max_width = fbl::round_down(max_width, size_alignment_width);
+
+      if (max_width < min_size_width) {
+        return 0;
+      }
+
+      auto non_aligned_res =
+          ImageConstraintsToFormat(image_constraints, static_cast<uint32_t>(max_width), height);
+      if (!non_aligned_res.is_ok())
+        return 0;
+      uint64_t non_aligned_size = ImageFormatImageSize(non_aligned_res.value());
+
+      uint32_t aligned_w =
+          static_cast<uint32_t>(fbl::round_up(max_width, static_cast<uint64_t>(block_width)));
+      uint32_t aligned_h = static_cast<uint32_t>(
+          fbl::round_up(static_cast<uint64_t>(height), static_cast<uint64_t>(block_height)));
+      auto aligned_res =
+          ImageConstraintsToFormat(constraints_for_block_aligned, aligned_w, aligned_h);
+      if (!aligned_res.is_ok())
+        return 0;
+      uint64_t aligned_size = ImageFormatImageSize(aligned_res.value());
+
+      return aligned_size - non_aligned_size;
+    };
+
+    uint32_t H1 = static_cast<uint32_t>(fbl::round_up(min_size_height, size_alignment_height));
+    uint64_t padding1 = get_actual_padding(H1);
+
+    uint32_t H2 = static_cast<uint32_t>(fbl::round_up(
+        fbl::round_down(static_cast<uint64_t>(H1) - 1, block_height) + block_height + 1,
+        size_alignment_height));
+    uint64_t padding2 = 0;
+    if (H2 <= max_size_height) {
+      padding2 = get_actual_padding(H2);
+    }
+
+    uint64_t expected_max_padding = std::max(padding1, padding2);
+    uint64_t expected_with_blocks_bytes = buffer_settings_size_bytes + expected_max_padding;
+
+    if (with_blocks_bytes != expected_with_blocks_bytes) {
+      ++result_counts.probe_image_with_blocks_bytes_not_tight;
+      print_unexpected_failure_params("PaddedSizeFromBlockSize not tight!", std::nullopt);
+      printf("expected: %" PRIu64 " actual: %" PRIu64 "\n", expected_with_blocks_bytes,
+             with_blocks_bytes);
+      if (result_counts.probe_image_with_blocks_bytes_not_tight >=
+          kCollectUnexpectedExamplesCount) {
+        ASSERT_EQ(expected_with_blocks_bytes, with_blocks_bytes);
+      }
+      continue;
+    }
+
+    // Standard probe verification
+    uint64_t min_probe_width = fbl::round_up(min_size_width, size_alignment_width);
+    uint64_t max_probe_width =
+        (buffer_settings_size_bytes / stride_bytes_per_width_pixel) + (2ull * block_width);
+    max_probe_width = std::min(max_probe_width, static_cast<uint64_t>(max_size_width));
+    max_probe_width =
+        std::min(max_probe_width,
+                 fbl::round_down(static_cast<uint64_t>(max_bytes_per_row), bytes_per_row_divisor) /
+                     stride_bytes_per_width_pixel);
+    // Without this limit, we'd hit some CheckedNumeric uint32_t overflows. Those are safely caught
+    // and rejected in the sysmem server but we need to avoid triggering those in this test.
+    uint64_t safety_limit = (0xFFFFFFFFull - bytes_per_row_divisor) / stride_bytes_per_width_pixel;
+    max_probe_width = std::min(max_probe_width, safety_limit);
+    max_probe_width = fbl::round_down(max_probe_width, size_alignment_width);
+    std::uniform_int_distribution<uint32_t> probe_width_distribution(
+        static_cast<uint32_t>(min_probe_width), static_cast<uint32_t>(max_probe_width));
+
+    uint64_t min_probe_height = fbl::round_up(min_size_height, size_alignment_height);
+    uint64_t max_probe_height =
+        (buffer_settings_size_bytes / bytes_per_row_divisor) + (2ull * block_height);
+    max_probe_height = std::min(max_probe_height, static_cast<uint64_t>(max_size_height));
+    max_probe_height = fbl::round_down(max_probe_height, size_alignment_height);
+    std::uniform_int_distribution<uint32_t> probe_height_distribution(
+        static_cast<uint32_t>(min_probe_height), static_cast<uint32_t>(max_probe_height));
+
+    for (uint64_t inner_try = 0; inner_try < kInnerTriesPerOuterTry; ++inner_try) {
+      ++probe_count;
+
+      const uint32_t probe_width =
+          fbl::round_up(probe_width_distribution(prng), size_alignment_width);
+      const uint32_t probe_height =
+          fbl::round_up(probe_height_distribution(prng), size_alignment_height);
+      fuchsia_math::SizeU probe_size = {probe_width, probe_height};
+
+      auto non_aligned_image_format_result =
+          ImageConstraintsToFormat(image_constraints, probe_width, probe_height);
+      if (!non_aligned_image_format_result.is_ok()) {
+        ++result_counts.probe_image_constraints_to_format_non_aligned_failed_count;
+        print_unexpected_failure_params("!non_aligned_image_format_result.is_ok()", probe_size);
+        if (result_counts.probe_image_constraints_to_format_non_aligned_failed_count >=
+            kCollectUnexpectedExamplesCount) {
+          ASSERT_TRUE(non_aligned_image_format_result.is_ok());
+        }
+        continue;
+      }
+      auto& non_aligned_image_format = non_aligned_image_format_result.value();
+
+      uint64_t non_aligned_size_bytes = ImageFormatImageSize(non_aligned_image_format);
+      if (non_aligned_size_bytes > buffer_settings_size_bytes) {
+        ++result_counts.probe_exceeds_buffer_settings_size_bytes_count;
+        continue;
+      }
+
+      const uint32_t block_aligned_probe_width = fbl::round_up(probe_width, block_width);
+      const uint32_t block_aligned_probe_height = fbl::round_up(probe_height, block_height);
+
+      auto aligned_image_format_result = ImageConstraintsToFormat(
+          constraints_for_block_aligned, block_aligned_probe_width, block_aligned_probe_height);
+      if (!aligned_image_format_result.is_ok()) {
+        ++result_counts.probe_image_constraints_to_format_aligned_failed_count;
+        print_unexpected_failure_params("probe_image_constraints_to_format_aligned_failed",
+                                        probe_size);
+        if (result_counts.probe_image_constraints_to_format_aligned_failed_count >=
+            kCollectUnexpectedExamplesCount) {
+          ASSERT_TRUE(aligned_image_format_result.is_ok());
+        }
+        continue;
+      }
+      auto& aligned_image_format = aligned_image_format_result.value();
+
+      uint64_t aligned_size_bytes = ImageFormatImageSize(aligned_image_format);
+      if (aligned_size_bytes > with_blocks_bytes) {
+        ++result_counts.probe_image_with_blocks_bytes_too_low;
+        print_unexpected_failure_params(
+            "PaddedSizeFromBlockSize returned too-low size in bytes (test will FAIL)", probe_size);
+        if (result_counts.probe_image_with_blocks_bytes_too_low >=
+            kCollectUnexpectedExamplesCount) {
+          ASSERT_LE(aligned_size_bytes, with_blocks_bytes);
+        }
+        continue;
+      }
+
+      ++result_counts.probe_success_count;
+    }
+  }
+
+  // these stats don't account for potential unlucky scheduling etc; just here to make sure the
+  // duration of the call isn't too high, since the whole point of the way it's implemented is to
+  // avoid being expensive, aside from using safemath for everything (which is probably worth it)
+  printf("probe_count: %" PRIu64 " total_ms: %" PRId64 " spent_in_function_under_test_ms: %" PRIu64
+         " microseconds_per_call: %" PRIu64 "\n",
+         probe_count, (zx::clock::get_monotonic() - begin_time).to_msecs(),
+         spent_in_function_under_test.to_msecs(),
+         (spent_in_function_under_test / static_cast<int64_t>(outer_try)).to_usecs());
+
+  ASSERT_EQ(0u, result_counts.probe_image_with_blocks_bytes_too_low);
+  ASSERT_EQ(0u, result_counts.probe_image_with_blocks_bytes_not_tight);
+  ASSERT_EQ(0u, result_counts.padded_size_from_block_size_failed);
+  ASSERT_EQ(0u, result_counts.probe_image_constraints_to_format_non_aligned_failed_count);
+  ASSERT_EQ(0u, result_counts.probe_image_constraints_to_format_aligned_failed_count);
   ASSERT_GT(result_counts.probe_success_count, 0u);
 }
 

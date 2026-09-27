@@ -47,6 +47,7 @@ source_set("platform") {
     "//zircon/kernel/phys:boot-constants",
     "//zircon/kernel/phys:handoff",
     "//zircon/kernel/phys/lib/memalloc",
+    "//zircon/system/ulib/affine:headers",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/ram-crashlog",
     "//zircon/system/ulib/zx",
@@ -94,9 +95,11 @@ kernel_rust_mod("platform-rs") {
   source_root = "platform.rs"
   sources = [
     "debug.rs",
+    "halt_token.rs",
     "platform.rs",
     "power.rs",
     "timer.rs",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
+  deps = [ "//zircon/system/ulib/affine/rust:affine" ]
 }

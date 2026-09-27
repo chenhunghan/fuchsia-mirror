@@ -41,6 +41,29 @@ Sysmem does not manage the flow of data once buffers have been allocated.
 Applications in a pipeline are responsible for coordinating between each
 other to ensure synchronization.
 
+## Protocols: `fuchsia.sysmem2.Allocator` vs. `fuchsia.hardware.sysmem.Sysmem`
+
+Despite the similar names, these two FIDL protocols serve completely different
+roles and have different security models:
+
+* **[`fuchsia.sysmem2.Allocator`][Allocator]**: The standard client protocol for
+  negotiating constraints, allocating buffers, and sharing buffer collections.
+  **Almost all sysmem clients (including hardware drivers) should use
+  `fuchsia.sysmem2.Allocator`.**
+* **`fuchsia.hardware.sysmem.Sysmem`**: A privileged backend registration
+  protocol used **only** by:
+  1. Drivers that implement and register a custom external sysmem heap
+     (`RegisterHeap`).
+  2. The platform secure memory (TEE) driver that registers physical secure
+     heaps (`RegisterSecureMem`).
+
+`fuchsia.hardware.sysmem.Sysmem` does **not** provide buffer allocation. Because
+sysmem trusts callers on `fuchsia.hardware.sysmem.Sysmem` to back heap
+allocations or specify physical secure memory ranges, access is restricted via
+Component Framework capability routing: only components/drivers that
+specifically and legitimately implement an external heap or secure memory may
+declare `use` of `fuchsia.hardware.sysmem.Sysmem` in their component manifests.
+
 ## Allocation process (simplified)
 
 1. [Participants](#participants) connect to the

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import fuchsia_controller_py as fuchsia_controller
@@ -51,6 +52,7 @@ class FfxConfigData:
         ssh_public_keys: List of SSH public keys for connection.
         ssh_auth_sock: Path to SSH authentication socket for connection.
         identities_only: Whether to strictly use explicit identity files.
+        shared_data: Directory for data shared among FFX invocations.
     """
 
     binary_path: str
@@ -68,6 +70,7 @@ class FfxConfigData:
     ssh_public_keys: list[str] | None
     ssh_auth_sock: str | None = None
     identities_only: bool | None = None
+    shared_data: str | None = None
 
     def __str__(self) -> str:
         return (
@@ -86,6 +89,7 @@ class FfxConfigData:
             f"ssh_public_keys={self.ssh_public_keys}, "
             f"ssh_auth_sock={self.ssh_auth_sock}, "
             f"identities_only={self.identities_only}, "
+            f"shared_data={self.shared_data}, "
         )
 
     def get_config_args(self) -> list[str]:
@@ -110,6 +114,7 @@ class FfxConfigData:
         configs_to_set: dict[str, Any] = {
             "log.dir": self.logs_dir,
             "log.level": self.logs_level,
+            "shared_data": self.shared_data,
             "ffx.subtool-search-paths": (
                 [self.subtools_search_path]
                 if self.subtools_search_path is not None
@@ -158,6 +163,7 @@ class FfxConfig:
         ssh_public_keys: list[str] | None = None,
         ssh_auth_sock: str | None = None,
         identities_only: bool | None = None,
+        shared_data: str | None = None,
     ) -> None:
         """Sets up configuration need to be used while running FFX command.
 
@@ -181,6 +187,9 @@ class FfxConfig:
                 Default value is None which means, it will not update
                 ssh_keepalive_timeout.
             emu_instance_dir: Directory where emulators are stored.
+                If None, checks FUCHSIA_FFX_EMU_INSTANCE_DIR, candidate
+                directories relative to shared_data and ambient host data,
+                and falls back to <logs_dir>/emu.
             usb_socket_path: Path to socket used to communicate with the USB
                 protocol driver.
             usb_driver_autostart: Whether to start the USB protocol driver if it
@@ -193,6 +202,9 @@ class FfxConfig:
             ssh_auth_sock: Path to SSH authentication socket for connection.
             identities_only: Whether to strictly use explicit identity files.
                 If None, checks IDENTITIES_ONLY or SSH_IDENTITIES_ONLY environment variable.
+            shared_data: Directory for data shared among FFX invocations.
+                If None, checks FUCHSIA_FFX_SHARED_DATA, then ambient FFX shared data
+                directory, and finally falls back to logs_dir.
 
         Raises:
             FfxConfigError: If setup has already been called once.
@@ -215,7 +227,14 @@ class FfxConfig:
         self._enable_usb: bool = enable_usb
         self._usb_socket_path: str | None = usb_socket_path
         self._usb_driver_autostart: bool = usb_driver_autostart
-        self._emu_instance_dir: str | None = emu_instance_dir
+
+        self._shared_data: str = self._resolve_shared_data(
+            shared_data, logs_dir
+        )
+        self._emu_instance_dir: str | None = self._resolve_emu_instance_dir(
+            emu_instance_dir, self._shared_data, logs_dir
+        )
+
         self._ssh_auth_sock: str | None = (
             ssh_auth_sock
             if ssh_auth_sock is not None
@@ -279,6 +298,68 @@ class FfxConfig:
 
         self._setup_done = True
 
+    def _resolve_shared_data(
+        self, shared_data: str | None, logs_dir: str
+    ) -> str:
+        """Resolves the shared_data directory and ensures it exists."""
+        resolved_shared_data: str | None = (
+            shared_data
+            if shared_data
+            else os.environ.get("FUCHSIA_FFX_SHARED_DATA") or None
+        )
+        if not resolved_shared_data:
+            state_home = os.environ.get("XDG_STATE_HOME") or os.path.expanduser(
+                "~/.local/share"
+            )
+            default_shared = os.path.join(
+                state_home, "Fuchsia", "ffx", "shared"
+            )
+            if os.path.exists(default_shared):
+                resolved_shared_data = default_shared
+            else:
+                resolved_shared_data = logs_dir
+
+        try:
+            Path(resolved_shared_data).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            _LOGGER.error(
+                "Failed to create shared_data directory %s: %s",
+                resolved_shared_data,
+                e,
+            )
+            raise
+
+        return resolved_shared_data
+
+    def _resolve_emu_instance_dir(
+        self,
+        emu_instance_dir: str | None,
+        shared_data: str,
+        logs_dir: str,
+    ) -> str:
+        """Resolves the emu_instance_dir directory."""
+        resolved_emu_instance_dir: str | None = (
+            emu_instance_dir
+            if emu_instance_dir
+            else os.environ.get("FUCHSIA_FFX_EMU_INSTANCE_DIR") or None
+        )
+        if not resolved_emu_instance_dir:
+            data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser(
+                "~/.local/share"
+            )
+            candidates: list[str] = [
+                os.path.join(shared_data, "emu", "instances"),
+                os.path.join(os.path.dirname(shared_data), "emu", "instances"),
+                os.path.join(data_home, "Fuchsia", "ffx", "emu", "instances"),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    resolved_emu_instance_dir = candidate
+                    break
+            if not resolved_emu_instance_dir:
+                resolved_emu_instance_dir = os.path.join(logs_dir, "emu")
+        return resolved_emu_instance_dir
+
     def close(self) -> None:
         """Clean up method.
 
@@ -323,6 +404,7 @@ class FfxConfig:
             ssh_public_keys=self._ssh_public_keys,
             ssh_auth_sock=self._ssh_auth_sock,
             identities_only=self._identities_only,
+            shared_data=self._shared_data,
         )
 
     def _atexit_callback(self) -> None:

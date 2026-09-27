@@ -102,10 +102,21 @@ def _host_test_impl(ctx):
 
     host_test_wrapper_template = ctx.file.host_test_wrapper_template
 
+    runfiles = ctx.runfiles(
+        files = ctx.files.data,
+    ).merge_all(
+        [binary_info.default_runfiles] +
+        [target[DefaultInfo].default_runfiles for target in ctx.attr.data],
+    )
+
+    # The wrapper generator symlinks every runfile (including those of `data`
+    # targets, not just the binary) into the runtime directory, so they must
+    # all be inputs. Otherwise this action, which runs locally without a
+    # sandbox, can race with the actions producing them and leave dangling
+    # symlinks in the runtime directory tree artifact.
     inputs = (
         binary_info.files.to_list() +
-        binary_info.default_runfiles.files.to_list() +
-        ctx.files.data +
+        runfiles.files.to_list() +
         ctx.files._python_modules +
         host_test_data_runtime_files
     ) + [
@@ -131,13 +142,6 @@ def _host_test_impl(ctx):
             loc_expanded,
             {},
         ))
-
-    runfiles = ctx.runfiles(
-        files = ctx.files.data,
-    ).merge_all(
-        [binary_info.default_runfiles] +
-        [target[DefaultInfo].default_runfiles for target in ctx.attr.data],
-    )
 
     if _DEBUG:
         def files_list_dump(name, files):

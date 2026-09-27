@@ -24,9 +24,15 @@ pub struct BoardFilesystemConfig {
     /// Board configuration for a vbmeta if necessary. The bootloader determines whether a vbmeta
     /// is necessary, therefore this is an optional board-level argument. fxfs and fvm below are
     /// chosen by the product, therefore those variables are always available for all boards.
+    /// Deprecated. Use `vbmetas` instead.
     #[serde(default)]
     #[walk_paths]
     pub vbmeta: Option<VBMeta>,
+
+    /// Board configuration for vbmetas if necessary.
+    #[serde(default)]
+    #[walk_paths]
+    pub vbmetas: Vec<VBMeta>,
 
     /// Board configuration for a fxfs if requested by the product. If the product does not
     /// request a fxfs, then these values are ignored.
@@ -68,6 +74,42 @@ pub struct BoardFilesystemConfig {
     /// If set, use keymint for encrypting data. Requires the `fuchsia::keymint` board capability.
     #[serde(default)]
     pub keymint_enabled: bool,
+}
+
+impl BoardFilesystemConfig {
+    /// Returns the validated list of vbmetas configured for this board.
+    ///
+    /// Validates that:
+    /// - At most one VBMeta has `mode == VBMetaMode::Asset`.
+    /// - Any VBMeta with `mode == VBMetaMode::Firmware` must specify a non-empty `name`.
+    pub fn get_vbmetas(&self) -> Result<Vec<VBMeta>> {
+        let mut vbmetas = self.vbmetas.clone();
+        if let Some(vbmeta) = &self.vbmeta {
+            vbmetas.push(vbmeta.clone());
+        }
+
+        let asset_count = vbmetas.iter().filter(|v| v.mode == VBMetaMode::Asset).count();
+        if asset_count > 1 {
+            bail!(
+                "Board configuration specifies multiple VBMeta images with mode 'asset'. \
+                 Only one VBMeta may be an asset; additional VBMetas must use mode 'firmware'."
+            );
+        }
+
+        for vbmeta in &vbmetas {
+            if vbmeta.mode == VBMetaMode::Firmware {
+                match &vbmeta.name {
+                    Some(name) if !name.is_empty() => {}
+                    _ => bail!(
+                        "Board configuration specifies a firmware VBMeta without a name. \
+                         A non-empty name is required for firmware VBMetas."
+                    ),
+                }
+            }
+        }
+
+        Ok(vbmetas)
+    }
 }
 
 /// How GPT-formatted block devices ought to be handled.
@@ -276,7 +318,7 @@ impl WalkPaths for PostProcessingScript {
 }
 
 /// The parameters describing how to create a VBMeta image.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, WalkPaths)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, WalkPaths)]
 #[serde(deny_unknown_fields)]
 pub struct VBMeta {
     /// The style of VBMeta image to assemble.
@@ -307,6 +349,24 @@ pub struct VBMeta {
     /// Whether to include the base merkle root command line descriptor.
     #[serde(default)]
     pub include_base_merkle: bool,
+
+    /// Delivery mode for flashing and OTA updates.
+    #[serde(default)]
+    pub mode: VBMetaMode,
+}
+
+/// The delivery mode of a VBMeta image.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VBMetaMode {
+    /// Delivered as the primary verified boot asset (flashed via `WriteAsset`).
+    /// At most one VBMeta across the entire board configuration may be an Asset.
+    #[default]
+    Asset,
+
+    /// Delivered as a firmware blob in the update package (flashed via `WriteFirmware`).
+    /// The firmware type will be the VBMeta's `name`. Multiple firmware VBMetas are allowed.
+    Firmware,
 }
 
 /// The parameters of a VBMeta descriptor to add to a VBMeta image.

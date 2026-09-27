@@ -136,7 +136,7 @@ impl<T: GuestEthernetInterface> NetDevice<T> {
     // multiple times before the Rust executor resumes the TX task. Once the task is running
     // again, clear all notifies.
     fn drain_notify_mpsc(&self) {
-        while let Ok(_) = self.notify_rx.borrow_mut().try_next() {
+        while self.notify_rx.borrow_mut().try_recv().is_ok() {
             // Keep draining the channel.
         }
     }

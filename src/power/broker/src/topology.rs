@@ -10,6 +10,7 @@ use crate::inspect::{
 use fidl_fuchsia_power_broker::{self as fpb};
 use fuchsia_inspect as inspect;
 use fuchsia_inspect_contrib::graph as igraph;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -215,7 +216,9 @@ impl Into<fpb::ModifyDependencyError> for ModifyDependencyError {
 pub struct Topology {
     pub(crate) elements: HashMap<ElementID, Element>,
     dependencies: HashMap<ElementLevel, Vec<ElementLevel>>,
-    removable_dependencies: rustc_hash::FxHashSet<Dependency>,
+    deps_by_required_element: FxHashMap<ElementID, FxHashSet<Dependency>>,
+    deps_by_dependent_element: FxHashMap<ElementID, FxHashSet<Dependency>>,
+    removable_dependencies: FxHashSet<Dependency>,
     unsatisfiable_element_id: ElementID,
     inspect: TopologyInspect,
 }
@@ -229,7 +232,9 @@ impl Topology {
         let mut topology = Topology {
             elements: HashMap::new(),
             dependencies: HashMap::new(),
-            removable_dependencies: rustc_hash::FxHashSet::default(),
+            deps_by_required_element: FxHashMap::default(),
+            deps_by_dependent_element: FxHashMap::default(),
+            removable_dependencies: FxHashSet::default(),
             unsatisfiable_element_id: ElementID::new(0),
             inspect: TopologyInspect::new(
                 parent_inspect_node.create_child("topology"),
@@ -404,6 +409,22 @@ impl Topology {
             })
     }
 
+    /// Returns an iterator over all dependencies where `element_id` is the required element.
+    pub fn dependencies_for_required_element(
+        &self,
+        element_id: ElementID,
+    ) -> impl Iterator<Item = &Dependency> {
+        self.deps_by_required_element.get(&element_id).into_iter().flat_map(|deps| deps.iter())
+    }
+
+    /// Returns an iterator over all dependencies where `element_id` is the dependent element.
+    pub fn dependencies_for_dependent_element(
+        &self,
+        element_id: ElementID,
+    ) -> impl Iterator<Item = &Dependency> {
+        self.deps_by_dependent_element.get(&element_id).into_iter().flat_map(|deps| deps.iter())
+    }
+
     /// Gets direct and transitive dependencies for the given Element and
     /// IndexedPowerLevel.
     pub fn all_direct_and_indirect_dependencies(
@@ -412,8 +433,8 @@ impl Topology {
     ) -> Vec<Dependency> {
         // We need to inspect the required level of every dependency encountered for any transitive
         // dependencies.
-        let mut dependencies = rustc_hash::FxHashSet::<Dependency>::default();
-        let mut visited = rustc_hash::FxHashSet::<ElementLevel>::default();
+        let mut dependencies = FxHashSet::<Dependency>::default();
+        let mut visited = FxHashSet::<ElementLevel>::default();
         let mut element_levels_to_inspect = vec![element_level.clone()];
         while let Some(element_level) = element_levels_to_inspect.pop() {
             if visited.contains(&element_level) {
@@ -442,19 +463,8 @@ impl Topology {
     fn update_dependencies_for_removed_element(&mut self, removed_element_id: ElementID) {
         // For each dependency that is not removable, we must first
         // replace the dependency with one on the unsatisfiable element.
-        let dependencies_on_removed_element: Vec<Dependency> = self
-            .dependencies
-            .iter()
-            .flat_map(|(dependent, requires)| {
-                requires
-                    .iter()
-                    .filter(move |required_level| required_level.element_id == removed_element_id)
-                    .map(move |required_level| Dependency {
-                        dependent: dependent.clone(),
-                        requires: required_level.clone(),
-                    })
-            })
-            .collect();
+        let dependencies_on_removed_element: Vec<Dependency> =
+            self.dependencies_for_required_element(removed_element_id).cloned().collect();
         for dep in dependencies_on_removed_element {
             if !self.removable_dependencies.contains(&dep) {
                 match self.add_dependency(
@@ -482,6 +492,11 @@ impl Topology {
             self.remove_dependency(&dep).expect("failed to remove dependency");
         }
         // Remove all dependencies where this element is the dependent element.
+        let dependencies_from_removed_element: Vec<Dependency> =
+            self.dependencies_for_dependent_element(removed_element_id).cloned().collect();
+        for dep in dependencies_from_removed_element {
+            self.remove_dependency(&dep).expect("failed to remove dependency");
+        }
         self.dependencies.retain(|key, _| key.element_id != removed_element_id);
     }
 
@@ -524,6 +539,14 @@ impl Topology {
             return Err(ModifyDependencyError::AlreadyExists);
         }
         required_levels.push(dep.requires.clone());
+        self.deps_by_required_element
+            .entry(dep.requires.element_id)
+            .or_default()
+            .insert(dep.clone());
+        self.deps_by_dependent_element
+            .entry(dep.dependent.element_id)
+            .or_default()
+            .insert(dep.clone());
         let remove_with_required_element =
             on_required_element_removal == OnRequiredElementRemoval::RemoveWithRequiredElement;
         if remove_with_required_element {
@@ -546,6 +569,18 @@ impl Topology {
             return Err(ModifyDependencyError::NotFound(dep.requires.element_id));
         }
         required_levels.retain(|el| el != &dep.requires);
+        if let Some(deps) = self.deps_by_required_element.get_mut(&dep.requires.element_id) {
+            deps.remove(dep);
+            if deps.is_empty() {
+                self.deps_by_required_element.remove(&dep.requires.element_id);
+            }
+        }
+        if let Some(deps) = self.deps_by_dependent_element.get_mut(&dep.dependent.element_id) {
+            deps.remove(dep);
+            if deps.is_empty() {
+                self.deps_by_dependent_element.remove(&dep.dependent.element_id);
+            }
+        }
         self.removable_dependencies.remove(dep);
         self.inspect.on_remove_dependency(&self.elements, dep);
         Ok(())
@@ -1343,5 +1378,170 @@ mod tests {
 
         assert_eq!(c_deps.len(), 1);
         assert_eq!(c_deps[0].requires.element_id, t.get_unsatisfiable_element_id());
+    }
+
+    // When an element is removed, every dependency naming it should drop out of both dependency
+    // indexes, leaving no stale entries for the removed element on either side.
+    #[fuchsia::test]
+    fn test_dependency_indexes_updated_on_remove() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut t = Topology::new(inspect.root(), 0);
+
+        let a = t.add_element_with_inspect("A", vec![0, 1], 0, 0).expect("add_element failed");
+        let b = t.add_element_with_inspect("B", vec![0, 1], 0, 0).expect("add_element failed");
+        let c = t.add_element_with_inspect("C", vec![0, 1], 0, 0).expect("add_element failed");
+
+        // C depends on B, and B depends on A.
+        let c_b = Dependency {
+            dependent: ElementLevel { element_id: c.clone(), level: ONE },
+            requires: ElementLevel { element_id: b.clone(), level: ONE },
+        };
+        let b_a = Dependency {
+            dependent: ElementLevel { element_id: b.clone(), level: ONE },
+            requires: ElementLevel { element_id: a.clone(), level: ONE },
+        };
+        t.add_dependency(
+            &c_b,
+            OnRequiredElementRemoval::RemoveWithRequiredElement,
+            &mut EagerInspectWriter,
+        )
+        .expect("add_dependency failed");
+        t.add_dependency(
+            &b_a,
+            OnRequiredElementRemoval::RemoveWithRequiredElement,
+            &mut EagerInspectWriter,
+        )
+        .expect("add_dependency failed");
+
+        assert_eq!(t.dependencies_for_required_element(b.clone()).collect::<Vec<_>>(), [&c_b]);
+        assert_eq!(t.dependencies_for_dependent_element(b.clone()).collect::<Vec<_>>(), [&b_a]);
+
+        // Removing B removes both the dependency on B and B's own dependency on A, leaving no
+        // stale entries in either index.
+        t.remove_element(b.clone());
+        assert_eq!(t.dependencies_for_required_element(a).count(), 0);
+        assert_eq!(t.dependencies_for_required_element(b.clone()).count(), 0);
+        assert_eq!(t.dependencies_for_dependent_element(b).count(), 0);
+        assert_eq!(t.dependencies_for_dependent_element(c).count(), 0);
+        assert!(t.deps_by_required_element.is_empty());
+        assert!(t.deps_by_dependent_element.is_empty());
+        assert!(t.removable_dependencies.is_empty());
+    }
+
+    /// Collects dependencies into a deterministic order for comparison, as the indexes are
+    /// unordered.
+    fn sorted_deps<'a>(deps: impl Iterator<Item = &'a Dependency>) -> Vec<Dependency> {
+        let mut deps: Vec<Dependency> = deps.cloned().collect();
+        deps.sort();
+        deps
+    }
+
+    // When dependencies are added and removed individually, both indexes should stay in step,
+    // and an element's entry should disappear entirely once its last dependency is gone.
+    #[fuchsia::test]
+    fn test_dependency_indexes_updated_on_add_remove_dependency() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut t = Topology::new(inspect.root(), 0);
+
+        let a = t.add_element_with_inspect("A", vec![0, 1, 2], 0, 0).expect("add_element failed");
+        let b = t.add_element_with_inspect("B", vec![0, 1, 2], 0, 0).expect("add_element failed");
+        let c = t.add_element_with_inspect("C", vec![0, 1, 2], 0, 0).expect("add_element failed");
+
+        // A depends on C at two levels, and B depends on C at one level.
+        let a1_c1 = Dependency {
+            dependent: ElementLevel { element_id: a.clone(), level: ONE },
+            requires: ElementLevel { element_id: c.clone(), level: ONE },
+        };
+        let a2_c2 = Dependency {
+            dependent: ElementLevel { element_id: a.clone(), level: TWO },
+            requires: ElementLevel { element_id: c.clone(), level: TWO },
+        };
+        let b1_c1 = Dependency {
+            dependent: ElementLevel { element_id: b.clone(), level: ONE },
+            requires: ElementLevel { element_id: c.clone(), level: ONE },
+        };
+        for dep in [&a1_c1, &a2_c2, &b1_c1] {
+            t.add_dependency(
+                dep,
+                OnRequiredElementRemoval::MakeUnsatisfiable,
+                &mut EagerInspectWriter,
+            )
+            .expect("add_dependency failed");
+        }
+
+        assert_eq!(
+            sorted_deps(t.dependencies_for_required_element(c.clone())),
+            sorted_deps([&a1_c1, &a2_c2, &b1_c1].into_iter())
+        );
+        assert_eq!(
+            sorted_deps(t.dependencies_for_dependent_element(a.clone())),
+            sorted_deps([&a1_c1, &a2_c2].into_iter())
+        );
+        assert_eq!(sorted_deps(t.dependencies_for_dependent_element(b.clone())), [b1_c1.clone()]);
+        // A dependency is only indexed for the elements it references.
+        assert_eq!(t.dependencies_for_required_element(a.clone()).count(), 0);
+        assert_eq!(t.dependencies_for_dependent_element(c.clone()).count(), 0);
+
+        // Adding the same dependency twice must not duplicate index entries.
+        assert!(matches!(
+            t.add_dependency(
+                &a1_c1,
+                OnRequiredElementRemoval::MakeUnsatisfiable,
+                &mut EagerInspectWriter
+            ),
+            Err(ModifyDependencyError::AlreadyExists)
+        ));
+        assert_eq!(t.dependencies_for_required_element(c.clone()).count(), 3);
+
+        t.remove_dependency(&a1_c1).expect("remove_dependency failed");
+        assert_eq!(
+            sorted_deps(t.dependencies_for_required_element(c.clone())),
+            sorted_deps([&a2_c2, &b1_c1].into_iter())
+        );
+        assert_eq!(sorted_deps(t.dependencies_for_dependent_element(a.clone())), [a2_c2.clone()]);
+
+        // Once an element has no remaining dependencies, it is removed from the index entirely.
+        t.remove_dependency(&a2_c2).expect("remove_dependency failed");
+        assert!(!t.deps_by_dependent_element.contains_key(&a));
+
+        t.remove_dependency(&b1_c1).expect("remove_dependency failed");
+        assert!(t.deps_by_required_element.is_empty());
+        assert!(t.deps_by_dependent_element.is_empty());
+    }
+
+    // When removing an element rewrites a dependency to point at the unsatisfiable element, both
+    // indexes should follow the rewrite: the replacement is indexed under the unsatisfiable
+    // element, and nothing remains indexed under the removed one.
+    #[fuchsia::test]
+    fn test_dependency_indexes_updated_on_unsatisfiable_replacement() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut t = Topology::new(inspect.root(), 0);
+
+        let a = t.add_element_with_inspect("A", vec![0, 1], 0, 0).expect("add_element failed");
+        let b = t.add_element_with_inspect("B", vec![0, 1], 0, 0).expect("add_element failed");
+
+        let a1_b1 = Dependency {
+            dependent: ElementLevel { element_id: a.clone(), level: ONE },
+            requires: ElementLevel { element_id: b.clone(), level: ONE },
+        };
+        t.add_dependency(
+            &a1_b1,
+            OnRequiredElementRemoval::MakeUnsatisfiable,
+            &mut EagerInspectWriter,
+        )
+        .expect("add_dependency failed");
+
+        // Removing B replaces A's dependency with one on the unsatisfiable element, which must be
+        // reflected in both indexes.
+        t.remove_element(b.clone());
+        let unsatisfiable = t.get_unsatisfiable_element_id();
+        let deps_from_a = sorted_deps(t.dependencies_for_dependent_element(a.clone()));
+        assert_eq!(deps_from_a.len(), 1);
+        assert_eq!(deps_from_a[0].requires.element_id, unsatisfiable);
+        assert_eq!(
+            sorted_deps(t.dependencies_for_required_element(unsatisfiable)),
+            [deps_from_a[0].clone()]
+        );
+        assert_eq!(t.dependencies_for_required_element(b).count(), 0);
     }
 }

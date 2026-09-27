@@ -97,7 +97,7 @@ class BaseFidlServer : public FidlServerT<ProtocolT>, public internal::BaseFidlS
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto deadline = zx::clock::get_monotonic() + timeout;
-    for (auto [p, weak_child] : children_) {
+    for (const auto& [p, weak_child] : children_) {
       if (auto child = weak_child.lock(); child) {
         timeout = deadline - zx::clock::get_monotonic();
         if (!child->WaitForShutdown(timeout)) {

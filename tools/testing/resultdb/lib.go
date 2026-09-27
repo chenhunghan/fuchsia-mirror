@@ -12,7 +12,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,8 +19,10 @@ import (
 	sinkpb "go.chromium.org/luci/resultdb/sink/proto/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"go.fuchsia.dev/fuchsia/tools/build"
 	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
 )
 
@@ -50,6 +51,12 @@ const (
 	// //third_party/luci-go/resultdb/proto/v1/test_metadata.proto:113
 	// https://source.chromium.org/chromium/infra/infra_superproject/+/main:infra/go/src/go.chromium.org/luci/resultdb/proto/v1/test_metadata.proto;l=114
 	MaxLocationFileNameLength = 512
+	// MaxPropertiesSize is the maximum serialized size of a test result's
+	// properties. ResultDB enforces it in ValidateTestResultProperties through
+	// MaxSizeTestResultProperties; the 8 KB mentioned in the comment of the
+	// vendored test_result.proto is stale.
+	// https://source.chromium.org/chromium/infra/infra_superproject/+/main:infra/go/src/go.chromium.org/luci/resultdb/pbutil/common.go;l=53;drc=4ea817bdb4c03f2a48c98fc85a3151edf1c0cb86
+	MaxPropertiesSize = 20 * 1024
 )
 
 // ParseSummary unmarshals the summary.json file content into runtests.TestSummary struct.
@@ -176,15 +183,6 @@ func setTestMetadata(r *sinkpb.TestResult, testDetail runtests.TestDetails, disp
 				},
 			},
 		}
-	}
-	if len(testDetail.Metadata.Owners) > 0 {
-		listOfOwners := testDetail.Metadata.Owners
-		truncatedListOfOwners := listOfOwners
-		if len(listOfOwners) > 5 {
-			truncatedListOfOwners = listOfOwners[:5]
-		}
-		owners := strings.Join(truncatedListOfOwners, ",")
-		r.Tags = append(r.Tags, &resultpb.StringPair{Key: "owners", Value: owners})
 	}
 	label := testDetail.SourceLabel
 	if label == "" {
@@ -338,18 +336,13 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 			continue
 		}
 
-		testCaseTags := append([]*resultpb.StringPair{
-			{Key: "format", Value: testCase.Format},
-			{Key: "is_test_case", Value: "true"},
-		}, tags...)
-		for _, tag := range testCase.Tags {
-			testCaseTags = append(testCaseTags, &resultpb.StringPair{
-				Key: tag.Key, Value: tag.Value,
-			})
-		}
+		properties, testCaseTags := testCaseProperties(testCase, testDetail, tags)
+		testIDStructured := testIdentifierFromCase(&testCase)
 		r := sinkpb.TestResult{
-			TestId: testID,
-			Tags:   testCaseTags,
+			TestId:           testID,
+			TestIdStructured: testIDStructured,
+			Tags:             testCaseTags,
+			Properties:       properties,
 		}
 		testCaseStatus, testCaseFailureReasonKind, err := resultDBStatus(testCase.Status)
 		if err != nil {
@@ -384,13 +377,32 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 
 		if testCase.Status == runtests.TestExonerated {
 			testExonerations = append(testExonerations, &sinkpb.TestExoneration{
-				TestId:          testID,
-				ExplanationHtml: fmt.Sprintf("Test case %s was exonerated in the test summary.", testCase.CaseName),
-				Reason:          resultpb.ExonerationReason_NOT_CRITICAL,
+				TestId:           testID,
+				TestIdStructured: testIDStructured,
+				ExplanationHtml:  fmt.Sprintf("Test case %s was exonerated in the test summary.", testCase.CaseName),
+				Reason:           resultpb.ExonerationReason_NOT_CRITICAL,
 			})
 		}
 	}
 	return testResults, testExonerations, testsSkipped
+}
+
+// testIdentifierFromCase constructs a sinkpb.TestIdentifier for an individual test case.
+func testIdentifierFromCase(testCase *runtests.TestCaseResult) *sinkpb.TestIdentifier {
+	caseName := testCase.CaseName
+	// ResultDB reserves characters <= ',' (ASCII U+0020 to U+002C, such as ' ',
+	// '!', '"', '#', etc.) as leading characters for case names and rejects
+	// results starting with them. Wrap any case name starting with a reserved
+	// character in brackets to preserve the original name while satisfying
+	// ResultDB constraints.
+	if len(caseName) > 0 && caseName[0] <= ',' {
+		caseName = fmt.Sprintf("[%s]", caseName)
+	}
+
+	return &sinkpb.TestIdentifier{
+		FineName:           testCase.SuiteName,
+		CaseNameComponents: []string{caseName},
+	}
 }
 
 // testDetailsToResultSink converts TestDetail defined in /tools/testing/runtests/runtests.go
@@ -402,24 +414,23 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 		return nil, nil, testDetail.Name, fmt.Errorf("The test name exceeds %d bytes max limit: %q ", MaxTestIDLength, testDetail.Name)
 	}
 
-	testTags := append([]*resultpb.StringPair{
-		{Key: "gn_label", Value: testDetail.GNLabel},
-		// Most consumers should use `source_label` rather than `gn_label` since
-		// it better corresponds to the location of the test's source code for
-		// Bazel tests.
-		{Key: "source_label", Value: testDetail.SourceLabel},
-		{Key: "test_case_count", Value: strconv.Itoa(len(testDetail.Cases))},
-		{Key: "affected", Value: strconv.FormatBool(testDetail.Affected)},
-		{Key: "is_top_level_test", Value: "true"},
-	}, tags...)
-	for _, tag := range testDetail.Tags {
-		testTags = append(testTags, &resultpb.StringPair{
-			Key: tag.Key, Value: tag.Value,
-		})
+	properties, testTags := testDetailProperties(testDetail, tags)
+	var testIDStructured *sinkpb.TestIdentifier
+	if len(testDetail.Cases) == 0 {
+		// If a test has no individual test cases, the top-level test itself is the
+		// test case. Populate FineName and CaseNameComponents with default values
+		// so that ResultSink validation succeeds. When test cases exist,
+		// test_id_structured is reported only on those cases and left nil here.
+		testIDStructured = &sinkpb.TestIdentifier{
+			FineName:           "test",
+			CaseNameComponents: []string{"case"},
+		}
 	}
 	r := sinkpb.TestResult{
-		TestId: testDetail.Name,
-		Tags:   testTags,
+		TestId:           testDetail.Name,
+		TestIdStructured: testIDStructured,
+		Tags:             testTags,
+		Properties:       properties,
 	}
 	testStatus, failureReasonKind, err := resultDBStatus(testDetail.Status)
 	if err != nil {
@@ -453,13 +464,143 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 
 	if testDetail.Status == runtests.TestExonerated {
 		return &r, &sinkpb.TestExoneration{
-			TestId:          testDetail.Name,
-			ExplanationHtml: fmt.Sprintf("Test target %s was exonerated in the test summary.", testDetail.Name),
-			Reason:          resultpb.ExonerationReason_NOT_CRITICAL,
+			TestId:           testDetail.Name,
+			TestIdStructured: testIDStructured,
+			ExplanationHtml:  fmt.Sprintf("Test target %s was exonerated in the test summary.", testDetail.Name),
+			Reason:           resultpb.ExonerationReason_NOT_CRITICAL,
 		}, "", nil
 	}
 
 	return &r, nil, "", nil
+}
+
+// testDetailProperties returns the properties and the legacy tags of a
+// top-level test result.
+//
+// buildTags is the build and environment metadata that applies to every test
+// result, such as the builder and the board.
+func testDetailProperties(testDetail *runtests.TestDetails, buildTags []*resultpb.StringPair) (*structpb.Struct, []*resultpb.StringPair) {
+	fields := map[string]any{
+		"gn_label": testDetail.GNLabel,
+		// Most consumers should use `source_label` rather than `gn_label`
+		// since it better corresponds to the location of the test's source
+		// code for Bazel tests.
+		"source_label":    testDetail.SourceLabel,
+		"test_case_count": len(testDetail.Cases),
+		"affected":        testDetail.Affected,
+	}
+
+	// ResultDB already models the suite and test case hierarchy, so
+	// is_top_level_test is reported as a legacy tag only. See b/527958757,
+	// which stops reporting suite-level results altogether.
+	tags := []*resultpb.StringPair{
+		{Key: "is_top_level_test", Value: "true"},
+	}
+	// The tags are an unordered list, so the properties can be flattened into
+	// them in map order.
+	for key, value := range fields {
+		tags = append(tags, &resultpb.StringPair{Key: key, Value: fmt.Sprint(value)})
+	}
+
+	addCommonProperties(fields, &tags, testDetail.Metadata.Owners, testDetail.Tags, buildTags)
+	return newProperties(fields), tags
+}
+
+// testCaseProperties returns the properties and the legacy tags of a test case
+// result.
+//
+// buildTags is the build and environment metadata that applies to every test
+// result, such as the builder and the board.
+func testCaseProperties(testCase runtests.TestCaseResult, testDetail *runtests.TestDetails, buildTags []*resultpb.StringPair) (*structpb.Struct, []*resultpb.StringPair) {
+	fields := map[string]any{
+		"format": testCase.Format,
+	}
+
+	// See the comment on is_top_level_test in testDetailProperties.
+	tags := []*resultpb.StringPair{
+		{Key: "is_test_case", Value: "true"},
+		{Key: "format", Value: testCase.Format},
+	}
+
+	addCommonProperties(fields, &tags, testDetail.Metadata.Owners, testCase.Tags, buildTags)
+	return newProperties(fields), tags
+}
+
+// addCommonProperties adds the properties and the legacy tags shared by test
+// and test case results to fields and tags.
+//
+// TODO(b/527958920): Remove the tags once downstream consumers read the
+// equivalent values from the test result properties instead. The known
+// consumers are the PLX queries over fuchsia-infra.resultdb.ci, which read the
+// gn_label tag.
+func addCommonProperties(fields map[string]any, tags *[]*resultpb.StringPair, owners []string, customTags []build.TestTag, buildTags []*resultpb.StringPair) {
+	// The properties hold every owner, whereas the legacy tag holds at most 5
+	// of them, comma-joined. The overall properties size limit already bounds
+	// the payload.
+	if len(owners) > 0 {
+		ownerValues := make([]any, 0, len(owners))
+		for _, owner := range owners {
+			ownerValues = append(ownerValues, owner)
+		}
+		fields["owners"] = ownerValues
+
+		truncatedOwners := owners
+		if len(truncatedOwners) > 5 {
+			truncatedOwners = truncatedOwners[:5]
+		}
+		*tags = append(*tags, &resultpb.StringPair{Key: "owners", Value: strings.Join(truncatedOwners, ",")})
+	}
+
+	// The build metadata and the custom test tags hold free-form keys that are
+	// not known ahead of time. They are nested under their own key in the
+	// properties to keep them from colliding with the properties that this tool
+	// controls, and flattened into the legacy tags.
+	if len(buildTags) > 0 {
+		buildFields := make(map[string]any, len(buildTags))
+		for _, tag := range buildTags {
+			if tag.Key == "" {
+				log.Printf("[Warn] Skip reporting build tag with an empty key, value: %q", tag.Value)
+				continue
+			}
+			buildFields[tag.Key] = tag.Value
+		}
+		if len(buildFields) > 0 {
+			fields["build"] = buildFields
+		}
+		*tags = append(*tags, buildTags...)
+	}
+
+	if len(customTags) > 0 {
+		tagFields := make(map[string]any, len(customTags))
+		for _, tag := range customTags {
+			if tag.Key == "" {
+				log.Printf("[Warn] Skip reporting test tag with an empty key, value: %q", tag.Value)
+				continue
+			}
+			// A JSON object can only hold a single value per key, so the last
+			// value of a repeated key wins, whereas the tags keep every value.
+			tagFields[tag.Key] = tag.Value
+			*tags = append(*tags, &resultpb.StringPair{Key: tag.Key, Value: tag.Value})
+		}
+		if len(tagFields) > 0 {
+			fields["tags"] = tagFields
+		}
+	}
+}
+
+// newProperties converts fields into the test result properties, and enforces
+// ResultDB's size limit.
+func newProperties(fields map[string]any) *structpb.Struct {
+	properties, err := structpb.NewStruct(fields)
+	if err != nil {
+		log.Printf("[Warn] Skip reporting properties %v due to error: %v", fields, err)
+		return nil
+	}
+	if proto.Size(properties) > MaxPropertiesSize {
+		log.Printf("[ERROR] Skip reporting properties due to exceeding the %d bytes max limit.", MaxPropertiesSize)
+		return nil
+	}
+	return properties
 }
 
 func resultDBStatus(result runtests.TestStatus) (resultpb.TestResult_Status, resultpb.FailureReason_Kind, error) {
@@ -491,8 +632,12 @@ func toResultDBFailureReason(fr *runtests.FailureReason, defaultKind resultpb.Fa
 	// Copy over errors to the resultpb.FailureReason.
 	res.Errors = make([]*resultpb.FailureReason_Error, 0, len(fr.Errors))
 	for i, e := range fr.Errors {
+		msg := truncateString(e.Message, MaxFailureReasonLength)
+		if msg == "" {
+			continue
+		}
 		pbErr := &resultpb.FailureReason_Error{
-			Message: truncateString(e.Message, MaxFailureReasonLength),
+			Message: msg,
 		}
 		res.Errors = append(res.Errors, pbErr)
 		if proto.Size(res) > MaxFailureReasonTotalSize {

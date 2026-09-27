@@ -50,6 +50,7 @@
             availability: "optional",
         },
         { service: "fuchsia.hardware.power.PowerTokenService" },
+        { service: "fuchsia.hardware.sdio.Metadata" },
         { service: "fuchsia.hardware.sdmmc.SdmmcMetadata" },
         { service: "fuchsia.hardware.sdmmc.SdmmcService" },
     ],

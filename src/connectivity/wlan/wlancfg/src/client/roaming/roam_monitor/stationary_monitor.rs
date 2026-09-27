@@ -691,8 +691,8 @@ mod test {
             run_handle_roam_trigger_data(&mut exec, &mut test_values.monitor, trigger_data.clone());
 
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::OnSignalVelocityUpdate { .. }))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::OnSignalVelocityUpdate { .. })
         );
     }
 

@@ -32,8 +32,8 @@ pub fn drain_timeouts(
 ) -> HashMap<TimedEventClass, Vec<(TimedEvent, EventId)>> {
     let mut timeouts = HashMap::new();
     loop {
-        match time_stream.try_next() {
-            Ok(Some((_, timed_event, _))) => {
+        match time_stream.try_recv() {
+            Ok((_, timed_event, _)) => {
                 timeouts
                     .entry(timed_event.event.class())
                     .or_insert(vec![])

@@ -237,9 +237,9 @@ fuchsia_package_checker_test(
         # Common files
         "lib/ld.so.1": "ld.so.1",
         "lib/libfdio.so": "libfdio.so",
-        "lib/libsvc.so": "libsvc.so",
-        "lib/libtrace-engine.so": "libtrace-engine.so",
-        "lib/libdriver_runtime.so": "libdriver_runtime.so",
+        "lib/libsvc.so": "libsvc.so_stripped",
+        "lib/libtrace-engine.so": "libtrace-engine.so_stripped",
+        "lib/libdriver_runtime.so": "libdriver_runtime.so_stripped",
     },
     manifests = [
         "meta/test_driver.cm",
@@ -266,9 +266,9 @@ fuchsia_package_checker_test(
         # Common files
         "lib/ld.so.1": "ld.so.1",
         "lib/libfdio.so": "libfdio.so",
-        "lib/libsvc.so": "libsvc.so",
-        "lib/libtrace-engine.so": "libtrace-engine.so",
-        "lib/libdriver_runtime.so": "libdriver_runtime.so",
+        "lib/libsvc.so": "libsvc.so_stripped",
+        "lib/libtrace-engine.so": "libtrace-engine.so_stripped",
+        "lib/libdriver_runtime.so": "libdriver_runtime.so_stripped",
 
         # The following files are needed by the tool, make sure they are included
         "lib/libc++.so.2": "libc++.so.2",

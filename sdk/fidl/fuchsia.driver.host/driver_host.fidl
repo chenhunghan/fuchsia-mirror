@@ -34,12 +34,59 @@ closed protocol Driver {
     strict Stop();
 };
 
-/// Information about the driver host's threads. Used for debugging.
+/// The lifecycle state of a dispatcher.
+type DispatcherState = flexible enum {
+    RUNNING = 1;
+    SHUTTING_DOWN = 2;
+    SHUTDOWN = 3;
+    DESTROYED = 4;
+};
+
+/// Breakdown of reasons why requests were not inlined by the driver runtime.
+type NonInlinedRequestStats = struct {
+    allow_sync_calls uint64;
+    parallel_dispatch uint64;
+    task uint64;
+    unknown_thread uint64;
+    reentrant uint64;
+    channel_wait_not_yet_registered uint64;
+    no_thread_migration uint64;
+};
+
+/// Request and inlining statistics for a dispatcher.
+type DispatcherDebugStats = struct {
+    num_total_requests uint64;
+    num_inlined_requests uint64;
+    non_inlined NonInlinedRequestStats;
+};
+
+/// Diagnostic information for a task queued on a dispatcher.
+type QueuedTaskInfo = struct {
+    ptr uint64;
+    handler uint64;
+    initiating_dispatcher uint64;
+    initiating_dispatcher_name string:MAX;
+    initiating_driver uint64;
+    initiating_driver_url string:MAX;
+};
+
+/// Information about the driver host's dispatchers. Used for debugging.
 type DispatcherInfo = struct {
     driver string:MAX;
     name string:MAX;
     options uint32;
     scheduler_role string:MAX;
+    dispatcher_ptr uint64;
+    driver_ptr uint64;
+    synchronized bool;
+    allow_sync_calls bool;
+    state DispatcherState;
+    destroy_context string:MAX;
+    has_destroy_user_initiated bool;
+    destroy_user_initiated bool;
+    debug_stats DispatcherDebugStats;
+    num_queued_tasks uint64;
+    queued_tasks vector<QueuedTaskInfo>:MAX;
 };
 
 /// Information about the driver host's threads. Used for debugging.

@@ -11,6 +11,32 @@
 #include "tools/symbolizer/symbolizer.h"
 #include "tools/symbolizer/symbolizer_impl.h"
 
+namespace {
+static_assert(sizeof(AddressType) == 1, "AddressType must be 1 byte");
+static_assert(alignof(AddressType) == 1, "AddressType must have 1-byte alignment");
+static_assert(static_cast<uint8_t>(AddressType::Return) == 0);
+static_assert(static_cast<uint8_t>(AddressType::Exact) == 1);
+static_assert(static_cast<uint8_t>(AddressType::Unknown) == 2);
+static_assert(static_cast<uint8_t>(AddressType::Return) ==
+              static_cast<uint8_t>(debug_ipc::StackFrame::AddressType::kReturn));
+static_assert(static_cast<uint8_t>(AddressType::Exact) ==
+              static_cast<uint8_t>(debug_ipc::StackFrame::AddressType::kExact));
+static_assert(static_cast<uint8_t>(AddressType::Unknown) ==
+              static_cast<uint8_t>(debug_ipc::StackFrame::AddressType::kUnknown));
+
+debug_ipc::StackFrame::AddressType ConvertAddressType(AddressType type) {
+  switch (type) {
+    case AddressType::Return:
+      return debug_ipc::StackFrame::AddressType::kReturn;
+    case AddressType::Exact:
+      return debug_ipc::StackFrame::AddressType::kExact;
+    case AddressType::Unknown:
+    default:
+      return debug_ipc::StackFrame::AddressType::kUnknown;
+  }
+}
+}  // namespace
+
 extern "C" {
 void symbolizer_global_init() { zxdb::Curl::GlobalInit(); }
 void symbolizer_global_cleanup() { zxdb::Curl::GlobalCleanup(); }
@@ -48,10 +74,10 @@ MappingStatus symbolizer_add_mapping(symbolizer::SymbolizerImpl* symbolizer, uin
 }
 
 ResolveAddressStatus symbolizer_resolve_address(symbolizer::SymbolizerImpl* symbolizer,
-                                                uint64_t address, location_callback output,
-                                                void* output_context) {
+                                                uint64_t address, AddressType address_type,
+                                                location_callback output, void* output_context) {
   symbolizer::SymbolizerImpl::BacktraceStatus status = symbolizer->Backtrace(
-      address, debug_ipc::StackFrame::AddressType::kUnknown,
+      address, ConvertAddressType(address_type),
       [address, output, output_context](auto inline_index, auto& location, auto& module) {
         symbolizer_location_t output_location;
 

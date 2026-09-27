@@ -49,6 +49,7 @@ if (is_host) {
   ]
 
   _golden_dir = "${target_gen_dir}/goldens"
+
   host_test_data("copy_golden_files") {
     sources = []
     foreach(test_name, _golden_tests) {

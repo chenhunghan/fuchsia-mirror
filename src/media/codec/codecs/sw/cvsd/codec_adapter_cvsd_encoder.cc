@@ -71,7 +71,8 @@ CodecAdapterCvsdEncoder::InputLoopStatus CodecAdapterCvsdEncoder::ProcessFormatD
   }
 
   if (input_format.frames_per_second != kExpectedSamplingFreq) {
-    LOG(WARNING, "Expected sampling frequency %u got %u", kExpectedSamplingFreq, input_format.frames_per_second);
+    LOG(WARNING, "Expected sampling frequency %u got %u", kExpectedSamplingFreq,
+        input_format.frames_per_second);
   }
 
   InitCvsdParams(codec_params_);
@@ -110,8 +111,7 @@ fuchsia::sysmem::BufferCollectionConstraints CodecAdapterCvsdEncoder::BufferColl
         std::max(zx_system_get_page_size(), kInputFrameSize);
     c.buffer_memory_constraints.max_size_bytes = kInputPerPacketBufferBytesMax;
   } else {
-    c.buffer_memory_constraints.min_size_bytes =
-        std::max(zx_system_get_page_size(), (uint32_t)MinOutputBufferSize());
+    c.buffer_memory_constraints.min_size_bytes = static_cast<uint32_t>(MinOutputBufferSize());
     // Set to some arbitrary value.
     c.buffer_memory_constraints.max_size_bytes = 0xFFFFFFFF;
   }

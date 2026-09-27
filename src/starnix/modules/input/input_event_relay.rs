@@ -48,7 +48,39 @@ pub enum EventProxyMode {
     WakeContainer,
 }
 
-pub type OpenedFiles = Arc<LockDepMutex<Vec<Weak<InputFile>>, InputEventRelayOpenedFilesLock>>;
+#[derive(Default)]
+pub struct OpenedFilesState {
+    files: Vec<Weak<InputFile>>,
+    has_been_opened: bool,
+    buffered_events: Vec<uapi::input_event>,
+}
+
+impl OpenedFilesState {
+    pub fn on_file_opened(&mut self, file: &Arc<InputFile>) {
+        if !self.has_been_opened {
+            self.has_been_opened = true;
+            if !self.buffered_events.is_empty() {
+                file.add_events(std::mem::take(&mut self.buffered_events));
+            }
+        }
+        self.files.push(Arc::downgrade(file));
+    }
+}
+
+impl std::ops::Deref for OpenedFilesState {
+    type Target = Vec<Weak<InputFile>>;
+    fn deref(&self) -> &Self::Target {
+        &self.files
+    }
+}
+
+impl std::ops::DerefMut for OpenedFilesState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.files
+    }
+}
+
+pub type OpenedFiles = Arc<LockDepMutex<OpenedFilesState, InputEventRelayOpenedFilesLock>>;
 
 pub enum InputDeviceType {
     Touch(FuchsiaTouchEventToLinuxTouchEventConverter),
@@ -66,10 +98,59 @@ impl std::fmt::Display for InputDeviceType {
     }
 }
 
+enum DeviceRegistration {
+    Pending { kernel: Arc<Kernel>, device: crate::InputDevice, device_id: DeviceId },
+    Registered,
+    Failed,
+}
+
+impl DeviceRegistration {
+    /// Creates a `Pending` registration for `device`, which will be registered with `kernel`
+    /// under `device_id` on the first call to `ensure_registered`.
+    ///
+    /// `device` must not already be registered: `DeviceRegistry::register_device` silently
+    /// overwrites an existing minor device entry, so a double registration would otherwise only
+    /// surface as a warning log.
+    fn pending(kernel: Arc<Kernel>, device: crate::InputDevice, device_id: DeviceId) -> Self {
+        debug_assert!(
+            {
+                let devt = starnix_uapi::device_id::DeviceId::new(
+                    starnix_uapi::device_id::INPUT_MAJOR,
+                    device_id,
+                );
+                let next_devt = starnix_uapi::device_id::DeviceId::new(
+                    starnix_uapi::device_id::INPUT_MAJOR,
+                    device_id + 1,
+                );
+                kernel
+                    .device_registry
+                    .list_minor_devices(starnix_core::device::DeviceMode::Char, devt..next_devt)
+                    .is_empty()
+            },
+            "input device {device_id} must not be registered before lazy registration",
+        );
+        Self::Pending { kernel, device, device_id }
+    }
+
+    fn ensure_registered(&mut self) {
+        let Self::Pending { kernel, device, device_id } = self else { return };
+        match device.clone().register(kernel, *device_id) {
+            Ok(()) => *self = Self::Registered,
+            Err(e) => {
+                log_warn!("unable to register input device {device_id:?}: {e:?}");
+                // Intentionally abandon registering the mouse device after one failed attempt
+                // rather than retrying and logging on every subsequent input event.
+                *self = Self::Failed;
+            }
+        }
+    }
+}
+
 pub struct DeviceState {
     device_type: InputDeviceType,
     open_files: OpenedFiles,
     inspect_status: Option<Arc<InputDeviceStatus>>,
+    registration: DeviceRegistration,
 }
 
 pub struct TrackedWakeLease {
@@ -131,6 +212,7 @@ impl InputEventsRelayHandle {
                 ),
                 open_files,
                 inspect_status,
+                registration: DeviceRegistration::Registered,
             },
             sender,
         ));
@@ -146,7 +228,12 @@ impl InputEventsRelayHandle {
         let (sender, receiver) = oneshot::channel();
         let _ = self.sender.unbounded_send(DeviceStateChange::Add(
             device_id,
-            DeviceState { device_type: InputDeviceType::Keyboard, open_files, inspect_status },
+            DeviceState {
+                device_type: InputDeviceType::Keyboard,
+                open_files,
+                inspect_status,
+                registration: DeviceRegistration::Registered,
+            },
             sender,
         ));
         let _ = block_on(receiver);
@@ -167,6 +254,7 @@ impl InputEventsRelayHandle {
                 ),
                 open_files,
                 inspect_status,
+                registration: DeviceRegistration::Registered,
             },
             sender,
         ));
@@ -189,6 +277,8 @@ impl InputEventsRelay {
     // TODO(https://fxbug.dev/371602479): Use `fuchsia.ui.SupportedInputDevices` to create
     // relays.
     // start_relays will take over the ownership of InputEventsRelay.
+    // If `default_mouse_device` is `Some`, it must be an unregistered `InputDevice`; the relay
+    // will lazily register it with `kernel` on the first converted mouse event.
     pub fn start_relays(
         mut self: Self,
         kernel: &Kernel,
@@ -200,10 +290,9 @@ impl InputEventsRelay {
         registry_proxy: fuipolicy::DeviceListenerRegistrySynchronousProxy,
         default_touch_device_opened_files: OpenedFiles,
         default_keyboard_device_opened_files: OpenedFiles,
-        default_mouse_device_opened_files: OpenedFiles,
+        default_mouse_device: Option<crate::InputDevice>,
         default_touch_device_inspect: Option<Arc<InputDeviceStatus>>,
         default_keyboard_device_inspect: Option<Arc<InputDeviceStatus>>,
-        default_mouse_device_inspect: Option<Arc<InputDeviceStatus>>,
     ) {
         let f = async move |current_task: &CurrentTask| {
             let kernel = current_task.kernel();
@@ -224,8 +313,7 @@ impl InputEventsRelay {
                     kernel,
                     event_proxy_mode,
                     mouse_source_client_end,
-                    default_mouse_device_opened_files,
-                    default_mouse_device_inspect,
+                    default_mouse_device,
                 );
             let mut mouse_future = mouse_waking_stream.next();
 
@@ -864,6 +952,10 @@ impl InputEventsRelay {
                 continue;
             }
 
+            if !new_events.is_empty() {
+                dev.registration.ensure_registered();
+            }
+
             if let Some(dev_inspect_status) = &dev.inspect_status {
                 dev_inspect_status.count_total_received_events(num_received_events);
                 dev_inspect_status.count_total_ignored_events(num_ignored_events);
@@ -884,7 +976,11 @@ impl InputEventsRelay {
             }
 
             fuchsia_trace::duration_end!("input", "starnix_process_per_device_mouse_event");
-            dev.open_files.lock().retain(|f| {
+            let mut open_files = dev.open_files.lock();
+            if !open_files.has_been_opened && !new_events.is_empty() {
+                open_files.buffered_events.extend(new_events.iter().copied());
+            }
+            open_files.retain(|f| {
                 let Some(file) = f.upgrade() else {
                     log_warn!("Dropping input file for mouse that failed to upgrade");
                     return false;
@@ -926,6 +1022,7 @@ fn setup_touch_relay(
         device_type: InputDeviceType::Touch(FuchsiaTouchEventToLinuxTouchEventConverter::create()),
         open_files: default_touch_device_opened_files,
         inspect_status: device_inspect_status,
+        registration: DeviceRegistration::Registered,
     };
     let (touch_source_proxy, counter) = match event_proxy_mode {
         EventProxyMode::WakeContainer => {
@@ -961,6 +1058,7 @@ fn setup_keyboard_relay(
         device_type: InputDeviceType::Keyboard,
         open_files: default_keyboard_device_opened_files,
         inspect_status: device_inspect_status,
+        registration: DeviceRegistration::Registered,
     };
     let (keyboard_listener, event_stream) =
         fidl::endpoints::create_request_stream::<KeyboardListenerMarker>();
@@ -988,6 +1086,7 @@ fn setup_button_relay(
         device_type: InputDeviceType::Keyboard,
         open_files: default_keyboard_device_opened_files,
         inspect_status: device_inspect_status,
+        registration: DeviceRegistration::Registered,
     };
     let media_buttons_name = "media buttons";
     let touch_buttons_name = "touch buttons";
@@ -1070,18 +1169,26 @@ fn setup_mouse_relay(
     kernel: &Arc<Kernel>,
     event_proxy_mode: EventProxyMode,
     mouse_source_client_end: ClientEnd<fuipointer::MouseSourceV2Marker>,
-    default_mouse_device_opened_files: OpenedFiles,
-    device_inspect_status: Option<Arc<InputDeviceStatus>>,
+    default_mouse_device: Option<crate::InputDevice>,
 ) -> (
     DeviceState,
     fuipointer::MouseSourceV2Proxy,
     ContainerWakingStream<fuipointer::MouseSourceV2EventStream>,
 ) {
     let mouse_counter_name = "mouse";
+    let (open_files, inspect_status, registration) = match default_mouse_device {
+        Some(dev) => (
+            dev.open_files.clone(),
+            Some(dev.inspect_status.clone()),
+            DeviceRegistration::pending(kernel.clone(), dev, DEFAULT_MOUSE_DEVICE_ID),
+        ),
+        None => (Default::default(), None, DeviceRegistration::Registered),
+    };
     let default_mouse_device = DeviceState {
         device_type: InputDeviceType::Mouse(FuchsiaMouseEventToLinuxMouseEventConverter::create()),
-        open_files: default_mouse_device_opened_files,
-        inspect_status: device_inspect_status,
+        open_files,
+        inspect_status,
+        registration,
     };
     let (mouse_source_proxy, counter) = match event_proxy_mode {
         EventProxyMode::WakeContainer => {
@@ -1210,10 +1317,9 @@ pub async fn start_input_relays_for_test(
         device_registry_proxy,
         touch_device.open_files.clone(),
         keyboard_device.open_files.clone(),
-        mouse_device.open_files.clone(),
+        Some(mouse_device.clone()),
         Some(touch_device.inspect_status.clone()),
         Some(keyboard_device.inspect_status.clone()),
-        Some(mouse_device.inspect_status.clone()),
     );
 
     let keyboard_listener = match keyboard_stream.next().await {
@@ -2080,6 +2186,146 @@ mod test {
             assert_ne!(events.len(), 0);
 
             assert!(!kernel.suspend_resume_manager.has_nonzero_message_counter());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn mouse_device_lazily_registered_on_first_mouse_event() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel().clone();
+            let inspector = fuchsia_inspect::Inspector::default();
+
+            let touch_device = crate::InputDevice::new_touch(700, 1200, inspector.root());
+            let keyboard_device = crate::InputDevice::new_keyboard(inspector.root());
+            // Do not open `mouse_device` before registration so we test production ordering:
+            // userspace can only open `/dev/input/event2` after `DeviceRegistry` registration.
+            let mouse_device = crate::InputDevice::new_mouse(inspector.root());
+
+            let (touch_source_client_end, _touch_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::TouchSourceV2Marker>();
+            let (mouse_source_client_end, mut mouse_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::MouseSourceV2Marker>();
+            let (keyboard_proxy, mut keyboard_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<fuiinput::KeyboardMarker>();
+            let view_ref_pair =
+                fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair");
+            let (device_registry_proxy, mut device_listener_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuipolicy::DeviceListenerRegistryMarker,
+                >();
+
+            let (relay, _relay_handle) = new_input_relay();
+            relay.start_relays(
+                &kernel,
+                EventProxyMode::None,
+                touch_source_client_end,
+                keyboard_proxy,
+                mouse_source_client_end,
+                view_ref_pair.view_ref,
+                device_registry_proxy,
+                touch_device.open_files.clone(),
+                keyboard_device.open_files.clone(),
+                Some(mouse_device.clone()),
+                Some(touch_device.inspect_status.clone()),
+                Some(keyboard_device.inspect_status.clone()),
+            );
+
+            if let Some(Ok(fuiinput::KeyboardRequest::AddListener { responder, .. })) =
+                keyboard_stream.next().await
+            {
+                let _ = responder.send();
+            }
+            if let Some(Ok(fuipolicy::DeviceListenerRegistryRequest::RegisterListener {
+                responder,
+                ..
+            })) = device_listener_stream.next().await
+            {
+                let _ = responder.send();
+            }
+            if let Some(Ok(
+                fuipolicy::DeviceListenerRegistryRequest::RegisterTouchButtonsListener {
+                    responder,
+                    ..
+                },
+            )) = device_listener_stream.next().await
+            {
+                let _ = responder.send();
+            }
+
+            let mouse_dev_id = starnix_uapi::device_id::DeviceId::new(
+                starnix_uapi::device_id::INPUT_MAJOR,
+                DEFAULT_MOUSE_DEVICE_ID,
+            );
+            let next_dev_id = starnix_uapi::device_id::DeviceId::new(
+                starnix_uapi::device_id::INPUT_MAJOR,
+                DEFAULT_MOUSE_DEVICE_ID + 1,
+            );
+
+            // Before any mouse event occurs, the mouse device should not be registered in
+            // DeviceRegistry.
+            assert!(
+                kernel
+                    .device_registry
+                    .list_minor_devices(
+                        starnix_core::device::DeviceMode::Char,
+                        mouse_dev_id..next_dev_id,
+                    )
+                    .is_empty()
+            );
+
+            // Send an empty/no-op mouse event (wheel delta 0) that produces no uapi input_events.
+            answer_next_mouse_watch_request(
+                &mut mouse_stream,
+                vec![make_mouse_wheel_event(0, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+
+            // Still should not be registered.
+            assert!(
+                kernel
+                    .device_registry
+                    .list_minor_devices(
+                        starnix_core::device::DeviceMode::Char,
+                        mouse_dev_id..next_dev_id,
+                    )
+                    .is_empty()
+            );
+
+            // Send a real mouse event (wheel delta 1) to trigger Pending -> Registered, followed by
+            // a second real mouse event (wheel delta 1) to synchronize the stream and exercise the
+            // DeviceRegistration::Registered idempotency path.
+            answer_next_mouse_watch_request(
+                &mut mouse_stream,
+                vec![make_mouse_wheel_event(1, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            answer_next_mouse_watch_request(
+                &mut mouse_stream,
+                vec![make_mouse_wheel_event(1, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            answer_next_mouse_watch_request(
+                &mut mouse_stream,
+                vec![make_mouse_wheel_event(0, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+
+            // The mouse device should now be registered in DeviceRegistry.
+            let registered = kernel.device_registry.list_minor_devices(
+                starnix_core::device::DeviceMode::Char,
+                mouse_dev_id..next_dev_id,
+            );
+            assert_eq!(registered.len(), 1);
+            assert_eq!(registered[0].0, mouse_dev_id);
+
+            // Open the mouse device *after* registration (matching production ordering) and verify
+            // that the converted events from the pre-open batches were buffered and flushed on
+            // first open (2 wheel events * 2 uapi events [EV_REL, EV_SYN] each = 4 events).
+            let mouse_file =
+                mouse_device.open_test(&current_task).expect("Failed to open mouse file");
+            let events = read_uapi_events(&mouse_file, &current_task);
+            assert_eq!(events.len(), 4);
         })
         .await;
     }

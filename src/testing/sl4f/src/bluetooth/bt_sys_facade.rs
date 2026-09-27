@@ -355,11 +355,11 @@ impl BluetoothSysFacade {
     pub async fn get_pairing_pin(&self) -> Result<String, Error> {
         let tag = "BluetoothSysFacade::get_pairing_pin";
         let pin = match &mut self.inner.write().client_pin_receiver {
-            Some(receiever) => match receiever.try_next() {
-                Ok(value) => match value {
-                    Some(v) => v,
-                    None => return Err(format_err!("Error getting pin from pairing delegate.")),
-                },
+            Some(receiever) => match receiever.try_recv() {
+                Ok(v) => v,
+                Err(e) if e.is_closed() => {
+                    return Err(format_err!("Error getting pin from pairing delegate."));
+                }
                 Err(_e) => {
                     let err_msg = "No pairing pin sent from the pairing delegate.".to_string();
                     fx_err_and_bail!(&with_line!(tag), err_msg)

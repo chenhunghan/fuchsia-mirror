@@ -370,12 +370,13 @@ mod test {
         assert_eq!(2, conv_string.len());
         let conv_bool: Vec<bool> = <_>::try_convert(c(json!([true, "false", false])))?;
         assert_eq!(3, conv_bool.len());
-        let conv_bool_2: Vec<bool> = <_>::try_convert(c(json!([36, "false", false])))?;
-        assert_eq!(2, conv_bool_2.len());
+        let conv_bool_2_err: Result<Vec<bool>, _> =
+            <_>::try_convert(c(json!([36, "false", false])));
+        assert!(conv_bool_2_err.is_err());
         let conv_num: Vec<u64> = <_>::try_convert(c(json!([3, "36", 1000])))?;
         assert_eq!(3, conv_num.len());
-        let conv_num_2: Vec<u64> = <_>::try_convert(c(json!([3, "false", 1000])))?;
-        assert_eq!(2, conv_num_2.len());
+        let conv_num_2_err: Result<Vec<u64>, _> = <_>::try_convert(c(json!([3, "false", 1000])));
+        assert!(conv_num_2_err.is_err());
         let bad_elem: Result<Vec<u64>, ConfigError> = <_>::try_convert(c(json!("test")));
         assert!(bad_elem.is_err());
         let bad_elem_2: Result<Vec<u64>, ConfigError> = <_>::try_convert(c(json!(["test"])));

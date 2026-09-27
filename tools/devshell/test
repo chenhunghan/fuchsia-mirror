@@ -11,11 +11,10 @@
 ## This is an incomplete list of options. Run 'fx test --help' for the complete set of options.
 ## Options:
 ## -h, --help
+##     --help-advanced                   Show all advanced and internal options.
 ##     --test-filter                     Runs specific test cases in v2 suite. Can be specified multiple
 ##                                       times to pass in multiple patterns.
 ##                                       example: --test-filter glob1 --test-filter glob2
-##     --agent-output                    Force machine-readable JSON output and log isolation for AI agents.
-##     --no-agent-output                 Disable agent output and run in standard human-readable mode (default, unless in an agent environment).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/vars.sh || exit $?
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/metrics.sh || exit $?
@@ -33,7 +32,7 @@ host_tests_only=false
 for arg in "$@"; do
   if [[ "$arg" == "--" ]]; then
     break
-  elif [[ "$arg" == "--help" || "$arg" == "-h" || "$arg" == "--info" || "$arg" == "--dry" || "$arg" == "--prev"* || "$arg" == "-pr" ]]; then
+  elif [[ "$arg" == "--help"* || "$arg" == "-h" || "$arg" == "--info" || "$arg" == "--dry" || "$arg" == "--prev"* || "$arg" == "-pr" ]]; then
     is_test_execution=false
   elif [[ "$arg" == "--host" ]]; then
     host_tests_only=true

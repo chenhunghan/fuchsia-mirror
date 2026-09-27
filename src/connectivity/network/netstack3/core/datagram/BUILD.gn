@@ -14,9 +14,8 @@ rustc_library_with_features("netstack3-datagram") {
     "src/datagram.rs",
     "src/diagnostics.rs",
     "src/lib.rs",
-    "src/settings.rs",
-    "src/sndbuf.rs",
     "src/spec_context.rs",
+    "src/tx_metadata.rs",
     "src/uninstantiable.rs",
   ]
   deps = [

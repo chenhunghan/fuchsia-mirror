@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 zerocopy = { version = "0.8.48", features = ["derive"] }
 thiserror = {version = "2.0.18", default-features = false}
-futures = {version = "=0.3.31", default-features = false, features = ["async-await"]}
+futures = {version = "=0.3.34", default-features = false, features = ["async-await"]}
 sapphire-async = { path = "../sapphire-async" }
 sapphire-sync = { path = "../sapphire-sync" }
 sapphire-collections = { path = "../sapphire-collections" }

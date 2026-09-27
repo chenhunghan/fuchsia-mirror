@@ -137,21 +137,21 @@ mod tests {
     fn events() {
         let (map, mut recv) = WatchableMap::new();
         map.insert(3u16, "foo");
-        assert_matches!(recv.try_next(), Ok(Some(MapEvent::KeyInserted(3u16))));
+        assert_matches!(recv.try_recv(), Ok(MapEvent::KeyInserted(3u16)));
 
         map.request_snapshot();
-        let snapshot_one = assert_matches!(recv.try_next(), Ok(Some(MapEvent::Snapshot(s))) => s);
+        let snapshot_one = assert_matches!(recv.try_recv(), Ok(MapEvent::Snapshot(s)) => s);
 
         map.remove(&3u16);
-        assert_matches!(recv.try_next(), Ok(Some(MapEvent::KeyRemoved(3u16))));
+        assert_matches!(recv.try_recv(), Ok(MapEvent::KeyRemoved(3u16)));
 
         map.insert(4u16, "bar");
-        assert_matches!(recv.try_next(), Ok(Some(MapEvent::KeyInserted(4u16))));
+        assert_matches!(recv.try_recv(), Ok(MapEvent::KeyInserted(4u16)));
 
         map.request_snapshot();
-        let snapshot_two = assert_matches!(recv.try_next(), Ok(Some(MapEvent::Snapshot(s))) => s);
+        let snapshot_two = assert_matches!(recv.try_recv(), Ok(MapEvent::Snapshot(s)) => s);
 
-        assert!(recv.try_next().is_err());
+        assert!(recv.try_recv().is_err());
 
         assert_eq!(
             vec![(3u16, "foo")],

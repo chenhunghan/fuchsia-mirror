@@ -25,6 +25,10 @@
                             type: "object",
                             properties: {
                                 name: { type: "string" },
+                                id: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
                                 mmio_id: {
                                     type: "integer",
                                     fuchsia_type: "uint32",

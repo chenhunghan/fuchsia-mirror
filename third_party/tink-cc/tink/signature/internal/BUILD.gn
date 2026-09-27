@@ -16,6 +16,8 @@ source_set("ecdsa_raw_sign_boringssl") {
   public_deps = [
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:status_macros",
+    "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/boringssl:crypto",
     "//third_party/tink-cc/tink:public_key_sign",
@@ -29,7 +31,6 @@ source_set("ecdsa_raw_sign_boringssl") {
     "//third_party/tink-cc/tink/internal:ssl_unique_ptr",
     "//third_party/tink-cc/tink/internal:util",
     "//third_party/tink-cc/tink/subtle:common_enums",
-    "//third_party/tink-cc/tink/subtle:subtle_util_boringssl",
     "//third_party/tink-cc/tink/util:errors",
     "//third_party/tink-cc/tink/util:status",
     "//third_party/tink-cc/tink/util:statusor",

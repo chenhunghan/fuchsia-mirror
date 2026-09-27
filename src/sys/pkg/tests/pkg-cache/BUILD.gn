@@ -23,6 +23,7 @@ rustc_test("driver") {
     "//sdk/fidl/fuchsia.pkg.garbagecollector:fuchsia.pkg.garbagecollector_rust",
     "//sdk/fidl/fuchsia.pkg.http:fuchsia.pkg.http_rust",
     "//sdk/fidl/fuchsia.pkg.internal:fuchsia.pkg.internal_rust",
+    "//sdk/fidl/fuchsia.pkg.resolution:fuchsia.pkg.resolution_rust",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
     "//sdk/fidl/fuchsia.storage.blobfs:fuchsia.storage.blobfs_rust",
     "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_rust",
@@ -84,6 +85,7 @@ rustc_test("driver") {
     "src/retained_packages.rs",
     "src/space.rs",
     "src/sync.rs",
+    "src/toolbox_resolver.rs",
     "src/write_blobs.rs",
   ]
   configs += [ "//build/config/rust/lints:clippy_warn_all" ]

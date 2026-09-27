@@ -47,7 +47,10 @@ source_set("socket") {
     "strings.h",
   ]
   configs += [ "//build/config:Wno-conversion" ]
-  visibility = [ "//src/lib/fsl/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/fsl/*",
+  ]
   public_deps = [
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-default",

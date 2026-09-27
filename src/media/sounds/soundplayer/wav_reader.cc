@@ -358,8 +358,8 @@ zx_status_t WavReader::WriteData24To32(const zx::vmo& vmo, const void* data,
 WavReader::FourCc::FourCc() : value_(0) {}
 
 WavReader::FourCc::FourCc(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
-    : value_((static_cast<uint64_t>(d) << 24) | (static_cast<uint64_t>(c) << 16) |
-             (static_cast<uint64_t>(b) << 8) | static_cast<uint64_t>(a)) {}
+    : value_((static_cast<uint32_t>(d) << 24) | (static_cast<uint32_t>(c) << 16) |
+             (static_cast<uint32_t>(b) << 8) | static_cast<uint32_t>(a)) {}
 
 WavReader::FourCc::FourCc(uint32_t value) : value_(value) {}
 

@@ -9,9 +9,12 @@ import abc
 import builtins
 import enum
 import ipaddress
+import logging
 import random
 from dataclasses import dataclass
 from typing import Any, TypeVar
+
+_LOGGER: logging.Logger = logging.getLogger(__name__)
 
 AnyString = TypeVar("AnyString", str, bytes)
 
@@ -368,6 +371,25 @@ class DeviceInfo:
     ip_port: IpPort | None
     serial_socket: str | None
     fastboot_node_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for attr in ("serial_number", "serial_socket", "fastboot_node_id"):
+            val = getattr(self, attr)
+            if isinstance(val, str):
+                cleaned = val.strip()
+                if "\n" in cleaned:
+                    raise ValueError(
+                        f"Multi-line value {val!r} is not allowed for DeviceInfo.{attr}"
+                    )
+                if not cleaned or cleaned.lower() in ("unknown", "<unknown>"):
+                    _LOGGER.debug(
+                        "Invalid value %r provided for DeviceInfo.%s; setting to None.",
+                        val,
+                        attr,
+                    )
+                    object.__setattr__(self, attr, None)
+                else:
+                    object.__setattr__(self, attr, cleaned)
 
     def __str__(self) -> str:
         return (

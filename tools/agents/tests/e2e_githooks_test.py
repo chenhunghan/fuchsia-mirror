@@ -67,6 +67,17 @@ if args[0] == "format-code":
     if failed:
         sys.exit(1)
     sys.exit(0)
+
+if args[0] == "lint":
+    # `fx lint --fix` delegates to `shac fix`, which skips formatter checks and
+    # exits 0 even when findings remain. Emulate that so tests can verify the
+    # separate check pass is what actually gates the commit.
+    if "--fix" in args and os.environ.get("SHAC_FIX_SEMANTICS") == "1":
+        sys.exit(0)
+    if os.environ.get("FAIL_MOCK_LINT") == "1":
+        sys.stderr.write("Mock lint failure on modified files\n")
+        sys.exit(1)
+    sys.exit(0)
 """
 
 MOCK_JIRI_DISPATCHER_TEMPLATE = (
@@ -543,6 +554,84 @@ class E2EGitHooksTest(unittest.TestCase):
             "status", "--porcelain", cwd=wt_dir, check=True
         )
         self.assertEqual(status_res.stdout.strip(), "")
+
+    def test_e2e_commit_blocks_on_lint_failure(self) -> None:
+        """Verifies that commits are blocked when fx lint reports a failure."""
+        workspace = self.fixture.create_isolated_workspace(with_hooks=True)
+        self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+
+        target_file = workspace / "src" / "foo.json"
+        target_file.write_text('{\n    "valid": true\n}\n', encoding="utf-8")
+        self._run_git("add", "src/foo.json", cwd=workspace, check=True)
+
+        msg = (
+            "[root] Valid commit message\n\n"
+            "Bug: 1234\n"
+            "Test: none\n"
+            "Change-Id: I0000000000000000000000000000000000000077\n"
+        )
+
+        # Human developer commit with a failing linter.
+        res = self._run_git(
+            "commit",
+            "-m",
+            msg,
+            cwd=workspace,
+            extra_env={"FAIL_MOCK_LINT": "1"},
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(
+            "Mock lint failure on modified files", res.stderr + res.stdout
+        )
+
+        # AI coding agent commit with a failing linter.
+        res_agent = self._run_git(
+            "commit",
+            "-m",
+            msg,
+            cwd=workspace,
+            extra_env={"GEMINI_CLI": "1", "FAIL_MOCK_LINT": "1"},
+        )
+        self.assertNotEqual(res_agent.returncode, 0)
+        self.assertIn(
+            "Mock lint failure on modified files",
+            res_agent.stderr + res_agent.stdout,
+        )
+
+        # Commit succeeds once the linters pass.
+        res_ok = self._run_git("commit", "-m", msg, cwd=workspace)
+        self.assertEqual(res_ok.returncode, 0)
+
+    def test_e2e_commit_blocks_when_fix_pass_exits_zero(self) -> None:
+        """Verifies the check pass gates even when `--fix` reports success.
+
+        `fx lint --fix` delegates to `shac fix`, which skips formatter checks
+        and exits 0 even when findings remain. Relying on it alone silently
+        disabled the lint gate, so the adapter runs a separate check pass.
+        """
+        workspace = self.fixture.create_isolated_workspace(with_hooks=True)
+        self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+
+        target_file = workspace / "src" / "foo.json"
+        target_file.write_text('{\n    "valid": true\n}\n', encoding="utf-8")
+        self._run_git("add", "src/foo.json", cwd=workspace, check=True)
+
+        msg = "[test] Lint gate regression\n\nBug: None\nTest: e2e"
+        res = self._run_git(
+            "commit",
+            "-m",
+            msg,
+            cwd=workspace,
+            extra_env={
+                "GEMINI_CLI": "1",
+                "FAIL_MOCK_LINT": "1",
+                "SHAC_FIX_SEMANTICS": "1",
+            },
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(
+            "Mock lint failure on modified files", res.stderr + res.stdout
+        )
 
     def test_e2e_multi_repo_setup_and_reset(self) -> None:
         """Verifies that install_git_hooks configures root and vendor repos, and uninstall removes them."""

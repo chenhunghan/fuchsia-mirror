@@ -3769,3 +3769,16 @@
   reviewers: ['abarth@google.com', 'dkoloski@google.com', 'hjfreyer@google.com', 'jamesr@google.com', 'surajmalhotra@google.com']
   submitted: '2026-08-10'
   reviewed: '2026-09-08'
+
+- name: 'RFC-0287'
+  title: 'Configuration-Driven Driver Architecture via DML'
+  short_description: 'A configuration-driven architecture using Driver Markup Language.'
+  authors: ['garratt@google.com']
+  file: '0287_config_with_dml.md'
+  area: ['Drivers']
+  issue: []
+  gerrit_change_id: ['1742409']
+  status: 'Accepted'
+  reviewers: ['awolter@google.com', 'cgonyeo@google.com', 'jmatt@google.com', 'novinc@google.com', 'puneetha@google.com', 'spqchan@google.com', 'surajmalhotra@google.com']
+  submitted: '2026-08-04'
+  reviewed: '2026-09-22'

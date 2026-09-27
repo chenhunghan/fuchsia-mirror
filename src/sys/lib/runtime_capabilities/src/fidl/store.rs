@@ -818,7 +818,7 @@ mod tests {
 
         let (client_end, server_end) = create_endpoints::<fio::DirectoryMarker>();
         aggregate.send(server_end, RelativePath::new("bar").unwrap(), None).unwrap();
-        let (received_server_end, path, flags) = source_dir_receiver.try_next().unwrap().unwrap();
+        let (received_server_end, path, flags) = source_dir_receiver.try_recv().unwrap();
         assert_eq!(
             client_end.as_handle_ref().basic_info().unwrap().koid,
             received_server_end.as_handle_ref().basic_info().unwrap().related_koid
@@ -859,7 +859,7 @@ mod tests {
         {
             let (client_end, server_end) = create_endpoints::<fio::DirectoryMarker>();
             aggregate.send(server_end, RelativePath::new(name).unwrap(), None).unwrap();
-            let (received_server_end, path, flags) = receiver.try_next().unwrap().unwrap();
+            let (received_server_end, path, flags) = receiver.try_recv().unwrap();
             assert_eq!(
                 client_end.as_handle_ref().basic_info().unwrap().koid,
                 received_server_end.as_handle_ref().basic_info().unwrap().related_koid
@@ -898,7 +898,7 @@ mod tests {
         {
             let (client_end, server_end) = create_endpoints::<fio::DirectoryMarker>();
             aggregate.send(server_end, RelativePath::new(name).unwrap(), None).unwrap();
-            let (received_server_end, path, flags) = receiver.try_next().unwrap().unwrap();
+            let (received_server_end, path, flags) = receiver.try_recv().unwrap();
             assert_eq!(
                 client_end.as_handle_ref().basic_info().unwrap().koid,
                 received_server_end.as_handle_ref().basic_info().unwrap().related_koid

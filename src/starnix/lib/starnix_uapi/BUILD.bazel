@@ -1,0 +1,85 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "starnix_uapi",
+    srcs = [
+        "src/arc_key.rs",
+        "src/as_any.rs",
+        "src/auth.rs",
+        "src/device_id.rs",
+        "src/elf.rs",
+        "src/errors.rs",
+        "src/file_lease.rs",
+        "src/file_mode.rs",
+        "src/fs_type.rs",
+        "src/inotify_mask.rs",
+        "src/iptables_flags.rs",
+        "src/kcmp.rs",
+        "src/lib.rs",
+        "src/math.rs",
+        "src/mount_flags.rs",
+        "src/open_flags.rs",
+        "src/personality.rs",
+        "src/range_ext.rs",
+        "src/resource_limits.rs",
+        "src/restricted_aspace.rs",
+        "src/seal_flags.rs",
+        "src/selinux.rs",
+        "src/signals.rs",
+        "src/syslog.rs",
+        "src/termios.rs",
+        "src/uapi.rs",
+        "src/union.rs",
+        "src/unmount_flags.rs",
+        "src/user_address.rs",
+        "src/user_value.rs",
+        "src/version.rs",
+        "src/vfs.rs",
+    ] + select({
+        "@platforms//cpu:x86_64": [
+            "src/x64.rs",
+        ],
+        "@platforms//cpu:arm64": [
+            "src/arm.rs",
+            "src/arm64.rs",
+        ],
+        "@platforms//cpu:riscv64": [
+            "src/riscv64.rs",
+        ],
+    }),
+    crate_name = "starnix_uapi",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    test_deps = ["//src/lib/fuchsia"],
+    version = "0.1.0",
+    visibility = [
+        "//src/starnix/kernel:__subpackages__",
+        "//src/starnix/lib:__subpackages__",
+        "//src/starnix/modules:__subpackages__",
+        "//src/starnix/runner/lib/kernel_manager:__pkg__",
+        "//src/starnix/tests/selinux/bench:__pkg__",
+        "//src/storage/crypt/starnix:__pkg__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-types",
+        "//src/lib/diagnostics/inspect/contrib/stubs:inspect_stubs",
+        "//src/lib/fuchsia-rcu",
+        "//src/starnix/lib/atomic_bitflags",
+        "//src/starnix/lib/linux_uapi",
+        "//src/starnix/lib/range_map",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:ref-cast",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

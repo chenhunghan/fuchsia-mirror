@@ -182,10 +182,7 @@ impl<S: Storage> RawBitmapGeneric<S> {
         let new_len = last_idx(size) + 1;
         let new_bitsize = core::mem::size_of::<usize>() * new_len;
         self.bits.grow(new_bitsize)?;
-        let data = self.data_mut();
-        for i in old_len..new_len {
-            data[i] = 0;
-        }
+        self.data_mut()[old_len..new_len].fill(0);
         let old_size = self.size;
         self.size = size;
         let clear_limit = core::cmp::min(old_len * BITS_PER_WORD, self.size);
@@ -257,9 +254,9 @@ impl<S: Storage> Bitmap<usize> for RawBitmapGeneric<S> {
         let first = first_idx(bitoff);
         let last = last_idx(bitmax);
         let data = self.data_mut();
-        for i in first..=last {
+        for (i, word) in data.iter_mut().enumerate().take(last + 1).skip(first) {
             let mask = get_mask(i == first, i == last, bitoff, bitmax);
-            data[i] |= mask;
+            *word |= mask;
         }
         Ok(())
     }
@@ -274,9 +271,9 @@ impl<S: Storage> Bitmap<usize> for RawBitmapGeneric<S> {
         let first = first_idx(bitoff);
         let last = last_idx(bitmax);
         let data = self.data_mut();
-        for i in first..=last {
+        for (i, word) in data.iter_mut().enumerate().take(last + 1).skip(first) {
             let mask = get_mask(i == first, i == last, bitoff, bitmax);
-            data[i] &= !mask;
+            *word &= !mask;
         }
         Ok(())
     }
@@ -286,9 +283,6 @@ impl<S: Storage> Bitmap<usize> for RawBitmapGeneric<S> {
             return;
         }
         let last = last_idx(self.size);
-        let data = self.data_mut();
-        for i in 0..=last {
-            data[i] = 0;
-        }
+        self.data_mut()[..=last].fill(0);
     }
 }

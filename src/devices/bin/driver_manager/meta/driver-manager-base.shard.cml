@@ -51,6 +51,13 @@
             ],
         },
         {
+            config: "fuchsia.power.StoragePowerManagementEnabled",
+            key: "storage_power_management_enabled",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+        {
             config: "fuchsia.power.WaitForSuspendingToken",
 
             // If set, driver manager waits for the storage power element token before binding

@@ -4,7 +4,7 @@
 {
     include: [
         "//sdk/lib/sys/testing/elf_test_runner.shard.cml",
-        "//sdk/lib/syslog/shards/client.shard.cml",
+        "syslog/client.shard.cml",
     ],
     program: {
         binary: "bin/ipc_comparison_bench",

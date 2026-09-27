@@ -186,6 +186,7 @@ SimpleDriverTestRealm starts automatically.
 
   ```
   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/drivers/driver_test_realm/non_hermetic/simple/rust/BUILD.gn" region_tag="example" %}
+  ```
 
 The test looks identical except that it doesn't need to set up a `main` function
 to call `fuchsia.driver.test/Realm:Start`.

@@ -104,6 +104,7 @@ mod tests {
             board_config: Some("x64".to_string()),
             boot_id: Some(123456),
             boot_timestamp_nanos: Some(1700000000000000000),
+            f_release: Some(33),
             ..Default::default()
         };
 
@@ -121,6 +122,7 @@ mod tests {
         assert!(output.contains("Product Config:      workbench_eng"));
         assert!(output.contains("Board Config:        x64"));
         assert!(output.contains("Boot ID:             123456"));
+        assert!(output.contains("F Release:           33"));
     }
 
     #[fasync::run_singlethreaded(test)]
@@ -129,6 +131,7 @@ mod tests {
             nodename: Some("mock-json-nodename".to_string()),
             serial_number: Some("mock-json-serial".to_string()),
             boot_id: Some(987654),
+            f_release: Some(33),
             ..Default::default()
         };
 
@@ -146,6 +149,7 @@ mod tests {
         assert_eq!(parsed["nodename"], "mock-json-nodename");
         assert_eq!(parsed["serial_number"], "mock-json-serial");
         assert_eq!(parsed["boot_id"], 987654);
+        assert_eq!(parsed["f_release"], 33);
     }
 
     #[fasync::run_singlethreaded(test)]
@@ -154,6 +158,7 @@ mod tests {
             nodename: Some("mock-json-nodename".to_string()),
             serial_number: Some("mock-json-serial".to_string()),
             boot_id: Some(987654),
+            f_release: Some(33),
             ..Default::default()
         };
 
@@ -171,6 +176,7 @@ mod tests {
         assert_eq!(parsed["nodename"], "mock-json-nodename");
         assert_eq!(parsed["serial_number"], "mock-json-serial");
         assert_eq!(parsed["boot_id"], 987654);
+        assert_eq!(parsed["f_release"], 33);
     }
 
     #[fasync::run_singlethreaded(test)]

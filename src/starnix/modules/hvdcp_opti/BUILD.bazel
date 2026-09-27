@@ -2,9 +2,45 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/hvdcp_opti.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_package(
+    name = "hvdcp_opti",
+    package_name = "hvdcp_opti",
+    components = [
+        ":hvdcp_opti_component",
+    ],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component(
+    name = "hvdcp_opti_component",
+    compiled_manifest = ":hvdcp_opti_manifest",
+    component_name = "hvdcp_opti",
+)
+
+fx_component_manifest(
+    name = "hvdcp_opti_manifest",
+    component_name = "hvdcp_opti",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/hvdcp_opti.cml",
 )

@@ -4,18 +4,16 @@
 
 use crate::mm::{MemoryAccessor, MemoryAccessorExt, MemoryManager, TaskMemoryAccessor};
 use crate::mutable_state::{state_accessor, state_implementation};
-use crate::ptrace::{
-    AtomicStopState, PtraceEvent, PtraceEventData, PtraceState, PtraceStatus, StopState,
-};
+use crate::ptrace::{AtomicStopState, PtraceEventData, PtraceState, PtraceStatus, StopState};
 use crate::signals::{KernelSignal, SignalDetail, SignalInfo, SignalState};
 use crate::task::memory_attribution::MemoryAttributionLifecycleEvent;
 use crate::task::run_state::RunState;
 use crate::task::tracing::ZirconIdentity;
 use crate::task::{
     AbstractUnixSocketNamespace, AbstractVsockSocketNamespace, CurrentCreds, CurrentTask,
-    EventHandler, Kernel, NormalPriority, Pid, ProcessExitInfo, RealtimePriority, SchedulerState,
+    EventHandler, ExitStatus, Kernel, NormalPriority, Pid, RealtimePriority, SchedulerState,
     SchedulingPolicy, SeccompFilterContainer, SeccompState, SeccompStateValue, TaskRunningState,
-    ThreadGroup, ThreadState, UtsNamespaceHandle, WaitCanceler, Waiter, ZombieProcess,
+    ThreadGroup, ThreadState, UtsNamespaceHandle, WaitCanceler, Waiter, ZombieProcess, ZombieState,
 };
 use crate::vfs::{FdTable, FsContext, FsString, SharedFdTable};
 use atomic_bitflags::atomic_bitflags;
@@ -30,16 +28,15 @@ use starnix_sync::{
 use starnix_task_command::TaskCommand;
 use starnix_types::arch::ArchWidth;
 use starnix_types::stats::TaskTimeStats;
-use starnix_uapi::auth::{Credentials, FsCred};
+use starnix_uapi::auth::{CAP_SYS_PTRACE, Credentials, FsCred};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::signals::{SIGCHLD, SigSet, Signal, sigaltstack_contains_pointer};
 use starnix_uapi::user_address::{
     ArchSpecific, MappingMultiArchUserRef, UserAddress, UserCString, UserRef,
 };
 use starnix_uapi::{
-    CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, CLD_TRAPPED,
-    FUTEX_BITSET_MATCH_ANY, errno, error, from_status_like_fdio, pid_t, sigaction_t, sigaltstack,
-    tid_t, uapi,
+    CLD_TRAPPED, FUTEX_BITSET_MATCH_ANY, errno, error, from_status_like_fdio, pid_t, sigaction_t,
+    sigaltstack, tid_t, uapi,
 };
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
@@ -48,60 +45,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::{cmp, fmt};
 use zx::{Signals, Task as _};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExitStatus {
-    Exit(u8),
-    Kill(SignalInfo),
-    CoreDump(SignalInfo),
-    // The second field for Stop and Continue contains the type of ptrace stop
-    // event that made it stop / continue, if applicable (PTRACE_EVENT_STOP,
-    // PTRACE_EVENT_FORK, etc)
-    Stop(SignalInfo, PtraceEvent),
-    Continue(SignalInfo, PtraceEvent),
-}
-impl ExitStatus {
-    /// Converts the given exit status to a status code suitable for returning from wait syscalls.
-    pub fn wait_status(&self) -> i32 {
-        match self {
-            ExitStatus::Exit(status) => (*status as i32) << 8,
-            ExitStatus::Kill(siginfo) => siginfo.signal.number() as i32,
-            ExitStatus::CoreDump(siginfo) => (siginfo.signal.number() as i32) | 0x80,
-            ExitStatus::Continue(siginfo, trace_event) => {
-                let trace_event_val = *trace_event as u32;
-                if trace_event_val != 0 {
-                    (siginfo.signal.number() as i32) | (trace_event_val << 16) as i32
-                } else {
-                    0xffff
-                }
-            }
-            ExitStatus::Stop(siginfo, trace_event) => {
-                let trace_event_val = *trace_event as u32;
-                (0x7f + ((siginfo.signal.number() as i32) << 8)) | (trace_event_val << 16) as i32
-            }
-        }
-    }
-
-    pub fn signal_info_code(&self) -> i32 {
-        match self {
-            ExitStatus::Exit(_) => CLD_EXITED as i32,
-            ExitStatus::Kill(_) => CLD_KILLED as i32,
-            ExitStatus::CoreDump(_) => CLD_DUMPED as i32,
-            ExitStatus::Stop(_, _) => CLD_STOPPED as i32,
-            ExitStatus::Continue(_, _) => CLD_CONTINUED as i32,
-        }
-    }
-
-    pub fn signal_info_status(&self) -> i32 {
-        match self {
-            ExitStatus::Exit(status) => *status as i32,
-            ExitStatus::Kill(siginfo)
-            | ExitStatus::CoreDump(siginfo)
-            | ExitStatus::Continue(siginfo, _)
-            | ExitStatus::Stop(siginfo, _) => siginfo.signal.number() as i32,
-        }
-    }
-}
 
 atomic_bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -225,14 +168,10 @@ pub struct TaskMutableState {
     pub uts_ns: UtsNamespaceHandle,
 
     /// Bit that determines whether a newly started program can have privileges its parent does
-    /// not have.  See Documentation/prctl/no_new_privs.txt in the Linux kernel for details.
-    /// Note that Starnix does not currently implement the relevant privileges (e.g.,
-    /// setuid/setgid binaries).  So, you can set this, but it does nothing other than get
-    /// propagated to children.
+    /// not have. See `PR_SET_NO_NEW_PRIVS` in `prctl(2)` for details.
     ///
-    /// The documentation indicates that this can only ever be set to
-    /// true, and it cannot be reverted to false.  Accessor methods
-    /// for this field ensure this property.
+    /// Once set to true, this bit cannot be reverted to false. Accessor methods for this field
+    /// ensure this property.
     no_new_privs: bool,
 
     /// Userspace hint about how to adjust the OOM score for this process.
@@ -301,6 +240,18 @@ impl TaskMutableState {
 
     pub fn is_ptraced(&self) -> bool {
         self.ptrace.is_some()
+    }
+
+    /// Returns true if the task is being traced via `ptrace(2)` by a tracer that does not hold
+    /// [`CAP_SYS_PTRACE`] in its effective capability set.
+    pub fn is_ptraced_without_cap_sys_ptrace(&self) -> bool {
+        self.ptrace.as_ref().is_some_and(|ptrace| {
+            ptrace.core_state.task.upgrade().is_none_or(|tracer| {
+                // TODO(https://fxbug.dev/322893829): Verify CAP_SYS_PTRACE in the tracee's user
+                // namespace once user namespaces are supported.
+                !tracer.real_creds().cap_effective.contains(CAP_SYS_PTRACE)
+            })
+        })
     }
 
     pub fn is_ptrace_listening(&self) -> bool {
@@ -486,14 +437,11 @@ impl TaskMutableState<Base = Task> {
         self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
     }
 
-    /// Enqueues the signal, allowing the signal to skip straight to the front of the task's queue.
+    /// Enqueues `signal` at the front of the task's signal queue.
     ///
-    /// `enqueue_signal` is the more common API to use.
-    ///
-    /// Note that this will not guarantee that the signal is dequeued before any process-directed
-    /// signals.
+    /// [`Self::enqueue_signal`] is the more common API to use.
     pub fn enqueue_signal_front(&mut self, signal: SignalInfo) {
-        self.signals.enqueue(signal);
+        self.signals.jump_queue(signal);
         self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
     }
 
@@ -640,12 +588,11 @@ impl TaskMutableState<Base = Task> {
     where
         F: Fn(&SignalInfo) -> bool,
     {
-        if let Some(signal) = self.base.thread_group().take_next_signal_where(&predicate) {
+        if let Some(signal) = self.signals.take_next_where(&predicate) {
+            self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
             Some(signal)
         } else {
-            let s = self.signals.take_next_where(&predicate);
-            self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
-            s
+            self.base.thread_group().take_next_signal_where(&predicate)
         }
     }
 
@@ -662,18 +609,20 @@ impl TaskMutableState<Base = Task> {
         self.take_next_signal_where(predicate)
     }
 
-    /// Removes and returns a pending signal that is unblocked by the current signal mask.
+    /// Removes and returns a pending signal that is unblocked by the current signal mask or forced.
     ///
-    /// Returns `None` if there are no unblocked signals pending.
+    /// Returns `None` if there are no deliverable signals pending.
     pub fn take_any_signal(&mut self) -> Option<SignalInfo> {
-        self.take_signal_with_mask(self.signal_mask())
+        let signal_mask = self.signal_mask();
+        let predicate = |s: &SignalInfo| !signal_mask.has_signal(s.signal) || s.force;
+        self.take_next_signal_where(predicate)
     }
 
     /// Removes and returns a pending signal that is unblocked by `signal_mask`.
     ///
     /// Returns `None` if there are no signals pending that are unblocked by `signal_mask`.
     pub fn take_signal_with_mask(&mut self, signal_mask: SigSet) -> Option<SignalInfo> {
-        let predicate = |s: &SignalInfo| !signal_mask.has_signal(s.signal) || s.force;
+        let predicate = |s: &SignalInfo| !signal_mask.has_signal(s.signal);
         self.take_next_signal_where(predicate)
     }
 
@@ -1048,15 +997,18 @@ impl Task {
                     starnix_logging::log_error!("Exiting without an exit code.");
                     ExitStatus::Exit(u8::MAX)
                 });
-                let uid = self.real_creds().uid;
-                let exit_info = ProcessExitInfo { status: exit_status, exit_signal };
                 let zombie = ZombieProcess {
-                    pid: self.pid.clone(),
+                    task: self
+                        .weak_self
+                        .upgrade()
+                        .expect("Task strong reference must exist while &self is held"),
                     pgid,
-                    uid,
-                    exit_info: exit_info,
-                    // ptrace doesn't need this.
-                    time_stats: TaskTimeStats::default(),
+                    state: ZombieState {
+                        exit_status,
+                        // ptrace doesn't need this.
+                        time_stats: TaskTimeStats::default(),
+                    },
+                    exit_signal,
                     is_canonical: false,
                 };
 

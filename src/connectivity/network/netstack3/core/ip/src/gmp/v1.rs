@@ -854,7 +854,6 @@ mod test {
     use assert_matches::assert_matches;
     use ip_test_macro::ip_test;
     use netstack3_base::testutil::{FakeDeviceId, FakeInstant, new_rng};
-    use test_util::assert_lt;
 
     use super::*;
 
@@ -942,7 +941,7 @@ mod test {
         let new_duration = assert_matches!(actions,
             QueryReceivedActions::ScheduleTimer(d) => d
         );
-        assert_lt!(new_duration, first_duration);
+        assert!(new_duration < first_duration, "{new_duration:?} < {first_duration:?}");
     }
 
     #[test]

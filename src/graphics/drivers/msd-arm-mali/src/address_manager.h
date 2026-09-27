@@ -108,4 +108,6 @@ class AddressManager final : public AddressSpaceObserver {
   std::vector<std::unique_ptr<HardwareSlot>> registers_;
 };
 
+uint8_t GetLog2FlushRegionPages(uint64_t start, uint64_t end);
+
 #endif  // SRC_GRAPHICS_DRIVERS_MSD_ARM_MALI_SRC_ADDRESS_MANAGER_H_

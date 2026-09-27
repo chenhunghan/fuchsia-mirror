@@ -34,7 +34,11 @@ use std::collections::BTreeMap;
 ///
 /// IMPORTANT: When changing this (major or minor), update the list of possible versions at
 /// https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/cobalt_config/fuchsia/local_storage/versions.txt.
-pub const LATEST_VERSION: Version = Version { major: 57, minor: 0 };
+pub const LATEST_VERSION: Version = Version { major: 58, minor: 0 };
+
+/// The last version of the filesystem where keys in layer files used the old serialization format
+/// (prior to SerializeKey and delta encoding).
+pub const OLD_KEY_SERIALIZATION_VERSION: Version = Version { major: 57, minor: 0 };
 
 /// The earliest supported version of the on-disk filesystem format.
 ///

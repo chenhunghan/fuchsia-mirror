@@ -12,18 +12,24 @@ Defines two constants:
 -  `icu_commits` which is a dict of icu flavors to their respective commit ids.
 
 - `default`(string): the detected git commit ID for
-   `@//:third_party/icu_default`
+   `@//:third_party/icu/default`
 - `latest`(string): the detected git commit ID for
-   `@//:third_party/icu_latest`
+   `@//:third_party/icu/latest`
 
 This dict can be ingested by main build rules by using:
 
-In WORKSPACE.bazel:
+In MODULE.bazel:
 
 ```
-load ("//:bazel/icu/repository_rules.bzl:", "fuchsia_icu_config_repository")
+fuchsia_icu_config_repository = use_repo_rule(
+    "//build/bazel/icu:repository_rules.bzl",
+    "fuchsia_icu_config_repository",
+)
 
-fuchsia_icu_config_repository(name = "fuchsia_icu_config")
+fuchsia_icu_config_repository(
+    name = "fuchsia_icu_config",
+    icu_build_config_json = "fuchsia_build_generated/icu_build_config.json",
+)
 ```
 
 in BUILD files:

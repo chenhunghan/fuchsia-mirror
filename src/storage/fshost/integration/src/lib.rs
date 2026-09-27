@@ -430,7 +430,7 @@ impl TestFixture {
         let disk = self.main_disk.take();
         // Check the crash reports before destroying the realm because tearing down the realm can
         // cause mounting errors that trigger a crash report.
-        assert_matches!(self.crash_reports.try_next(), Ok(None) | Err(_));
+        assert_matches!(self.crash_reports.try_recv(), Err(_));
         self.realm.destroy().await.unwrap();
         self.torn_down.0 = true;
         disk

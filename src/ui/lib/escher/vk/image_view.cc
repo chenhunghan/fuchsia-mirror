@@ -64,19 +64,4 @@ ImageViewPtr ImageView::New(ResourceRecycler* recycler, ImagePtr image,
   return fxl::MakeRefCounted<ImageView>(recycler, std::move(image), aspect_mask);
 }
 
-ImageViewAllocator::ImageViewAllocator(ResourceRecycler* resource_recycler)
-    : resource_recycler_(resource_recycler) {}
-
-ImageViewPtr ImageViewAllocator::ObtainImageView(ImagePtr image, vk::ImageAspectFlags aspect_mask) {
-  TRACE_DURATION("gfx", "ImageViewAllocator::ObtainImageView");
-  Hasher h;
-  h.pointer(image.get());
-  h.u64(static_cast<VkFlags>(aspect_mask));
-  auto pair = image_view_cache_.Obtain(h.value());
-  if (!pair.second) {
-    pair.first->image_view = ImageView::New(resource_recycler_, image, aspect_mask);
-  }
-  return pair.first->image_view;
-}
-
 }  // namespace escher

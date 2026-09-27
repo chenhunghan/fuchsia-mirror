@@ -532,9 +532,30 @@ impl<R: Rpc, Cfg: RpcCfg, C: Deref<Target = RpcChannel<R, Cfg>> + Clone> Server<
             Responder { request_idx: idx, chan: self.channel.clone(), response_slot, waker },
         )))
     }
+
+    /// Asynchronously blocks until all Client handles are dropped (`client_count == 0`).
+    pub async fn wait_closed(&self) {
+        let guard = self.channel.state.lock();
+        self.channel
+            .not_empty
+            .when(guard, |chan| {
+                if chan.client_count == 0 {
+                    core::task::Poll::Ready(())
+                } else {
+                    core::task::Poll::Pending
+                }
+            })
+            .await;
+    }
 }
 
 impl<R: Rpc, Cfg: RpcCfg, C: Deref<Target = RpcChannel<R, Cfg>>> Responder<R, Cfg, C> {
+    /// Returns true if the client has cancelled the request.
+    pub fn is_cancelled(&self) -> bool {
+        let guard = self.chan.state.lock();
+        matches!(guard.get(self.request_idx), Some(RpcRequestState::Cancelled))
+    }
+
     /// Sends the response back to the Client and wakes their waker.
     pub fn respond(self, response: R::Response) {
         // Drop implementation just handles cancellation, so we can avoid double locking
@@ -772,6 +793,38 @@ mod tests {
     }
 
     #[test]
+    fn test_rpc_responder_is_cancelled() {
+        BoundedExecutor::new(TestExecutor::new(), |_s| {
+            let mut channel = TestRpcChannel::new();
+            let (client, server) = channel.split();
+
+            let mut call_fut = Box::pin(client.call(42));
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(&waker);
+
+            // Client submits call
+            assert!(call_fut.as_mut().poll(&mut cx).is_pending());
+
+            // Server receives request
+            let mut recv_fut = Box::pin(server.recv());
+            let poll_res = recv_fut.as_mut().poll(&mut cx);
+            let Poll::Ready(Ok((req, responder))) = poll_res else {
+                panic!("Server should have received the request");
+            };
+            assert_eq!(req, 42);
+
+            // Prior to cancellation, is_cancelled() must be false
+            assert!(!responder.is_cancelled());
+
+            // Client cancels by dropping call_fut
+            drop(call_fut);
+
+            // After cancellation, is_cancelled() must be true
+            assert!(responder.is_cancelled());
+        });
+    }
+
+    #[test]
     fn test_rpc_index_overflow() {
         let mut channel = TestRpcChannel::new();
 
@@ -828,6 +881,47 @@ mod tests {
             assert!(!handle.is_finished());
             s.spawn(async {
                 drop(client); // All clients closed
+            });
+            s.run_until_stalled();
+            assert!(handle.is_finished());
+        });
+    }
+
+    #[test]
+    fn test_rpc_server_wait_closed() {
+        let mut channel = TestRpcChannel::new();
+        let (client, server) = channel.split();
+
+        BoundedExecutor::new(TestExecutor::new(), |s| {
+            let client2 = client.clone();
+            let handle = s.spawn(async {
+                server.wait_closed().await;
+            });
+
+            s.run_until_stalled();
+            assert!(!handle.is_finished());
+
+            // Dropping one client does not wake wait_closed while another client exists.
+            drop(client);
+            s.run_until_stalled();
+            assert!(!handle.is_finished());
+
+            // Dropping the final client wakes wait_closed.
+            drop(client2);
+            s.run_until_stalled();
+            assert!(handle.is_finished());
+        });
+    }
+
+    #[test]
+    fn test_rpc_server_wait_closed_already_closed() {
+        let mut channel = TestRpcChannel::new();
+        let (client, server) = channel.split();
+        drop(client);
+
+        BoundedExecutor::new(TestExecutor::new(), |s| {
+            let handle = s.spawn(async {
+                server.wait_closed().await;
             });
             s.run_until_stalled();
             assert!(handle.is_finished());

@@ -1400,29 +1400,36 @@ impl MemoryManagerState {
                 break;
             }
 
-            let mapped_len = intersection.end - intersection.start;
+            let old_access_flags = mapping.flags().access_flags();
+            if old_access_flags != prot_flags {
+                let mapped_len = intersection.end - intersection.start;
 
-            // SAFETY: This is safe because the vmar belongs to a different process.
-            let protect_result = unsafe {
-                mapping_context.user_vmar.protect(intersection.start.ptr(), mapped_len, vmar_flags)
+                // SAFETY: This is safe because it's performed on the restricted vmar.
+                let protect_result = unsafe {
+                    mapping_context.user_vmar.protect(
+                        intersection.start.ptr(),
+                        mapped_len,
+                        vmar_flags,
+                    )
+                }
+                .map_err(|s| match s {
+                    zx::Status::INVALID_ARGS => errno!(EINVAL),
+                    zx::Status::NOT_FOUND => errno!(ENOMEM),
+                    zx::Status::ACCESS_DENIED => errno!(EACCES),
+                    _ => impossible_error(s),
+                });
+
+                if let Err(e) = protect_result {
+                    final_result = Err(e);
+                    break;
+                }
+
+                let mut new_mapping = mapping;
+                new_mapping.set_flags(new_mapping.flags().with_access_flags(prot_flags));
+                let push_range = intersection.clone();
+                updates.push((push_range, new_mapping));
             }
-            .map_err(|s| match s {
-                zx::Status::INVALID_ARGS => errno!(EINVAL),
-                zx::Status::NOT_FOUND => errno!(ENOMEM),
-                zx::Status::ACCESS_DENIED => errno!(EACCES),
-                _ => impossible_error(s),
-            });
-
-            if let Err(e) = protect_result {
-                final_result = Err(e);
-                break;
-            }
-
-            let mut new_mapping = mapping;
-            new_mapping.set_flags(new_mapping.flags().with_access_flags(prot_flags));
-            let push_range = intersection.clone();
             start_cursor = intersection.end;
-            updates.push((push_range, new_mapping));
         }
 
         if final_result.is_ok() && start_cursor < prot_range.end {

@@ -93,8 +93,6 @@ static_library("minfs") {
       "minfs_inspect_tree.h",
       "minfs_target.cc",
       "mount.cc",
-      "service/admin.cc",
-      "service/admin.h",
       "service/lifecycle.cc",
       "service/lifecycle.h",
       "service/startup.cc",

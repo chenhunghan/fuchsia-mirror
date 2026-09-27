@@ -7,7 +7,7 @@ use crate::common_utils::common::parse_u64_identifier;
 use crate::server::Facade;
 use anyhow::Error;
 use async_trait::async_trait;
-use serde_json::{to_value, Value};
+use serde_json::{Value, to_value};
 
 enum NetstackMethod<'a> {
     DisableInterface,
@@ -15,8 +15,6 @@ enum NetstackMethod<'a> {
     GetIpv6Addresses,
     GetLinkLocalIpv6Addresses,
     ListInterfaces,
-    GetNetstackVersion,
-    SetUserNetstackVersion,
     Undefined(&'a str),
 }
 
@@ -28,8 +26,6 @@ impl NetstackMethod<'_> {
             "GetIpv6Addresses" => NetstackMethod::GetIpv6Addresses,
             "GetLinkLocalIpv6Addresses" => NetstackMethod::GetLinkLocalIpv6Addresses,
             "ListInterfaces" => NetstackMethod::ListInterfaces,
-            "GetNetstackVersion" => NetstackMethod::GetNetstackVersion,
-            "SetUserNetstackVersion" => NetstackMethod::SetUserNetstackVersion,
             method => NetstackMethod::Undefined(method),
         }
     }
@@ -59,15 +55,6 @@ impl Facade for NetstackFacade {
             NetstackMethod::DisableInterface => {
                 let identifier = parse_u64_identifier(args)?;
                 let result = self.disable_interface(identifier).await?;
-                to_value(result).map_err(Into::into)
-            }
-            NetstackMethod::GetNetstackVersion => {
-                let result = self.get_netstack_version().await?;
-                to_value(result).map_err(Into::into)
-            }
-            NetstackMethod::SetUserNetstackVersion => {
-                let version = args.try_into()?;
-                let result = self.set_user_netstack_version(version).await?;
                 to_value(result).map_err(Into::into)
             }
             NetstackMethod::Undefined(method) => {

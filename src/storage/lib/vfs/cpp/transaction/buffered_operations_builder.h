@@ -15,7 +15,6 @@
 #include "src/storage/lib/operation/operation.h"
 
 #ifdef __Fuchsia__
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 
 #include <utility>
 
@@ -33,7 +32,7 @@ namespace internal {
 class BorrowedBuffer : public storage::BlockBuffer {
  public:
 #ifdef __Fuchsia__
-  explicit BorrowedBuffer(vmoid_t vmoid) : vmoid_(vmoid) {}
+  explicit BorrowedBuffer(storage::vmoid_t vmoid) : vmoid_(vmoid) {}
 
   uint16_t vmoid() const final { return vmoid_; }
   void* Data(size_t index) final { return nullptr; }
@@ -57,7 +56,7 @@ class BorrowedBuffer : public storage::BlockBuffer {
 
  private:
 #ifdef __Fuchsia__
-  vmoid_t vmoid_;
+  storage::vmoid_t vmoid_;
 #else
   void* data_;
 #endif

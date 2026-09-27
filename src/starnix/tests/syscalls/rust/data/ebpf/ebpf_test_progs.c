@@ -48,6 +48,7 @@ struct test_result {
 
   __u32 ether_type;
   __u32 ifindex;
+  __u32 mark;
 
   __u32 sockaddr_family;
   __u32 sockaddr_port;
@@ -57,6 +58,7 @@ struct test_result {
   __u32 sk_protocol;
   __u32 sk_family;
   __u32 sk_state;
+  __u32 socket_uid;
 };
 
 // Global variable that will be stored in a .data section (which is a BPF map).
@@ -95,8 +97,10 @@ int skb_test_prog(struct __sk_buff* skb) {
   *entry = skb->len;
 
   struct test_result result = {
+      .socket_uid = bpf_get_socket_uid(skb),
       .ether_type = skb->protocol,
       .ifindex = skb->ifindex,
+      .mark = skb->mark,
   };
 
   // Try calling `bpf_sk_fullsock`.

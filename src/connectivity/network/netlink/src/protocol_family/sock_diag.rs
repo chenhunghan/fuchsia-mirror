@@ -10,7 +10,6 @@ mod request;
 pub(crate) use eventloop::SockDiagEventLoop;
 pub(crate) use request::NetlinkSockDiagRequestHandler;
 
-use std::convert::Infallible as Never;
 use std::num::NonZeroU32;
 
 use fidl_fuchsia_net_sockets_ext as fnet_sockets_ext;
@@ -164,7 +163,7 @@ impl ProtocolFamily for NetlinkSockDiag {
     type Response = SockDiagResponse;
     type RequestHandler<S: Sender<Self::Response>> = NetlinkSockDiagRequestHandler<S>;
     type NotifiedMulticastGroup = NetlinkSockDiagNotifiedGroup;
-    type AsyncWorkItem = Never;
+    type AsyncWorkItem = !;
 
     fn should_notify_on_group_membership_change(
         group: ModernGroup,

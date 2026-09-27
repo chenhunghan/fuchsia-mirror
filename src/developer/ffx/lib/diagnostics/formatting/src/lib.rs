@@ -4,8 +4,6 @@
 
 use discovery::query::TargetInfoQuery;
 use discovery::{DiscoverySources, TargetState};
-use fidl_fuchsia_developer_ffx as ffx;
-use fidl_fuchsia_net as fnet;
 use safe_string::TermSafe;
 
 pub trait AsDiagnosticMessage {
@@ -23,11 +21,11 @@ impl AsDiagnosticMessage for u8 {
                 "For mDNS debugging, see: https://fuchsia.dev/fuchsia-src/development/tools/ffx/workflows/network-connectivity/device-discovery#multicast-dns-resolution"
             }
             v if v == DiscoverySources::MANUAL.bits() => "",
-            v if v == DiscoverySources::EMULATOR.bits() => "",
             v if v == DiscoverySources::FASTBOOT_FILE.bits() => "",
             v if v == DiscoverySources::USB_VSOCK.bits() => "",
             v if v == DiscoverySources::USB_FASTBOOT.bits() => "",
             v if v == DiscoverySources::GCE.bits() => "",
+            v if v == DiscoverySources::UART.bits() => "",
             b => panic!(
                 "Un-handled bit type: {b}. This may be a failure from the discovery library of ffx. Please report this to {}",
                 errors::BUG_REPORT_URL
@@ -43,101 +41,6 @@ pub struct ReadableQuery {
     pub kind: &'static str,
     /// The actual value behind the query.
     pub value: String,
-}
-
-fn format_ip_addr(ip: &fnet::IpAddress) -> String {
-    match ip {
-        fnet::IpAddress::Ipv4(ipv4) => std::net::Ipv4Addr::from(ipv4.addr).to_string(),
-        fnet::IpAddress::Ipv6(ipv6) => std::net::Ipv6Addr::from(ipv6.addr).to_string(),
-    }
-}
-
-fn format_target_ip(ip: &ffx::TargetIp) -> String {
-    let ip_str = format_ip_addr(&ip.ip);
-    if ip.scope_id > 0 { format!("{ip_str}%{}", ip.scope_id) } else { ip_str }
-}
-
-fn format_target_ip_port(ip_port: &ffx::TargetIpPort) -> String {
-    let ip_str = format_ip_addr(&ip_port.ip);
-    let s = if ip_port.scope_id > 0 { format!("{ip_str}%{}", ip_port.scope_id) } else { ip_str };
-
-    if matches!(&ip_port.ip, fnet::IpAddress::Ipv6(_)) {
-        format!("[{}]:{}", s, ip_port.port)
-    } else {
-        format!("{}:{}", s, ip_port.port)
-    }
-}
-
-fn format_target_addr_info(addr: &ffx::TargetAddrInfo) -> String {
-    match addr {
-        ffx::TargetAddrInfo::Ip(ip) => format_target_ip(ip),
-        ffx::TargetAddrInfo::IpPort(ip_port) => format_target_ip_port(ip_port),
-        ffx::TargetAddrInfo::Vsock(vsock) => {
-            format!("vsock(cid={}, namespace={:?})", vsock.cid, vsock.namespace)
-        }
-    }
-}
-
-fn format_target_ip_addr_info(addr: &ffx::TargetIpAddrInfo) -> String {
-    match addr {
-        ffx::TargetIpAddrInfo::Ip(ip) => format_target_ip(ip),
-        ffx::TargetIpAddrInfo::IpPort(ip_port) => format_target_ip_port(ip_port),
-    }
-}
-
-fn format_rcs_state(state: &ffx::RemoteControlState) -> &'static str {
-    match state {
-        ffx::RemoteControlState::Up => "Up",
-        ffx::RemoteControlState::Down => "Down",
-        ffx::RemoteControlState::Unknown => "Unknown",
-    }
-}
-
-fn format_fidl_target_state(state: &ffx::TargetState) -> &'static str {
-    match state {
-        ffx::TargetState::Unknown => "Unknown",
-        ffx::TargetState::Disconnected => "Disconnected",
-        ffx::TargetState::Product => "Product",
-        ffx::TargetState::Fastboot => "Fastboot",
-        ffx::TargetState::Zedboot => "Zedboot",
-    }
-}
-
-/// Formats a `TargetInfo` struct into a human-readable string.
-pub fn format_target_info(info: &ffx::TargetInfo) -> String {
-    let mut parts = Vec::new();
-    if let Some(nodename) = &info.nodename {
-        parts.push(format!("nodename: \"{}\"", TermSafe::from_str_escaped(nodename)));
-    }
-    if let Some(serial) = &info.serial_number {
-        parts.push(format!("serial: \"{}\"", TermSafe::from_str_escaped(serial)));
-    }
-    if let Some(addresses) = &info.addresses {
-        if !addresses.is_empty() {
-            let addrs_str =
-                addresses.iter().map(format_target_addr_info).collect::<Vec<_>>().join(", ");
-            parts.push(format!("addresses: [{addrs_str}]"));
-        }
-    }
-    if let Some(ssh_address) = &info.ssh_address {
-        parts.push(format!("ssh_address: {}", format_target_ip_addr_info(ssh_address)));
-    }
-    if let Some(state) = &info.target_state {
-        parts.push(format!("state: {}", format_fidl_target_state(state)));
-    }
-    if let Some(rcs_state) = &info.rcs_state {
-        parts.push(format!("rcs: {}", format_rcs_state(rcs_state)));
-    }
-    if let Some(product) = &info.product_config {
-        parts.push(format!("product: \"{}\"", TermSafe::from_str_escaped(product)));
-    }
-    if let Some(board) = &info.board_config {
-        parts.push(format!("board: \"{}\"", TermSafe::from_str_escaped(board)));
-    }
-    if info.is_manual.unwrap_or(false) {
-        parts.push("manual".to_string());
-    }
-    parts.join(", ")
 }
 
 /// Formats the target state into a human-readable string.
@@ -176,29 +79,68 @@ pub fn format_query(query: &TargetInfoQuery) -> ReadableQuery {
         TargetInfoQuery::Id(s) => ("id (serial number)", TermSafe::from_str_escaped(s).to_string()),
         TargetInfoQuery::Usb(u) => ("usb", u.to_string()),
         TargetInfoQuery::VSock(v) => ("vsock", v.to_string()),
+        TargetInfoQuery::Uart(u) => ("uart", TermSafe::from_str_escaped(u).to_string()),
     };
     ReadableQuery { kind, value }
 }
 
+fn format_mdns_target_addr_info(a: &discovery::TargetAddrInfo) -> String {
+    let (ip, scope_id, port) = match a {
+        discovery::TargetAddrInfo::Ip(ip) => (ip.ip, ip.scope_id, 0),
+        discovery::TargetAddrInfo::IpPort(ip_port) => (ip_port.ip, ip_port.scope_id, ip_port.port),
+    };
+    let target_addr = addr::TargetAddr::new(ip, scope_id, port);
+    if port != 0 {
+        match target_addr.ip() {
+            Some(std::net::IpAddr::V6(_)) => format!("[{target_addr}]:{port}"),
+            _ => format!("{target_addr}:{port}"),
+        }
+    } else {
+        format!("{target_addr}")
+    }
+}
+
 /// Formats an mDNS event into a human-readable string.
-pub fn format_mdns_event(event: &ffx::MdnsEventType) -> String {
-    let target_info_as_string = |t: &ffx::TargetInfo| -> String { format_target_info(t) };
+pub fn format_mdns_event(event: &discovery::MdnsEventType) -> String {
     match event {
-        ffx::MdnsEventType::TargetFound(info) => {
-            format!("device found: {}", target_info_as_string(info))
+        discovery::MdnsEventType::TargetFound(info) => {
+            format!("device found: {}", format_mdns_target_info(info))
         }
-        ffx::MdnsEventType::TargetRediscovered(info) => {
-            format!("device rediscovered: {}", target_info_as_string(info))
+        discovery::MdnsEventType::TargetRediscovered(info) => {
+            format!("device rediscovered: {}", format_mdns_target_info(info))
         }
-        ffx::MdnsEventType::TargetExpired(info) => {
-            format!("device expired: {}", target_info_as_string(info))
+        discovery::MdnsEventType::TargetExpired(info) => {
+            format!("device expired: {}", format_mdns_target_info(info))
         }
-        ffx::MdnsEventType::SocketBound(event) => {
+        discovery::MdnsEventType::SocketBound(event) => {
             event.port.as_ref().map(|p| format!("binding on socket: {p}")).unwrap_or_else(|| {
                 format!("mDNS bind event to unspecified socket (this is highly unexpected)")
             })
         }
     }
+}
+
+/// Formats an `MdnsTargetInfo` struct into a human-readable string.
+pub fn format_mdns_target_info(info: &discovery::MdnsTargetInfo) -> String {
+    let mut parts = Vec::new();
+    if let Some(nodename) = &info.nodename {
+        parts.push(format!("nodename: \"{}\"", TermSafe::from_str_escaped(nodename)));
+    }
+    if let Some(serial) = &info.serial_number {
+        parts.push(format!("serial: \"{}\"", TermSafe::from_str_escaped(serial)));
+    }
+    if !info.addresses.is_empty() {
+        let addrs_str =
+            info.addresses.iter().map(format_mdns_target_addr_info).collect::<Vec<_>>().join(", ");
+        parts.push(format!("addresses: [{addrs_str}]"));
+    }
+    if let Some(ssh_address) = &info.ssh_address {
+        parts.push(format!("ssh_address: {}", format_mdns_target_addr_info(ssh_address)));
+    }
+    if let Some(iface) = &info.fastboot_interface {
+        parts.push(format!("fastboot: {iface:?}"));
+    }
+    parts.join(", ")
 }
 
 /// Extension trait for `TargetInfoQuery` to provide analytics tags.
@@ -291,68 +233,103 @@ mod tests {
     }
 
     #[test]
-    fn test_format_target_info() {
-        let info = ffx::TargetInfo {
-            addresses: Some(vec![ffx::TargetAddrInfo::IpPort(ffx::TargetIpPort {
-                ip: fnet::IpAddress::Ipv6(fnet::Ipv6Address {
-                    addr: [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-                }),
-                scope_id: 2,
-                port: 22,
-            })]),
+    fn test_format_mdns_event() {
+        let info = discovery::MdnsTargetInfo {
+            nodename: Some("test-nodename".to_string()),
             ..Default::default()
         };
-        assert_eq!(format_target_info(&info), "addresses: [[fe80::1%2]:22]");
-    }
+        let info_str = format_mdns_target_info(&info);
 
-    #[test]
-    fn test_format_mdns_event() {
-        let info =
-            ffx::TargetInfo { nodename: Some("test-nodename".to_string()), ..Default::default() };
-        let info_str = format_target_info(&info);
-
-        let event = ffx::MdnsEventType::TargetFound(info.clone());
+        let event = discovery::MdnsEventType::TargetFound(info.clone());
         assert_eq!(format_mdns_event(&event), format!("device found: {info_str}"));
 
-        let event = ffx::MdnsEventType::TargetRediscovered(info.clone());
+        let event = discovery::MdnsEventType::TargetRediscovered(info.clone());
         assert_eq!(format_mdns_event(&event), format!("device rediscovered: {info_str}"));
 
-        let event = ffx::MdnsEventType::TargetExpired(info.clone());
+        let event = discovery::MdnsEventType::TargetExpired(info.clone());
         assert_eq!(format_mdns_event(&event), format!("device expired: {info_str}"));
 
-        let event = ffx::MdnsEventType::SocketBound(ffx::MdnsBindEvent {
-            port: Some(1234),
-            ..Default::default()
-        });
+        let event =
+            discovery::MdnsEventType::SocketBound(discovery::MdnsBindEvent { port: Some(1234) });
         assert_eq!(format_mdns_event(&event), "binding on socket: 1234");
 
-        let event = ffx::MdnsEventType::SocketBound(ffx::MdnsBindEvent {
-            port: None,
-            ..Default::default()
-        });
+        let event = discovery::MdnsEventType::SocketBound(discovery::MdnsBindEvent { port: None });
         assert_eq!(
             format_mdns_event(&event),
             "mDNS bind event to unspecified socket (this is highly unexpected)"
         );
     }
+
     #[test]
-    fn test_formatting_escapes_control_characters() {
-        let info = ffx::TargetInfo {
-            nodename: Some("node\x1b[31m_evil\n".to_string()),
-            serial_number: Some("serial\x1b]0;hack\x07".to_string()),
-            product_config: Some("prod\x1b[2J_clear".to_string()),
-            board_config: Some("board\r\0".to_string()),
+    fn test_format_mdns_target_info_addresses() {
+        let ip_v6_ll = addr::TargetAddr::new("fe80::1".parse().unwrap(), 2, 0);
+        let ip_v6_ll_port = addr::TargetAddr::new("fe80::1".parse().unwrap(), 2, 8022);
+        let ip_v6_ssh = addr::TargetAddr::new("fe80::1".parse().unwrap(), 2, 22);
+
+        let info = discovery::MdnsTargetInfo {
+            nodename: Some("target-node".to_string()),
+            addresses: vec![
+                discovery::TargetAddrInfo::Ip(discovery::TargetIp {
+                    ip: "192.168.1.10".parse().unwrap(),
+                    scope_id: 0,
+                }),
+                discovery::TargetAddrInfo::Ip(discovery::TargetIp {
+                    ip: "2001:db8::1".parse().unwrap(),
+                    scope_id: 0,
+                }),
+                discovery::TargetAddrInfo::Ip(discovery::TargetIp {
+                    ip: "fe80::1".parse().unwrap(),
+                    scope_id: 2,
+                }),
+                discovery::TargetAddrInfo::IpPort(discovery::TargetIpPort {
+                    ip: "192.168.1.10".parse().unwrap(),
+                    scope_id: 0,
+                    port: 8022,
+                }),
+                discovery::TargetAddrInfo::IpPort(discovery::TargetIpPort {
+                    ip: "2001:db8::1".parse().unwrap(),
+                    scope_id: 0,
+                    port: 8080,
+                }),
+                discovery::TargetAddrInfo::IpPort(discovery::TargetIpPort {
+                    ip: "fe80::1".parse().unwrap(),
+                    scope_id: 2,
+                    port: 8022,
+                }),
+            ],
+            ssh_address: Some(discovery::TargetAddrInfo::IpPort(discovery::TargetIpPort {
+                ip: "fe80::1".parse().unwrap(),
+                scope_id: 2,
+                port: 22,
+            })),
+            fastboot_interface: Some(discovery::FastbootInterface::Tcp),
             ..Default::default()
         };
-        let formatted_info = format_target_info(&info);
+        let formatted = format_mdns_target_info(&info);
+        assert!(formatted.contains("nodename: \"target-node\""));
+        assert!(formatted.contains("192.168.1.10"));
+        assert!(formatted.contains("2001:db8::1"));
+        assert!(formatted.contains(&format!("{ip_v6_ll}")));
+        assert!(formatted.contains("192.168.1.10:8022"));
+        assert!(formatted.contains("[2001:db8::1]:8080"));
+        assert!(formatted.contains(&format!("[{ip_v6_ll_port}]:8022")));
+        assert!(formatted.contains(&format!("ssh_address: [{ip_v6_ssh}]:22")));
+        assert!(formatted.contains("fastboot: Tcp"));
+    }
+    #[test]
+    fn test_formatting_escapes_control_characters() {
+        let info = discovery::MdnsTargetInfo {
+            nodename: Some("node\x1b[31m_evil\n".to_string()),
+            serial_number: Some("serial\x1b]0;hack\x07".to_string()),
+            ..Default::default()
+        };
+        let formatted_info = format_mdns_target_info(&info);
         assert!(!formatted_info.contains('\x1b'));
         assert!(!formatted_info.contains('\n'));
         assert!(!formatted_info.contains('\x07'));
-        assert!(!formatted_info.contains('\r'));
-        assert!(!formatted_info.contains('\0'));
         assert_eq!(
             formatted_info,
-            "nodename: \"node\\u{1b}[31m_evil\\n\", serial: \"serial\\u{1b}]0;hack\\u{7}\", product: \"prod\\u{1b}[2J_clear\", board: \"board\\r\\u{0}\""
+            "nodename: \"node\\u{1b}[31m_evil\\n\", serial: \"serial\\u{1b}]0;hack\\u{7}\""
         );
 
         let state_product =
@@ -381,5 +358,10 @@ mod tests {
         let formatted_query_id = format_query(&query_id);
         assert!(!formatted_query_id.value.contains('\x1b'));
         assert_eq!(formatted_query_id.value, "query\\u{1b}[35m_id");
+
+        let query_uart = TargetInfoQuery::Uart("query\x1b[36m_uart".to_string());
+        let formatted_query_uart = format_query(&query_uart);
+        assert!(!formatted_query_uart.value.contains('\x1b'));
+        assert_eq!(formatted_query_uart.value, "query\\u{1b}[36m_uart");
     }
 }

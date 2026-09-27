@@ -22,5 +22,14 @@
             from: "#pwm_a0_d-regulator",
             to: "#power-controller",
         },
+        {
+            from: "#self",
+            to: "#power-controller",
+            driver_config: "fuchsia.hardware.power.DomainMetadata",
+            domains: [
+                { id: 0 },
+                { id: 1 },
+            ],
+        },
     ],
 }

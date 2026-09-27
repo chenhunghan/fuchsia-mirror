@@ -80,7 +80,7 @@ void Display::OnVsync(zx::time_monotonic timestamp, WireConfigStamp displayed_co
                          << "  callback_id=" << id << "  timestamp=" << timestamp.get()
                          << "  displayed_config_stamp=" << displayed_config_stamp.value
                          << "  ... invoking vsync callback";
-    callback(timestamp, displayed_config_stamp);
+    callback(display_id_, timestamp, displayed_config_stamp);
   }
 }
 

@@ -135,7 +135,12 @@ impl Stream for OutputQueue {
 // encoder case (1024). Increase to a reasonable amount.
 const MIN_INPUT_BUFFER_SIZE: u32 = 4096;
 // Go with codec default for output, for frame alignment.
-const MIN_OUTPUT_BUFFER_SIZE: u32 = 0;
+const DEFAULT_MIN_OUTPUT_BUFFER_SIZE: u32 = 0;
+// The CVSD encoder's minimum output frame size is 1 byte (16 bytes of 64kHz 16-bit mono PCM at
+// 16:1 compression), and it fills each output buffer to capacity before emitting an output packet.
+// HFP inband SCO expects output packets in multiples of the 60-byte SCO packet size (7.5ms of
+// CVSD audio).
+const CVSD_MIN_OUTPUT_BUFFER_SIZE: u32 = 60;
 
 /// Index of an input buffer to be shared between the client and the StreamProcessor.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -167,6 +172,8 @@ struct StreamProcessorInner {
     input_allocation: MaybeDone<SysmemAllocation>,
     /// Allocation for the output buffers.
     output_allocation: MaybeDone<SysmemAllocation>,
+    /// The minimum size of the output buffers.
+    min_output_buffer_size: u32,
 }
 
 impl StreamProcessorInner {
@@ -207,7 +214,7 @@ impl StreamProcessorInner {
                     return Ok(());
                 }
                 let buffer_constraints =
-                    Self::buffer_constraints_from_min_size(MIN_OUTPUT_BUFFER_SIZE);
+                    Self::buffer_constraints_from_min_size(self.min_output_buffer_size);
                 let processor = self.processor.clone();
                 let mut partial_settings = Self::partial_settings();
                 let token_fn = move |token: ClientEnd<BufferCollectionTokenMarker>| {
@@ -454,7 +461,11 @@ pub struct StreamProcessorOutputStream {
 impl StreamProcessor {
     /// Create a new StreamProcessor given the proxy.
     /// Takes the event stream of the proxy.
-    fn create(processor: StreamProcessorProxy, sysmem_client: AllocatorProxy) -> Self {
+    fn create(
+        processor: StreamProcessorProxy,
+        sysmem_client: AllocatorProxy,
+        min_output_buffer_size: u32,
+    ) -> Self {
         let events = processor.take_event_stream();
         Self {
             inner: Arc::new(RwLock::new(StreamProcessorInner {
@@ -468,6 +479,7 @@ impl StreamProcessor {
                 input_waker: None,
                 input_allocation: maybe_done(SysmemAllocation::pending()),
                 output_allocation: maybe_done(SysmemAllocation::pending()),
+                min_output_buffer_size,
             })),
         }
     }
@@ -481,6 +493,11 @@ impl StreamProcessor {
     ) -> Result<StreamProcessor, Error> {
         let sysmem_client = fuchsia_component::client::connect_to_protocol::<AllocatorMarker>()
             .context("Connecting to sysmem")?;
+
+        let min_output_buffer_size = match &encoder_settings {
+            EncoderSettings::Cvsd(_) => CVSD_MIN_OUTPUT_BUFFER_SIZE,
+            _ => DEFAULT_MIN_OUTPUT_BUFFER_SIZE,
+        };
 
         let format_details = FormatDetails {
             domain: Some(input_domain),
@@ -506,7 +523,7 @@ impl StreamProcessor {
 
         codec_svc.create_encoder(&encoder_params, stream_processor_serverend)?;
 
-        Ok(StreamProcessor::create(processor, sysmem_client))
+        Ok(StreamProcessor::create(processor, sysmem_client, min_output_buffer_size))
     }
 
     /// Create a new StreamProcessor decoder, with the given `mime_type` and optional `oob_bytes`.  See
@@ -543,7 +560,7 @@ impl StreamProcessor {
 
         codec_svc.create_decoder(&decoder_params, stream_processor_serverend)?;
 
-        Ok(StreamProcessor::create(processor, sysmem_client))
+        Ok(StreamProcessor::create(processor, sysmem_client, DEFAULT_MIN_OUTPUT_BUFFER_SIZE))
     }
 
     /// Take a stream object which will produce the output of the processor.

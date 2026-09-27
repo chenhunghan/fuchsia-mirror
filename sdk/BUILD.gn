@@ -664,7 +664,7 @@ sdk_molecule("core_data") {
     "//sdk/lib/heapdump_instrumentation:heapdump_instrumentation_shard",
     "//sdk/lib/inspect/shards:inspect_sdk",
     "//sdk/lib/sys/component:realm_builder_shard_sdk",
-    "//sdk/lib/syslog/shards:syslog_sdk",
+    "//sdk/lib/syslog/shards_for_idk_only:syslog_sdk",
     "//sdk/lib/vulkan",
     "//src/developer/ffx/lib/symbol-index:symbol-index-sdk",
   ]

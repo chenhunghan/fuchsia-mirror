@@ -75,7 +75,7 @@ rust_library(
     deps = [
         "//third_party/rust_crates/vendor/async-channel-2.5.0:async_channel",
         "//third_party/rust_crates/vendor/async-task-4.7.1:async_task",
-        "//third_party/rust_crates/vendor/futures-io-0.3.31:futures_io",
+        "//third_party/rust_crates/vendor/futures-io-0.3.34:futures_io",
         "//third_party/rust_crates/vendor/futures-lite-2.6.1:futures_lite",
         "//third_party/rust_crates/vendor/piper-0.2.5:piper",
     ],

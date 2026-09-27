@@ -278,9 +278,10 @@ class MsdArmDevice : public msd::Device,
   void ReleaseMappingsForAtom(MsdArmAtom* atom) override;
   magma::PlatformPort* GetPlatformPort() override;
   void UpdateGpuActive(bool active, bool has_pending_work) override;
-  void EnterProtectedMode() override;
+  bool EnterProtectedMode() override;
   bool ExitProtectedMode() override;
   bool IsInProtectedMode() override;
+  bool WaitForProtectedMode(bool enable);
   void OutputHangMessage(bool hardware_hang) override;
   void PowerOnGpuForRunnableAtoms() override;
 

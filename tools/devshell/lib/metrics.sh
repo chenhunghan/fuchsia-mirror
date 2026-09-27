@@ -19,6 +19,8 @@
 # This script assumes that vars.sh has already been sourced, since it
 # depends on FUCHSIA_DIR being defined correctly.
 
+fx-ensure-prebuilt "${PREBUILT_JQ}"
+
 # Increase the metrics version by 1 when analytics is updated
 _METRICS_VERSION="11"
 _METRICS_ALLOWS_CUSTOM_REPORTING=( "test" )
@@ -560,7 +562,7 @@ function track-subcommand-custom-event {
     return 0
   fi
 
-  event_params=$(fx-command-run jq -c -n \
+  event_params=$("${PREBUILT_JQ}" -c -n \
     --arg subcommand "${subcommand}" \
     --arg action "${event_action}" \
     --arg label "${event_label}" \
@@ -628,7 +630,7 @@ function track-command-execution {
 
   local call_stack="${FUCHSIA_METRICS_CALL_STACK:0:500}"
 
-  event_params=$(fx-command-run jq -c -n \
+  event_params=$("${PREBUILT_JQ}" -c -n \
     --arg subcommand "${subcommand}" \
     --arg args "${args1}" \
     --arg args2 "${args2}" \
@@ -672,7 +674,7 @@ function _add-fx-set-hit {
   # Packages argument can be a comma-separated list.
   IFS=',' read -ra packages_parts <<< "$packages"
   for p in "${packages_parts[@]}"; do
-    event_params=$(fx-command-run jq -c -n \
+    event_params=$("${PREBUILT_JQ}" -c -n \
       --arg with_type "${category}" \
       --arg package_name "${p}" \
       '$ARGS.named')
@@ -720,7 +722,7 @@ function track-command-finished {
 
   local timing=$(( (end_time - start_time)/1000 ))
 
-  event_params=$(fx-command-run jq -c -n \
+  event_params=$("${PREBUILT_JQ}" -c -n \
     --arg subcommand "${subcommand}" \
     --arg args "${args1}" \
     --arg args2 "${args2}" \
@@ -768,7 +770,7 @@ function track-feature-status {
       status="disabled"
   fi
 
-  event_params=$(fx-command-run jq -c -n \
+  event_params=$("${PREBUILT_JQ}" -c -n \
     --arg feature "${feature}" \
     --arg status "${status}" \
     '$ARGS.named')
@@ -801,11 +803,11 @@ function track-build-event {
   if [[ "${METRICS_LEVEL}" -eq 2 ]]; then
     ninja_switches="$(metrics-sanitize-string "${ninja_switches}")"
     fuchsia_targets="$(metrics-sanitize-string "${fuchsia_targets}")"
-    args_json=$(fx-command-run jq -c '{ b: .build_info_board, p: .build_info_product, r: .rbe_mode, c: .compilation_mode, o: .optimize, sv: .select_variant, tc: .target_cpu, ri: .rust_incremental }' "${build_dir}"/args.json)
-    main_pb_label=$(fx-command-run jq -r '.main_pb_label // empty' "${build_dir}"/args.json)
+    args_json=$("${PREBUILT_JQ}" -c '{ b: .build_info_board, p: .build_info_product, r: .rbe_mode, c: .compilation_mode, o: .optimize, sv: .select_variant, tc: .target_cpu, ri: .rust_incremental }' "${build_dir}"/args.json)
+    main_pb_label=$("${PREBUILT_JQ}" -r '.main_pb_label // empty' "${build_dir}"/args.json)
     local legacy_flag_count=0
     if [[ -f "${build_dir}/args.json" ]]; then
-      legacy_flag_count=$(fx-command-run jq -r 'keys[]' "${build_dir}/args.json" | grep -E '(_rbe_|restat_|_download_unstripped_binaries)' | wc -l)
+      legacy_flag_count=$("${PREBUILT_JQ}" -r 'keys[]' "${build_dir}/args.json" | grep -E '(_rbe_|restat_|_download_unstripped_binaries)' | wc -l)
     fi
   else
     ninja_switches=""
@@ -848,7 +850,7 @@ function track-build-event {
     target_count=$("${PREBUILT_PYTHON3}" "$FUCHSIA_DIR/tools/devshell/contrib/lib/count-ninja-actions.py")
   fi
 
-  event_params=$(fx-command-run jq -c -n \
+  event_params=$("${PREBUILT_JQ}" -c -n \
     --arg args_json1 "${args_json1}" \
     --arg args_json2 "${args_json2}" \
     --arg main_pb_label "${main_pb_label}" \
@@ -900,7 +902,7 @@ function track-test-event {
   fi
 
   local event_params
-  event_params=$(fx-command-run jq -c -n \
+  event_params=$("${PREBUILT_JQ}" -c -n \
     "${slurp_arg[@]}" \
     --argjson start_time_micros "${start_time:-0}" \
     --argjson end_time_micros "${end_time:-0}" \
@@ -951,12 +953,12 @@ function __add-to-analytics-batch {
   timestamp_micros=$("${PREBUILT_PYTHON3}" \
     -c 'import time; print(int(time.time() * 1000000))')
   if [[ $# -eq 0 ]]; then
-    event=$(fx-command-run jq -c -n \
+    event=$("${PREBUILT_JQ}" -c -n \
       --arg name "${event_name}" \
       --argjson timestamp_micros "${timestamp_micros}" \
       '$ARGS.named')
   else
-    event=$(fx-command-run jq -c -n \
+    event=$("${PREBUILT_JQ}" -c -n \
       --arg name "${event_name}" \
       --argjson params "$*" \
       --argjson timestamp_micros "${timestamp_micros}" \
@@ -1010,9 +1012,9 @@ function __send-analytics-batch {
   \"metrics_version\":{\"value\":${_METRICS_VERSION}},\
   \"nproc\":{\"value\":$(_get_nproc)}\
   }"
-  local events_json=$(fx-command-run jq -n -c '$ARGS.positional' \
+  local events_json=$("${PREBUILT_JQ}" -n -c '$ARGS.positional' \
     --jsonargs "${events[@]}")
-  local measurement=$(fx-command-run jq -n -c \
+  local measurement=$("${PREBUILT_JQ}" -n -c \
     --arg client_id "${METRICS_UUID}" \
     --argjson events "${events_json}" \
     --argjson user_properties "${user_properties}" \

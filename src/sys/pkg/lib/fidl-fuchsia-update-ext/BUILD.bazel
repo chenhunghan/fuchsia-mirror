@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fidl-fuchsia-update-ext",
+    srcs = [
+        "src/lib.rs",
+        "src/types.rs",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "src/commit.rs",
+        ],
+        "//conditions:default": [],
+    }),
+    crate_name = "fidl_fuchsia_update_ext",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:proptest-derive",
+    ],
+    test_deps = select({
+        "@platforms//os:fuchsia": [
+            "//src/lib/fidl/rust/fidl",
+            "//src/lib/fuchsia",
+            "//src/lib/fuchsia-async",
+            "//third_party/rust_crates/vendor:futures",
+        ],
+        "//conditions:default": [],
+    }),
+    version = "0.0.1",
+    visibility = [
+        "//src/developer/ffx/plugins/target/update:__subpackages__",
+        "//src/sys/pkg:__subpackages__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.update:fuchsia.update_rust_common",
+        "//src/sys/pkg/lib/event-queue",
+        "//third_party/rust_crates/vendor:proptest",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:typed-builder",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
+            "//sdk/rust/zx",
+            "//third_party/rust_crates/vendor:anyhow",
+        ],
+        "//conditions:default": [],
+    }),
+)

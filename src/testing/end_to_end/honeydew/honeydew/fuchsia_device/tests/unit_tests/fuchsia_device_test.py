@@ -46,6 +46,7 @@ from honeydew.auxiliary_devices.usb_power_hub import (
 )
 from honeydew.fuchsia_device import fuchsia_device
 from honeydew.transports.adb import adb as adb_transport
+from honeydew.transports.adb import errors as adb_errors
 from honeydew.transports.fastboot import fastboot
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.ffx import errors as ffx_errors
@@ -154,6 +155,7 @@ _INPUT_ARGS: dict[str, Any] = {
         emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
+        shared_data="/tmp/shared_data",
     ),
 }
 
@@ -254,6 +256,31 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         super().__init__(*args, **kwargs)
 
     def setUp(self) -> None:
+        adb_binary_patcher = mock.patch.object(
+            adb_transport,
+            "_get_adb_binary",
+            return_value="/bin/adb",
+            autospec=True,
+        )
+        adb_binary_patcher.start()
+        self.addCleanup(adb_binary_patcher.stop)
+
+        adb_server_patcher = mock.patch.object(
+            adb_transport,
+            "AdbServer",
+            autospec=True,
+        )
+        adb_server_patcher.start()
+        self.addCleanup(adb_server_patcher.stop)
+
+        adb_cache_pid_patcher = mock.patch.object(
+            adb_transport.Adb,
+            "_cache_adbd_pid",
+            autospec=True,
+        )
+        adb_cache_pid_patcher.start()
+        self.addCleanup(adb_cache_pid_patcher.stop)
+
         with (
             mock.patch.object(
                 ffx.FFX,
@@ -386,19 +413,6 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(self.fd_sl4f_obj, fuchsia_device.FuchsiaDevice)
 
     # List all the tests related to transports
-    @mock.patch.object(
-        adb_transport.Adb,
-        "__init__",
-        autospec=True,
-        return_value=None,
-    )
-    def test_adb_transport(self, mock_adb_init: mock.Mock) -> None:
-        """Test case to make sure fuchsia_device supports adb transport."""
-        self.assertIsInstance(
-            self.fd_fc_obj.adb,
-            adb_transport.Adb,
-        )
-        mock_adb_init.assert_called_once()
 
     def test_adb_transport_disabled(self) -> None:
         """Test case to make sure fuchsia_device raises NotEnabledError when adb is disabled."""
@@ -460,48 +474,9 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.fd_fc_obj.ffx,
             ffx.FFX,
         )
-
-    def test_ffx_transport_with_shared_data(self) -> None:
-        """Test case to make sure fuchsia_device supports ffx transport with shared_data."""
-        shared_data = "/tmp/shared_data"
-        config = {
-            "transports": {
-                "ffx": {
-                    "shared_data": shared_data,
-                }
-            }
-        }
-        with (
-            mock.patch.object(
-                ffx.FFX,
-                "check_connection",
-                autospec=True,
-            ) as mock_ffx_check_connection,
-            mock.patch.object(
-                fc_transport.FuchsiaController,
-                "check_connection",
-                autospec=True,
-            ),
-            mock.patch.object(
-                fc_transport.FuchsiaController,
-                "create_context",
-                autospec=True,
-            ),
-        ):
-            fd_obj = fuchsia_device.FuchsiaDevice(
-                device_info=custom_types.DeviceInfo(
-                    name=_INPUT_ARGS["device_name"],
-                    serial_number=None,
-                    ip_port=_INPUT_ARGS["device_ip"],
-                    serial_socket=_INPUT_ARGS["device_serial_socket"],
-                ),
-                ffx_config_data=_INPUT_ARGS["ffx_config_data"],
-                config=config,
-            )
-            ffx_obj = fd_obj.ffx
-            self.assertIsInstance(ffx_obj, ffx.FFX)
-            self.assertEqual(ffx_obj.shared_data, shared_data)
-            mock_ffx_check_connection.assert_called()
+        self.assertEqual(
+            self.fd_fc_obj.ffx.config.shared_data, "/tmp/shared_data"
+        )
 
     def test_sl4f_impl(self) -> None:
         """Test case to make sure fuchsia_device does not support sl4f
@@ -552,6 +527,166 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         ):
             _: serial_interface.Serial = self.fd_fc_obj.serial
 
+        self.fd_fc_obj._device_info = device_info
+
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    def test_adb_transport(
+        self,
+        mock_verify_supported: mock.Mock,
+        mock_check_connection: mock.Mock,
+    ) -> None:
+        """Test case to make sure fuchsia_device supports adb transport."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=None,
+            serial_socket=None,
+        )
+
+        self.assertIsInstance(
+            self.fd_fc_obj.adb,
+            adb_transport.Adb,
+        )
+        mock_verify_supported.assert_called_once()
+        mock_check_connection.assert_called_once()
+
+        self.fd_fc_obj.__dict__.pop("adb", None)
+        self.fd_fc_obj._device_info = device_info
+
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        side_effect=errors.NotSupportedError("Not supported"),
+        autospec=True,
+    )
+    def test_adb_transport_not_supported(
+        self, mock_verify_supported: mock.Mock
+    ) -> None:
+        """Test case to make sure fuchsia_device raises NotSupportedError when
+        ADB is not supported on the target."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=None,
+            serial_socket=None,
+        )
+
+        with self.assertRaises(errors.NotSupportedError):
+            _: adb_transport.Adb = self.fd_fc_obj.adb
+
+        self.fd_fc_obj._device_info = device_info
+
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx.FFX,
+        "serial_number",
+        new_callable=mock.PropertyMock,
+        return_value="ffx-serial-1234",
+    )
+    def test_adb_transport_fallback_ffx_serial(
+        self,
+        mock_ffx_serial_number: mock.Mock,
+        mock_verify_supported: mock.Mock,
+        mock_check_connection: mock.Mock,
+    ) -> None:
+        """Test case to make sure fuchsia_device falls back to FFX serial_number
+        when serial_number is not in device_info."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number=None,
+            ip_port=None,
+            serial_socket=None,
+        )
+
+        adb_inst: adb_transport.Adb = self.fd_fc_obj.adb
+        self.assertIsInstance(adb_inst, adb_transport.Adb)
+        mock_ffx_serial_number.assert_called_once()
+        mock_verify_supported.assert_called_once()
+        mock_check_connection.assert_called_once()
+
+        self.fd_fc_obj.__dict__.pop("adb", None)
+        self.fd_fc_obj._device_info = device_info
+
+    @mock.patch.object(
+        ffx.FFX,
+        "serial_number",
+        new_callable=mock.PropertyMock,
+        return_value="<unknown>",
+    )
+    def test_adb_transport_ffx_serial_unknown(
+        self,
+        mock_ffx_serial_number: mock.Mock,
+    ) -> None:
+        """Test case to make sure fuchsia_device raises NotSupportedError when
+        FFX serial_number is '<unknown>'."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number=None,
+            ip_port=None,
+            serial_socket=None,
+        )
+
+        with self.assertRaises(errors.NotSupportedError):
+            _: adb_transport.Adb = self.fd_fc_obj.adb
+
+        mock_ffx_serial_number.assert_called_once()
+
+        self.fd_fc_obj.__dict__.pop("adb", None)
+        self.fd_fc_obj._device_info = device_info
+
+    @mock.patch.object(
+        ffx.FFX,
+        "serial_number",
+        new_callable=mock.PropertyMock,
+        side_effect=ffx_errors.FfxCommandError("FFX error"),
+    )
+    def test_adb_transport_error(
+        self,
+        mock_ffx_serial_number: mock.Mock,
+    ) -> None:
+        """Test case to make sure fuchsia_device raises NotSupportedError when we try to
+        access "adb" transport without serial_number and FFX fails."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number=None,
+            ip_port=None,
+            serial_socket=None,
+        )
+
+        with self.assertRaises(errors.NotSupportedError):
+            _: adb_transport.Adb = self.fd_fc_obj.adb
+
+        mock_ffx_serial_number.assert_called_once()
+
+        self.fd_fc_obj.__dict__.pop("adb", None)
         self.fd_fc_obj._device_info = device_info
 
     # List all the tests related to affordances
@@ -1072,6 +1207,194 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         mock_ffx_check_connection.assert_called_once_with(self.fd_fc_obj.ffx)
         mock_fc_check_connection.assert_not_called()
+
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    @mock.patch.object(
+        sl4f_transport.SL4F,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        fc_transport.FuchsiaController,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    def test_health_check_adb_supported(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+        mock_fc_check_connection: mock.Mock,
+        mock_sl4f_check_connection: mock.Mock,
+        mock_adb_verify_supported: mock.Mock,
+        mock_adb_check_connection: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.health_check() when ADB is supported."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=_INPUT_ARGS["device_ip"],
+            serial_socket=_INPUT_ARGS["device_serial_socket"],
+        )
+
+        # Initialize adb, then reset mock to isolate health_check's call to check_connection.
+        _ = self.fd_fc_obj.adb
+        mock_adb_check_connection.reset_mock()
+
+        self.fd_fc_obj.health_check()
+
+        mock_ffx_check_connection.assert_called_once_with(self.fd_fc_obj.ffx)
+        mock_fc_check_connection.assert_called_once_with(
+            self.fd_fc_obj.fuchsia_controller
+        )
+        mock_sl4f_check_connection.assert_not_called()
+        mock_adb_check_connection.assert_called_once_with(self.fd_fc_obj.adb)
+
+        self.fd_fc_obj.__dict__.pop("adb", None)
+        self.fd_fc_obj._device_info = device_info
+
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        side_effect=errors.NotSupportedError("ADB not supported"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        sl4f_transport.SL4F,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        fc_transport.FuchsiaController,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    def test_health_check_adb_not_supported(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+        mock_fc_check_connection: mock.Mock,
+        mock_sl4f_check_connection: mock.Mock,
+        mock_adb_verify_supported: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.health_check() when ADB is not supported."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=_INPUT_ARGS["device_ip"],
+            serial_socket=_INPUT_ARGS["device_serial_socket"],
+        )
+
+        self.fd_fc_obj.health_check()
+
+        mock_ffx_check_connection.assert_called_once_with(self.fd_fc_obj.ffx)
+        mock_fc_check_connection.assert_called_once_with(
+            self.fd_fc_obj.fuchsia_controller
+        )
+        mock_sl4f_check_connection.assert_not_called()
+        mock_adb_verify_supported.assert_called_once()
+
+        self.fd_fc_obj.__dict__.pop("adb", None)
+        self.fd_fc_obj._device_info = device_info
+
+    @mock.patch.object(
+        sl4f_transport.SL4F,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        fc_transport.FuchsiaController,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    def test_health_check_adb_disabled(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+        mock_fc_check_connection: mock.Mock,
+        mock_sl4f_check_connection: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.health_check() when ADB is disabled in config."""
+        orig_config = self.fd_fc_obj._config
+        self.fd_fc_obj._config = {
+            "transports": {
+                "adb": {
+                    "enabled": False,
+                }
+            }
+        }
+        self.fd_fc_obj.__dict__.pop("adb", None)
+
+        self.fd_fc_obj.health_check()
+
+        mock_ffx_check_connection.assert_called_once_with(self.fd_fc_obj.ffx)
+        mock_fc_check_connection.assert_called_once_with(
+            self.fd_fc_obj.fuchsia_controller
+        )
+        mock_sl4f_check_connection.assert_not_called()
+
+        self.fd_fc_obj._config = orig_config
+        self.fd_fc_obj.__dict__.pop("adb", None)
+
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        side_effect=adb_errors.AdbConnectionError("ADB connection error"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    @mock.patch.object(
+        sl4f_transport.SL4F,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        fc_transport.FuchsiaController,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    def test_health_check_adb_connection_error(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+        mock_fc_check_connection: mock.Mock,
+        mock_sl4f_check_connection: mock.Mock,
+        mock_adb_verify_supported: mock.Mock,
+        mock_adb_check_connection: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.health_check() raising HealthCheckError on ADB failure."""
+        device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
+
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=_INPUT_ARGS["device_ip"],
+            serial_socket=_INPUT_ARGS["device_serial_socket"],
+        )
+
+        with self.assertRaises(errors.HealthCheckError):
+            self.fd_fc_obj.health_check()
+
+        mock_adb_check_connection.assert_called_once()
+
+        self.fd_fc_obj.__dict__.pop("adb", None)
+        self.fd_fc_obj._device_info = device_info
 
     @parameterized.expand(
         [

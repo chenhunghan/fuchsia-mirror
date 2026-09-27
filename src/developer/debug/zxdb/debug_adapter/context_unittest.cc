@@ -533,4 +533,83 @@ TEST_F(ContextTest, ThreadAndEventProcessId) {
   EXPECT_EQ(got.response.threads[0].processId.value(), static_cast<dap::integer>(kProcessKoid));
 }
 
+TEST_F(ContextTest, ThreadStartImplicitlySuspended) {
+  InitializeDebugging();
+  InjectProcess(kProcessKoid);
+  RunClient();  // Process started event
+
+  std::vector<std::string> event_order;
+  std::optional<dap::ThreadEventZxdb> received_thread_event;
+  std::optional<dap::StoppedEvent> received_stopped_event;
+
+  client().registerHandler([&](const dap::ThreadEventZxdb& arg) {
+    event_order.push_back("thread_started");
+    received_thread_event = arg;
+  });
+
+  client().registerHandler([&](const dap::StoppedEvent& arg) {
+    event_order.push_back("thread_stopped");
+    received_stopped_event = arg;
+  });
+
+  // Inject a thread in the suspended state (implicit suspension race).
+  debug_ipc::NotifyThreadStarting notify;
+  notify.record.id = {.process = kProcessKoid, .thread = kThreadKoid};
+  notify.record.name = "suspended_thread";
+  notify.record.state = debug_ipc::ThreadRecord::State::kSuspended;
+  session().DispatchNotifyThreadStarting(notify);
+
+  // First event: ThreadEventZxdb
+  ASSERT_TRUE(HasPendingClientCalls());
+  RunClient();
+  ASSERT_TRUE(received_thread_event.has_value());
+  EXPECT_EQ(received_thread_event->reason, "started");
+  EXPECT_EQ(received_thread_event->threadId, static_cast<dap::integer>(kThreadKoid));
+  EXPECT_EQ(received_thread_event->processId.value(0), static_cast<dap::integer>(kProcessKoid));
+  ASSERT_TRUE(received_thread_event->isStopped.has_value());
+  EXPECT_TRUE(received_thread_event->isStopped.value());
+
+  // Second event: StoppedEvent
+  ASSERT_TRUE(HasPendingClientCalls());
+  RunClient();
+  ASSERT_TRUE(received_stopped_event.has_value());
+  EXPECT_EQ(received_stopped_event->reason, "pause");
+  ASSERT_TRUE(received_stopped_event->threadId.has_value());
+  EXPECT_EQ(received_stopped_event->threadId.value(), static_cast<dap::integer>(kThreadKoid));
+
+  // Verify ordering and no extra events.
+  ASSERT_EQ(event_order.size(), 2u);
+  EXPECT_EQ(event_order[0], "thread_started");
+  EXPECT_EQ(event_order[1], "thread_stopped");
+  EXPECT_FALSE(HasPendingClientCalls());
+}
+
+TEST_F(ContextTest, ThreadStartRunningDoesNotSendStoppedEvent) {
+  InitializeDebugging();
+  InjectProcess(kProcessKoid);
+  RunClient();  // Process started event
+
+  std::optional<dap::ThreadEventZxdb> received_thread_event;
+  bool stopped_received = false;
+
+  client().registerHandler([&](const dap::ThreadEventZxdb& arg) { received_thread_event = arg; });
+
+  client().registerHandler([&](const dap::StoppedEvent& arg) { stopped_received = true; });
+
+  InjectThread(kProcessKoid, kThreadKoid);
+
+  ASSERT_TRUE(HasPendingClientCalls());
+  RunClient();
+
+  ASSERT_TRUE(received_thread_event.has_value());
+  EXPECT_EQ(received_thread_event->reason, "started");
+  EXPECT_EQ(received_thread_event->threadId, static_cast<dap::integer>(kThreadKoid));
+  EXPECT_EQ(received_thread_event->processId.value(0), static_cast<dap::integer>(kProcessKoid));
+  ASSERT_TRUE(received_thread_event->isStopped.has_value());
+  EXPECT_FALSE(received_thread_event->isStopped.value());
+
+  EXPECT_FALSE(stopped_received);
+  EXPECT_FALSE(HasPendingClientCalls());
+}
+
 }  // namespace zxdb

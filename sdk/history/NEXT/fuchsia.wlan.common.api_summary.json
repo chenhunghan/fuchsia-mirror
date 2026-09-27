@@ -294,6 +294,16 @@
     },
     {
         "kind": "table/member",
+        "name": "fuchsia.wlan.common/RssiMonitorSupport.supported",
+        "ordinal": "1",
+        "type": "bool"
+    },
+    {
+        "kind": "table",
+        "name": "fuchsia.wlan.common/RssiMonitorSupport"
+    },
+    {
+        "kind": "table/member",
         "name": "fuchsia.wlan.common/SaeFeature.driver_handler_supported",
         "ordinal": "1",
         "type": "bool"

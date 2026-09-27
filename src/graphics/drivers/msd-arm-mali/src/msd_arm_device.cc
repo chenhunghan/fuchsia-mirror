@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <iterator>
 #include <string>
+#include <thread>
 
 #include "src/graphics/drivers/msd-arm-mali/include/magma_vendor_queries.h"
 #include "src/graphics/drivers/msd-arm-mali/src/job_scheduler.h"
@@ -1615,7 +1616,7 @@ bool MsdArmDevice::NdtIsProtectedModeSupported() {
   return gpu_product_id != 0x6956 && (gpu_product_id > 0x1000);
 }
 
-void MsdArmDevice::EnterProtectedMode() {
+bool MsdArmDevice::EnterProtectedMode() {
   TRACE_DURATION("magma", "MsdArmDevice::EnterProtectedMode");
   // Remove perf counter address mapping.
   perf_counters_->ForceDisable();
@@ -1625,7 +1626,11 @@ void MsdArmDevice::EnterProtectedMode() {
     // the completion of that.
     register_io_->Write32(registers::GpuCommand::kCmdSetProtectedMode,
                           registers::GpuCommand::kOffset);
-    return;
+    if (!WaitForProtectedMode(true)) {
+      MAGMA_LOG(ERROR, "Timing out waiting for protected mode entry");
+      return false;
+    }
+    return true;
   }
   // |force_expire| is false because nothing should have been using an address
   // space before. Do this before powering down L2 so connections don't try to
@@ -1650,9 +1655,11 @@ void MsdArmDevice::EnterProtectedMode() {
   if (!status.ok()) {
     TRACE_ALERT("magma", "pmode-error");
     MAGMA_LOG(ERROR, "Error from EnterProtectedMode: %s", status.status_string());
+    return false;
   } else if (!status->is_ok()) {
     TRACE_ALERT("magma", "pmode-error");
     MAGMA_LOG(ERROR, "Remote error from EnterProtectedMode: %d", status->error_value());
+    return false;
   }
 
   EnableAllCores();
@@ -1660,8 +1667,15 @@ void MsdArmDevice::EnterProtectedMode() {
   if (!power_manager_->WaitForShaderReady()) {
     TRACE_ALERT("magma", "pmode-error");
     MAGMA_LOG(WARNING, "Waiting for shader ready failed");
-    return;
+    return false;
   }
+
+  if (!WaitForProtectedMode(true)) {
+    TRACE_ALERT("magma", "pmode-error");
+    MAGMA_LOG(ERROR, "Timing out waiting for protected mode entry");
+    return false;
+  }
+  return true;
 }
 
 bool MsdArmDevice::ExitProtectedMode() {
@@ -1759,6 +1773,15 @@ bool MsdArmDevice::PowerDownShaders() {
 
 bool MsdArmDevice::IsInProtectedMode() {
   return registers::GpuStatus::Get().ReadFrom(register_io_.get()).protected_mode_active();
+}
+
+bool MsdArmDevice::WaitForProtectedMode(bool enable) {
+  auto timeout = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+
+  while (IsInProtectedMode() != enable && std::chrono::steady_clock::now() < timeout)
+    ;
+
+  return IsInProtectedMode() == enable;
 }
 
 std::shared_ptr<DeviceRequest::Reply> MsdArmDevice::NdtPostTask(FitCallbackTask task) {

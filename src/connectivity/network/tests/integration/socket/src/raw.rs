@@ -10,7 +10,7 @@ use fuchsia_async::net::DatagramSocket;
 use fuchsia_async::{self as fasync, TimeoutExt as _};
 use futures::FutureExt as _;
 use net_types::ip::{Ip, IpAddress as _, IpVersion};
-use netstack_testing_common::realms::{Netstack, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
 };
@@ -60,19 +60,18 @@ fn verify_packet_body<I: Ip>(buf: &[u8], expected_body: &[u8]) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(None, true; "default_should_loop")]
 #[test_case(Some(true), true; "enabled_should_loop")]
 #[test_case(Some(false), false; "disabled_shouldnt_loop")]
-async fn multicast_loop_on_raw_ip_socket<N: Netstack, I: MulticastTestIpExt>(
+async fn multicast_loop_on_raw_ip_socket<I: MulticastTestIpExt>(
     name: &str,
     multicast_loop_value: Option<bool>,
     should_receive: bool,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
     let networks = crate::init_multicast_test_networks::<I>(&sandbox, &client).await;
 
@@ -155,12 +154,11 @@ async fn multicast_loop_on_raw_ip_socket<N: Netstack, I: MulticastTestIpExt>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn raw_ip_socket_recv_hop_limit<N: Netstack, I: TestIpExt>(name: &str) {
+async fn raw_ip_socket_recv_hop_limit<I: TestIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("creating client realm should succeed");
 
     let socket = client

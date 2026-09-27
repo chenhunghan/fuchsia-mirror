@@ -36,6 +36,7 @@ if (is_host) {
 fidl("fuchsia.pkg.http") {
   sources = [ "http.fidl" ]
   visibility = [
+    ":*",
     "//src/connectivity/policy/http-client:*",
     "//src/connectivity/policy/http-client/integration:*",
     "//src/sys/pkg/bin/pkg-cache:*",

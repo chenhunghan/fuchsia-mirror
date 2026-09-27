@@ -9,8 +9,9 @@
 
 #include <fbl/array.h>
 #include <fuzzer/FuzzedDataProvider.h>
-#include <src/lib/chunked-compression/chunked-compressor.h>
-#include <src/lib/chunked-compression/compression-params.h>
+
+#include "src/lib/chunked-compression/chunked-compressor.h"
+#include "src/lib/chunked-compression/compression-params.h"
 
 namespace {
 

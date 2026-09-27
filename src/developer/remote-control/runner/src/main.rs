@@ -19,7 +19,13 @@ use std::task::{Poll, ready};
 use version_history::AbiRevision;
 use version_history_data::HISTORY;
 
-const BUFFER_SIZE: usize = 65536;
+// LINT.IfChange
+const BUFFER_SIZE: usize = 256 * 1024;
+// LINT.ThenChange(
+//     //src/developer/ffx/lib/target/src/target_connector.rs,
+//     //src/developer/remote-control/fdomain-runner/src/main.rs,
+//     //src/lib/fdomain/container/src/lib.rs
+// )
 
 #[derive(Copy, Clone)]
 enum CopyDirection {
@@ -210,17 +216,24 @@ async fn main() -> Result<()> {
     let local_socket = fidl::AsyncSocket::from_socket(local_socket);
     let (mut rx_socket, mut tx_socket) = futures::AsyncReadExt::split(local_socket);
 
-    let stdin = std::io::stdin().lock();
-    let stdout = std::io::stdout().lock();
+    let stdin_lock = std::io::stdin().lock();
+    let mut stdout_lock = std::io::stdout().lock();
+    std::io::Write::flush(&mut stdout_lock)?;
 
     // SAFETY: In order to remove the overhead of FDIO, we want to extract out the underlying
     // handles of STDIN and STDOUT and forward them to our sockets. That requires us to transfer
     // the sockets out of fdio, but unfortunately Rust doesn't allow us to take ownership from
     // `std::io::stdin()` and `std::io::stdout()`. To work around that, we grab the STDIN and
-    // STDOUT locks to prevent any other thread from accessing them while we're streaming traffic.
+    // STDOUT locks to prevent any other thread from accessing them while we're streaming traffic,
+    // and forget the lock guards so `std::io` never touches the invalidated FDs on teardown.
     let (stdin_fd, stdout_fd) = unsafe {
-        (OwnedFd::from_raw_fd(stdin.as_raw_fd()), OwnedFd::from_raw_fd(stdout.as_raw_fd()))
+        (
+            OwnedFd::from_raw_fd(stdin_lock.as_raw_fd()),
+            OwnedFd::from_raw_fd(stdout_lock.as_raw_fd()),
+        )
     };
+    std::mem::forget(stdin_lock);
+    std::mem::forget(stdout_lock);
 
     let stdin = fdio::transfer_fd(stdin_fd)?;
     let stdout = fdio::transfer_fd(stdout_fd)?;

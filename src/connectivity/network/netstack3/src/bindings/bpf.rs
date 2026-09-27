@@ -37,7 +37,6 @@ use packet_formats::ethernet::EtherType;
 use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
 use smallvec::SmallVec;
 use std::collections::{HashMap, hash_map};
-use std::convert::Infallible as Never;
 use std::mem::offset_of;
 use std::sync::{Arc, Weak};
 use zerocopy::FromBytes;
@@ -148,7 +147,7 @@ struct SmallVecAlloc<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> LayoutBufferAlloc<Buf<&'a mut [u8]>> for SmallVecAlloc<'a, N> {
-    type Error = Never;
+    type Error = !;
 
     fn layout_alloc(
         self,
@@ -157,7 +156,7 @@ impl<'a, const N: usize> LayoutBufferAlloc<Buf<&'a mut [u8]>> for SmallVecAlloc<
         suffix: usize,
     ) -> Result<Buf<&'a mut [u8]>, Self::Error> {
         self.buf.resize(prefix + body + suffix, 0);
-        Ok::<_, Never>(Buf::new(&mut self.buf[..], prefix..(prefix + body)))
+        Ok::<_, !>(Buf::new(&mut self.buf[..], prefix..(prefix + body)))
     }
 }
 

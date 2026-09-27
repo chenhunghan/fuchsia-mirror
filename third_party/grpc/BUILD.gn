@@ -102,6 +102,8 @@ config("grpc_config") {
 }
 
 config("grpc_config_private") {
+  configs = [ "//build/config:Wno-call-graph-section-no-prototype" ]
+
   # TODO(b/311287092): Clean up the code and remove this list.
   cflags = [
     "-Wno-c++98-compat-extra-semi",
@@ -2435,6 +2437,7 @@ static_library("grpc++_repeated1") {
     configs += [ "//build/config/gcc:symbol_visibility_default" ]
   }
 }
+
 static_library("grpc++_repeated2") {
   sources = [
     "$source_root/src/core/ext/upb-gen/envoy/extensions/transport_sockets/tls/v3/common.upb_minitable.c",
@@ -2470,6 +2473,7 @@ static_library("grpc++_repeated2") {
     configs += [ "//build/config/gcc:symbol_visibility_default" ]
   }
 }
+
 static_library("grpc++_repeated3") {
   sources = [ "$source_root/src/core/util/log.cc" ]
 
@@ -2496,6 +2500,7 @@ static_library("grpc++_repeated3") {
     configs += [ "//build/config/gcc:symbol_visibility_default" ]
   }
 }
+
 static_library("grpc++_repeated4") {
   sources = [ "$source_root/src/core/util/log.cc" ]
 

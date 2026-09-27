@@ -16,6 +16,8 @@
 #include "src/media/codec/codecs/test/test_codec_packets.h"
 #include "src/media/codec/codecs/vaapi/codec_adapter_vaapi_encoder.h"
 #include "src/media/codec/codecs/vaapi/codec_runner_app.h"
+#include "src/media/codec/codecs/vaapi/third_party/chromium/h264_vaapi_video_encoder_delegate.h"
+#include "src/media/codec/codecs/vaapi/third_party/chromium/vaapi_wrapper.h"
 #include "src/media/codec/codecs/vaapi/vaapi_utils.h"
 #include "src/media/third_party/chromium_media/geometry.h"
 #include "src/media/third_party/chromium_media/media/gpu/gpu_video_encode_accelerator_helpers.h"
@@ -55,6 +57,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
     EXPECT_TRUE(*output_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     std::unique_lock<std::mutex> lock(lock_);
+    mid_stream_output_constraints_change_count_++;
     // Wait for buffer initialization to complete to ensure all buffers are staged to be loaded.
     cond_.wait(lock, [&]() { return buffer_initialization_completed_; });
 
@@ -72,7 +75,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecOutputFormatChange() override {}
 
-  void onCoreCodecInputPacketDone(CodecPacket *packet) override {
+  void onCoreCodecInputPacketDone(const CodecPacket *packet) override {
     std::lock_guard lock(lock_);
     input_packets_done_.push_back(packet);
     cond_.notify_all();
@@ -101,6 +104,9 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   uint64_t fail_codec_count() const { return fail_codec_count_; }
   uint64_t fail_stream_count() const { return fail_stream_count_; }
+  uint64_t mid_stream_output_constraints_change_count() const {
+    return mid_stream_output_constraints_change_count_;
+  }
 
   void WaitForInputPacketsDone() {
     std::unique_lock<std::mutex> lock(lock_);
@@ -138,6 +144,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
   CodecAdapter *codec_adapter_ = nullptr;
   uint64_t fail_codec_count_{};
   uint64_t fail_stream_count_{};
+  uint64_t mid_stream_output_constraints_change_count_{};
 
   std::mutex lock_;
   std::condition_variable cond_;
@@ -524,6 +531,275 @@ TEST(H264Encoder, H264SPSGetVisibleRectRejectsOverflowingRect) {
   sps.frame_crop_left_offset = 50;    // crop_left = 100
   sps.frame_crop_right_offset = -50;  // crop_right = -100
   EXPECT_FALSE(sps.GetVisibleRect().has_value());
+}
+
+TEST_F(H264EncoderTestFixture, RejectOverflowingOrExcessiveCodedSize) {
+  // Case 1: valid display_size (1920x1080) with 32-bit area-overflowing coded_size (65536x65536).
+  {
+    fuchsia::media::FormatDetails format_details;
+    format_details.set_format_details_version_ordinal(1);
+    format_details.set_mime_type("video/h264");
+
+    fuchsia::media::DomainFormat domain_format;
+    domain_format.video().uncompressed().image_format.display_width = 1920;
+    domain_format.video().uncompressed().image_format.display_height = 1080;
+    domain_format.video().uncompressed().image_format.coded_width = 65536;
+    domain_format.video().uncompressed().image_format.coded_height = 65536;
+    format_details.set_domain(std::move(domain_format));
+    encoder_->CoreCodecInit(format_details);
+    events_.WaitForCodecFailure(1u);
+    EXPECT_EQ(1u, events_.fail_codec_count());
+  }
+
+  // Case 2: coded_size (4096x2160) doesn't overflow int, but exceeds kMaxInputWidth (3840).
+  {
+    fuchsia::media::FormatDetails format_details;
+    format_details.set_format_details_version_ordinal(1);
+    format_details.set_mime_type("video/h264");
+
+    fuchsia::media::DomainFormat domain_format;
+    domain_format.video().uncompressed().image_format.display_width = 1920;
+    domain_format.video().uncompressed().image_format.display_height = 1080;
+    domain_format.video().uncompressed().image_format.coded_width = 4096;
+    domain_format.video().uncompressed().image_format.coded_height = 2160;
+    format_details.set_domain(std::move(domain_format));
+    encoder_->CoreCodecInit(format_details);
+    events_.WaitForCodecFailure(2u);
+    EXPECT_EQ(2u, events_.fail_codec_count());
+  }
+
+  // Case 3: coded_size (3000x3000) has width and height <= 3840 individually,
+  // but pixel area (9,000,000) exceeds kMaxInputArea (3840 * 2160 = 8,294,400).
+  {
+    fuchsia::media::FormatDetails format_details;
+    format_details.set_format_details_version_ordinal(1);
+    format_details.set_mime_type("video/h264");
+
+    fuchsia::media::DomainFormat domain_format;
+    domain_format.video().uncompressed().image_format.display_width = 1920;
+    domain_format.video().uncompressed().image_format.display_height = 1080;
+    domain_format.video().uncompressed().image_format.coded_width = 3000;
+    domain_format.video().uncompressed().image_format.coded_height = 3000;
+    format_details.set_domain(std::move(domain_format));
+    encoder_->CoreCodecInit(format_details);
+    events_.WaitForCodecFailure(3u);
+    EXPECT_EQ(3u, events_.fail_codec_count());
+  }
+}
+
+TEST_F(H264EncoderTestFixture, ResizeCodedSizeOnly) {
+  constexpr uint32_t kExpectedOutputPackets = 2;
+
+  CodecAndStreamInit();
+
+  constexpr uint32_t kOutputPacketCount = 35;
+  constexpr size_t kOutputPacketSize = 4096;
+  {
+    auto input_constraints = encoder_->CoreCodecGetBufferCollectionConstraints2(
+        CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
+        fuchsia::media::StreamBufferPartialSettings());
+    EXPECT_TRUE(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
+
+    fuchsia_sysmem2::BufferCollectionInfo buffer_collection;
+    buffer_collection.settings().emplace().image_format_constraints() =
+        input_constraints.image_format_constraints()->at(0);
+    encoder_->CoreCodecSetBufferCollectionInfo(CodecPort::kInputPort, buffer_collection);
+  }
+
+  // Size buffer for the larger coded_size (16x20 -> stride 16 * height 20 * 3 / 2 = 480 bytes).
+  constexpr uint32_t kInputStride = 16;
+  constexpr uint32_t kInputBufferSize = kInputStride * 20 * 3 / 2;
+
+  input_buffer_ = std::make_unique<CodecBufferForTest>(kInputBufferSize, 0, false);
+
+  std::vector<std::unique_ptr<CodecPacketForTest>> input_packets;
+  {
+    auto input_packet = std::make_unique<CodecPacketForTest>(0);
+    input_packet->SetStartOffset(0);
+    input_packet->SetValidLengthBytes(kInputBufferSize);
+    input_packet->SetBuffer(input_buffer_.get());
+    encoder_->CoreCodecQueueInputPacket(input_packet.get());
+    input_packets.push_back(std::move(input_packet));
+  }
+  {
+    // Keep display_size unchanged (10x10) while changing coded_size (10x10 -> 16x20)
+    // to verify that HandleInputFormatChange triggers reset_encoder when only coded_size changes.
+    fuchsia::media::FormatDetails format_details;
+    format_details.set_format_details_version_ordinal(2);
+    format_details.set_mime_type("video/h264");
+
+    fuchsia::media::DomainFormat domain_format;
+    domain_format.video().uncompressed().image_format.display_width = 10;
+    domain_format.video().uncompressed().image_format.display_height = 10;
+    domain_format.video().uncompressed().image_format.coded_width = 16;
+    domain_format.video().uncompressed().image_format.coded_height = 20;
+    format_details.set_domain(std::move(domain_format));
+    encoder_->CoreCodecQueueInputFormatDetails(format_details);
+  }
+  {
+    auto input_packet = std::make_unique<CodecPacketForTest>(0);
+    input_packet->SetStartOffset(0);
+    input_packet->SetValidLengthBytes(kInputBufferSize);
+    input_packet->SetBuffer(input_buffer_.get());
+    encoder_->CoreCodecQueueInputPacket(input_packet.get());
+    input_packets.push_back(std::move(input_packet));
+  }
+  ConfigureOutputBuffers(kOutputPacketCount, kOutputPacketSize);
+
+  events_.SetBufferInitializationCompleted();
+  events_.WaitForInputPacketsDone();
+  events_.WaitForOutputPacketCount(kExpectedOutputPackets);
+  events_.ReturnLastOutputPacket();
+
+  CodecStreamStop();
+
+  // Verify that mid-stream output constraints change was triggered twice:
+  // once on initial stream start and once after the coded_size-only format change.
+  EXPECT_EQ(2u, events_.mid_stream_output_constraints_change_count());
+  EXPECT_EQ(kExpectedOutputPackets - 1u, events_.output_packet_count());
+  EXPECT_EQ(0u, events_.fail_codec_count());
+  EXPECT_EQ(0u, events_.fail_stream_count());
+}
+
+TEST(H264Encoder, DelegateRejectsOverflowingVisibleSize) {
+  EXPECT_TRUE(VADisplayWrapper::InitializeSingletonForTesting());
+  auto vaapi_wrapper = std::make_shared<media::VaapiWrapper>();
+  media::H264VaapiVideoEncoderDelegate delegate(vaapi_wrapper, fit::function<void()>());
+
+  media::VideoEncodeAccelerator::Config config;
+  // Even dimensions near INT_MAX that would overflow signed int when rounded up to 16.
+  config.input_visible_size = gfx::Size(std::numeric_limits<int>::max() - 1, 1080);
+  config.output_profile = media::H264PROFILE_HIGH;
+  config.framerate = 30;
+  config.bitrate = media::Bitrate::ConstantBitrate(200000u);
+
+  media::VaapiVideoEncoderDelegate::Config ave_config;
+  ave_config.max_num_ref_frames = 4;
+
+  EXPECT_FALSE(delegate.Initialize(config, ave_config));
+
+  // Verify that framerate values overflowing framesize_in_mbs * framerate (uint32_t)
+  // or framerate * 2 (int) are rejected.
+  config.input_visible_size = gfx::Size(1920, 1080);
+  // 8160 MBs * 526323 = 4294795680 + 8160 > UINT32_MAX (wraps to 3264 if unchecked).
+  config.framerate = 526323u;
+  EXPECT_FALSE(delegate.Initialize(config, ave_config));
+  // Small frame size (16x16 = 1 MB) where framesize_in_mbs * framerate fits in uint32_t,
+  // but framerate * 2 overflows signed 32-bit int time_scale.
+  config.input_visible_size = gfx::Size(16, 16);
+  config.framerate = static_cast<uint32_t>(std::numeric_limits<int>::max()) / 2 + 1u;
+  EXPECT_FALSE(delegate.Initialize(config, ave_config));
+
+  // Initialize with valid parameters and verify dynamic UpdateRates() rejects
+  // a framerate that overflows signed 32-bit int when multiplied by 2.
+  config.input_visible_size = gfx::Size(1920, 1080);
+  config.framerate = 30;
+  ASSERT_TRUE(delegate.Initialize(config, ave_config));
+  EXPECT_FALSE(
+      delegate.UpdateRates(media::AllocateBitrateForDefaultEncoding(config),
+                           static_cast<uint32_t>(std::numeric_limits<int>::max()) / 2 + 1u));
+  EXPECT_TRUE(delegate.UpdateRates(media::AllocateBitrateForDefaultEncoding(config), 60u));
+
+  // Also test CheckedRoundUp directly.
+  EXPECT_EQ(16, CheckedRoundUp(1, 16).ValueOrDie());
+  EXPECT_EQ(16, CheckedRoundUp(16, 16).ValueOrDie());
+  EXPECT_EQ(0u, CheckedRoundUp(0u, 16u).ValueOrDie());
+  EXPECT_FALSE(CheckedRoundUp(std::numeric_limits<int>::max() - 1, 16).IsValid());
+  EXPECT_FALSE(CheckedRoundUp(10, 0).IsValid());
+  EXPECT_FALSE(CheckedRoundUp(10, -16).IsValid());
+  EXPECT_FALSE(CheckedRoundUp(-10, 16).IsValid());
+  // Exact multiples near integer limits must not suffer false-positive overflow.
+  EXPECT_EQ(0xFFFFFFF0u, CheckedRoundUp(0xFFFFFFF0u, 16u).ValueOrDie());
+  EXPECT_EQ(2147483646, CheckedRoundUp(2147483646, 3).ValueOrDie());
+}
+
+TEST(H264Encoder, UploadVideoFrameToSurfaceBoundsCheck) {
+  EXPECT_TRUE(VADisplayWrapper::InitializeSingletonForTesting());
+  vaDefaultStubSetReturn();
+
+  auto vaapi_wrapper = std::make_shared<media::VaapiWrapper>();
+  VASurfaceID surface_id = 0;
+  ASSERT_EQ(VA_STATUS_SUCCESS,
+            vaCreateSurfaces(VADisplayWrapper::GetSingleton()->display(), VA_RT_FORMAT_YUV420, 16,
+                             16, &surface_id, 1, nullptr, 0));
+  ScopedSurfaceID scoped_surface(surface_id);
+
+  // Buffer sized for 10x10 surface (240 bytes), but coded_size height is 20 so
+  // UV plane starts at offset 20 * 16 = 320 bytes (requiring 480 bytes total).
+  std::vector<uint8_t> small_buffer(240, 0);
+  media::VideoFrame frame;
+  frame.display_size = gfx::Size(10, 10);
+  frame.coded_size = gfx::Size(16, 20);
+  frame.stride = 16;
+  frame.base = small_buffer.data();
+  frame.size_bytes = small_buffer.size();
+
+  EXPECT_FALSE(vaapi_wrapper->UploadVideoFrameToSurface(frame, surface_id, gfx::Size(10, 10)));
+
+  // With sufficient buffer size for coded_size (16 * 20 + 16 * 10 = 480 bytes), upload succeeds.
+  // Populate distinct byte patterns to verify UV plane bytes are copied from
+  // coded_size.height() * stride (offset 320) rather than display_size.height() * stride (offset
+  // 160).
+  std::vector<uint8_t> valid_buffer(480, 0);
+  std::fill(valid_buffer.begin(), valid_buffer.begin() + 160, 0xAA);
+  std::fill(valid_buffer.begin() + 160, valid_buffer.begin() + 320, 0xDE);
+  std::fill(valid_buffer.begin() + 320, valid_buffer.end(), 0x55);
+  frame.base = valid_buffer.data();
+  frame.size_bytes = valid_buffer.size();
+  EXPECT_TRUE(vaapi_wrapper->UploadVideoFrameToSurface(frame, surface_id, gfx::Size(10, 10)));
+
+  // Map back the destination surface and verify Y and UV plane pixel bytes.
+  {
+    VAImage image{};
+    ASSERT_EQ(VA_STATUS_SUCCESS,
+              vaDeriveImage(VADisplayWrapper::GetSingleton()->display(), surface_id, &image));
+    ScopedImageID scoped_image(image.image_id);
+    uint8_t *mapped_ptr = nullptr;
+    ASSERT_EQ(VA_STATUS_SUCCESS, vaMapBuffer(VADisplayWrapper::GetSingleton()->display(), image.buf,
+                                             reinterpret_cast<void **>(&mapped_ptr)));
+    ASSERT_NE(nullptr, mapped_ptr);
+    for (uint32_t y = 0; y < 10; ++y) {
+      for (uint32_t x = 0; x < 10; ++x) {
+        EXPECT_EQ(0xAA, mapped_ptr[image.offsets[0] + y * image.pitches[0] + x]);
+      }
+    }
+    for (uint32_t y = 0; y < 5; ++y) {
+      for (uint32_t x = 0; x < 10; ++x) {
+        EXPECT_EQ(0x55, mapped_ptr[image.offsets[1] + y * image.pitches[1] + x]);
+      }
+    }
+    EXPECT_EQ(VA_STATUS_SUCCESS,
+              vaUnmapBuffer(VADisplayWrapper::GetSingleton()->display(), image.buf));
+  }
+
+  // Empty display_size is rejected.
+  frame.display_size = gfx::Size(0, 10);
+  EXPECT_FALSE(vaapi_wrapper->UploadVideoFrameToSurface(frame, surface_id, gfx::Size(10, 10)));
+
+  // display_size exceeding coded_size is rejected.
+  frame.display_size = gfx::Size(20, 10);
+  EXPECT_FALSE(vaapi_wrapper->UploadVideoFrameToSurface(frame, surface_id, gfx::Size(10, 10)));
+
+  // display_size exceeding input_surface_size is rejected.
+  frame.display_size = gfx::Size(12, 12);
+  EXPECT_FALSE(vaapi_wrapper->UploadVideoFrameToSurface(frame, surface_id, gfx::Size(10, 10)));
+
+  // Restore valid display_size for remaining checks.
+  frame.display_size = gfx::Size(10, 10);
+
+  // Stride smaller than coded_size.width() is rejected.
+  frame.stride = 12;
+  EXPECT_FALSE(vaapi_wrapper->UploadVideoFrameToSurface(frame, surface_id, gfx::Size(10, 10)));
+
+  // Destination VAImage smaller than display_size is rejected by VAImage bounds check.
+  frame.stride = 16;
+  VASurfaceID small_surface_id = 0;
+  ASSERT_EQ(VA_STATUS_SUCCESS,
+            vaCreateSurfaces(VADisplayWrapper::GetSingleton()->display(), VA_RT_FORMAT_YUV420, 8, 8,
+                             &small_surface_id, 1, nullptr, 0));
+  ScopedSurfaceID scoped_small_surface(small_surface_id);
+  EXPECT_FALSE(
+      vaapi_wrapper->UploadVideoFrameToSurface(frame, small_surface_id, gfx::Size(10, 10)));
 }
 
 }  // namespace

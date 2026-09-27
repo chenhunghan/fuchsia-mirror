@@ -89,7 +89,7 @@ impl WebdriverFacadeInternal {
 
     /// Consumes messages produced by context listeners to update set of open ports.
     fn update_port_set(&mut self) {
-        while let Ok(Some(update)) = self.port_update_receiver.try_next() {
+        while let Ok(update) = self.port_update_receiver.try_recv() {
             match update {
                 PortUpdateMessage::PortOpened(port) => self.dev_tools_ports.insert(port),
                 PortUpdateMessage::PortClosed(port) => self.dev_tools_ports.remove(&port),

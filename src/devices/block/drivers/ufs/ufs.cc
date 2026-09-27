@@ -282,6 +282,7 @@ void Ufs::ProcessIoSubmissions() {
       data_vmo = unmap_vmo.is_valid() ? unmap_vmo.borrow() : io_cmd.request.data_vmo();
     }
     const uint8_t lun = io_cmd.lun;
+    const auto inline_crypto = io_cmd.request.inline_crypto();
 
     auto cb = [req = std::move(io_cmd.request),
                vmo = std::move(unmap_vmo)](zx_status_t status) mutable {
@@ -290,7 +291,8 @@ void Ufs::ProcessIoSubmissions() {
     };
 
     transfer_request_processor_->SendIoScsiCmd(upiu, lun, slot.value(), std::move(data_vmo),
-                                               dma_offset, dma_length, std::move(cb));
+                                               dma_offset, dma_length, std::move(cb),
+                                               inline_crypto);
   }
 }
 
@@ -773,6 +775,20 @@ zx::result<> Ufs::InitController() {
     return zx::error(status);
   }
 
+  if (CapabilityReg::Get().ReadFrom(&mmio).crypto_support()) {
+    auto inline_crypto_client =
+        incoming_->Connect<fuchsia_hardware_ufs_phy::Service::InlineCrypto>("phy");
+    if (inline_crypto_client.is_error()) {
+      fdf::error("UFS controller supports crypto, but failed to connect to PHY inline crypto: {}",
+                 inline_crypto_client);
+    } else {
+      inline_encryption_client_ = fidl::WireSyncClient(std::move(*inline_crypto_client));
+      HostControllerEnableReg::Get().ReadFrom(&mmio).set_crypto_general_enable(true).WriteTo(&mmio);
+      crypto_supported_ = true;
+      fdf::info("UFS host controller inline encryption enabled");
+    }
+  }
+
   // Create and post IRQ worker
   {
     auto irq_dispatcher = fdf::SynchronizedDispatcher::Create(
@@ -1175,7 +1191,11 @@ void Ufs::DumpRegisters() {
 
 zx_status_t Ufs::EnableHostController() {
   const fdf::MmioBuffer& mmio = mmio_.value();
-  HostControllerEnableReg::Get().FromValue(0).set_host_controller_enable(true).WriteTo(&mmio);
+  HostControllerEnableReg::Get()
+      .FromValue(0)
+      .set_host_controller_enable(true)
+      .set_crypto_general_enable(CapabilityReg::Get().ReadFrom(&mmio).crypto_support())
+      .WriteTo(&mmio);
 
   auto wait_for = [&]() -> bool {
     return HostControllerEnableReg::Get().ReadFrom(&mmio).host_controller_enable();
@@ -1416,7 +1436,7 @@ zx::result<> Ufs::Start(fdf::DriverContext context) {
     return zx::error(status);
   }
 
-  if (config().enable_suspend()) {
+  if (config().enable_suspend() && config().storage_power_management_enabled()) {
     if (zx::result<> status = ConfigurePowerManagement(); status.is_error()) {
       return status.take_error();
     }
@@ -1434,6 +1454,80 @@ zx::result<> Ufs::Start(fdf::DriverContext context) {
   }
 
   return zx::ok();
+}
+
+void Ufs::ServeInlineEncryption(
+    fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) {
+  inline_encryption_bindings_.AddBinding(dispatcher(), std::move(server_end), this,
+                                         fidl::kIgnoreBindingClosure);
+}
+
+void Ufs::ProgramKey(ProgramKeyRequestView request, ProgramKeyCompleter::Sync& completer) {
+  if (!inline_encryption_client_.is_valid()) {
+    completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
+    return;
+  }
+  // UFSHCI CRYPTOCFG DWORD 16 DUSIZE[7:0] encodes the data unit size as a one-hot
+  // bitmask in multiples of 512 bytes (0x01 = 512B/0x200 .. 0x80 = 64KiB/0x10000).
+  constexpr uint32_t kMinCryptoDataUnitSize = 0x200;    // 512 B (DUSIZE = 0x01)
+  constexpr uint32_t kMaxCryptoDataUnitSize = 0x10000;  // 64 KiB (DUSIZE = 0x80)
+  const uint32_t du = request->data_unit_size;
+  if (du < kMinCryptoDataUnitSize || du > kMaxCryptoDataUnitSize || !std::has_single_bit(du)) {
+    completer.ReplyError(ZX_ERR_INVALID_ARGS);
+    return;
+  }
+  auto result =
+      inline_encryption_client_->ProgramKey(request->wrapped_key, request->data_unit_size);
+  if (!result.ok()) {
+    completer.ReplyError(result.status());
+    return;
+  }
+  if (result->is_error()) {
+    completer.ReplyError(result->error_value());
+    return;
+  }
+
+  const uint8_t slot = result->value()->slot;
+  constexpr uint8_t kMaxCryptoSlots = 32;
+  if (slot >= kMaxCryptoSlots) {
+    completer.ReplyError(ZX_ERR_OUT_OF_RANGE);
+    return;
+  }
+
+  // Configure UFSHCI CRYPTO_CFG per Section 5.6.3:
+  // 1. Clear CFGE = 0 first.
+  // 2. Program remaining configuration words (DWORD 17 = 0).
+  // 3. Write CFGE = 1 | DUSIZE to DWORD 16 last.
+  constexpr uint32_t kCryptoCfgBase = 0x500;
+  constexpr uint32_t kCryptoCfgStride = 0x80;
+  constexpr uint32_t kCryptoCfgDword16Offset = 0x40;
+  constexpr uint32_t kCryptoCfgDword17Offset = 0x44;
+  constexpr uint32_t kCryptoCfgEnable = 1U << 31;
+  const uint32_t dusize_flag = du / kMinCryptoDataUnitSize;
+  const uint32_t cfg_offset = kCryptoCfgBase + slot * kCryptoCfgStride;
+  GetMmio().Write32(0, cfg_offset + kCryptoCfgDword16Offset);
+  GetMmio().Write32(0, cfg_offset + kCryptoCfgDword17Offset);
+  GetMmio().Write32(kCryptoCfgEnable | (dusize_flag & 0xffU), cfg_offset + kCryptoCfgDword16Offset);
+
+  completer.ReplySuccess(slot);
+}
+
+void Ufs::DeriveRawSecret(DeriveRawSecretRequestView request,
+                          DeriveRawSecretCompleter::Sync& completer) {
+  if (!inline_encryption_client_.is_valid()) {
+    completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
+    return;
+  }
+  auto result = inline_encryption_client_->DeriveRawSecret(std::move(request->wrapped_key));
+  if (!result.ok()) {
+    completer.ReplyError(result.status());
+    return;
+  }
+  if (result->is_error()) {
+    completer.ReplyError(result->error_value());
+    return;
+  }
+  completer.ReplySuccess(std::move(result->value()->secret));
 }
 
 void Ufs::OnDispatcherShutdown() {

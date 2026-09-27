@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env fuchsia-vendored-python
 #
 # Copyright 2026 The Fuchsia Authors
 # Use of this source code is governed by a BSD-style license that can be
@@ -187,17 +187,11 @@ class WlanTargetSecurityTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             )
 
     async def test_associate_wep_ap_with_wep_target_security(self) -> None:
-        # TODO(b/490162087): Remove this skip once OpenWrt supports WEP security
-        self.skip_if_wep_not_supported()
         ssid, password = self.setup_ap(SecurityWep())
         await self.dut.wlan_policy.save_network(
             ssid, f_wlan_policy.SecurityType.WEP, password
         )
         await self.dut.wlan_policy.connect(ssid, f_wlan_policy.SecurityType.WEP)
-
-    def skip_if_wep_not_supported(self) -> None:
-        if self.openwrt_ap:
-            raise signals.TestSkip("OpenWrt does not support WEP security")
 
     async def test_reject_wep_ap_with_wpa_target_security(self) -> None:
         ssid, password = self.setup_ap(SecurityWep())

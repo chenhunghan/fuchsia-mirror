@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "trace-engine",
+    srcs = [
+        "buffer.cc",
+        "buffer.h",
+        "context.cc",
+        "context_api.cc",
+        "context_impl.h",
+        "engine.cc",
+        "hash_table.h",
+        "include/lib/trace-engine/buffer_internal.h",
+        "nonce.cc",
+        "rolling_buffer.cc",
+        "rolling_buffer.h",
+    ],
+    hdrs = [
+        "include/lib/trace-engine/context.h",
+        "include/lib/trace-engine/fields.h",
+        "include/lib/trace-engine/handler.h",
+        "include/lib/trace-engine/instrumentation.h",
+        "include/lib/trace-engine/types.h",
+    ],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//zircon/system/ulib/zx",
+    ],
+)

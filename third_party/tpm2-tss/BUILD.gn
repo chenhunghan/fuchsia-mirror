@@ -48,6 +48,7 @@ static_library("tss2-mu") {
     "src/src/util/tss2_endian.h",
   ]
   configs += [
+    "//build/config:Wno-call-graph-section-no-prototype",
     "//build/config:Wno-conversion",
     "//build/config:Wno-extra-semi",
     "//build/config:Wno-missing-prototypes",
@@ -238,6 +239,7 @@ static_library("tss2-sys") {
     "src/src/util/log.c",
   ]
   configs += [
+    "//build/config:Wno-call-graph-section-no-prototype",
     "//build/config:Wno-conversion",
     "//build/config:Wno-extra-semi",
   ]
@@ -386,6 +388,7 @@ static_library("tss2-esys") {
     "src/src/util/log.c",
   ]
   configs += [
+    "//build/config:Wno-call-graph-section-no-prototype",
     "//build/config:Wno-conversion",
     "//build/config:Wno-extra-semi",
     "//build/config:Wno-strict-prototypes",

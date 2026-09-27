@@ -7,10 +7,8 @@
 use anyhow::{Error, format_err};
 use extended_pstate::ExtendedPstatePointer;
 use starnix_core::arch::execution::new_syscall;
-use starnix_core::ptrace::{StopState, ptrace_syscall_enter, ptrace_syscall_exit};
-use starnix_core::signals::{
-    SignalInfo, deliver_signal, dequeue_signal, prepare_to_restart_syscall,
-};
+use starnix_core::ptrace::{ptrace_syscall_enter, ptrace_syscall_exit};
+use starnix_core::signals::{SignalInfo, dequeue_signal, force_signal, prepare_to_restart_syscall};
 use starnix_core::task::{CurrentTask, ExceptionResult, ExitStatus, SeccompStateValue, TaskFlags};
 use starnix_logging::{
     CATEGORY_STARNIX, NAME_HANDLE_EXCEPTION, NAME_RESTRICTED_KICK, NAME_RUN_TASK, log_error,
@@ -275,28 +273,7 @@ fn process_completed_exception(
     match exception_result {
         ExceptionResult::Handled => {}
         ExceptionResult::Signal(signal) => {
-            let mut task_state = current_task.task.write();
-            if task_state.ptrace_on_signal_consume() {
-                task_state.set_stopped(
-                    StopState::SignalDeliveryStopping,
-                    Some(signal),
-                    Some(&current_task),
-                    None,
-                );
-                return;
-            }
-
-            if let Some(status) = deliver_signal(
-                current_task.task.as_ref(),
-                current_task.thread_state.arch_width(),
-                task_state,
-                signal.into(),
-                &mut current_task.thread_state.registers,
-                &current_task.thread_state.extended_pstate,
-                Some(restricted_exception),
-            ) {
-                current_task.kill_thread_group(status);
-            }
+            force_signal(current_task, signal, Some(restricted_exception));
         }
     }
 }

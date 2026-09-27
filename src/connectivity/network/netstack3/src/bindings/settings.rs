@@ -11,9 +11,9 @@ use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 use fidl_fuchsia_net_settings as fnet_settings;
 use futures::TryStreamExt as _;
 use log::warn;
+use netstack3_core::SettingsContext;
 use netstack3_core::tcp::TcpSettings;
 use netstack3_core::types::{BufferSizeSettings, PositiveIsize};
-use netstack3_core::{MapDerefExt as _, SettingsContext};
 use once_cell::sync::Lazy;
 
 use crate::bindings::interface_config::{
@@ -138,8 +138,7 @@ fn update_udp(
         let fnet_settings::SocketBufferSizes { send, receive, __source_breaking } = buffer_sizes;
         let mut buffer_sizes = fnet_settings::SocketBufferSizes::default();
         if let Some(send) = send {
-            buffer_sizes.send =
-                Some(update_buffer_sizes(&mut settings.core.datagram.send_buffer, send)?);
+            buffer_sizes.send = Some(update_buffer_sizes(&mut settings.send_buffer, send)?);
         }
         if let Some(receive) = receive {
             buffer_sizes.receive =
@@ -160,12 +159,11 @@ fn update_icmp(
         let fnet_settings::SocketBufferSizes { send, receive, __source_breaking } = buffer_sizes;
         let mut buffer_sizes = fnet_settings::SocketBufferSizes::default();
         if let Some(send) = send {
-            buffer_sizes.send =
-                Some(update_buffer_sizes(&mut settings.echo_core.datagram.send_buffer, send)?);
+            buffer_sizes.send = Some(update_buffer_sizes(&mut settings.send_buffer, send)?);
         }
         if let Some(receive) = receive {
             buffer_sizes.receive =
-                Some(update_buffer_sizes(&mut settings.echo_receive_buffer, receive)?);
+                Some(update_buffer_sizes(&mut settings.receive_buffer, receive)?);
         }
         prev.echo_buffer_sizes = util::some_if_not_default(buffer_sizes);
     }
@@ -265,7 +263,7 @@ fn get_tcp(settings: &TcpSettings) -> fnet_settings::Tcp {
 
 fn get_udp(settings: &UdpSettings) -> fnet_settings::Udp {
     let buffer_sizes = fnet_settings::SocketBufferSizes {
-        send: Some(settings.core.datagram.send_buffer.into_fidl()),
+        send: Some(settings.send_buffer.into_fidl()),
         receive: Some(settings.receive_buffer.into_fidl()),
         __source_breaking: fidl::marker::SourceBreaking,
     };
@@ -277,8 +275,8 @@ fn get_udp(settings: &UdpSettings) -> fnet_settings::Udp {
 
 fn get_icmp(settings: &IcmpSettings) -> fnet_settings::Icmp {
     let echo_buffer_sizes = fnet_settings::SocketBufferSizes {
-        send: Some(settings.echo_core.datagram.send_buffer.into_fidl()),
-        receive: Some(settings.echo_receive_buffer.into_fidl()),
+        send: Some(settings.send_buffer.into_fidl()),
+        receive: Some(settings.receive_buffer.into_fidl()),
         __source_breaking: fidl::marker::SourceBreaking,
     };
     let icmpv4 = fnet_settings::Icmpv4 { __source_breaking: fidl::marker::SourceBreaking };
@@ -377,27 +375,46 @@ fn default_dgram_rcvbuf_sizes() -> BufferSizeSettings<NonZeroUsize> {
     .unwrap()
 }
 
+fn default_dgram_sndbuf_sizes() -> BufferSizeSettings<PositiveIsize> {
+    // These values were picked to match Linux defaults.
+    const DEFAULT_DATAGRAM_MIN_SNDBUF: PositiveIsize = PositiveIsize::new(4 * 1024).unwrap();
+    const DEFAULT_DATAGRAM_DEFAULT_SNDBUF: PositiveIsize = PositiveIsize::new(208 * 1024).unwrap();
+    const DEFAULT_DATAGRAM_MAX_SNDBUF: PositiveIsize = PositiveIsize::new(4 * 1024 * 1024).unwrap();
+    BufferSizeSettings::new(
+        DEFAULT_DATAGRAM_MIN_SNDBUF,
+        DEFAULT_DATAGRAM_DEFAULT_SNDBUF,
+        DEFAULT_DATAGRAM_MAX_SNDBUF,
+    )
+    .unwrap()
+}
+
 #[derive(Clone)]
 pub(crate) struct UdpSettings {
-    core: netstack3_core::udp::UdpSettings,
+    pub(crate) send_buffer: BufferSizeSettings<PositiveIsize>,
     pub(crate) receive_buffer: BufferSizeSettings<NonZeroUsize>,
 }
 
 impl Default for UdpSettings {
     fn default() -> Self {
-        Self { core: Default::default(), receive_buffer: default_dgram_rcvbuf_sizes() }
+        Self {
+            send_buffer: default_dgram_sndbuf_sizes(),
+            receive_buffer: default_dgram_rcvbuf_sizes(),
+        }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct IcmpSettings {
-    echo_core: netstack3_core::icmp::IcmpEchoSettings,
-    pub(crate) echo_receive_buffer: BufferSizeSettings<NonZeroUsize>,
+    pub(crate) send_buffer: BufferSizeSettings<PositiveIsize>,
+    pub(crate) receive_buffer: BufferSizeSettings<NonZeroUsize>,
 }
 
 impl Default for IcmpSettings {
     fn default() -> Self {
-        Self { echo_core: Default::default(), echo_receive_buffer: default_dgram_rcvbuf_sizes() }
+        Self {
+            send_buffer: default_dgram_sndbuf_sizes(),
+            receive_buffer: default_dgram_rcvbuf_sizes(),
+        }
     }
 }
 
@@ -426,18 +443,6 @@ impl Default for IpLayerSettings {
 impl SettingsContext<TcpSettings> for BindingsCtx {
     fn settings(&self) -> impl Deref<Target = TcpSettings> + '_ {
         self.settings.tcp.read()
-    }
-}
-
-impl SettingsContext<netstack3_core::udp::UdpSettings> for BindingsCtx {
-    fn settings(&self) -> impl Deref<Target = netstack3_core::udp::UdpSettings> + '_ {
-        self.settings.udp.read().map_deref(|u| &u.core)
-    }
-}
-
-impl SettingsContext<netstack3_core::icmp::IcmpEchoSettings> for BindingsCtx {
-    fn settings(&self) -> impl Deref<Target = netstack3_core::icmp::IcmpEchoSettings> + '_ {
-        self.settings.icmp.read().map_deref(|i| &i.echo_core)
     }
 }
 

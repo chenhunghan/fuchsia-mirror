@@ -4,6 +4,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+from iperf import (
+    iperf_client,
+    iperf_server,
+)
+
 from . import (
     access_point,
     adb,
@@ -11,8 +16,6 @@ from . import (
     attenuator,
     fastboot,
     fuchsia_device,
-    iperf_client,
-    iperf_server,
     openwrt_ap,
     packet_capture,
     pdu,

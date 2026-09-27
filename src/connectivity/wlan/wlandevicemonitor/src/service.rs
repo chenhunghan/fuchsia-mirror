@@ -3278,9 +3278,7 @@ mod tests {
         let mut phy_stream =
             fake_destroy_iface_env(&test_values.phys, &iface_map, &test_values.ifaces_tree);
 
-        if let Ok(Some(crate::watchable_map::MapEvent::KeyInserted(iface_id))) =
-            iface_events.try_next()
-        {
+        if let Ok(crate::watchable_map::MapEvent::KeyInserted(iface_id)) = iface_events.try_recv() {
             assert_eq!(iface_id, TEST_IFACE_ID);
         } else {
             panic!("No iface ID was added.")
@@ -3310,7 +3308,7 @@ mod tests {
             assert_matches!(exec.run_until_stalled(&mut phy_stream.next()), Poll::Pending);
         }
 
-        if iface_events.try_next().is_ok() {
+        if iface_events.try_recv().is_ok() {
             panic!("Received unexpected iface event.");
         }
 
@@ -3318,9 +3316,7 @@ mod tests {
         // completion and produces an OnIfaceRemoved event.
         responder.send(Ok(())).expect("failed to send DestroyIfaceResponse");
         assert_eq!(exec.run_until_stalled(&mut first_destroy_fut), Poll::Ready(Ok(())));
-        if let Ok(Some(crate::watchable_map::MapEvent::KeyRemoved(iface_id))) =
-            iface_events.try_next()
-        {
+        if let Ok(crate::watchable_map::MapEvent::KeyRemoved(iface_id)) = iface_events.try_recv() {
             assert_eq!(iface_id, TEST_IFACE_ID);
         } else {
             panic!("No iface ID was removed.")
@@ -3330,7 +3326,7 @@ mod tests {
             exec.run_until_stalled(&mut second_destroy_fut),
             Poll::Ready(Err(zx::Status::NOT_FOUND))
         );
-        if iface_events.try_next().is_ok() {
+        if iface_events.try_recv().is_ok() {
             panic!("Received unexpected iface event.");
         }
     }

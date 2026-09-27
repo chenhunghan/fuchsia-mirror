@@ -175,5 +175,8 @@ static_library("ring-core") {
   }
   sources += HEADERS
   configs += [ ":ring-config" ]
-  visibility = [ "//third_party/rust_crates/*" ]
+  visibility = [
+    ":*",
+    "//third_party/rust_crates/*",
+  ]
 }

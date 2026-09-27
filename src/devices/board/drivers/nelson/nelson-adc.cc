@@ -71,7 +71,7 @@ zx::result<> Nelson::AdcInit() {
   fidl::Arena<> fidl_arena;
   fdf::Arena arena('ADC_');
   auto composite_spec =
-      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("aml_saradc").Build();
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("adc").Build();
 
   auto result =
       pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, node), composite_spec);

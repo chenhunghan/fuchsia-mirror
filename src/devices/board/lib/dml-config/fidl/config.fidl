@@ -19,6 +19,9 @@ type Device = table {
     3: url string:MAX;
     4: compatible string:MAX;
     5: metadata vector<StaticMetadata>:MAX;
+    6: interrupt_controller_id uint32;
+    7: disabled bool;
+    8: driver_host string:MAX;
 };
 
 type ResourceEntry = table {
@@ -33,7 +36,25 @@ type AggregateEntry = table {
     3: resources vector<ResourceEntry>:MAX;
 };
 
+type StubIommu = struct {};
+
+type ArmSmmu = struct {
+    base_address uint64;
+};
+
+type IommuType = flexible union {
+    1: stub_iommu StubIommu;
+    2: arm_smmu ArmSmmu;
+};
+
+type Iommu = table {
+    1: name string:MAX;
+    2: id uint32;
+    3: iommu_type IommuType;
+};
+
 type BoardConfig = table {
     1: devices vector<Device>:MAX;
     2: aggregates vector<AggregateEntry>:MAX;
+    3: iommus vector<Iommu>:MAX;
 };

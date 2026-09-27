@@ -94,12 +94,12 @@ async fn wake_lease_blocks_system_suspend_until_release() -> Result<()> {
             .expect("error registering suspend blocker");
     }
 
-    assert!(before_suspend_receiver.try_next().is_err()); // OnSuspend not called yet.
+    assert!(before_suspend_receiver.try_recv().is_err()); // OnSuspend not called yet.
 
     // Closing the ApplicationActivity lease shouldn't cause the system to suspend as long as
     // the wake lease is active.
     drop(activity_lease);
-    assert!(before_suspend_receiver.try_next().is_err()); // OnSuspend not called yet.
+    assert!(before_suspend_receiver.try_recv().is_err()); // OnSuspend not called yet.
 
     // Release the wake lease and observe a suspend callback within a timeout.
     drop(wake_lease);

@@ -7,6 +7,7 @@
 
 #include <lib/fit/function.h>
 #include <lib/fit/result.h>
+#include <sched.h>
 #include <string.h>
 
 #include <string>
@@ -153,5 +154,20 @@ void PrintTo(const fit::result<E, T>& result, std::ostream* os) {
 
 /// Returns a ScopedTempFD labeled with the given SELinux `label`.
 test_helper::ScopedTempFD ScopedTempFDWithLabel(std::string_view label);
+
+/// Base test class that isolates the mount namespace for the running test process.
+class IsolatedMountNamespaceTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    // The unshare() call will isolate the mount namespaces for the running
+    // test process. This allows the Linux-based tests to execute syscalls with
+    // root permissions, without fear of messing the environment up. While the
+    // Starnix tests don't strictly need to unshare, it's beneficial to run the
+    // same test binaries on Linux and on Starnix so we can be sure the semantics
+    // match. As a side effect, this means that the mounted directories will not
+    // be viewable in traditional ways, e.g. ffx component explore.
+    ASSERT_THAT(unshare(CLONE_NEWNS), SyscallSucceeds());
+  }
+};
 
 #endif  // SRC_STARNIX_TESTS_SELINUX_USERSPACE_UTIL_H_

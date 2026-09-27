@@ -6181,7 +6181,7 @@ mod tests {
     }
 
     impl TryRng for StepRng {
-        type Error = core::convert::Infallible;
+        type Error = !;
 
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.try_next_u64()? as u32)

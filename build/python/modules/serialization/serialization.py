@@ -245,7 +245,7 @@ def _has_default_value(cls: type[Any], field: str) -> Any:
 def _parse_value_into(
     value: Any,
     cls: type[Any],
-) -> dict[str, Any] | list[Any] | set[Any] | C | None:
+) -> dict[str, Any] | list[Any] | tuple[Any, ...] | set[Any] | C | None:
     """For a class, attempt to parse it from the value."""
     if value is None:
         return None
@@ -288,6 +288,22 @@ def _parse_value_into(
                 f"cannot parse {cls} from a non-list value({type(value)})"
             )
 
+    elif typing.get_origin(cls) is tuple:
+        tuple_args = typing.get_args(cls)
+        if type(value) is list or type(value) is tuple:
+            if len(tuple_args) == 2 and tuple_args[1] is Ellipsis:
+                return tuple(
+                    _parse_value_into(item, tuple_args[0]) for item in value
+                )
+            elif len(tuple_args) == len(value):
+                return tuple(
+                    _parse_value_into(item, t)
+                    for item, t in zip(value, tuple_args)
+                )
+        raise TypeError(
+            f"cannot parse {cls} from a non-list/tuple value({type(value)})"
+        )
+
     elif typing.get_origin(cls) is set:
         # Set items need to have a type
         set_item_type = typing.get_args(cls)[0]
@@ -317,6 +333,9 @@ def _parse_value_into(
         # Strip the Nonetype
         if types.NoneType in type_options:
             type_options.remove(types.NoneType)
+
+        if len(type_options) == 1:
+            return _parse_value_into(value, type_options[0])
 
         # There are some special types that can deserialize nearly anything,
         # like str, or are very general like dict, set, and list, so lets
@@ -428,8 +447,8 @@ def make_dict_value_for(obj: Any) -> dict[str, Any] | list[Any] | str | int:
             result[str(key)] = make_dict_value_for(value)
         return result
 
-    elif isinstance(obj, list):
-        # Lists are special, they need to retain their existing order
+    elif isinstance(obj, (list, tuple)):
+        # Lists and tuples are special, they need to retain their existing order
         return [make_dict_value_for(value) for value in obj]
 
     elif isinstance(obj, set):

@@ -121,6 +121,7 @@ fn receive_frame<I: TestIpExt + IpExt>() {
             device_id: base_device_id,
             ip_version: I::VERSION,
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         packet,
     );

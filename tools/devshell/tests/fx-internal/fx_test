@@ -377,4 +377,74 @@ EOF
   BT_EXPECT_EQ "${res}" "success"
 }
 
+TEST_fx-on-demand-prebuilts-executable() {
+  local mock_bin="${BT_TEMP_DIR}/prebuilt/third_party/mytool/bin/mytool"
+  mkdir -p "$(dirname "${mock_bin}")"
+  cat >"${mock_bin}" <<'EOF'
+#!/bin/bash
+echo "ran mytool: $@"
+EOF
+  chmod +x "${mock_bin}"
+
+  cat >"${BT_TEMP_DIR}/tools/devshell/mytool.fx" <<'EOF'
+#### CATEGORY=Other
+#### EXECUTABLE=${PREBUILT_3P_DIR}/mytool/bin/mytool
+### test prebuilt executable
+EOF
+
+  # Note: BT_TEMP_DIR is an isolated per-test temp directory that ${fx} uses as
+  # FUCHSIA_DIR, and BT_RUN_TESTS runs TEST_* functions sequentially.
+  local log_file="${BT_TEMP_DIR}/out/.on-demand-fetch-log"
+  rm -f "${log_file}"
+
+  # Default (logging disabled): does not write to //out/.on-demand-fetch-log
+  local out
+  out=$(_FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" FX_ON_DEMAND_PREBUILTS_LOG_FETCHES= "${fx}" mytool arg1 2>&1)
+  BT_EXPECT_EQ "${out}" "ran mytool: arg1"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${log_file}"
+
+  # Logging enabled (FX_ON_DEMAND_PREBUILTS_LOG_FETCHES=1): writes fetch request to //out/.on-demand-fetch-log
+  out=$(_FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" FX_ON_DEMAND_PREBUILTS_LOG_FETCHES=1 "${fx}" mytool arg1 2>&1)
+  BT_EXPECT_EQ "${out}" "ran mytool: arg1"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${log_file}" "jiri fetch-package prebuilt/third_party/mytool/bin/mytool"
+}
+
+TEST_fx-on-demand-prebuilts-header-and-helper() {
+  local subcommand="${BT_TEMP_DIR}/tools/devshell/myscript"
+  cat >"${subcommand}" <<EOF
+#!/bin/bash
+#### CATEGORY=Source tree
+#### PREBUILTS=\${PREBUILT_SHAC} \${PREBUILT_JQ}
+### test prebuilts header
+
+source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh" || exit \$?
+fx-ensure-prebuilt "\${PREBUILT_BLOATY}" "\${PREBUILT_SHAC}" || exit \$?
+echo "script completed"
+EOF
+  chmod +x "${subcommand}"
+
+  local log_file="${BT_TEMP_DIR}/out/.on-demand-fetch-log"
+  rm -f "${log_file}"
+
+  # Logging disabled: should not create //out/.on-demand-fetch-log
+  local out
+  out=$(_FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" FX_ON_DEMAND_PREBUILTS_LOG_FETCHES= "${fx}" myscript 2>&1)
+  BT_EXPECT_EQ "${out}" "script completed"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${log_file}"
+
+  # Logging enabled: should batch PREBUILTS from header and log fx-ensure-prebuilt calls
+  out=$(_FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" FX_ON_DEMAND_PREBUILTS_LOG_FETCHES=1 "${fx}" myscript 2>&1)
+  BT_EXPECT_EQ "${out}" "script completed"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${log_file}" "jiri fetch-package prebuilt/tools/shac/shac prebuilt/third_party/jq/"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${log_file}" "jiri fetch-package prebuilt/third_party/bloaty/"
+
+  # Error cases: 0 arguments or a path outside //prebuilt should fail and not log
+  BT_EXPECT_FAIL fx-ensure-prebuilt 2>/dev/null
+  FX_ON_DEMAND_PREBUILTS_LOG_FETCHES=1 BT_EXPECT_FAIL fx-ensure-prebuilt "${BT_TEMP_DIR}/out/default/host-tools/not-a-prebuilt" 2>/dev/null
+  local log_contents
+  log_contents="$(cat "${log_file}")"
+  [[ "${log_contents}" != *"not-a-prebuilt"* ]]
+  BT_EXPECT_GOOD_STATUS $?
+}
+
 BT_RUN_TESTS "$@"

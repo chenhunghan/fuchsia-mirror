@@ -5,12 +5,13 @@
 use alloc::rc::Rc;
 use alloc::vec;
 use core::cell::RefCell;
-use core::convert::Infallible as Never;
 
 use assert_matches::assert_matches;
 use ip_test_macro::ip_test;
 use netstack3_base::testutil::{MultipleDevicesId, MultipleDevicesIdState, TestIpExt};
-use netstack3_base::{CtxPair, NetworkSerializationContext, NetworkSerializer, SubnetMatcher};
+use netstack3_base::{
+    CtxPair, Ipv4IdMode, NetworkSerializationContext, NetworkSerializer, SubnetMatcher,
+};
 use packet::{InnerPacketBuilder as _, NestableSerializer as _};
 use packet_formats::ip::IpProto;
 
@@ -326,7 +327,7 @@ fn test_walk_rules<I: IpLayerIpExt + TestIpExt>() {
                 },
                 |(), _core_ctx, _table| panic!("should not be able to look up tables")
             ),
-            ControlFlow::Break(RuleAction::<RuleWalkInfo<Never>>::Unreachable)
+            ControlFlow::Break(RuleAction::<RuleWalkInfo<!>>::Unreachable)
         );
     });
 
@@ -489,4 +490,83 @@ fn send_respects_device_mtu<I: IpLayerIpExt + TestIpExt>() {
         IpLayerPacketMetadata::default(),
     )
     .expect("send ip packet")
+}
+
+#[ip_test(I)]
+fn test_ip_layer_packet_metadata_multicast_and_device_conversion<
+    I: IpLayerIpExt + crate::internal::device::state::IpDeviceStateIpExt + TestIpExt,
+>() {
+    let mut core_ctx = FakeCoreCtx::<I>::default();
+    let marks = Marks::new([(MarkDomain::Mark1, 100), (MarkDomain::Mark2, 200)]);
+
+    let gso_info = GsoInfo {
+        gso_size: core::num::NonZeroU16::new(1460).unwrap(),
+        ipv4_id_mode: Some(Ipv4IdMode::Fixed),
+    };
+
+    // Verify `from_device_ip_layer_metadata` sets `socket_info` to `None` even if
+    // `marks` are present, and that it threads through `gso_info`.
+    let device_meta = DeviceIpLayerMetadata::<FakeBindingsCtx>::with_marks(marks);
+    let rx_meta = IpLayerPacketMetadata::<
+        I,
+        crate::internal::device::state::WeakAddressId<I, FakeBindingsCtx>,
+        FakeBindingsCtx,
+    >::from_device_ip_layer_metadata(
+        &mut core_ctx,
+        &MultipleDevicesId::A,
+        device_meta,
+        Some(gso_info),
+    );
+    let (_, _, rx_marks, rx_socket_info, rx_gso_info) = rx_meta.into_parts();
+    assert_eq!(rx_marks, marks);
+    assert_eq!(rx_socket_info, None);
+    assert_eq!(rx_gso_info, Some(gso_info));
+
+    // Verify `split_for_multicast` preserves marks, socket_info, and gso_info
+    // across multiple splits.
+    let mut tx_meta = IpLayerPacketMetadata::<I, !, FakeBindingsCtx>::new_local_tx(
+        Default::default(),
+        marks,
+        Some(gso_info),
+    );
+    let primary_rc = PrimaryRc::new(());
+    let socket_info = SocketInfo {
+        proto: I::map_ip(
+            (),
+            |()| {
+                netstack3_filter::EitherIpProto::V4(packet_formats::ip::Ipv4Proto::Proto(
+                    IpProto::Udp,
+                ))
+            },
+            |()| {
+                netstack3_filter::EitherIpProto::V6(packet_formats::ip::Ipv6Proto::Proto(
+                    IpProto::Udp,
+                ))
+            },
+        ),
+        cookie: netstack3_base::socket::SocketCookie::new(
+            PrimaryRc::clone_strong(&primary_rc).resource_token(),
+        ),
+    };
+    tx_meta.socket_info = Some(socket_info.clone());
+
+    let SplitMulticastPacketMetadata { primary: split1, secondary: tx_meta } =
+        tx_meta.split_for_multicast();
+    let SplitMulticastPacketMetadata { primary: split2, secondary: tx_meta } =
+        tx_meta.split_for_multicast();
+
+    let (_, _, marks1, sock1, gso1) = split1.into_parts();
+    assert_eq!(marks1, marks);
+    assert_eq!(sock1, Some(socket_info.clone()));
+    assert_eq!(gso1, Some(gso_info));
+
+    let (_, _, marks2, sock2, gso2) = split2.into_parts();
+    assert_eq!(marks2, marks);
+    assert_eq!(sock2, Some(socket_info.clone()));
+    assert_eq!(gso2, Some(gso_info));
+
+    let (_, _, marks_rem, sock_rem, gso_rem) = tx_meta.into_parts();
+    assert_eq!(marks_rem, marks);
+    assert_eq!(sock_rem, Some(socket_info));
+    assert_eq!(gso_rem, Some(gso_info));
 }

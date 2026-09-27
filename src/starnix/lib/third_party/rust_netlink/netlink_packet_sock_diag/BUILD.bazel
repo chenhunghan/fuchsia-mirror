@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "netlink_packet_sock_diag",
+    srcs = [
+        "src/buffer.rs",
+        "src/constants.rs",
+        "src/inet/bytecode.rs",
+        "src/inet/mod.rs",
+        "src/inet/nlas.rs",
+        "src/inet/request.rs",
+        "src/inet/response.rs",
+        "src/inet/socket_id.rs",
+        "src/inet/tests.rs",
+        "src/lib.rs",
+        "src/message.rs",
+        "src/unix/mod.rs",
+        "src/unix/nlas.rs",
+        "src/unix/request.rs",
+        "src/unix/response.rs",
+        "src/unix/tests.rs",
+    ],
+    crate_name = "netlink_packet_sock_diag",
+    edition = "2024",
+    with_unit_tests = True,
+    deps = [
+        "//src/starnix/lib/third_party/rust_netlink/netlink_packet_core",
+        "//src/starnix/lib/third_party/rust_netlink/netlink_packet_utils",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:arbitrary",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:smallvec",
+    ],
+)

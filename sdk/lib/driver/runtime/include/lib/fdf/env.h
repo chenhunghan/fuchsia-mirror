@@ -265,6 +265,80 @@ void fdf_env_driver_suspend(const void* driver, fdf_env_suspend_completer_t* com
 /// The runtime will move pending callbacks back to the main queue and start accepting new work.
 void fdf_env_driver_resume(const void* driver) ZX_AVAILABLE_SINCE(32);
 
+typedef uint32_t fdf_dispatcher_state_t;
+#define FDF_DISPATCHER_STATE_RUNNING ((fdf_dispatcher_state_t)0u)
+#define FDF_DISPATCHER_STATE_SHUTTING_DOWN ((fdf_dispatcher_state_t)1u)
+#define FDF_DISPATCHER_STATE_SHUTDOWN ((fdf_dispatcher_state_t)2u)
+#define FDF_DISPATCHER_STATE_DESTROYED ((fdf_dispatcher_state_t)3u)
+
+typedef struct fdf_non_inlined_stats {
+  uint64_t allow_sync_calls;
+  uint64_t parallel_dispatch;
+  uint64_t task;
+  uint64_t unknown_thread;
+  uint64_t reentrant;
+  uint64_t channel_wait_not_yet_registered;
+  uint64_t no_thread_migration;
+} fdf_non_inlined_stats_t;
+
+typedef struct fdf_dispatcher_debug_stats {
+  uint64_t num_total_requests;
+  uint64_t num_inlined_requests;
+  fdf_non_inlined_stats_t non_inlined;
+} fdf_dispatcher_debug_stats_t;
+
+typedef struct fdf_task_debug_info {
+  uint64_t ptr;
+  uint64_t handler;
+  uint64_t initiating_dispatcher;
+  const void* initiating_driver;
+} fdf_task_debug_info_t;
+
+typedef struct fdf_dispatcher_dump_entry {
+  const void* driver;
+  uint64_t dispatcher_ptr;
+  const char* name;
+  const char* scheduler_role;
+  uint32_t options;
+  bool synchronized;
+  bool allow_sync_calls;
+  fdf_dispatcher_state_t state;
+  const char* destroy_context;
+  bool has_destroy_user_initiated;
+  bool destroy_user_initiated;
+  fdf_dispatcher_debug_stats_t debug_stats;
+  const fdf_task_debug_info_t* queued_tasks;
+  size_t num_queued_tasks;
+} fdf_dispatcher_dump_entry_t;
+
+/// Retrieves structured runtime diagnostic dumps for all dispatchers currently tracked by the
+/// driver runtime environment.
+///
+/// The caller must free the returned array using |fdf_env_free_all_dispatchers_dump|.
+void fdf_env_get_all_dispatchers_dump(fdf_dispatcher_dump_entry_t** out_entries, size_t* out_count)
+    ZX_AVAILABLE_SINCE(HEAD);
+
+/// Frees the array returned by |fdf_env_get_all_dispatchers_dump|.
+void fdf_env_free_all_dispatchers_dump(fdf_dispatcher_dump_entry_t* entries, size_t count)
+    ZX_AVAILABLE_SINCE(HEAD);
+
+typedef struct fdf_thread_dump_entry {
+  zx_koid_t koid;
+  const char* name;
+  const char* scheduler_role;
+} fdf_thread_dump_entry_t;
+
+/// Retrieves structured runtime diagnostic dumps for all threads currently spawned by the
+/// driver runtime environment.
+///
+/// The caller must free the returned array using |fdf_env_free_all_threads_dump|.
+void fdf_env_get_all_threads_dump(fdf_thread_dump_entry_t** out_entries, size_t* out_count)
+    ZX_AVAILABLE_SINCE(HEAD);
+
+/// Frees the array returned by |fdf_env_get_all_threads_dump|.
+void fdf_env_free_all_threads_dump(fdf_thread_dump_entry_t* entries, size_t count)
+    ZX_AVAILABLE_SINCE(HEAD);
+
 __END_CDECLS
 
 #endif  // LIB_FDF_ENV_H_

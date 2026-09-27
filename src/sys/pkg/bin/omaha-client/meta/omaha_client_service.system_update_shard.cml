@@ -54,10 +54,7 @@
             to: "#omaha-client-service",
         },
         {
-            protocol: [
-                "fuchsia.net.name.Lookup",
-                "fuchsia.posix.socket.Provider",
-            ],
+            protocol: "fuchsia.net.http.Loader",
             from: "parent",
             to: "#omaha-client-service",
         },
@@ -96,12 +93,6 @@
             directory: "omaha-client-service-config-data",
             from: "parent",
             as: "config-data",
-            to: "#omaha-client-service",
-        },
-        {
-            directory: "swd-root-ssl-certificates",
-            from: "parent",
-            as: "root-ssl-certificates",
             to: "#omaha-client-service",
         },
         {

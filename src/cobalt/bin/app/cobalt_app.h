@@ -124,9 +124,12 @@ class CobaltApp {
   inspect::Node inspect_node_;
   inspect::Node inspect_config_node_;
 
-  std::unique_ptr<CobaltServiceInterface> cobalt_service_;
-
   std::unique_ptr<FuchsiaSystemClockInterface> validated_clock_;
+
+  // cobalt_service_ must be declared after validated_clock_ because cobalt_service_ depends on
+  // validated_clock_. C++ destroys member variables in the reverse order of their declaration,
+  // so validated_clock_ must be declared first to ensure it outlives cobalt_service_.
+  std::unique_ptr<CobaltServiceInterface> cobalt_service_;
 
   std::unique_ptr<CobaltControllerImpl> controller_impl_;
   fidl::BindingSet<fuchsia::cobalt::Controller> controller_bindings_;

@@ -9,6 +9,37 @@ import("//build/testing/host_test_data.gni")
 import("//sdk/categories/compatibility.gni")
 import("//src/developer/ffx/config.gni")
 
+declare_args() {
+  # Path to directory containing *.adb_key files to bundle into Honeydew.
+  # Defaults to Google's internal ADB vendor keys repository if present.
+  #
+  # To bundle custom ADB keys (e.g., in an open-source checkout or for custom
+  # devices), override this GN argument in args.gn or via `fx set`:
+  #   fx set ... --args='honeydew_adb_keys_dir="//path/to/custom/keys"'
+  honeydew_adb_keys_dir =
+      "//third_party/android/platform/vendor/google/security/adb"
+}
+
+_has_adb_keys =
+    honeydew_adb_keys_dir != "" && path_exists(honeydew_adb_keys_dir)
+
+if (_has_adb_keys) {
+  action("adb_keys_tar") {
+    testonly = false
+    script = "//src/testing/end_to_end/honeydew/scripts/create_adb_keys_tar.py"
+    outputs = [ "$root_out_dir/data/honeydew/adb/adb_keys.tar" ]
+    depfile = "$target_gen_dir/adb_keys_tar.d"
+    args = [
+      "--input-dir",
+      rebase_path(honeydew_adb_keys_dir, root_build_dir),
+      "--output",
+      rebase_path(outputs[0], root_build_dir),
+      "--depfile",
+      rebase_path(depfile, root_build_dir),
+    ]
+  }
+}
+
 group("honeydew") {
   testonly = true
 
@@ -186,6 +217,10 @@ python_library("honeydew_no_testonly") {
     "${prebuilt_fastboot}",
     "//prebuilt/third_party/adb/adb",
   ]
+  if (_has_adb_keys) {
+    deps = [ ":adb_keys_tar" ]
+    data_sources += [ "$root_out_dir/data/honeydew/adb/adb_keys.tar" ]
+  }
 
   # Ensure all FIDL dependencies meet the compatibility and stability
   # requirements.

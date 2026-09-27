@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/lib/chunked-compression/chunked-decompressor.h"
+
 #include <cstddef>
 
 #include <fbl/array.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
-#include <src/lib/chunked-compression/chunked-compressor.h>
-#include <src/lib/chunked-compression/chunked-decompressor.h>
-#include <src/lib/chunked-compression/status.h>
 #include <zxtest/zxtest.h>
+
+#include "src/lib/chunked-compression/chunked-archive.h"
+#include "src/lib/chunked-compression/chunked-compressor.h"
+#include "src/lib/chunked-compression/status.h"
 
 namespace chunked_compression {
 namespace {
@@ -556,8 +558,8 @@ TEST(ChunkedDecompressorTest, RawDecompressFrame_WrongDecompressionLength) {
 
   size_t bytes_written;
   // First frame uses the correct table outputs.
-  EXPECT_EQ(decompressor.DecompressFrame(frame_start, frame_length, out_buf.get(),
-                                         output_len, &bytes_written),
+  EXPECT_EQ(decompressor.DecompressFrame(frame_start, frame_length, out_buf.get(), output_len,
+                                         &bytes_written),
             kStatusOk);
 
   frame_start = compressed_data.get() + table.Entries()[1].compressed_offset;
@@ -566,8 +568,8 @@ TEST(ChunkedDecompressorTest, RawDecompressFrame_WrongDecompressionLength) {
 
   // Second frame takes an incorrect table output, so we cannot verify that the entire frame was
   // decompressed as expected.
-  EXPECT_EQ(decompressor.DecompressFrame(frame_start, frame_length, out_buf.get(),
-                                         wrong_output_len, &bytes_written),
+  EXPECT_EQ(decompressor.DecompressFrame(frame_start, frame_length, out_buf.get(), wrong_output_len,
+                                         &bytes_written),
             kStatusErrIoDataIntegrity);
 }
 

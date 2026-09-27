@@ -422,10 +422,7 @@ pub mod tests {
         /// Expects that a task had been built, and retrieves that task, or panics.
         #[track_caller]
         pub fn expect_task(&mut self) -> TestMediaTask {
-            self.receiver
-                .try_next()
-                .expect("should have made a task")
-                .expect("shouldn't have dropped all senders")
+            self.receiver.try_recv().expect("should have made a task")
         }
     }
 

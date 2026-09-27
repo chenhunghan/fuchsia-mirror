@@ -107,6 +107,18 @@ TEST_F(TestRingbuffer, Write) {
   }
 }
 
+TEST_F(TestRingbuffer, HasSpaceFull) {
+  const uint32_t kMagmaPageSize = magma::page_size();
+  auto ringbuffer =
+      std::make_unique<Ringbuffer>(magma::PlatformBuffer::Create(kMagmaPageSize, "test"));
+
+  // Set tail to 0, head to 4. Space should be 0.
+  ringbuffer->Reset(0);
+  ringbuffer->update_head(sizeof(uint32_t));
+
+  EXPECT_FALSE(ringbuffer->HasSpace(sizeof(uint32_t)));
+}
+
 TEST_F(TestRingbuffer, MultipleAddressSpaces) {
   const uint32_t kMagmaPageSize = magma::page_size();
   auto ringbuffer =

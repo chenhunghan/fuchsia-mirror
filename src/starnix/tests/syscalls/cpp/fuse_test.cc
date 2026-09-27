@@ -390,6 +390,8 @@ class FuseServer {
 
   FileSystem& fs() { return fs_; }
   const fbl::unique_fd& fuse_fd() { return fuse_fd_; }
+  uint32_t init_flags2() const { return init_flags2_; }
+  uint32_t want_init_flags() const { return want_init_flags_; }
 
   testing::AssertionResult Mount(const std::string& path) {
     OK_OR_RETURN(OpenFuseDevice());
@@ -418,12 +420,14 @@ class FuseServer {
     return R();
   }
 
-  testing::AssertionResult SendInitResponse(const fuse_in_header& in_header, uint32_t flags) {
+  testing::AssertionResult SendInitResponse(const fuse_in_header& in_header, uint32_t flags,
+                                            uint32_t flags2 = 0) {
     fuse_init_out init_out = {
         .major = FUSE_KERNEL_VERSION,
         .minor = FUSE_KERNEL_MINOR_VERSION,
         .flags = flags,
     };
+    init_out.unused[1] = flags2;
     return WriteStructResponse(in_header, init_out);
   }
 
@@ -457,6 +461,11 @@ class FuseServer {
       case FUSE_INIT: {
         struct fuse_init_in init_in = {};
         memcpy(&init_in, in_payload, sizeof(init_in));
+        if (message.size() >= sizeof(fuse_in_header) + 20) {
+          uint32_t flags2 = 0;
+          memcpy(&flags2, reinterpret_cast<const char*>(in_payload) + 16, sizeof(flags2));
+          init_flags2_ = flags2;
+        }
         OK_OR_RETURN(HandleInit(in_header, &init_in));
         break;
       }
@@ -804,6 +813,7 @@ class FuseServer {
   bool init_done_ = false;
 
   uint32_t want_init_flags_;
+  uint32_t init_flags2_ = 0;
 
   FileSystem fs_;
 
@@ -2173,4 +2183,134 @@ TEST_F(FuseServerTest, StandardReadEOFCapping) {
   for (int i = 0; i < 64; i++) {
     EXPECT_EQ(buffer[i], 'L');
   }
+}
+
+#ifndef FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2
+#define FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2 _IOW(229, 126, uint32_t)
+#endif
+
+#ifndef FUSE_PASSTHROUGH
+#define FUSE_PASSTHROUGH (1ULL << 63)
+#endif
+
+// In FUSE 7.36+, FUSE_PASSTHROUGH is bit 63, which maps to bit 31 in flags2.
+// For earlier FUSE versions, FUSE_PASSTHROUGH was (1 << 31).
+constexpr uint32_t kFusePassthroughFlag2 = (FUSE_PASSTHROUGH > 0xFFFFFFFFULL)
+                                               ? static_cast<uint32_t>(FUSE_PASSTHROUGH >> 32)
+                                               : static_cast<uint32_t>(FUSE_PASSTHROUGH);
+
+class PassthroughMmapServer : public FuseServer {
+ public:
+  PassthroughMmapServer() : FuseServer() {}
+
+  bool kernel_supports_passthrough() const { return kernel_supports_passthrough_; }
+
+  void SetPassthrough(std::shared_ptr<Node> node, uint32_t passthrough_id) {
+    std::lock_guard guard(mu_);
+    passthrough_nodes_[node] = passthrough_id;
+  }
+
+  testing::AssertionResult HandleInit(const struct fuse_in_header& in_header,
+                                      const struct fuse_init_in* init_in) override {
+    uint32_t flags2 = 0;
+    if (init_flags2() & kFusePassthroughFlag2) {
+      kernel_supports_passthrough_ = true;
+      flags2 |= kFusePassthroughFlag2;
+    }
+    OK_OR_RETURN(SendInitResponse(in_header, want_init_flags(), flags2));
+    NotifyInitWaiters();
+    return testing::AssertionSuccess();
+  }
+
+  testing::AssertionResult HandleOpen(const std::shared_ptr<Node>& node,
+                                      const struct fuse_in_header& in_header,
+                                      const struct fuse_open_in* open_in) override {
+    struct fuse_open_out open_out = {};
+    open_out.fh = GetNextFileHandle();
+    {
+      std::lock_guard guard(mu_);
+      auto it = passthrough_nodes_.find(node);
+      if (it != passthrough_nodes_.end()) {
+        open_out.padding = it->second;
+      }
+    }
+    return WriteStructResponse(in_header, open_out);
+  }
+
+ private:
+  std::atomic<bool> kernel_supports_passthrough_ = false;
+  std::mutex mu_;
+  std::unordered_map<std::shared_ptr<Node>, uint32_t> passthrough_nodes_ __TA_GUARDED(mu_);
+};
+
+TEST_F(FuseServerTest, PassthroughMmap) {
+  auto server = std::make_shared<PassthroughMmapServer>();
+  std::shared_ptr<File> pt_file = server->fs().AddFileAtRoot("passthrough_file");
+  ASSERT_TRUE(pt_file);
+  pt_file->SetSize(4096);
+  pt_file->SetPermissions(0666);
+
+  std::shared_ptr<File> non_pt_file = server->fs().AddFileAtRoot("non_passthrough_file");
+  ASSERT_TRUE(non_pt_file);
+  non_pt_file->SetSize(4096);
+  non_pt_file->SetPermissions(0666);
+
+  ASSERT_TRUE(Mount(server));
+  server->WaitForInit();
+  if (!server->kernel_supports_passthrough()) {
+    GTEST_SKIP() << "FUSE passthrough is not supported by the kernel";
+  }
+
+  // 1. Create a backing file to be used for FUSE passthrough.
+  char backing_path[] = "/tmp/fuse_backing_XXXXXX";
+  int backing_fd_raw = mkstemp(backing_path);
+  ASSERT_GE(backing_fd_raw, 0) << strerror(errno);
+  fbl::unique_fd backing_fd(backing_fd_raw);
+  unlink(backing_path);
+
+  ASSERT_EQ(ftruncate(backing_fd.get(), 4096), 0) << strerror(errno);
+  const char test_data[] = "FUSE Passthrough Mmap Test Content";
+  ASSERT_EQ(pwrite(backing_fd.get(), test_data, sizeof(test_data), 0),
+            static_cast<ssize_t>(sizeof(test_data)))
+      << strerror(errno);
+
+  // 2. Register backing file with FUSE passthrough ioctl.
+  int passthrough_id =
+      ioctl(server->fuse_fd().get(), FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2, &backing_fd_raw);
+  ASSERT_GT(passthrough_id, 0) << strerror(errno);
+  server->SetPassthrough(pt_file, static_cast<uint32_t>(passthrough_id));
+
+  // 3. Open the passthrough file via FUSE mount.
+  std::string pt_path = GetMountDir() + "/passthrough_file";
+  fbl::unique_fd pt_client_fd(open(pt_path.c_str(), O_RDWR));
+  ASSERT_TRUE(pt_client_fd.is_valid()) << strerror(errno);
+
+  // 4. Memory-map the passthrough file.
+  void* addr = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, pt_client_fd.get(), 0);
+  ASSERT_NE(addr, MAP_FAILED) << strerror(errno);
+
+  // 5. Verify the memory mapping content matches the backing file.
+  EXPECT_STREQ(reinterpret_cast<const char*>(addr), test_data);
+
+  // 6. Mutate data through the mapped memory.
+  const char modified_data[] = "Modified via FUSE Passthrough Mmap!";
+  memcpy(addr, modified_data, sizeof(modified_data));
+  ASSERT_EQ(msync(addr, 4096, MS_SYNC), 0) << strerror(errno);
+  ASSERT_EQ(munmap(addr, 4096), 0) << strerror(errno);
+
+  // 7. Verify modifications are reflected on the backing file.
+  char read_buf[64] = {};
+  ASSERT_EQ(pread(backing_fd.get(), read_buf, sizeof(modified_data), 0),
+            static_cast<ssize_t>(sizeof(modified_data)))
+      << strerror(errno);
+  EXPECT_STREQ(read_buf, modified_data);
+
+  // 8. Verify non-passthrough file fails with ENODEV on mmap.
+  std::string non_pt_path = GetMountDir() + "/non_passthrough_file";
+  fbl::unique_fd non_pt_fd(open(non_pt_path.c_str(), O_RDWR));
+  ASSERT_TRUE(non_pt_fd.is_valid()) << strerror(errno);
+
+  void* non_pt_addr = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, non_pt_fd.get(), 0);
+  EXPECT_EQ(non_pt_addr, MAP_FAILED);
+  EXPECT_EQ(errno, ENODEV);
 }

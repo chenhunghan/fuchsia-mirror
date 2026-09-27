@@ -20,6 +20,7 @@ def run(
     capture_error_in_output: bool = False,
     log_output: bool = True,
     timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> str | None:
     """Runs the command on host shell and returns the output.
 
@@ -40,6 +41,8 @@ def run(
             or spammy output.
         timeout: maximum amount of time to wait for the command to finish.
             Default value is None which means no time limit.
+        env: optional environment variables mapping for the new process.
+            If None, inherits the current process's environment.
 
     Returns:
         Command output, if capture_output is True. Otherwise, returns None.
@@ -84,6 +87,7 @@ def run(
             check=True,  # to raise exception if cmd fails
             text=True,  # to decode the output to str
             timeout=timeout,  # default is None which means no timeout
+            env=env,
         )
         output: str | None = proc.stdout
         if isinstance(output, str):

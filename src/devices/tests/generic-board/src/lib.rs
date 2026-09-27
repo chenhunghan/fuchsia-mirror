@@ -69,12 +69,19 @@ impl Driver for GenericBoardDriver {
             .context("GetBoardInfo returned error")?;
         info!("Board info: {:?}", board_info);
 
+        let enabled_nodes = context
+            .take_config::<dml_config::StructuredConfig>()
+            .map(|c| c.enabled_nodes)
+            .unwrap_or_default();
+
         publish_dml_devices(
             &pbus,
             &composite_manager,
             &board_config,
             &GENERIC_BOARD_PARSER_CONFIG,
             None,
+            None,
+            &enabled_nodes,
         )
         .await
         .context("Failed to publish DML devices")?;

@@ -100,8 +100,14 @@ zx_status_t VmoPool::ListableBuffer::PinVmo(const zx::bti& bti,
   if (static_cast<bool>(require_contiguous) && pinned_buffer.region_count() != 1) {
     return ZX_ERR_NO_MEMORY;
   }
-  if (static_cast<bool>(require_low_memory) && pinned_buffer.region(0).phys_addr > UINT32_MAX) {
-    return ZX_ERR_NO_MEMORY;
+  if (static_cast<bool>(require_low_memory)) {
+    for (uint32_t i = 0; i < pinned_buffer.region_count(); ++i) {
+      const PinnedVmo::Region& region = pinned_buffer.region(i);
+      if (region.phys_addr > UINT32_MAX ||
+          region.size > (static_cast<uint64_t>(UINT32_MAX) + 1 - region.phys_addr)) {
+        return ZX_ERR_NO_MEMORY;
+      }
+    }
   }
   is_pinned = true;
   return ZX_OK;

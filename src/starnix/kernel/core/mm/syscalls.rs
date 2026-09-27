@@ -20,7 +20,7 @@ use fuchsia_runtime::UtcTimeline;
 use linux_uapi::MLOCK_ONFAULT;
 use starnix_logging::{CATEGORY_STARNIX_MM, log_trace, track_stub};
 use starnix_syscalls::SyscallArg;
-use starnix_types::time::{duration_from_timespec, time_from_timespec, timespec_from_time};
+use starnix_types::time::{duration_from_timespec, time_from_timespec};
 use starnix_uapi::auth::{PTRACE_MODE_ATTACH_REALCREDS, PTRACE_MODE_READ_REALCREDS};
 use starnix_uapi::errors::{EINTR, Errno};
 use starnix_uapi::user_address::{UserAddress, UserRef};
@@ -481,16 +481,18 @@ fn do_futex<Key: FutexKey>(
 
     // The timeout is interpreted differently by WAIT and WAIT_BITSET: WAIT takes a
     // timeout and WAIT_BITSET takes a deadline.
+    let utime = TimeSpecPtr::new(current_task, timeout_or_value2);
     let read_timespec = |current_task: &CurrentTask| {
-        let utime = TimeSpecPtr::new(current_task, timeout_or_value2);
         if utime.is_null() {
-            Ok(timespec_from_time(zx::MonotonicInstant::INFINITE))
+            Ok(None)
         } else {
-            current_task.read_multi_arch_object(utime)
+            Ok(Some(current_task.read_multi_arch_object(utime)?))
         }
     };
-    let read_timeout = |current_task: &CurrentTask| {
-        let timespec = read_timespec(current_task)?;
+    let read_timeout = |current_task: &CurrentTask| -> Result<Option<zx::MonotonicInstant>, Errno> {
+        let Some(timespec) = read_timespec(current_task)? else {
+            return Ok(None);
+        };
         let timeout = duration_from_timespec(timespec);
         let deadline = zx::MonotonicInstant::after(timeout?);
         if is_realtime {
@@ -498,28 +500,24 @@ fn do_futex<Key: FutexKey>(
             // just as good as actually estimating UTC here.
             track_stub!(TODO("https://fxbug.dev/356912301"), "FUTEX_CLOCK_REALTIME timeout");
         }
-        Ok(deadline)
+        Ok(Some(deadline))
     };
-    let read_deadline = |current_task: &CurrentTask| {
-        let timespec = read_timespec(current_task)?;
+    let read_deadline = |current_task: &CurrentTask| -> Result<Option<TargetTime>, Errno> {
+        let Some(timespec) = read_timespec(current_task)? else {
+            return Ok(None);
+        };
         if is_realtime {
-            Ok(TargetTime::RealTime(time_from_timespec::<UtcTimeline>(timespec)?))
+            Ok(Some(TargetTime::RealTime(time_from_timespec::<UtcTimeline>(timespec)?)))
         } else {
-            Ok(TargetTime::Monotonic(time_from_timespec::<zx::MonotonicTimeline>(timespec)?))
+            Ok(Some(TargetTime::Monotonic(time_from_timespec::<zx::MonotonicTimeline>(timespec)?)))
         }
     };
 
     match cmd {
         FUTEX_WAIT => {
-            let deadline = read_timeout(current_task)?;
+            let deadline = read_timeout(current_task)?.map(TargetTime::Monotonic);
             let bitset = FUTEX_BITSET_MATCH_ANY;
-            do_futex_wait_with_restart::<Key>(
-                current_task,
-                addr,
-                value,
-                bitset,
-                TargetTime::Monotonic(deadline),
-            )?;
+            do_futex_wait_with_restart::<Key>(current_task, addr, value, bitset, deadline)?;
             Ok(0)
         }
         FUTEX_WAKE => futexes.wake(current_task, addr, value as usize, FUTEX_BITSET_MATCH_ANY),
@@ -559,7 +557,8 @@ fn do_futex<Key: FutexKey>(
             error!(ENOSYS)
         }
         FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
-            futexes.lock_pi(current_task, addr, read_timeout(current_task)?)?;
+            let deadline = read_timeout(current_task)?.unwrap_or(zx::MonotonicInstant::INFINITE);
+            futexes.lock_pi(current_task, addr, deadline)?;
             Ok(0)
         }
         FUTEX_TRYLOCK_PI => {
@@ -582,19 +581,20 @@ fn do_futex_wait_with_restart<Key: FutexKey>(
     addr: UserAddress,
     value: u32,
     mask: u32,
-    deadline: TargetTime,
+    deadline: Option<TargetTime>,
 ) -> Result<(), Errno> {
     let futexes = Key::get_table_from_task(current_task)?;
     let result = match deadline {
-        TargetTime::Monotonic(mono_deadline) => {
+        None => futexes.wait(current_task, addr, value, mask, zx::MonotonicInstant::INFINITE),
+        Some(TargetTime::Monotonic(mono_deadline)) => {
             futexes.wait(current_task, addr, value, mask, mono_deadline)
         }
-        TargetTime::BootInstant(boot_deadline) => {
+        Some(TargetTime::BootInstant(boot_deadline)) => {
             let timer_slack = current_task.read().get_timerslack();
             futexes.wait_boot(current_task, addr, value, mask, boot_deadline, timer_slack)
         }
-        TargetTime::RealTime(utc_deadline) => {
-            // We convert real time deadlines to boot time deadlines since we cannot wait using a UTC deadline.
+        Some(TargetTime::RealTime(utc_deadline)) => {
+            // Convert real time deadlines to boot time deadlines since waiting using a UTC deadline is unsupported.
             let (boot_deadline, _) = estimate_boot_deadline_from_utc(utc_deadline);
             let timer_slack = current_task.read().get_timerslack();
             futexes.wait_boot(current_task, addr, value, mask, boot_deadline, timer_slack)
@@ -602,10 +602,20 @@ fn do_futex_wait_with_restart<Key: FutexKey>(
     };
     match result {
         Err(err) if err == EINTR => {
-            current_task.set_syscall_restart_func(move |current_task| {
-                do_futex_wait_with_restart::<Key>(current_task, addr, value, mask, deadline)
-            });
-            error!(ERESTART_RESTARTBLOCK)
+            if let Some(deadline) = deadline {
+                current_task.set_syscall_restart_func(move |current_task| {
+                    do_futex_wait_with_restart::<Key>(
+                        current_task,
+                        addr,
+                        value,
+                        mask,
+                        Some(deadline),
+                    )
+                });
+                error!(ERESTART_RESTARTBLOCK)
+            } else {
+                error!(ERESTARTSYS)
+            }
         }
         result => result,
     }

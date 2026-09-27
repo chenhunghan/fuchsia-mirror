@@ -63,7 +63,7 @@ source_set("main") {
     "//zircon/kernel/dev:init",
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/console:console_rust",
+    "//zircon/kernel/lib/console:console_rs",
     "//zircon/kernel/lib/counters",
     "//zircon/kernel/lib/counters:counters-rs",
     "//zircon/kernel/lib/cxxabi-dynamic-init:headers",
@@ -92,6 +92,7 @@ kernel_rust_mod("top_rust") {
   output_name = "top"
   source_root = "mod.rs"
   sources = [
+    "debug.rs",
     "init.rs",
     "mod.rs",
   ]

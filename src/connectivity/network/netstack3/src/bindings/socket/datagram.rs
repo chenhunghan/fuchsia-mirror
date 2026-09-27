@@ -4,7 +4,6 @@
 
 //! Datagram socket bindings.
 
-use std::convert::{Infallible as Never, TryInto as _};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::num::{NonZeroU8, NonZeroU16, NonZeroU64, NonZeroUsize, TryFromIntError};
@@ -14,8 +13,12 @@ use either::Either;
 use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_posix as fposix;
 use fidl_fuchsia_posix_socket as fposix_socket;
-use netstack3_core::types::BufferSizeSettings;
+use netstack3_core::types::{BufferSizeSettings, PositiveIsize};
 use netstack3_core::{MapDerefExt as _, PendingDatagramSocketError};
+
+mod sndbuf;
+pub use sndbuf::SendBufferToken;
+pub(crate) use sndbuf::{SendBuffer, SendBufferError};
 
 use derivative::Derivative;
 use explicit::ResultExt as _;
@@ -72,6 +75,9 @@ pub(crate) trait Transport<I: Ip>: Debug + Sized + Send + Sync + 'static {
     const PROTOCOL: DatagramProtocol;
     /// Whether the Transport Protocol supports dualstack sockets.
     const SUPPORTS_DUALSTACK: bool;
+    /// The overhead added to the payload size of an outgoing packet when calculating
+    /// how much should be charged against the send buffer of the corresponding socket.
+    const PACKET_BUFFER_OVERHEAD: usize;
     type SocketId: Hash + Eq + Debug + Send + Sync + Clone;
 
     /// Match Linux and implicitly map IPv4 addresses to IPv6 addresses for
@@ -94,6 +100,9 @@ pub(crate) trait Transport<I: Ip>: Debug + Sized + Send + Sync + 'static {
 
     fn get_rcvbuf_settings(ctx: &mut Ctx) -> impl Deref<Target = BufferSizeSettings<NonZeroUsize>>;
 
+    fn get_sndbuf_settings(ctx: &mut Ctx)
+    -> impl Deref<Target = BufferSizeSettings<PositiveIsize>>;
+
     #[cfg(test)]
     fn collect_all_sockets(ctx: &mut Ctx) -> Vec<Self::SocketId>;
 }
@@ -102,6 +111,7 @@ pub(crate) trait Transport<I: Ip>: Debug + Sized + Send + Sync + 'static {
 #[derive(Debug)]
 pub(crate) struct DatagramSocketExternalData<I: Ip> {
     message_queue: CoreMutex<MessageQueue<AvailableMessage<I>, SocketEventPair>>,
+    pub(crate) send_buffer: SendBuffer,
     sharing_domain_token: CoreMutex<Option<zx::Event>>,
 }
 
@@ -143,7 +153,6 @@ pub(crate) trait TransportState<I: Ip>: Transport<I> + Send + Sync + 'static {
     fn create_unbound(
         ctx: &mut Ctx,
         external_data: DatagramSocketExternalData<I>,
-        writable_listener: SocketEventPair,
     ) -> Self::SocketId;
 
     fn connect(
@@ -307,6 +316,7 @@ pub(crate) trait TransportState<I: Ip>: Transport<I> + Send + Sync + 'static {
             Self::RemoteIdentifier,
         )>,
         body: B,
+        send_token: SendBufferToken,
     ) -> Result<(), Self::SendError>;
 
     fn set_mark(ctx: &mut Ctx, id: &Self::SocketId, domain: MarkDomain, mark: Mark);
@@ -315,8 +325,15 @@ pub(crate) trait TransportState<I: Ip>: Transport<I> + Send + Sync + 'static {
 
     fn get_cookie(ctx: &mut Ctx, id: &Self::SocketId) -> SocketCookie;
 
-    fn set_send_buffer(ctx: &mut Ctx, id: &Self::SocketId, send_buffer: usize);
-    fn get_send_buffer(ctx: &mut Ctx, id: &Self::SocketId) -> usize;
+    fn set_send_buffer(ctx: &mut Ctx, id: &Self::SocketId, send_buffer: usize) {
+        Self::external_data(id)
+            .send_buffer
+            .set_capacity(send_buffer, &Self::get_sndbuf_settings(ctx));
+    }
+
+    fn get_send_buffer(_ctx: &mut Ctx, id: &Self::SocketId) -> usize {
+        Self::external_data(id).send_buffer.capacity()
+    }
 
     fn take_pending_error(ctx: &mut Ctx, id: &Self::SocketId)
     -> Option<PendingDatagramSocketError>;
@@ -330,6 +347,8 @@ type UdpSocketId<I> = udp::UdpSocketId<I, WeakDeviceId<BindingsCtx>, BindingsCtx
 impl<I: IpExt> Transport<I> for Udp {
     const PROTOCOL: DatagramProtocol = DatagramProtocol::Udp;
     const SUPPORTS_DUALSTACK: bool = true;
+    const PACKET_BUFFER_OVERHEAD: usize =
+        I::IP_HEADER_LENGTH.get() as usize + packet_formats::udp::HEADER_BYTES;
     type SocketId = UdpSocketId<I>;
 
     fn external_data(id: &Self::SocketId) -> &DatagramSocketExternalData<I> {
@@ -338,6 +357,12 @@ impl<I: IpExt> Transport<I> for Udp {
 
     fn get_rcvbuf_settings(ctx: &mut Ctx) -> impl Deref<Target = BufferSizeSettings<NonZeroUsize>> {
         ctx.bindings_ctx().settings.udp.read().map_deref(|u| &u.receive_buffer)
+    }
+
+    fn get_sndbuf_settings(
+        ctx: &mut Ctx,
+    ) -> impl Deref<Target = BufferSizeSettings<PositiveIsize>> {
+        ctx.bindings_ctx().settings.udp.read().map_deref(|u| &u.send_buffer)
     }
 
     #[cfg(test)]
@@ -360,7 +385,7 @@ pub(crate) enum UdpSendError {
     #[error(transparent)]
     Core(#[from] udp::SendToError),
     #[error(transparent)]
-    PendingDatagramSocket(#[from] PendingDatagramSocketError),
+    PendingDatagramSocketError(#[from] PendingDatagramSocketError),
     #[error("cannot send on non-connected UDP socket")]
     NotConnected,
 }
@@ -370,8 +395,6 @@ impl From<Either<udp::SendError, ExpectedConnError>> for UdpSendError {
         match value {
             Either::Left(e) => Self::Core(match e {
                 udp::SendError::NotWriteable => udp::SendToError::NotWriteable,
-                udp::SendError::SendBufferFull => udp::SendToError::SendBufferFull,
-                udp::SendError::InvalidLength => udp::SendToError::InvalidLength,
                 udp::SendError::IpSock(err) => udp::SendToError::Send(err),
                 udp::SendError::RemotePortUnset => udp::SendToError::RemotePortUnset,
             }),
@@ -384,7 +407,7 @@ impl IntoErrno for UdpSendError {
     fn to_errno(&self) -> fidl_fuchsia_posix::Errno {
         match self {
             UdpSendError::Core(err) => err.to_errno(),
-            UdpSendError::PendingDatagramSocket(err) => err.to_errno(),
+            UdpSendError::PendingDatagramSocketError(err) => err.to_errno(),
             UdpSendError::NotConnected => fposix::Errno::Edestaddrreq,
         }
     }
@@ -405,8 +428,8 @@ where
     type MulticastLoopError = NotDualStackCapableError;
     type SetReuseAddrError = ExpectedUnboundError;
     type SetReusePortError = ExpectedUnboundError;
-    type SetIpTransparentError = Never;
-    type SetBroadcastError = Never;
+    type SetIpTransparentError = !;
+    type SetBroadcastError = !;
     type LocalIdentifier = NonZeroU16;
     type RemoteIdentifier = udp::UdpRemotePort;
     type SocketInfo = SocketInfo<I::Addr, WeakDeviceId<BindingsCtx>>;
@@ -416,9 +439,8 @@ where
     fn create_unbound(
         ctx: &mut Ctx,
         external_data: DatagramSocketExternalData<I>,
-        writable_listener: SocketEventPair,
     ) -> Self::SocketId {
-        ctx.api().udp().create_with(external_data, writable_listener)
+        ctx.api().udp().create_with(external_data)
     }
 
     fn connect(
@@ -660,19 +682,22 @@ where
             Self::RemoteIdentifier,
         )>,
         body: B,
+        send_token: SendBufferToken,
     ) -> Result<(), Self::SendError> {
         if let Some(err) = Self::take_pending_error(ctx, id) {
-            return Err(UdpSendError::PendingDatagramSocket(err));
+            return Err(UdpSendError::PendingDatagramSocketError(err));
         }
 
         // NOTE: It's possible an ICMP error arrived on the socket between the
         // check above and now. However, it's not possible for the application
         // to detect the difference between that and the error coming in later.
         match remote {
-            Some((remote_ip, remote_port)) => {
-                ctx.api().udp().send_to(id, remote_ip, remote_port, body, ()).map_err(|e| e.into())
-            }
-            None => ctx.api().udp().send(id, body, ()).map_err(|e| e.into()),
+            Some((remote_ip, remote_port)) => ctx
+                .api()
+                .udp()
+                .send_to(id, remote_ip, remote_port, body, send_token)
+                .map_err(|e| e.into()),
+            None => ctx.api().udp().send(id, body, send_token).map_err(|e| e.into()),
         }
     }
 
@@ -686,14 +711,6 @@ where
 
     fn get_cookie(_ctx: &mut Ctx, id: &Self::SocketId) -> SocketCookie {
         id.socket_cookie()
-    }
-
-    fn set_send_buffer(ctx: &mut Ctx, id: &Self::SocketId, send_buffer: usize) {
-        ctx.api().udp().set_send_buffer(id, send_buffer)
-    }
-
-    fn get_send_buffer(ctx: &mut Ctx, id: &Self::SocketId) -> usize {
-        ctx.api().udp().send_buffer(id)
     }
 
     fn take_pending_error(
@@ -742,6 +759,7 @@ type IcmpSocketId<I> = icmp::IcmpSocketId<I, WeakDeviceId<BindingsCtx>, Bindings
 impl<I: IpExt> Transport<I> for IcmpEcho {
     const PROTOCOL: DatagramProtocol = DatagramProtocol::IcmpEcho;
     const SUPPORTS_DUALSTACK: bool = false;
+    const PACKET_BUFFER_OVERHEAD: usize = I::IP_HEADER_LENGTH.get() as usize;
     type SocketId = IcmpSocketId<I>;
 
     fn external_data(id: &Self::SocketId) -> &DatagramSocketExternalData<I> {
@@ -749,7 +767,13 @@ impl<I: IpExt> Transport<I> for IcmpEcho {
     }
 
     fn get_rcvbuf_settings(ctx: &mut Ctx) -> impl Deref<Target = BufferSizeSettings<NonZeroUsize>> {
-        ctx.bindings_ctx().settings.icmp.read().map_deref(|i| &i.echo_receive_buffer)
+        ctx.bindings_ctx().settings.icmp.read().map_deref(|i| &i.receive_buffer)
+    }
+
+    fn get_sndbuf_settings(
+        ctx: &mut Ctx,
+    ) -> impl Deref<Target = BufferSizeSettings<PositiveIsize>> {
+        ctx.bindings_ctx().settings.icmp.read().map_deref(|i| &i.send_buffer)
     }
 
     #[cfg(test)]
@@ -810,9 +834,8 @@ where
     fn create_unbound(
         ctx: &mut Ctx,
         external_data: DatagramSocketExternalData<I>,
-        writable_listener: SocketEventPair,
     ) -> Self::SocketId {
-        ctx.api().icmp_echo().create_with(external_data, writable_listener)
+        ctx.api().icmp_echo().create_with(external_data)
     }
 
     fn connect(
@@ -1103,12 +1126,13 @@ where
             Self::RemoteIdentifier,
         )>,
         body: B,
+        send_token: SendBufferToken,
     ) -> Result<(), Self::SendError> {
         match remote {
             Some((remote_ip, _remote_id)) => {
-                ctx.api().icmp_echo().send_to(id, remote_ip, body, ()).map_err(|e| e.into())
+                ctx.api().icmp_echo().send_to(id, remote_ip, body, send_token).map_err(|e| e.into())
             }
-            None => ctx.api().icmp_echo().send(id, body, ()).map_err(|e| e.into()),
+            None => ctx.api().icmp_echo().send(id, body, send_token).map_err(|e| e.into()),
         }
     }
 
@@ -1122,14 +1146,6 @@ where
 
     fn get_cookie(_ctx: &mut Ctx, id: &Self::SocketId) -> SocketCookie {
         id.socket_cookie()
-    }
-
-    fn set_send_buffer(ctx: &mut Ctx, id: &Self::SocketId, send_buffer: usize) {
-        ctx.api().icmp_echo().set_send_buffer(id, send_buffer)
-    }
-
-    fn get_send_buffer(ctx: &mut Ctx, id: &Self::SocketId) -> usize {
-        ctx.api().icmp_echo().send_buffer(id)
     }
 
     fn take_pending_error(
@@ -1148,8 +1164,6 @@ where
         match self {
             core_socket::SendError::NotConnected => fposix::Errno::Edestaddrreq,
             core_socket::SendError::NotWriteable => fposix::Errno::Epipe,
-            core_socket::SendError::SendBufferFull => fposix::Errno::Eagain,
-            core_socket::SendError::InvalidLength => fposix::Errno::Emsgsize,
             core_socket::SendError::IpSock(err) => err.to_errno(),
             core_socket::SendError::SerializeError(_e) => fposix::Errno::Einval,
         }
@@ -1164,8 +1178,6 @@ where
         match self {
             core_socket::SendToError::NotWriteable => fposix::Errno::Epipe,
             core_socket::SendToError::LocalAddress(err) => err.to_errno(),
-            core_socket::SendToError::SendBufferFull => fposix::Errno::Eagain,
-            core_socket::SendToError::InvalidLength => fposix::Errno::Emsgsize,
             core_socket::SendToError::Zone(err) => err.to_errno(),
             // NB: Mapping MTU to EMSGSIZE is different from the impl on
             // `IpSockSendError` which maps to EINVAL instead.
@@ -1322,24 +1334,25 @@ where
     ) -> Self {
         let (local_event, peer_event) = SocketEventPair::create();
 
-        let notifier = wake_group.as_ref().and_then(|group| {
-            if let Some(notifier) = ctx.bindings_ctx().wake_groups.get_data_notifier(&group) {
-                Some(notifier)
-            } else {
-                warn!("could not attach socket to nonexistent wake group {group:?}");
-                None
-            }
-        });
+        let notifier = wake_group
+            .as_ref()
+            .and_then(|group| ctx.bindings_ctx().wake_groups.data_notifier(group));
 
+        let default_rcvbuf = <T as Transport<I>>::get_rcvbuf_settings(ctx).default();
+        let send_buffer = {
+            let sndbuf_settings = <T as Transport<I>>::get_sndbuf_settings(ctx);
+            SendBuffer::new(local_event.clone(), &sndbuf_settings)
+        };
         let external_data = DatagramSocketExternalData {
             message_queue: CoreMutex::new(MessageQueue::new(
-                local_event.clone(),
+                local_event,
                 notifier.clone(),
-                <T as Transport<I>>::get_rcvbuf_settings(ctx).default(),
+                default_rcvbuf,
             )),
+            send_buffer,
             sharing_domain_token: CoreMutex::new(None),
         };
-        let id = T::create_unbound(ctx, external_data, local_event);
+        let id = T::create_unbound(ctx, external_data);
 
         if let Some(group) = wake_group
             && notifier.is_some()
@@ -2382,8 +2395,21 @@ where
             })
             .transpose()?;
         let len = data.len() as i64;
+        let send_token = <T as Transport<I>>::external_data(id)
+            .send_buffer
+            .acquire_token(<T as Transport<I>>::PACKET_BUFFER_OVERHEAD.saturating_add(data.len()))
+            .map_err(|e| {
+                if matches!(
+                    T::get_shutdown(ctx, id),
+                    Some(ShutdownType::Send | ShutdownType::SendAndReceive)
+                ) {
+                    udp::SendToError::NotWriteable.into_errno_error()
+                } else {
+                    e.into_errno_error()
+                }
+            })?;
         let body = Buf::new(data, ..);
-        T::send(ctx, id, remote, body).map_err(|e| e.into_errno_error()).map(|()| len)
+        T::send(ctx, id, remote, body, send_token).map_err(|e| e.into_errno_error()).map(|()| len)
     }
 
     fn bind_to_device_id(self, device: Option<DeviceId<BindingsCtx>>) -> Result<(), ErrnoError> {
@@ -4057,6 +4083,43 @@ mod tests {
     }
 
     declare_tests!(shutdown);
+
+    #[fixture::teardown(TestSetup::shutdown)]
+    async fn send_shutdown_shadows_full_send_buffer<A: TestSockAddr, T>(
+        proto: fposix_socket::DatagramSocketProtocol,
+    ) {
+        let (t, socket, _events) = prepare_test::<A>(proto).await;
+        let remote = A::create(A::REMOTE_ADDR, 300);
+        socket.connect(&remote).await.unwrap().expect("connect succeeds");
+
+        // Set send buffer to minimum (4KB).
+        socket.set_send_buffer(4 * 1024).await.unwrap().expect("set_send_buffer succeeds");
+
+        // Shut down the socket for writing.
+        socket
+            .shutdown(fposix_socket::ShutdownMode::WRITE)
+            .await
+            .unwrap()
+            .expect("shutdown succeeds");
+
+        // Even with a payload larger than send buffer capacity, sending returns Epipe.
+        let large_body = vec![0u8; 8 * 1024];
+        let err = socket
+            .send_msg(
+                None,
+                &large_body,
+                &fposix_socket::DatagramSocketSendControlData::default(),
+                fposix_socket::SendMsgFlags::empty(),
+            )
+            .await
+            .unwrap()
+            .expect_err("send should fail on shutdown socket");
+        assert_eq!(err, fposix::Errno::Epipe);
+
+        t
+    }
+
+    declare_tests!(send_shutdown_shadows_full_send_buffer);
 
     #[fixture::teardown(TestSetup::shutdown)]
     async fn set_receive_buffer_after_delivery<

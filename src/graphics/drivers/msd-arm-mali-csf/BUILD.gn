@@ -13,8 +13,13 @@ declare_args() {
   msd_arm_mali_csf_firmware_label = ""
 }
 
+fuchsia_driver_dml("msd_arm_mali_csf-dml") {
+  dml = "meta/msd_arm_mali_csf.dml"
+  driver_name = "msd_arm_mali_csf"
+}
+
 driver_bind_rules("bind") {
-  rules = "meta/driver.bind"
+  dml_label = ":msd_arm_mali_csf-dml"
   deps = [ "//src/devices/bind/fuchsia" ]
 }
 
@@ -70,13 +75,12 @@ fuchsia_rust_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
-  component_name = "msd_arm_mali_csf"
   deps = [
     ":bind",
     ":driver",
   ]
   info = "meta/driver.json"
-  manifest = "meta/driver.cml"
+  dml_label = ":msd_arm_mali_csf-dml"
 }
 
 fuchsia_driver_package("msd-arm-mali-csf") {

@@ -48,6 +48,7 @@ std::optional<std::unique_ptr<AvCodecContext>> AvCodecContext::CreateDecoder(
   // This flag is required to override get_buffer2.
   ZX_ASSERT(avcodec_context->codec->capabilities & AV_CODEC_CAP_DR1);
 
+  avcodec_context->get_format = AvCodecContext::GetFormatCallback;
   avcodec_context->get_buffer2 = AvCodecContext::GetBufferCallbackRouter;
 
   std::unique_ptr<AvCodecContext> decoder(
@@ -136,7 +137,7 @@ AvCodecContext::FrameBufferRequest AvCodecContext::frame_buffer_request(AVFrame*
   ZX_DEBUG_ASSERT(avcodec_is_open(avcodec_context_.get()));
   ZX_DEBUG_ASSERT(av_codec_is_decoder(avcodec_context_->codec));
   // TODO(turnage): Accept 10 bit YUV formats.
-  ZX_DEBUG_ASSERT(frame->format == AV_PIX_FMT_YUV420P);
+  ZX_ASSERT(frame->format == AV_PIX_FMT_YUV420P);
   // We only implement right and bottom crops, not left or top crops.
   ZX_ASSERT(frame->crop_left == 0);
   ZX_ASSERT(frame->crop_top == 0);
@@ -193,11 +194,24 @@ AvCodecContext::FrameBufferRequest AvCodecContext::frame_buffer_request(AVFrame*
     uncompressed_format.image_format.pixel_aspect_ratio_height = frame->sample_aspect_ratio.den;
   }
 
-  size_t buffer_bytes_needed = av_image_get_buffer_size(static_cast<AVPixelFormat>(frame->format),
-                                                        frame->width, frame->height,
-                                                        /*align=*/1);
+  int buffer_bytes_needed_int = av_image_get_buffer_size(static_cast<AVPixelFormat>(frame->format),
+                                                         frame->width, frame->height,
+                                                         /*align=*/1);
+  ZX_ASSERT(buffer_bytes_needed_int >= 0);
+  size_t buffer_bytes_needed = static_cast<size_t>(buffer_bytes_needed_int);
 
   return {.format = std::move(uncompressed_format), .buffer_bytes_needed = buffer_bytes_needed};
+}
+
+// static
+AVPixelFormat AvCodecContext::GetFormatCallback(AVCodecContext* /*avcodec_context*/,
+                                                const AVPixelFormat* pix_fmts) {
+  for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+    if (*p == AV_PIX_FMT_YUV420P) {
+      return AV_PIX_FMT_YUV420P;
+    }
+  }
+  return AV_PIX_FMT_NONE;
 }
 
 // static

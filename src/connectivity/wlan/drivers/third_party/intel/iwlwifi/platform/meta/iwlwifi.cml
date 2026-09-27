@@ -20,9 +20,6 @@
     ],
     use: [
         { service: "fuchsia.hardware.pci.Service" },
-        {
-            protocol: [ "fuchsia.logger.LogSink" ],
-        },
     ],
     expose: [
         {

@@ -93,6 +93,7 @@ template("bazel_product_image") {
   }
 
   _product_assembly_target = targets.bazel_product_assembly
+
   bazel_build_action(_product_assembly_target) {
     forward_variables_from(invoker,
                            [

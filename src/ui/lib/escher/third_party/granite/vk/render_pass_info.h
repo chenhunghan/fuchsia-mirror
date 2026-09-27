@@ -177,9 +177,11 @@ struct RenderPassInfo {
   //
   // Returns true if and only if initialization is successful.
   static bool InitRenderPassInfo(RenderPassInfo* rp, vk::Rect2D render_area,
-                                 const ImagePtr& output_image, const TexturePtr& depth_texture,
-                                 const TexturePtr& msaa_texture = nullptr,
-                                 ImageViewAllocator* allocator = nullptr);
+                                 ImageViewPtr output_image_view, TexturePtr depth_texture = nullptr,
+                                 TexturePtr msaa_texture = nullptr);
+  static bool InitRenderPassInfo(RenderPassInfo* rp, vk::Rect2D render_area,
+                                 const ImagePtr& output_image, TexturePtr depth_texture = nullptr,
+                                 TexturePtr msaa_texture = nullptr);
   // This variant of InitRenderPassInfo() cannot be used to call CommandBuffer::BeginRenderPass(),
   // because there are no attachment images provided.  It can be used for warming up the render-pass
   // cache to avoid jank caused by creating render-passes/pipelines at runtime.

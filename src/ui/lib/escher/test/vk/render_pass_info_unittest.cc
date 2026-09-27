@@ -91,8 +91,8 @@ VK_TEST_F(RenderPassInfoTest, ValidOutputImageLayout) {
 }
 
 // Initialize RenderPassInfo with its |output_image| having a layout of |eUndefined|.
-// This should fail and error messages in initialization are expected.
-VK_TEST_F(RenderPassInfoTest, InvalidOutputImageLayout) {
+// This should succeed as long as it has a valid swapchain_layout.
+VK_TEST_F(RenderPassInfoTest, UndefinedOutputImageLayout) {
   auto escher = test::GetEscher();
 
   auto output_image = CreateSwapchainImageWithLayout(escher, vk::ImageLayout::eUndefined);
@@ -113,8 +113,7 @@ VK_TEST_F(RenderPassInfoTest, InvalidOutputImageLayout) {
   RenderPassInfo render_pass;
   vk::Rect2D render_area = {{0, 0}, {output_image->width(), output_image->height()}};
 
-  FX_LOGS(INFO) << "Test RenderPassInfo initialization with invalid image layout, errors expected.";
-  EXPECT_FALSE(
+  EXPECT_TRUE(
       RenderPassInfo::InitRenderPassInfo(&render_pass, render_area, output_image, depth_texture));
 }
 

@@ -754,7 +754,7 @@ zx_status_t AudioDriver::Start() {
                      << static_cast<uint32_t>(state_);
       return;
     }
-    auto start_limit = zx::clock::get_monotonic().get() + ZX_SEC(1);
+    auto start_limit = async::Now(owner_->mix_domain().dispatcher()).get() + ZX_SEC(1);
     if (start_time > start_limit) {
       // The driver-returned start_time can only be as far as 1 second in the future, otherwise the
       // clock might appear to run backward. Treat any far-future start_time as an error.

@@ -133,6 +133,11 @@ class MockDisplayCoordinator
                SetDisplayColorConversionCompleter::Sync&),
               (override));
 
+  MOCK_METHOD(void, SetDisplayPowerMode,
+              (fuchsia_hardware_display::wire::CoordinatorSetDisplayPowerModeRequest*,
+               SetDisplayPowerModeCompleter::Sync&),
+              (override));
+
  private:
   void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {
     FX_LOGS(ERROR) << "MockDisplayCoordinator::NotImplemented_(): " << name

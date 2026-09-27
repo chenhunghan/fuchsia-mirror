@@ -198,4 +198,47 @@ TEST_F(StackProviderImplTest, SetWlanNetworkConfigProvider) {
   EXPECT_TRUE(fake_wlan_provider_new.IsInterfaceBound());
 }
 
+TEST_F(StackProviderImplTest, GetWiFiStationProvision_OversizedCredentials) {
+  DeviceNetworkInfo netInfo;
+  FakeWlanNetworkConfigProvider fake_wlan_provider;
+
+  weave_stack_provider_->SetWlanNetworkConfigProvider(
+      std::move(fake_wlan_provider.GetInterfaceHandle()));
+  RunLoopUntilIdle();
+
+  constexpr char test_ssid[] = "TESTSSID";
+
+  // Test password of 257 bytes.
+  std::vector<uint8_t> long_password(257, 'A');
+  fuchsia::wlan::policy::NetworkIdentifier network_id;
+  fuchsia::wlan::policy::NetworkConfig network_config;
+  network_id.ssid.assign(std::begin(test_ssid), std::end(test_ssid));
+  network_id.type = fuchsia::wlan::policy::SecurityType::WPA2;
+  network_config.set_id(network_id);
+  network_config.set_credential(
+      fuchsia::wlan::policy::Credential::WithPassword(std::move(long_password)));
+
+  fake_wlan_provider.ReportWlanUpdate(std::move(network_config));
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(NetworkProvisioningSvrImpl().GetDelegate()->GetWiFiStationProvision(netInfo, true),
+            WEAVE_ERROR_BUFFER_TOO_SMALL);
+
+  // Test PSK of 257 bytes.
+  std::vector<uint8_t> long_psk(257, 'B');
+  fuchsia::wlan::policy::NetworkIdentifier network_id_psk;
+  fuchsia::wlan::policy::NetworkConfig network_config_psk;
+  network_id_psk.ssid.assign(std::begin(test_ssid), std::end(test_ssid));
+  network_id_psk.type = fuchsia::wlan::policy::SecurityType::WPA2;
+  network_config_psk.set_id(network_id_psk);
+  network_config_psk.set_credential(
+      fuchsia::wlan::policy::Credential::WithPsk(std::move(long_psk)));
+
+  fake_wlan_provider.ReportWlanUpdate(std::move(network_config_psk));
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(NetworkProvisioningSvrImpl().GetDelegate()->GetWiFiStationProvision(netInfo, true),
+            WEAVE_ERROR_BUFFER_TOO_SMALL);
+}
+
 }  // namespace weavestack

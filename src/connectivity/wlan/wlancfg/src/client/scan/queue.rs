@@ -408,14 +408,14 @@ mod tests {
         // The matching request was removed from the queue
         assert_eq!(queue.queue.len(), 1);
         // The request fulfillment time was recorded
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, ScanRequestFulfillmentTime {
                 duration,
                 reason: ScanReason::BssSelectionAugmentation
             } => assert_eq!(duration, scan_duration));
         });
         // The request fulfillment count was recorded
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, ScanQueueStatistics {
                 fulfilled_requests: 1,
                 remaining_requests: 1,

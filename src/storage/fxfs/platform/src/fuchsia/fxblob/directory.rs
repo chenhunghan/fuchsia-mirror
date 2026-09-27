@@ -20,6 +20,7 @@ use fidl_fuchsia_fxfs::{
     BlobReaderRequest, BlobReaderRequestStream, BlobWriterMarker, CreateBlobError,
 };
 use fidl_fuchsia_io::{self as fio, FilesystemInfo, NodeMarker, WatchMask};
+use fidl_fuchsia_storage_block as fblock;
 use fidl_fuchsia_storage_mapping::MappingProviderMarker;
 use fuchsia_hash::Hash;
 use futures::TryStreamExt;
@@ -105,9 +106,24 @@ impl RootDir for BlobDirectory {
             }),
         )?;
 
+        let this = self.clone();
         svc_dir.add_entry(
             BlobReaderMarker::PROTOCOL_NAME,
-            vfs::service::host(move |r| self.clone().handle_blob_reader_requests(r)),
+            vfs::service::host(move |r| this.clone().handle_blob_reader_requests(r)),
+        )?;
+
+        svc_dir.add_entry(
+            fblock::MapperMarker::PROTOCOL_NAME,
+            vfs::service::endpoint(move |scope, channel| {
+                let device = self.store().device().clone();
+                scope.spawn(async move {
+                    if let Err(status) =
+                        device.connect_mapper(channel.into_zx_channel().into()).await
+                    {
+                        log::warn!(status:?; "Failed to connect to Mapper");
+                    }
+                });
+            }),
         )?;
 
         Ok(())
@@ -815,6 +831,19 @@ mod tests {
         let entries = readdir_inclusive(&svc_dir).await.expect("readdir");
         let is_exposed = entries.iter().any(|e| e.name == MappingProviderMarker::PROTOCOL_NAME);
         assert!(is_exposed, "MappingProvider not exposed");
+        let mapper_exposed = entries.iter().any(|e| e.name == fblock::MapperMarker::PROTOCOL_NAME);
+        assert!(mapper_exposed, "Mapper not exposed");
+
+        let mapper =
+            connect_to_protocol_at_dir_svc::<fblock::MapperMarker>(fixture.volume_out_dir())
+                .expect("failed to connect to the Mapper service");
+        assert_matches::assert_matches!(
+            mapper.take_event_stream().try_next().await,
+            Err(fidl::Error::ClientChannelClosed {
+                epitaph: fidl::Epitaph::Explicit(Err(Status::NOT_SUPPORTED)),
+                ..
+            })
+        );
 
         fixture.close().await;
     }

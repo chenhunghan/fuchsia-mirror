@@ -68,11 +68,17 @@ pub(in crate::security) fn file_system_resolve_security(
             file_system.name(),
         )?;
 
-        if requested_label.sid != default_label.sid {
-            let permission_check = super::build_permission_check(current_task, security_server);
-            let source_sid = current_task_state(current_task).current_sid;
-            let audit_context = [current_task.into(), file_system.as_ref().into()];
+        let permission_check = super::build_permission_check(current_task, security_server);
+        let source_sid = current_task_state(current_task).current_sid;
+        let audit_context = [current_task.into(), file_system.as_ref().into()];
 
+        let mount_sids = &requested_label.mount_sids;
+
+        // Overriding the file system's label requires "relabelfrom" to the policy-defined default
+        // label, and "relabelto" to the requested one. These are gated on "fscontext="/"context="
+        // being supplied rather than on the label actually changing. This means that relabeling
+        // with the current label still requires both permission checks.
+        if mount_sids.fs_context.is_some() || mount_sids.context.is_some() {
             check_permission(
                 &permission_check,
                 current_task,
@@ -88,6 +94,41 @@ pub(in crate::security) fn file_system_resolve_security(
                 source_sid,
                 requested_label.sid,
                 FileSystemPermission::RelabelTo,
+                (&audit_context).into(),
+            )?;
+        }
+
+        // "context=" labels both the file system and the nodes it contains, so it only needs to be
+        // validated here if "fscontext=" supplied a separate label for the file system itself.
+        // Otherwise the file system took the "context=" label, and the checks above covered it.
+        let context_node_sid =
+            if mount_sids.fs_context.is_some() { mount_sids.context } else { None };
+
+        // If "rootcontext=" is not supplied then the root node takes the "context=" label, if any.
+        let root_context_sid = mount_sids.root_context.or(mount_sids.context);
+        let mut node_sids = [context_node_sid, root_context_sid, mount_sids.def_context]
+            .into_iter()
+            .flatten()
+            .peekable();
+
+        if node_sids.peek().is_some() {
+            check_permission(
+                &permission_check,
+                current_task,
+                source_sid,
+                requested_label.sid,
+                FileSystemPermission::RelabelFrom,
+                (&audit_context).into(),
+            )?;
+        }
+
+        for node_sid in node_sids {
+            check_permission(
+                &permission_check,
+                current_task,
+                node_sid,
+                requested_label.sid,
+                FileSystemPermission::Associate,
                 (&audit_context).into(),
             )?;
         }

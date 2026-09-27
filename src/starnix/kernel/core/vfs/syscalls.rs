@@ -65,8 +65,8 @@ use starnix_uapi::{
     POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE, POSIX_FADV_NORMAL, POSIX_FADV_RANDOM,
     POSIX_FADV_SEQUENTIAL, POSIX_FADV_WILLNEED, RWF_SUPPORTED, TFD_CLOEXEC, TFD_NONBLOCK,
     TFD_TIMER_ABSTIME, TFD_TIMER_CANCEL_ON_SET, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE,
-    aio_context_t, errno, error, io_event, iocb, off_t, pid_t, pollfd, pselect6_sigmask, sigset_t,
-    statx, timespec, uapi, uid_t,
+    XATTR_SIZE_MAX, aio_context_t, errno, error, io_event, iocb, off_t, pid_t, pollfd,
+    pselect6_sigmask, sigset_t, statx, timespec, uapi, uid_t,
 };
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
@@ -1343,7 +1343,7 @@ fn do_setxattr(
     size: usize,
     flags: u32,
 ) -> Result<(), Errno> {
-    if size > XATTR_NAME_MAX as usize {
+    if size > XATTR_SIZE_MAX as usize {
         return error!(E2BIG);
     }
 
@@ -2540,6 +2540,30 @@ pub fn poll(
     Ok(unique_ready_items.into_iter().filter(Clone::clone).count())
 }
 
+/// Calls `poll` and arranges for an interrupted call to be restarted unless a signal handler runs.
+///
+/// Reporting EINTR directly would surface interruptions that userspace never asked about, as `poll`
+/// cannot tell whether the signal that interrupted it was delivered at all.
+pub fn poll_with_restart(
+    current_task: &mut CurrentTask,
+    user_fds: UserRef<pollfd>,
+    num_fds: i32,
+    deadline: zx::MonotonicInstant,
+) -> Result<usize, Errno> {
+    match poll(current_task, user_fds, num_fds, None, deadline) {
+        Err(err) if err == EINTR => {
+            // Restart through `restart_syscall` rather than through the original syscall, so that
+            // the wait resumes with the absolute deadline instead of restarting its relative
+            // timeout from scratch.
+            current_task.set_syscall_restart_func(move |current_task| {
+                poll_with_restart(current_task, user_fds, num_fds, deadline)
+            });
+            error!(ERESTART_RESTARTBLOCK)
+        }
+        result => result,
+    }
+}
+
 pub fn sys_ppoll(
     current_task: &mut CurrentTask,
     user_fds: UserRef<pollfd>,
@@ -2572,27 +2596,28 @@ pub fn sys_ppoll(
 
     let poll_result = poll(current_task, user_fds, num_fds, mask, deadline);
 
-    if user_timespec.is_null() {
-        return poll_result;
+    if !user_timespec.is_null() {
+        let now = zx::MonotonicInstant::get();
+        let remaining = std::cmp::max(deadline - now, zx::MonotonicDuration::from_seconds(0));
+        let remaining_timespec = timespec_from_duration(remaining);
+
+        if current_task.write_multi_arch_object(user_timespec, remaining_timespec).is_err() {
+            // From gVisor: "ppoll is normally restartable if interrupted by something other
+            // than a signal handled by the application (i.e. returns ERESTARTNOHAND).
+            // However, if [copy out] failed, then the restarted ppoll would use the wrong
+            // timeout, so the error should be left as EINTR."
+
+            // Here the [copy out] failed, return the poll result unchanged.
+            return poll_result;
+        }
     }
 
-    let now = zx::MonotonicInstant::get();
-    let remaining = std::cmp::max(deadline - now, zx::MonotonicDuration::from_seconds(0));
-    let remaining_timespec = timespec_from_duration(remaining);
-
-    // From gVisor: "ppoll is normally restartable if interrupted by something other than a signal
-    // handled by the application (i.e. returns ERESTARTNOHAND). However, if
-    // [copy out] failed, then the restarted ppoll would use the wrong timeout, so the
-    // error should be left as EINTR."
-    match (current_task.write_multi_arch_object(user_timespec, remaining_timespec), poll_result) {
-        // If write was ok, and poll was ok, return poll result.
-        (Ok(_), Ok(num_events)) => Ok(num_events),
-        (Ok(_), Err(e)) if e == EINTR => {
+    // Restart ppoll if interrupted.
+    match poll_result {
+        Err(e) if e == EINTR => {
             error!(ERESTARTNOHAND)
         }
-        (Ok(_), poll_result) => poll_result,
-        // If write was a failure, return the poll result unchanged.
-        (Err(_), poll_result) => poll_result,
+        poll_result => poll_result,
     }
 }
 
@@ -3170,7 +3195,7 @@ mod arch32 {
         timeout: i32,
     ) -> Result<usize, Errno> {
         let deadline = zx::MonotonicInstant::after(duration_from_poll_timeout(timeout)?);
-        super::poll(current_task, user_fds, num_fds, None, deadline)
+        super::poll_with_restart(current_task, user_fds, num_fds, deadline)
     }
 
     pub fn sys_arch32_epoll_create(

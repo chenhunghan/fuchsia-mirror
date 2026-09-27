@@ -7,7 +7,7 @@ mod tee_client_api;
 use self::tee_client_api::*;
 use log::debug;
 use std::fmt::Debug;
-use std::{fmt, mem, ptr};
+use std::{fmt, ptr};
 use thiserror::Error;
 
 use self::tee_client_api::{TEEC_Operation as TeecOperation, TEEC_Value as TeecValue};
@@ -36,8 +36,8 @@ pub fn ota_config_get(default_value: u32) -> Result<u32, TeeError> {
     let params = [
         get_value_parameter(default_value, 0),
         get_value_parameter(0, 0),
-        get_zero_parameter(),
-        get_zero_parameter(),
+        get_none_parameter(),
+        get_none_parameter(),
     ];
     let mut op = create_operation(param_type, params);
     // SAFETY: op was initialized by create_operation and does not contain TEEC_MEMREF_*
@@ -53,9 +53,9 @@ pub fn ota_config_set(value: u32) -> Result<(), TeeError> {
     let param_type = teec_param_types(TEEC_VALUE_INPUT, TEEC_NONE, TEEC_NONE, TEEC_NONE);
     let params = [
         get_value_parameter(value, 0),
-        get_zero_parameter(),
-        get_zero_parameter(),
-        get_zero_parameter(),
+        get_none_parameter(),
+        get_none_parameter(),
+        get_none_parameter(),
     ];
     let mut op = create_operation(param_type, params);
     // SAFETY: op was initialized by create_operation and does not contain TEEC_MEMREF_*
@@ -79,10 +79,10 @@ static VX_TA_UUID: TEEC_UUID = TEEC_UUID {
 };
 
 /// Gets a None parameter.
-fn get_zero_parameter() -> TeecParameter {
-    // SAFETY: All zeroes is a valid byte pattern for TeecParameter
-    let zero_parameter: TeecParameter = unsafe { mem::zeroed() };
-    zero_parameter
+fn get_none_parameter() -> TeecParameter {
+    // TEEC_NONE parameters are not inspected by the callee, so any initialized union field
+    // suffices. There is no need to initialize the entire union storage.
+    get_value_parameter(0, 0)
 }
 
 /// Gets a value parameter.
@@ -133,8 +133,9 @@ struct TeeContext {
 
 impl TeeContext {
     pub fn new() -> Result<Self, u32> {
-        // SAFETY: All zeroes is a valid byte pattern for TEEC_Context
-        let mut context: TEEC_Context = unsafe { mem::zeroed() };
+        let mut context = TEEC_Context {
+            imp: teec_context_impl { tee_channel: 0, uuid_to_channel: ptr::null_mut() },
+        };
         // SAFETY: null is a valid name argument, context points to a TEEC_Context that is valid
         // for writes
         let result = unsafe { TEEC_InitializeContext(ptr::null(), &mut context) };
@@ -150,8 +151,8 @@ impl TeeContext {
     /// The returned session must be dropped before the context is dropped
     ///
     pub unsafe fn new_session(&mut self) -> Result<TeeSession, u32> {
-        // SAFETY: All zeroes is a valid byte pattern for TEEC_Session
-        let mut session: TEEC_Session = unsafe { mem::zeroed() };
+        let mut session =
+            TEEC_Session { imp: teec_session_impl { session_id: 0, application_channel: 0 } };
 
         let mut return_origin: u32 = 0;
         // SAFETY:

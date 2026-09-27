@@ -14,6 +14,7 @@
 #include <memory>
 
 #include <fbl/algorithm.h>
+#include <safemath/checked_math.h>
 
 #include "device_type.h"
 #include "firmware_blob.h"
@@ -52,6 +53,8 @@ using HevcDecodeCount = HevcAssistScratchM;
 using HevcDecodeSize = HevcAssistScratchN;
 
 using DebugReg1 = HevcAssistScratchG;
+
+constexpr uint32_t kLcuMvBytes = 0x240;
 
 const char* Vp9Decoder::DecoderStateName(DecoderState state) {
   switch (state) {
@@ -312,6 +315,14 @@ zx_status_t Vp9Decoder::Initialize() {
   return InitializeHardware();
 }
 
+// static
+uint64_t Vp9Decoder::GetMpredBufferSize(uint32_t width, uint32_t height) {
+  uint64_t rounded_width = fbl::round_up(static_cast<uint64_t>(width), 64u);
+  uint64_t rounded_height = fbl::round_up(static_cast<uint64_t>(height), 32u);
+  uint64_t lcu_count = (rounded_width / 64) * (rounded_height / 32);
+  return fbl::round_up(lcu_count * kLcuMvBytes, static_cast<uint64_t>(zx_system_get_page_size()));
+}
+
 zx_status_t Vp9Decoder::InitializeBuffers() {
   TRACE_DURATION("media", "Vp9Decoder::InitializeBuffers");
 
@@ -375,12 +386,11 @@ zx_status_t Vp9Decoder::InitializeBuffers() {
   ZX_DEBUG_ASSERT(!on_deck_internal_buffers_.has_value() ||
                   on_deck_internal_buffers_->mpred_buffers_.empty());
   // The largest coding unit is assumed to be 64x32.
-  constexpr uint32_t kLcuMvBytes = 0x240;
   // Round up 1080 to 1088 and 2160 to 2176 so that all dimensions are divisible by 64, in case of
   // decoding a portrait mode video.
-  constexpr uint32_t kLcuCount = kUseLessRam ? 1920 * 1088 / (64 * 32) : 4096 * 2176 / (64 * 32);
-  uint64_t rounded_up_size =
-      fbl::round_up(kLcuCount * kLcuMvBytes, static_cast<uint64_t>(zx_system_get_page_size()));
+  uint32_t init_width = kUseLessRam ? 1920 : 4096;
+  uint32_t init_height = kUseLessRam ? 1088 : 2176;
+  uint64_t rounded_up_size = GetMpredBufferSize(init_width, init_height);
   constexpr uint32_t kMpredAlignment = (1 << 16);
   constexpr bool kMpredIsWritable = true;
   constexpr bool kMpredIsMappingNeeded = false;
@@ -690,7 +700,17 @@ void Vp9Decoder::InitializedFrames(std::vector<CodecFrame> frames, uint32_t code
   ZX_DEBUG_ASSERT(state_ == DecoderState::kPausedAtHeader);
   ZX_ASSERT(owner_->IsDecoderCurrent(this));
   ZX_DEBUG_ASSERT(valid_frames_count_ == 0);
-  uint32_t frame_vmo_bytes = stride * coded_height * 3 / 2;
+  const safemath::CheckedNumeric<uint32_t> y_plane_bytes =
+      safemath::CheckedNumeric<uint32_t>(stride) * coded_height;
+  const safemath::CheckedNumeric<uint32_t> uv_plane_bytes =
+      safemath::CheckedNumeric<uint32_t>(stride) * (coded_height / 2);
+  const safemath::CheckedNumeric<uint32_t> frame_vmo_bytes = y_plane_bytes + uv_plane_bytes;
+  if (!frame_vmo_bytes.IsValid()) {
+    LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_InitializationError);
+    LOG(ERROR, "Frame vmo bytes overflow: stride %u, coded_height %u", stride, coded_height);
+    CallErrorHandler();
+    return;
+  }
   BarrierBeforeInvalidate();
   for (uint32_t i = 0; i < frames.size(); i++) {
     auto video_frame = std::make_shared<VideoFrame>();
@@ -702,7 +722,7 @@ void Vp9Decoder::InitializedFrames(std::vector<CodecFrame> frames, uint32_t code
     video_frame->coded_width = coded_width;
     video_frame->coded_height = coded_height;
     video_frame->stride = stride;
-    video_frame->uv_plane_offset = video_frame->stride * video_frame->coded_height;
+    video_frame->uv_plane_offset = y_plane_bytes.ValueOrDie();
     video_frame->index = i;
 
     video_frame->codec_buffer = frames[i].buffer_ptr();
@@ -721,11 +741,14 @@ void Vp9Decoder::InitializedFrames(std::vector<CodecFrame> frames, uint32_t code
       CallErrorHandler();
       return;
     }
-    size_t vmo_size = io_buffer_size(&video_frame->buffer, 0);
-    if (vmo_size < frame_vmo_bytes) {
+    const size_t vmo_size = io_buffer_size(&video_frame->buffer, 0);
+    if (vmo_size < frame_vmo_bytes.ValueOrDie()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_InitializationError);
-      LOG(ERROR, "Insufficient frame vmo bytes: %ld < %d", vmo_size, frame_vmo_bytes);
+      // ValueOrDie() returns StrictNumeric<uint32_t>, which needs an explicit cast for variadic
+      // LOG().
+      LOG(ERROR, "Insufficient frame vmo bytes: %zu < %u", vmo_size,
+          static_cast<uint32_t>(frame_vmo_bytes.ValueOrDie()));
       CallErrorHandler();
       return;
     }
@@ -896,13 +919,25 @@ void Vp9Decoder::SetPausedAtEndOfStream() {
   state_ = DecoderState::kPausedAtEndOfStream;
 }
 
-void Vp9Decoder::AdaptProbabilityCoefficients(uint32_t adapt_prob_status) {
+bool Vp9Decoder::AdaptProbabilityCoefficients(uint32_t adapt_prob_status) {
   TRACE_DURATION("media", "Vp9Decoder::AdaptProbabilityCoefficients");
   constexpr uint32_t kFrameContextSize = 0x1000;
   constexpr uint32_t kVp9FrameContextCount = 4;
   constexpr uint32_t kProbSize = 496 * 2 * 4;  // 3968 < 4096
   static_assert(kProbSize <= kFrameContextSize);
   if ((adapt_prob_status & 0xff) == 0xfd) {
+    uint32_t frame_context_idx = adapt_prob_status >> 8;
+    // TBD if the FW/HW would ever report frame_context_idx that fails this check, but even if not,
+    // it could be FW version dependent, so check in SW regardless.
+    if (frame_context_idx >= kVp9FrameContextCount) {
+      LogEvent(
+          media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_GenericDecodeError);
+      LOG(ERROR, "frame_context_idx out of bounds: %u (max: %u)", frame_context_idx,
+          kVp9FrameContextCount - 1);
+      CallErrorHandler();
+      return false;
+    }
+
     // current_frame_data_ still reflects the frame that just finished decoding.
     uint32_t previous_fc = current_frame_data_.keyframe;
 
@@ -913,7 +948,6 @@ void Vp9Decoder::AdaptProbabilityCoefficients(uint32_t adapt_prob_status) {
     working_buffers_->count_buffer.buffer().CacheFlushInvalidate(
         0, working_buffers_->count_buffer.buffer().size());
 
-    uint32_t frame_context_idx = adapt_prob_status >> 8;
     uint8_t* previous_prob_buffer = working_buffers_->probability_buffer.buffer().virt_base() +
                                     frame_context_idx * kFrameContextSize;
     uint8_t* current_prob_buffer = working_buffers_->probability_buffer.buffer().virt_base() +
@@ -938,6 +972,7 @@ void Vp9Decoder::AdaptProbabilityCoefficients(uint32_t adapt_prob_status) {
         0, working_buffers_->count_buffer.buffer().size());
     Vp9AdaptProbReg::Get().FromValue(0).WriteTo(owner_->dosbus());
   }
+  return true;
 }
 
 void Vp9Decoder::HandleInterrupt() {
@@ -959,7 +994,10 @@ void Vp9Decoder::HandleInterrupt() {
 
   owner_->watchdog()->Cancel();
 
-  AdaptProbabilityCoefficients(adapt_prob_status);
+  if (!AdaptProbabilityCoefficients(adapt_prob_status)) {
+    owner_->TryToReschedule();
+    return;
+  }
 
   if (dec_status == kVp9InputBufferEmpty) {
     // TODO: We'll want to use this to continue filling input data of
@@ -1253,6 +1291,12 @@ bool Vp9Decoder::CanBeSwappedIn() {
 
 void Vp9Decoder::ShowExistingFrame(HardwareRenderParams* params) {
   TRACE_DURATION("media", "Vp9Decoder::ShowExistingFrame");
+  if (params->frame_to_show >= std::size(reference_frame_map_)) {
+    LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_GenericDecodeError);
+    LOG(ERROR, "frame_to_show too large: %u", params->frame_to_show);
+    CallErrorHandler();
+    return;
+  }
   Frame* frame = reference_frame_map_[params->frame_to_show];
   if (!frame) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_MissingPictureError);
@@ -1337,6 +1381,13 @@ void Vp9Decoder::PrepareNewFrame(bool params_checked_previously) {
     for (uint32_t j = 0; j < 4; j++) {
       params.data_words[i + j] = input_params[i + (3 - j)];
     }
+  }
+
+  if (params.bit_depth != 8 || params.profile != 0) {
+    LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_GenericDecodeError);
+    LOG(ERROR, "Unsupported VP9 profile %u or bit depth %u", params.profile, params.bit_depth);
+    CallErrorHandler();
+    return;
   }
 
   if (!has_keyframe_ && params.frame_type != kVp9FrameTypeKeyFrame) {
@@ -1493,7 +1544,8 @@ bool Vp9Decoder::FindNewFrameBuffer(HardwareRenderParams* params, bool params_ch
 
   DLOG("coded_width: %u coded_height: %u stride: %u", coded_width, coded_height, stride);
 
-  // Support up to 4kx2k, the hardware limit.
+  // Support up to 4kx2k, the hardware limit. Note there is another check just below related to
+  // kUseLessRam, which must be false in order for 4kx2k to actually decode.
   constexpr uint32_t kMaxWidth = 4096, kMaxHeight = 2176;
   if (coded_width > kMaxWidth || coded_height > kMaxHeight) {
     LogEvent(media_metrics::
@@ -1501,6 +1553,28 @@ bool Vp9Decoder::FindNewFrameBuffer(HardwareRenderParams* params, bool params_ch
     LOG(ERROR, "Invalid stream size %dx%d", coded_width, coded_height);
     CallErrorHandler();
     return false;
+  }
+
+  ZX_DEBUG_ASSERT(!cached_mpred_buffers_.empty());
+  if (cached_mpred_buffers_.empty()) {
+    // This is unreachable unless we have a bug elsewhere.
+    LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_UnreachableError);
+    LOG(ERROR, "cached_mpred_buffers_.empty()");
+    CallErrorHandler();
+    return false;
+  }
+
+  {
+    uint64_t needed_size = GetMpredBufferSize(params->hw_width, params->hw_height);
+    if (needed_size > cached_mpred_buffers_.back()->size()) {
+      // See also kUseLessRam.
+      LogEvent(media_metrics::
+                   StreamProcessorEvents2MigratedMetricDimensionEvent_DimensionsUnsupportedError);
+      LOG(ERROR, "Mpred buffer size insufficient: needed %lu, cached %lu (width %u height %u)",
+          needed_size, cached_mpred_buffers_.back()->size(), params->hw_width, params->hw_height);
+      CallErrorHandler();
+      return false;
+    }
   }
 
   bool buffers_allocated = !!frames_[0]->frame || !!frames_[0]->on_deck_frame;

@@ -2413,6 +2413,406 @@ impl VmPageList {
         debug_assert!(status.is_ok());
     }
 
+    /// Clips an interval from the start by `len`, i.e. moves the start from `interval_start` to
+    /// `interval_start + len`. The total length of the interval must be larger than `len`.
+    ///
+    /// Any remaining awaiting clean length is carried over to the new start.
+    pub fn clip_interval_start(&mut self, interval_start: u64, len: u64) -> Result<(), Status> {
+        let page_size = page::SIZE as u64;
+        debug_assert!(interval_start.is_multiple_of(page_size));
+        debug_assert!(len.is_multiple_of(page_size));
+        if len == 0 {
+            return Ok(());
+        }
+        let new_interval_start =
+            interval_start.checked_add(len).expect("clipped interval start overflowed");
+
+        // Capture the state of the old start upfront, before we make any changes to the list.
+        let (old_dirty_state, old_awaiting_clean_len) = {
+            let old_start =
+                self.lookup(interval_start).expect("interval start sentinel must be populated");
+            debug_assert!(old_start.is_interval_start());
+            // We only support zero intervals for now.
+            debug_assert!(old_start.is_interval_zero());
+            (old_start.zero_interval_dirty_state(), old_start.zero_interval_awaiting_clean_length())
+        };
+
+        if cfg!(debug_assertions) {
+            // There should only be empty slots between the old and the new start.
+            let status = self.for_every_page_and_gap_in_range(
+                interval_start + page_size,
+                new_interval_start,
+                |_, _| Status::BAD_STATE,
+                |_, _| Status::BAD_STATE,
+            );
+            debug_assert!(status.is_ok());
+        }
+
+        let Some(new_start) = self.lookup_or_allocate_internal(new_interval_start) else {
+            return Err(Status::NO_MEMORY);
+        };
+
+        // It is possible that we are moving the start all the way to the end, leaving behind a
+        // single interval slot.
+        if new_start.is_interval_end() {
+            new_start.change_interval_sentinel(SentinelType::Slot);
+        } else {
+            debug_assert!(new_start.is_empty());
+            // We only support zero intervals for now.
+            *new_start = VmPageOrMarker::zero_interval(SentinelType::Start, old_dirty_state);
+        }
+
+        // Now that the new start has been created, carry over any remaining awaiting clean length
+        // from the old start.
+        if old_awaiting_clean_len > len {
+            new_start.set_zero_interval_awaiting_clean_length(old_awaiting_clean_len - len);
+        }
+
+        // Free up the old start.
+        self.remove_content(interval_start);
+        Ok(())
+    }
+
+    /// Clips an interval from the end by `len`, i.e. moves the end from `interval_end` to
+    /// `interval_end - len`. The total length of the interval must be larger than `len`.
+    pub fn clip_interval_end(&mut self, interval_end: u64, len: u64) -> Result<(), Status> {
+        let page_size = page::SIZE as u64;
+        debug_assert!(interval_end.is_multiple_of(page_size));
+        debug_assert!(len.is_multiple_of(page_size));
+        if len == 0 {
+            return Ok(());
+        }
+        let new_interval_end =
+            interval_end.checked_sub(len).expect("clipped interval end underflowed");
+
+        // Capture the state of the old end upfront, before we make any changes to the list.
+        let old_dirty_state = {
+            let old_end =
+                self.lookup(interval_end).expect("interval end sentinel must be populated");
+            debug_assert!(old_end.is_interval_end());
+            // We only support zero intervals for now.
+            debug_assert!(old_end.is_interval_zero());
+            old_end.zero_interval_dirty_state()
+        };
+
+        if cfg!(debug_assertions) {
+            // There should only be empty slots between the new and the old end.
+            let status = self.for_every_page_and_gap_in_range(
+                new_interval_end + page_size,
+                interval_end,
+                |_, _| Status::BAD_STATE,
+                |_, _| Status::BAD_STATE,
+            );
+            debug_assert!(status.is_ok());
+        }
+
+        let Some(new_end) = self.lookup_or_allocate_internal(new_interval_end) else {
+            return Err(Status::NO_MEMORY);
+        };
+
+        // It is possible that we are moving the end all the way to the start, leaving behind a
+        // single interval slot.
+        if new_end.is_interval_start() {
+            new_end.change_interval_sentinel(SentinelType::Slot);
+        } else {
+            debug_assert!(new_end.is_empty());
+            // We only support zero intervals for now.
+            *new_end = VmPageOrMarker::zero_interval(SentinelType::End, old_dirty_state);
+        }
+
+        // Free up the old end.
+        self.remove_content(interval_end);
+        Ok(())
+    }
+
+    /// Replace an existing page at `offset` with a zero interval, and return the released page.
+    /// The caller takes ownership of the released page and is responsible for freeing it.
+    pub fn replace_page_with_zero_interval(
+        &mut self,
+        offset: u64,
+        dirty_state: ZeroRangeDirtyState,
+    ) -> VmPagePtr {
+        // We are guaranteed to find the slot as we're replacing an existing page.
+        let slot = self.lookup_or_allocate_internal(offset);
+        debug_assert!(slot.is_some());
+        let slot = slot.unwrap();
+        // Release the page at the offset, but hold on to the empty slot so it can be reused by
+        // `add_zero_interval_internal`.
+        let page = slot.release_page();
+        let status = self.add_zero_interval_internal(
+            offset,
+            offset + page::SIZE as u64,
+            dirty_state,
+            0,
+            true,
+        );
+        // The only error `add_zero_interval_internal` can encounter is NO_MEMORY, but we know that
+        // cannot happen because we are reusing an existing slot, so we don't need to allocate a new
+        // node.
+        debug_assert!(status.is_ok());
+        // Return the page we released.
+        page
+    }
+
+    /// Overwrite a zero interval either fully or partially with a new zero interval, breaking off
+    /// the old interval into two if required. `old_start_offset` and `old_end_offset` specify the
+    /// start and end sentinels of the old interval that is being overwritten; either one of these
+    /// or both can be specified, with the other set to `None`. The new zero interval that
+    /// overwrites the old spans `[new_start_offset, new_end_offset]` with its state set to
+    /// `new_dirty_state`.
+    ///  - For full overwrites, both `old_start_offset` and `old_end_offset` must be provided, and
+    ///    should be equal to `new_start_offset` and `new_end_offset` respectively. At the end of
+    ///    the call, the old interval will have been completely replaced by the new one.
+    ///  - For partial overwrites from the start, `old_start_offset` must be provided and be equal
+    ///    to `new_start_offset`, and `old_end_offset` must be `None`. At the end of this call, the
+    ///    start of the old interval will have been overwritten by the new interval, with the
+    ///    remainder of the old interval now starting at `new_end_offset + page::SIZE`.
+    ///  - For partial overwrites from the end, `old_end_offset` must be provided and be equal to
+    ///    `new_end_offset`, and `old_start_offset` must be `None`. At the end of this call, the end
+    ///    of the old interval will have been overwritten by the new interval, with the remainder of
+    ///    the old interval now ending at `new_start_offset - page::SIZE`.
+    ///  - Partial overwrites in the middle are not allowed. In other words, either
+    ///    `old_start_offset` must be the same as `new_start_offset`, or `old_end_offset` must be
+    ///    the same as `new_end_offset`, or both.
+    pub fn overwrite_zero_interval(
+        &mut self,
+        old_start_offset: Option<u64>,
+        old_end_offset: Option<u64>,
+        new_start_offset: u64,
+        new_end_offset: u64,
+        new_dirty_state: ZeroRangeDirtyState,
+    ) -> Result<(), Status> {
+        let page_size = page::SIZE as u64;
+        debug_assert!(old_start_offset.is_none_or(|off| off.is_multiple_of(page_size)));
+        debug_assert!(old_end_offset.is_none_or(|off| off.is_multiple_of(page_size)));
+        debug_assert!(new_start_offset.is_multiple_of(page_size));
+        debug_assert!(new_end_offset.is_multiple_of(page_size));
+        // We only support dirty or untracked zero intervals.
+        debug_assert!(
+            new_dirty_state == ZeroRangeDirtyState::Dirty
+                || new_dirty_state == ZeroRangeDirtyState::Untracked
+        );
+
+        let old_start = old_start_offset.map_or(core::ptr::null_mut(), |off| self.lookup_slot(off));
+        let old_end = old_end_offset.map_or(core::ptr::null_mut(), |off| self.lookup_slot(off));
+        // We should have been able to find either the old start or end sentinel (or both).
+        debug_assert!(!old_start.is_null() || !old_end.is_null());
+        // If found, the old start and end sentinels are as expected.
+        // SAFETY: `old_start` and `old_end`, if non-null, point to valid slots in `self.list`.
+        debug_assert!(
+            old_start.is_null()
+                || unsafe {
+                    (*old_start).is_interval_zero()
+                        && ((*old_start).is_interval_start() || (*old_start).is_interval_slot())
+                }
+        );
+        // SAFETY: `old_end`, if non-null, points to a valid slot in `self.list`.
+        debug_assert!(
+            old_end.is_null()
+                || unsafe {
+                    (*old_end).is_interval_zero()
+                        && ((*old_end).is_interval_end() || (*old_end).is_interval_slot())
+                }
+        );
+
+        // Both of these are assigned by every branch below before they are read.
+        let new_start: *mut VmPageOrMarker;
+        let new_end: *mut VmPageOrMarker;
+        let mut try_merge_left = false;
+        let mut try_merge_right = false;
+
+        // Now that we've performed the initial checks, do the actual changes. The rest of this
+        // function is structured such that any allocations for node slots are done before making
+        // any changes to the page list, so that we don't leave the list in an inconsistent state.
+        // Any unused empty slots should be returned so that they can be freed up.
+        if !old_start.is_null() && !old_end.is_null() {
+            // Overwriting existing slots.
+            debug_assert_eq!(old_start_offset, Some(new_start_offset));
+            debug_assert_eq!(old_end_offset, Some(new_end_offset));
+            // SAFETY: `old_start` and `old_end` are non-null in this branch.
+            unsafe {
+                // The new interval has a different dirty state.
+                debug_assert!((*old_start).zero_interval_dirty_state() != new_dirty_state);
+                debug_assert!(
+                    (*old_start).zero_interval_dirty_state()
+                        == (*old_end).zero_interval_dirty_state()
+                );
+            }
+            new_start = old_start;
+            new_end = old_end;
+            // We have a new dirty state, so we can try merging the new interval both to the left
+            // and the right.
+            try_merge_left = true;
+            try_merge_right = true;
+        } else if !old_start.is_null() {
+            // We need to clip at the start.
+            debug_assert_eq!(old_start_offset, Some(new_start_offset));
+            // SAFETY: `old_start` is non-null in this branch.
+            let old_dirty_state = unsafe {
+                // The new interval has a different dirty state.
+                debug_assert!((*old_start).zero_interval_dirty_state() != new_dirty_state);
+                (*old_start).zero_interval_dirty_state()
+            };
+
+            new_end = match self.lookup_or_allocate_internal(new_end_offset) {
+                Some(slot) => slot,
+                None => return Err(Status::NO_MEMORY),
+            };
+            // SAFETY: `new_end` is non-null.
+            debug_assert!(new_start_offset == new_end_offset || unsafe { (*new_end).is_empty() });
+
+            let clipped_start = match self.lookup_or_allocate_internal(new_end_offset + page_size) {
+                Some(slot) => slot,
+                None => {
+                    if new_start_offset != new_end_offset {
+                        self.return_empty_slot(new_end_offset);
+                    }
+                    return Err(Status::NO_MEMORY);
+                }
+            };
+            if clipped_start.is_interval_end() {
+                clipped_start.change_interval_sentinel(SentinelType::Slot);
+            } else {
+                debug_assert!(clipped_start.is_empty());
+                *clipped_start =
+                    VmPageOrMarker::zero_interval(SentinelType::Start, old_dirty_state);
+            }
+
+            // Now that the clipped start has been created, carry over any remaining awaiting clean
+            // length from the old start.
+            // SAFETY: `old_start` is non-null in this branch.
+            let old_len = unsafe { (*old_start).zero_interval_awaiting_clean_length() };
+            // `old_start` is only non-null if `old_start_offset` was provided.
+            let len = new_end_offset + page_size - old_start_offset.unwrap();
+            if old_len > len {
+                clipped_start.set_zero_interval_awaiting_clean_length(old_len - len);
+            }
+
+            new_start = old_start;
+            // We can try merging the new interval to the left since it has a different dirty state
+            // from the old interval.
+            try_merge_left = true;
+        } else {
+            // We need to clip at the end.
+            debug_assert_eq!(old_end_offset, Some(new_end_offset));
+            // SAFETY: `old_end` is non-null in this branch.
+            let old_dirty_state = unsafe {
+                // The new interval has a different dirty state.
+                debug_assert!((*old_end).zero_interval_dirty_state() != new_dirty_state);
+                (*old_end).zero_interval_dirty_state()
+            };
+
+            new_start = match self.lookup_or_allocate_internal(new_start_offset) {
+                Some(slot) => slot,
+                None => return Err(Status::NO_MEMORY),
+            };
+            // SAFETY: `new_start` is non-null.
+            debug_assert!(new_start_offset == new_end_offset || unsafe { (*new_start).is_empty() });
+
+            let clipped_end = match self.lookup_or_allocate_internal(new_start_offset - page_size) {
+                Some(slot) => slot,
+                None => {
+                    if new_start_offset != new_end_offset {
+                        self.return_empty_slot(new_start_offset);
+                    }
+                    return Err(Status::NO_MEMORY);
+                }
+            };
+            if clipped_end.is_interval_start() {
+                clipped_end.change_interval_sentinel(SentinelType::Slot);
+            } else {
+                debug_assert!(clipped_end.is_empty());
+                *clipped_end = VmPageOrMarker::zero_interval(SentinelType::End, old_dirty_state);
+            }
+
+            new_end = old_end;
+            // We can try merging the new interval to the right since it has a different dirty state
+            // from the old interval.
+            try_merge_right = true;
+        }
+
+        // SAFETY: `new_start` and `new_end` are non-null after the branches above.
+        unsafe {
+            if new_start == new_end {
+                *new_start = VmPageOrMarker::zero_interval(SentinelType::Slot, new_dirty_state);
+            } else {
+                *new_start = VmPageOrMarker::zero_interval(SentinelType::Start, new_dirty_state);
+                *new_end = VmPageOrMarker::zero_interval(SentinelType::End, new_dirty_state);
+            }
+        }
+
+        // See if we can merge left. Note that an interval starting at offset 0 has nothing to merge
+        // with on the left.
+        if try_merge_left && let Some(left_offset) = new_start_offset.checked_sub(page_size) {
+            let left = self.lookup_slot(left_offset);
+            // SAFETY: `left`, if non-null, points to a valid slot in `self.list`.
+            if !left.is_null()
+                && unsafe { (*left).is_interval_zero() }
+                && unsafe { (*left).zero_interval_dirty_state() == new_dirty_state }
+            {
+                // SAFETY: `left` is non-null. `left_ref` is not used after the
+                // `return_empty_slot` call below, which reaches the same slot through `self`.
+                let left_ref = unsafe { &mut *left };
+                if left_ref.is_interval_slot() {
+                    left_ref.change_interval_sentinel(SentinelType::Start);
+                } else {
+                    debug_assert!(left_ref.is_interval_end());
+                    *left_ref = VmPageOrMarker::empty();
+                    // The node holding `new_start` is still populated at this point, so returning
+                    // the left slot cannot free the node `new_start` lives in.
+                    self.return_empty_slot(left_offset);
+                }
+
+                // SAFETY: `new_start` is non-null and its node is still live (see above).
+                // `new_start_ref` is not used after the `return_empty_slot` call below.
+                let new_start_ref = unsafe { &mut *new_start };
+                if new_start_ref.is_interval_slot() {
+                    new_start_ref.change_interval_sentinel(SentinelType::End);
+                } else {
+                    debug_assert!(new_start_ref.is_interval_start());
+                    *new_start_ref = VmPageOrMarker::empty();
+                    self.return_empty_slot(new_start_offset);
+                }
+            }
+        }
+
+        // See if we can merge right.
+        if try_merge_right && let Some(right_offset) = new_end_offset.checked_add(page_size) {
+            let right = self.lookup_slot(right_offset);
+            // SAFETY: `right`, if non-null, points to a valid slot in `self.list`.
+            if !right.is_null()
+                && unsafe { (*right).is_interval_zero() }
+                && unsafe { (*right).zero_interval_dirty_state() == new_dirty_state }
+            {
+                // SAFETY: `right` is non-null. `right_ref` is not used after the
+                // `return_empty_slot` call below, which reaches the same slot through `self`.
+                let right_ref = unsafe { &mut *right };
+                if right_ref.is_interval_slot() {
+                    right_ref.change_interval_sentinel(SentinelType::End);
+                } else {
+                    debug_assert!(right_ref.is_interval_start());
+                    *right_ref = VmPageOrMarker::empty();
+                    // The node holding `new_end` is still populated at this point, so returning the
+                    // right slot cannot free the node `new_end` lives in.
+                    self.return_empty_slot(right_offset);
+                }
+
+                // SAFETY: `new_end` is non-null and its node is still live (see above).
+                // `new_end_ref` is not used after the `return_empty_slot` call below.
+                let new_end_ref = unsafe { &mut *new_end };
+                if new_end_ref.is_interval_slot() {
+                    new_end_ref.change_interval_sentinel(SentinelType::Start);
+                } else {
+                    debug_assert!(new_end_ref.is_interval_end());
+                    *new_end_ref = VmPageOrMarker::empty();
+                    self.return_empty_slot(new_end_offset);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Walk the page tree, calling the passed in function on every tree node.
     pub fn for_every_page<F>(&self, per_page_func: F) -> Result<(), Status>
     where

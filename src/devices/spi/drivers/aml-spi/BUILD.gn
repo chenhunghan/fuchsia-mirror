@@ -79,9 +79,6 @@ test("aml-spi-test-bin") {
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_unittest_package("aml-spi-test") {
@@ -109,9 +106,6 @@ fuchsia_cc_driver("aml-spi-driver") {
     "//build/config/fuchsia:enable_zircon_asserts",
   ]
   deps = [ ":common" ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_driver_component("aml-spi") {

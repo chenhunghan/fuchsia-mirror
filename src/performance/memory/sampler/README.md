@@ -66,6 +66,13 @@ Note: on `core`, `feedback` will write the filed crash reports in a temporary
 storage on the device. They can be found via the `fx shell "find /tmp /data
 -name <your_program_name>*"` command.
 
+Note: profiles are `gzip`-compressed, which substantially reduces the memory
+held by profiles awaiting filing, as well as the storage they occupy on the
+device. They are named with the `.pb.gz` extension accordingly. Tooling that
+understands the `pprof` format, such as `fx pprof`, detects this and
+decompresses profiles transparently; ad-hoc tooling that reads profiles as raw
+protobuf needs to decompress them first.
+
 ### Out-of-tree components
 
 Currently, out-of-tree components won't have access to `memory_sampler` because
@@ -167,6 +174,10 @@ performance knobs follow:
     this duration will increase the frequency of partial profiles,
     which should in turn reduce the memory consumption of the
     profiler.
+  * `memory_sampler::profile_builder::PROFILE_COMPRESSION_LEVEL`: the `gzip`
+    compression level applied to profiles. Reducing it lowers the CPU spent
+    compressing, at the expense of the memory held by profiles awaiting filing;
+    note that the returns diminish quickly above it.
 
 Note also that `memory_sampler` comes with built-in throttling of filed
 profiles, to limit the rate of filing crash reports; in an `eng` build,

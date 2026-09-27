@@ -33,6 +33,10 @@ Symbols:
   - { Name: fdf_env_dispatcher_has_queued_tasks, Type: Func }
   - { Name: fdf_env_driver_resume, Type: Func }
   - { Name: fdf_env_driver_suspend, Type: Func }
+  - { Name: fdf_env_free_all_dispatchers_dump, Type: Func }
+  - { Name: fdf_env_free_all_threads_dump, Type: Func }
+  - { Name: fdf_env_get_all_dispatchers_dump, Type: Func }
+  - { Name: fdf_env_get_all_threads_dump, Type: Func }
   - { Name: fdf_env_get_current_driver, Type: Func }
   - { Name: fdf_env_get_driver_on_tid, Type: Func }
   - { Name: fdf_env_get_scheduler_role_opts, Type: Func }

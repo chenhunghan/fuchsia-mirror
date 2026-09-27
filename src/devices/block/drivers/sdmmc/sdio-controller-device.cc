@@ -10,6 +10,7 @@
 #include <inttypes.h>
 #include <lib/async/cpp/task.h>
 #include <lib/driver/logging/cpp/logger.h>
+#include <lib/driver/metadata/cpp/metadata.h>
 #include <lib/fdf/dispatcher.h>
 #include <lib/fit/defer.h>
 #include <lib/fzl/vmo-mapper.h>
@@ -25,6 +26,7 @@
 #include <fbl/algorithm.h>
 
 #include "sdmmc-root-device.h"
+#include "src/devices/block/drivers/sdmmc/sdmmc_parser.h"
 
 namespace {
 
@@ -275,13 +277,35 @@ zx_status_t SdioControllerDevice::AddDevice() {
   auto remove_device_on_error =
       fit::defer([&]() { [[maybe_unused]] auto result = controller_->Remove(); });
 
-  zx_status_t st;
-  for (uint32_t i = 0; i < hw_info_.num_funcs - 1; i++) {
-    if ((st = SdioFunctionDevice::Create(this, i + 1, &child_sdio_function_devices_[i])) != ZX_OK) {
-      return st;
+  std::optional<sdmmc_metadata::SdioMetadata> sdio_metadata;
+  zx::result generic_res =
+      fdf_metadata::GetMetadataFromFidlServiceIfExists<fuchsia_driver_metadata::Dictionary>(
+          parent_->driver_incoming()->svc_dir(),
+          fuchsia_hardware_sdio::wire::Metadata::kSerializableName);
+  if (generic_res.is_error()) {
+    fdf::warn("Failed to retrieve generic SDIO metadata: {}", generic_res.status_string());
+  } else if (generic_res.value().has_value()) {
+    sdio_metadata = sdmmc_metadata::SdioMetadata::Parse(*generic_res.value());
+    if (!sdio_metadata) {
+      fdf::error("Failed to parse generic SDIO metadata");
     }
   }
 
+  for (uint32_t i = 1; i < hw_info_.num_funcs; i++) {
+    std::optional<uint32_t> function_id = std::nullopt;
+    if (sdio_metadata.has_value()) {
+      for (const auto& func_meta : sdio_metadata->functions) {
+        if (func_meta.function == i && func_meta.id.has_value()) {
+          function_id = func_meta.id;
+          break;
+        }
+      }
+    }
+    child_sdio_function_devices_[i - 1] =
+        std::make_unique<SdioFunctionDevice>(this, i, function_id);
+  }
+
+  zx_status_t st;
   // Clear all bits except for function 0, then selectively set the rest depending on which
   // functions are actually present.
   function_power_on_.reset();

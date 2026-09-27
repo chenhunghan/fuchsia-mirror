@@ -4,7 +4,38 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use affine::Ratio;
 use zx_types::{ZX_TIME_INFINITE, ZX_TIME_INFINITE_PAST};
+
+#[inline]
+pub const fn zx_nsec(n: i64) -> i64 {
+    n
+}
+
+#[inline]
+pub const fn zx_usec(n: i64) -> i64 {
+    n.saturating_mul(1_000)
+}
+
+#[inline]
+pub const fn zx_msec(n: i64) -> i64 {
+    n.saturating_mul(1_000_000)
+}
+
+#[inline]
+pub const fn zx_sec(n: i64) -> i64 {
+    n.saturating_mul(1_000_000_000)
+}
+
+#[inline]
+pub const fn zx_min(n: i64) -> i64 {
+    n.saturating_mul(60_000_000_000)
+}
+
+#[inline]
+pub const fn zx_hour(n: i64) -> i64 {
+    n.saturating_mul(3_600_000_000_000)
+}
 
 /// Monotonic timeline instant in nanoseconds.
 #[repr(transparent)]
@@ -236,6 +267,7 @@ unsafe extern "C" {
     fn cpp_timer_current_boot_ticks() -> InstantBootTicks;
     fn cpp_current_mono_time() -> InstantMono;
     fn cpp_current_boot_time() -> InstantBoot;
+    fn cpp_timer_get_ticks_to_time_ratio() -> Ratio;
 }
 
 /// Returns the current monotonic time in ticks.
@@ -268,6 +300,14 @@ pub fn current_boot_time() -> InstantBoot {
     // SAFETY: Calling this FFI function has no preconditions and safely returns the platform boot
     // time.
     unsafe { cpp_current_boot_time() }
+}
+
+/// Returns the ratio between timer ticks and nanoseconds.
+#[inline]
+pub fn timer_get_ticks_to_time_ratio() -> Ratio {
+    // SAFETY: Calling this FFI function has no preconditions and returns the globally configured
+    // timer ticks to time ratio.
+    unsafe { cpp_timer_get_ticks_to_time_ratio() }
 }
 
 /// Platform timer tests.

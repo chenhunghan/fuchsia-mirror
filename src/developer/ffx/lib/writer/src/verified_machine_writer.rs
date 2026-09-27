@@ -88,7 +88,9 @@ where
     /// Validates the passed in data object against the schema
     /// for the writer type.
     pub fn verify_schema(data: &Value) -> Result<()> {
-        let s = schemars::schema_for!(T);
+        let s = schemars::generate::SchemaSettings::draft07()
+            .into_generator()
+            .into_root_schema_for::<T>();
         let mut raw_schema: Vec<u8> = vec![];
         format_output(Format::JsonPretty, &mut raw_schema, &s)
             .map_err(|e| crate::Error::SchemaFailure(format!("err: {e:?} for {s:?}")))?;
@@ -131,7 +133,9 @@ where
     }
 
     fn try_print_schema(&mut self) -> Result<()> {
-        let s = schemars::schema_for!(T);
+        let s = schemars::generate::SchemaSettings::draft07()
+            .into_generator()
+            .into_root_schema_for::<T>();
         self.machine_writer.formatted(&s)
     }
 
@@ -377,7 +381,9 @@ mod test {
         let mut writer =
             VerifiedMachineWriter::<SampleData>::new_test(Some(Format::JsonPretty), &test_buffers);
         writer.machine(&data).expect("machine data written");
-        let s = schemars::schema_for!(SampleData);
+        let s = schemars::generate::SchemaSettings::draft07()
+            .into_generator()
+            .into_root_schema_for::<SampleData>();
         let mut schema: Vec<u8> = vec![];
         format_output(Format::JsonPretty, &mut schema, &s).expect("schema as string");
         let schema_val = serde_json::from_slice(&schema).expect("string to schema value");
@@ -402,9 +408,6 @@ mod test {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "SampleData",
   "type": "object",
-  "required": [
-    "name"
-  ],
   "properties": {
     "name": {
       "type": "string"
@@ -415,7 +418,8 @@ mod test {
         "null"
       ],
       "format": "uint16",
-      "minimum": 0.0
+      "minimum": 0,
+      "maximum": 65535
     },
     "error": {
       "type": [
@@ -423,7 +427,10 @@ mod test {
         "null"
       ]
     }
-  }
+  },
+  "required": [
+    "name"
+  ]
 }"#;
         assert_eq!(actual, expected);
     }

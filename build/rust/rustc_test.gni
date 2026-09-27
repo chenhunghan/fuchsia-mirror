@@ -81,6 +81,7 @@ template("rustc_test_internal") {
     # directory using a copy of the test binary.
     if (use_unstripped_binary_for_host_tests) {
       unstripped_copy_target_name = "${target_name}_copy_unstripped"
+
       copy(unstripped_copy_target_name) {
         testonly = true
         sources = [ "${root_out_dir}/exe.unstripped/${_crate_name}" ]
@@ -111,6 +112,7 @@ template("rustc_test_internal") {
       # For asan targets use the normal binary path.
       crate_binary_path = "${root_out_dir}/${_crate_name}"
     }
+
     host_test_data(_test_data_target) {
       sources = [ crate_binary_path ]
       deps = [ ":${exe_target_name}" ]
@@ -173,7 +175,15 @@ template("rustc_test_internal") {
   } else {
     # if not a host-side target, we don't need this since it doesn't
     # propogate to package.gni
-    not_needed(invoker, [ "test_environments" ])
+    #
+    # `args` is only read in the is_host branch above. A BUILD.gn file is
+    # evaluated in both toolchains, so callers that set it unconditionally would
+    # otherwise trip GN's "Assignment had no effect" check here.
+    not_needed(invoker,
+               [
+                 "args",
+                 "test_environments",
+               ])
   }
 
   rustflags = []

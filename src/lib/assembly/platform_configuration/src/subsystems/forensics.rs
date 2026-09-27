@@ -91,18 +91,6 @@ impl DefineSubsystemConfiguration<(&ForensicsConfig, &PlatformSessionConfig)>
             }
         };
 
-        #[allow(deprecated)]
-        let component_url = match (
-            &config.feedback.component_url_for_remote_feedback_id,
-            &config.feedback.feedback_id_component_url,
-        ) {
-            (FeedbackIdComponentUrl::None, url) => url,
-            (url, FeedbackIdComponentUrl::None) => url,
-            _ => anyhow::bail!(
-                "component_url_for_remote_feedback_id and feedback_id_component_url cannot be both specified"
-            ),
-        };
-
         // Cobalt and Feedback may be added to anything utility and higher.
         if matches!(context.feature_set_level, FeatureSetLevel::Standard | FeatureSetLevel::Utility)
         {
@@ -115,24 +103,11 @@ impl DefineSubsystemConfiguration<(&ForensicsConfig, &PlatformSessionConfig)>
                 &serde_json::to_string_pretty(&config.feedback.snapshot_exclusion)?,
             )?;
 
-            // For backward compatibility, legacy configurations specifying `large_disk: true`
-            // map to `Medium`.
-            #[allow(deprecated)]
-            let effective_disk_size = match (config.feedback.disk_size, config.feedback.large_disk)
-            {
-                (_, true) => DiskSize::Medium,
-                (size, _) => size,
-            };
-
-            let disk_sized_params = match effective_disk_size {
+            let disk_sized_params = match config.feedback.disk_size {
                 DiskSize::Small => SMALL_DISK,
                 DiskSize::Medium => MEDIUM_DISK,
                 DiskSize::Large => LARGE_DISK,
             };
-
-            #[allow(deprecated)]
-            let remote_device_id_provider = config.feedback.remote_device_id_provider
-                || !matches!(component_url, FeedbackIdComponentUrl::None);
 
             let feedback_config = FeedbackInternalConfig {
                 report_persistence_max_cache_size_kib: disk_sized_params.report_cache_size_kib,
@@ -148,7 +123,10 @@ impl DefineSubsystemConfiguration<(&ForensicsConfig, &PlatformSessionConfig)>
                 enable_data_redaction: build_type_config.enable_data_redaction,
                 enable_hourly_snapshots: build_type_config.enable_hourly_snapshots,
                 enable_limit_inspect_data: build_type_config.enable_limit_inspect_data,
-                remote_device_id_provider,
+                remote_device_id_provider: !matches!(
+                    config.feedback.component_url_for_remote_feedback_id,
+                    FeedbackIdComponentUrl::None
+                ),
                 supports_user_initiated_poweroffs: config
                     .feedback
                     .supports_user_initiated_poweroffs,
@@ -174,7 +152,7 @@ impl DefineSubsystemConfiguration<(&ForensicsConfig, &PlatformSessionConfig)>
             }
         }
 
-        match component_url {
+        match &config.feedback.component_url_for_remote_feedback_id {
             FeedbackIdComponentUrl::FlashTs(url) => {
                 util::add_platform_declared_product_provided_component(
                     url,
@@ -647,27 +625,6 @@ mod test {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn feedback_config_large_disk() {
-        let forensics_config = ForensicsConfig {
-            feedback: FeedbackConfig { large_disk: true, ..Default::default() },
-            ..Default::default()
-        };
-        let config = get_feedback_config(BuildType::Eng, forensics_config, Default::default());
-
-        assert_eq!(config.report_persistence_max_cache_size_kib, MEDIUM_DISK.report_cache_size_kib);
-        assert_eq!(config.report_persistence_max_tmp_size_kib, MEDIUM_DISK.report_tmp_size_kib);
-        assert_eq!(
-            config.snapshot_persistence_max_cache_size_mib,
-            MEDIUM_DISK.snapshot_storage_size_mib
-        );
-        assert_eq!(
-            config.snapshot_persistence_max_tmp_size_mib,
-            MEDIUM_DISK.snapshot_storage_size_mib
-        );
-    }
-
-    #[test]
     fn feedback_config_disk_size_small() {
         let forensics_config = ForensicsConfig {
             feedback: FeedbackConfig { disk_size: DiskSize::Small, ..Default::default() },
@@ -736,7 +693,7 @@ mod test {
     }
 
     #[test]
-    fn feedback_config_remote_device_id_provider_inferred_true() {
+    fn feedback_config_remote_device_id_provider_true() {
         let resource_dir = tempfile::TempDir::new().unwrap();
         std::fs::File::create(
             resource_dir.path().join("flash_ts_feedback_id.core_shard.cml.template"),
@@ -786,17 +743,5 @@ mod test {
         let forensics_config =
             serde_json::from_str::<FeedbackInternalConfig>(string_contents).unwrap();
         assert!(forensics_config.remote_device_id_provider);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn feedback_config_remote_device_id_provider_true() {
-        let forensics_config = ForensicsConfig {
-            feedback: FeedbackConfig { remote_device_id_provider: true, ..Default::default() },
-            ..Default::default()
-        };
-        let config = get_feedback_config(BuildType::Eng, forensics_config, Default::default());
-
-        assert!(config.remote_device_id_provider);
     }
 }

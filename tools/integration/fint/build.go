@@ -16,7 +16,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -564,13 +563,6 @@ func buildImpl(
 			return artifacts, err
 		}
 	}
-	if summary, err := buildBazelTests(ctx, runner, contextSpec.CheckoutDir, contextSpec.BuildDir, modules.TestSpecs()); err != nil {
-		if summary != "" {
-			artifacts.FailureSummary = summary
-		}
-		return artifacts, err
-	}
-
 	// TODO(olivernewman): Figure out a way to skip this analysis when the
 	// caller doesn't care about running tests, or just wants to run all tests
 	// in the same way regardless of any build graph analysis. In the meantime
@@ -787,21 +779,8 @@ func constructNinjaTargets(
 	var targets []string
 	var artifacts fintpb.BuildArtifacts
 
-	if staticSpec.IncludeArchives {
-		return nil, nil, fmt.Errorf("include_archives=true is no longer supported")
-	}
-
 	if staticSpec.IncludeDefaultNinjaTarget {
 		targets = append(targets, ":default")
-	} else {
-		// "//:host" is a dep of "//:default"
-		if staticSpec.IncludeHostTests {
-			for _, testSpec := range modules.TestSpecs() {
-				if testSpec.OS != "fuchsia" {
-					targets = append(targets, testSpec.Path)
-				}
-			}
-		}
 	}
 
 	if staticSpec.IncludeGeneratedSources {
@@ -1034,95 +1013,4 @@ func exportDebugSymbols(ctx context.Context, buildAPIClient buildAPIClient, cont
 	}
 
 	return string(b), nil
-}
-
-func buildBazelTests(ctx context.Context, runner subprocessRunner, checkoutDir, buildDir string, testSpecs []build.TestSpec) (string, error) {
-	var bazelLabels []string
-	for _, spec := range testSpecs {
-		// Bazel tests are differentiated from GN tests by having a "@" prefix
-		// in the label field.
-		if strings.HasPrefix(spec.Label, "@") {
-			bazelLabels = append(bazelLabels, spec.Label)
-		}
-	}
-	if len(bazelLabels) == 0 {
-		return "", nil
-	}
-
-	topDirConfigPath := filepath.Join(checkoutDir, "build", "bazel", "config", "bazel_top_dir")
-	data, err := os.ReadFile(topDirConfigPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read bazel_top_dir config at %s: %w", topDirConfigPath, err)
-	}
-	bazelTopDir := strings.TrimSpace(string(data))
-	bazelLauncher := filepath.Join(buildDir, bazelTopDir, "bazel")
-	if _, err := os.Stat(bazelLauncher); err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("bazel launcher not found at %s: check if the workspace was properly initialized by GN/Ninja", bazelLauncher)
-		}
-		return "", err
-	}
-
-	cmd := append([]string{
-		bazelLauncher,
-		"build",
-		// For now we only support building Bazel host tests.
-		// TODO(https://fxbug.dev/546173288): Support Bazel target tests.
-		"--config=host",
-		// Bazel prefers to wait until the latest possible moment (e.g. `bazel
-		// test`) to generate runfiles. Forcing runfile link generation during
-		// `bazel build` ensures all runtime dependencies are materialized under
-		// the execroot where the test runner expects them.
-		"--build_runfile_links=true",
-		"--enable_runfiles=true",
-	}, bazelLabels...)
-
-	var stderrBuf bytes.Buffer
-	if err := runner.Run(ctx, cmd, subprocess.RunOptions{
-		Stdout: os.Stdout,
-		Stderr: io.MultiWriter(os.Stderr, &stderrBuf),
-	}); err != nil {
-		return parseBazelError(stderrBuf.String()), fmt.Errorf("failed to build Bazel tests: %w", err)
-	}
-	return "", nil
-}
-
-var bazelProgressRe = regexp.MustCompile(`^\[\d+(?:,\d+)* / \d+(?:,\d+)*\]`)
-
-// parseBazelError parses the standard error output of a bazel command and
-// extracts the meaningful error messages, filtering out progress and unhelpful
-// log messages.
-func parseBazelError(stderr string) string {
-	var out []string
-	lines := strings.Split(stderr, "\n")
-
-	ignorePrefixes := []string{
-		"INFO:",
-		"WARNING:",
-		"Loading:",
-		"Analyzing:",
-		"Computing main repo mapping:",
-		"ERROR: Build did NOT complete successfully",
-		"Use --verbose_failures to see the command lines of failed build steps.",
-	}
-
-	for _, line := range lines {
-		ignore := false
-		for _, prefix := range ignorePrefixes {
-			if strings.HasPrefix(line, prefix) {
-				ignore = true
-			}
-		}
-		if ignore {
-			continue
-		}
-
-		if bazelProgressRe.MatchString(line) {
-			continue
-		}
-
-		out = append(out, line)
-	}
-
-	return strings.TrimSpace(strings.Join(out, "\n"))
 }

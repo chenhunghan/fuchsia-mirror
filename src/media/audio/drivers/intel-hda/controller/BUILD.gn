@@ -10,8 +10,14 @@ import("//build/fuzz.gni")
 import("//build/test.gni")
 import("//build/testing/cc_test_executable.gni")
 
+fuchsia_driver_dml("intel-hda-dml") {
+  dml = "meta/intel-hda.dml"
+  golden_bind = "meta/controller.bind"
+  driver_name = "intel-hda"
+}
+
 driver_bind_rules("ihda_controller_bind") {
-  rules = "meta/controller.bind"
+  dml_label = ":intel-hda-dml"
   deps = [
     "//src/devices/bind/fuchsia",
     "//src/devices/bind/fuchsia.acpi",
@@ -126,7 +132,7 @@ fuchsia_driver_component("intel-hda") {
   component_name = "intel-hda"
   deps = [ ":intel-hda-driver" ]
   info = "meta/intel-hda-info.json"
-  manifest = "meta/intel-hda.cml"
+  dml_label = ":intel-hda-dml"
 }
 
 fuchsia_driver_package("package") {

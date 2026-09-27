@@ -4,6 +4,7 @@
 
 """General utility Starlark functions for Fuchsia Bazel rules."""
 
+load("@fuchsia_rules_common//debug_symbols:providers.bzl", "make_fuchsia_unstripped_binary_info")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 
 def fuchsia_cpu_from_ctx(ctx):
@@ -141,3 +142,28 @@ def find_cc_toolchain(ctx):
 
     # We didn't find anything.
     fail("In order to use find_cc_toolchain, your rule has to depend on C++ toolchain. See find_cc_toolchain.bzl docs for details.")
+
+def get_runfiles_shared_lib_binary_info(runfiles, shared_lib_dest = "lib", exclude_libs = []):
+    """ Returns a list of FuchsiaUnstrippedBinaryInfo objects for the shared libraries in the runfiles.
+
+    Args:
+      runfiles: The runfiles of the target.
+      shared_lib_dest: The destination directory for the shared libraries.
+      exclude_libs: A list of shared libraries to exclude from the result.
+    Returns:
+      A list of FuchsiaUnstrippedBinaryInfo objects for the shared libraries.
+    """
+    unstripped_binaries = []
+
+    # default_runfiles.files is a depset, so sort for deterministic ordering.
+    for f in sorted(runfiles.files.to_list(), key = lambda x: x.path):
+        if f.basename in exclude_libs:
+            continue
+        if f.basename.endswith(".so") or ".so." in f.basename:
+            unstripped_binaries.append(
+                make_fuchsia_unstripped_binary_info(
+                    dest = shared_lib_dest + "/" + f.basename,
+                    unstripped_file = f,
+                ),
+            )
+    return unstripped_binaries

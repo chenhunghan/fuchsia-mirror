@@ -215,9 +215,6 @@ static_library("lib") {
       # sources += [ "linux_arch_riscv64.cc" ]
     }
   }
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 executable("bin") {
@@ -228,9 +225,6 @@ executable("bin") {
     ":debug_agent_config",
     ":lib",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 source_set("launcher") {
@@ -309,9 +303,6 @@ fuchsia_component("debug_agent_launcher_component") {
 cc_test_executable("zxdb_test_app") {
   sources = [ "zxdb_test_app.cc" ]
   deps = [ "//zircon/system/ulib/zx" ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 if (current_cpu == "riscv64") {
@@ -374,9 +365,6 @@ source_set("test_lib") {
     "//sdk/lib/syslog/cpp",
     "//src/developer/debug/shared:test_support",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 test("launcher_tests") {
@@ -471,9 +459,6 @@ test("unit_tests") {
       "posix/file_descriptor_shuffle_unittest.cc",
     ]
   }
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_unittest_package("debug_agent_launcher_unit_tests") {

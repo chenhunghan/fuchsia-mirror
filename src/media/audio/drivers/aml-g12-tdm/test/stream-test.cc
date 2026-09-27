@@ -34,8 +34,8 @@ namespace audio_fidl = fuchsia_hardware_audio;
 
 static constexpr float kTestGain = 2.f;
 static constexpr float kTestDeltaGain = 1.f;
-static constexpr float kTestTurnOnNsecs = 12345;
-static constexpr float kTestTurnOffNsecs = 67890;
+static constexpr int64_t kTestTurnOnNsecs = 12345;
+static constexpr int64_t kTestTurnOffNsecs = 67890;
 
 class PowerManagementTest : public zxtest::Test {
  public:
@@ -278,8 +278,8 @@ struct AmlG12I2sOutTest : public AmlG12TdmStream {
     SetCommonDefaults();
     aml_audio_ = std::make_unique<AmlTdmConfigDevice>(metadata_, region.GetMmioBuffer());
     // Simply one ring buffer channel per codec.
-    metadata_.ring_buffer.number_of_channels = codec_client_ends.size();
-    metadata_.codecs.number_of_codecs = codec_client_ends.size();
+    metadata_.ring_buffer.number_of_channels = static_cast<uint8_t>(codec_client_ends.size());
+    metadata_.codecs.number_of_codecs = static_cast<uint8_t>(codec_client_ends.size());
     for (size_t i = 0; i < codec_client_ends.size(); ++i) {
       codecs_.push_back(std::make_unique<SimpleCodecClient>());
       codecs_[i]->SetCodec(std::move(codec_client_ends[i]));
@@ -1955,8 +1955,10 @@ TEST_F(AmlG12TdmTest, Attributes) { TestAttributes(); }
 TEST_F(AmlG12TdmTest, Rate) {
   uint32_t mclk_ctrl = 0;
   uint32_t sclk_ctrl = 0;
-  mmio_.AtIndex(0x3).SetWriteCallback([&mclk_ctrl](uint64_t value) { mclk_ctrl = value; });
-  mmio_.AtIndex(0x14).SetWriteCallback([&sclk_ctrl](uint64_t value) { sclk_ctrl = value; });
+  mmio_.AtIndex(0x3).SetWriteCallback(
+      [&mclk_ctrl](uint64_t value) { mclk_ctrl = static_cast<uint32_t>(value); });
+  mmio_.AtIndex(0x14).SetWriteCallback(
+      [&sclk_ctrl](uint64_t value) { sclk_ctrl = static_cast<uint32_t>(value); });
   CreateRingBuffer();                // Defaults to 48kHz rate.
   ASSERT_EQ(0x84000009, mclk_ctrl);  // clkdiv = 9 for 48kHz rate.
   ASSERT_EQ(0xC1807C3F, sclk_ctrl);  // enabled, 24 sdiv, 31 lrduty, 63 lrdiv for 48kHz rate.

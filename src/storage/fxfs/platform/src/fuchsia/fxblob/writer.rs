@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use zx::Status;
 
-static RING_BUFFER_SIZE: LazyLock<u64> = LazyLock::new(|| 64 * storage_units::PAGE_SIZE);
+static RING_BUFFER_SIZE: LazyLock<u64> = LazyLock::new(|| 64 * storage_units::page_size());
 
 const PAYLOAD_BUFFER_FLUSH_THRESHOLD: usize = 131_072; /* 128 KiB */
 

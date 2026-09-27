@@ -8,6 +8,8 @@ use crate::disconnect::LocallyInitiated;
 use crate::error::Error;
 use anyhow::format_err;
 use fdf::ArenaStaticBox;
+use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
+use fidl_fuchsia_wlan_mlme as fidl_mlme;
 use ieee80211::{Bssid, MacAddr, MacAddrBytes, Ssid};
 use wlan_common::ie::rsn::rsne;
 use wlan_common::ie::{self};
@@ -17,7 +19,6 @@ use wlan_common::timer::{EventHandle, Timer};
 use wlan_common::{TimeUnit, data_writer, mgmt_writer, wmm};
 use wlan_frame_writer::{write_frame, write_frame_with_fixed_slice};
 use zerocopy::byteorder::big_endian::U16 as BigEndianU16;
-use {fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211, fidl_fuchsia_wlan_mlme as fidl_mlme};
 
 /// BeaconParams contains parameters that may be used to offload beaconing to the hardware.
 pub struct BeaconOffloadParams {
@@ -657,8 +658,7 @@ mod test {
             zx::MonotonicDuration::from_seconds(5),
             TimedEvent::ClientEvent(MacAddr::from([1; 6]), ClientEvent::BssIdleTimeout),
         );
-        let (_, timed_event, _) =
-            time_stream.try_next().unwrap().expect("Should have scheduled an event");
+        let (_, timed_event, _) = time_stream.try_recv().expect("Should have scheduled an event");
         assert_eq!(timed_event.id, event_handle.id());
 
         assert_matches!(
@@ -667,7 +667,7 @@ mod test {
                 assert_eq!(MacAddr::from([1; 6]), mac_addr);
             }
         );
-        assert!(time_stream.try_next().is_err());
+        assert!(time_stream.try_recv().is_err());
     }
 
     #[fuchsia::test(allow_stalls = false)]

@@ -4,8 +4,6 @@
 
 //! Helper types, traits, and aliases for dealing with resource references.
 
-use core::convert::Infallible as Never;
-
 use crate::sync::{DynDebugReferences, MapRcNotifier, PrimaryRc, RcNotifier};
 
 /// A context trait determining the types to be used for reference
@@ -86,7 +84,7 @@ impl<R, D> RemoveResourceResult<R, D> {
     }
 }
 
-impl<R> RemoveResourceResult<R, Never> {
+impl<R> RemoveResourceResult<R, !> {
     /// A helper function to unwrap a [`RemoveResourceResult`] that can never be
     /// [`RemoveResourceResult::Deferred`].
     pub fn into_removed(self) -> R {

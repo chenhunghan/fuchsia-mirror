@@ -7,7 +7,7 @@ use crate::lsm_tree::Query;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_store::transaction::{LockKey, Mutation, Options, lock_keys};
 use crate::object_store::{
-    ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, ProjectProperty,
+    BytesAndNodes, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, ProjectProperty,
 };
 use anyhow::{Error, anyhow};
 use fprint::TypeFingerprint;
@@ -116,20 +116,16 @@ impl ObjectStore {
                 ObjectValue::Object { kind, attributes },
             ),
         );
-        transaction.add(
+        transaction.merge_bytes_and_nodes(
             self.store_object_id,
-            Mutation::merge_object(
-                ObjectKey::project_usage(root_id, project_id),
-                ObjectValue::BytesAndNodes { bytes: storage_size, nodes: 1 },
-            ),
+            ObjectKey::project_usage(root_id, project_id),
+            BytesAndNodes { bytes: storage_size, nodes: 1 },
         );
         if let Some(old_project_id) = old_project_id {
-            transaction.add(
+            transaction.merge_bytes_and_nodes(
                 self.store_object_id,
-                Mutation::merge_object(
-                    ObjectKey::project_usage(root_id, old_project_id),
-                    ObjectValue::BytesAndNodes { bytes: -storage_size, nodes: -1 },
-                ),
+                ObjectKey::project_usage(root_id, old_project_id),
+                BytesAndNodes { bytes: -storage_size, nodes: -1 },
             );
         }
         transaction.commit().await?;
@@ -190,15 +186,13 @@ impl ObjectStore {
         );
         // Not safe to convert storage_size to i64, as space usage can exceed i64 in size. Not
         // going to deal with handling such enormous files, fail the request.
-        transaction.add(
+        transaction.merge_bytes_and_nodes(
             self.store_object_id,
-            Mutation::merge_object(
-                ObjectKey::project_usage(root_id, old_project_id),
-                ObjectValue::BytesAndNodes {
-                    bytes: -(storage_size.try_into().map_err(|_| FxfsError::TooBig)?),
-                    nodes: -1,
-                },
-            ),
+            ObjectKey::project_usage(root_id, old_project_id),
+            BytesAndNodes {
+                bytes: -(storage_size.try_into().map_err(|_| FxfsError::TooBig)?),
+                nodes: -1,
+            },
         );
         transaction.commit().await?;
         Ok(())

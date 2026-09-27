@@ -1351,10 +1351,7 @@ mod tests {
             VsockConnectionKey::new(HOST_CID, host_port, DEFAULT_GUEST_CID, guest_port),
             control_tx,
         );
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         assert_eq!(header.src_cid.get(), u64::from(HOST_CID));
         assert_eq!(header.dst_cid.get(), u64::from(DEFAULT_GUEST_CID));
@@ -1492,10 +1489,7 @@ mod tests {
         // Send a request to the guest. If the guest replies before a request is sent, the device
         // assumes that we are out of sync and drops the connection.
         state.do_state_action().now_or_never().expect("task should have completed");
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         assert_eq!(header.src_port.get(), key.host_port);
         assert_eq!(header.dst_port.get(), key.guest_port);
@@ -1533,10 +1527,7 @@ mod tests {
         futures::pin_mut!(state_action_fut);
         assert!(!executor.run_until_stalled(&mut state_action_fut).is_pending());
 
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::CreditUpdate);
 
         // Create a vector of random bytes that will entirely exhaust the TX credit.
@@ -1757,10 +1748,7 @@ mod tests {
         futures::pin_mut!(state_action_fut);
         assert!(!executor.run_until_stalled(&mut state_action_fut).is_pending());
 
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::CreditUpdate);
 
         // Using the credit update, create a buffer that will exhaust the TX socket buffer.
@@ -1801,10 +1789,7 @@ mod tests {
         // The device socket is now writable, so the state sends an unsolicited credit update
         // to the guest.
         assert!(!executor.run_until_stalled(&mut state_action_fut).is_pending());
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::CreditUpdate);
         assert_eq!(header.fwd_cnt.get(), read_buf.len() as u32);
     }
@@ -1868,10 +1853,7 @@ mod tests {
 
         // The guest is instructed to stop sending packets, but receive is left open until the
         // socket is drained.
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         let flags = VirtioVsockFlags::from_bits(header.flags.get()).expect("unrecognized flag");
         assert_eq!(flags, VirtioVsockFlags::SHUTDOWN_SEND);
@@ -1943,10 +1925,7 @@ mod tests {
             panic!("Expected a change of state")
         }
 
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         let flags = VirtioVsockFlags::from_bits(header.flags.get()).expect("unrecognized flag");
         assert_eq!(flags, VirtioVsockFlags::SHUTDOWN_BOTH);
@@ -2123,10 +2102,7 @@ mod tests {
             panic!("Expected future to be ready")
         };
 
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         let flags = VirtioVsockFlags::from_bits(header.flags.get()).expect("unrecognized flag");
         assert_eq!(flags, VirtioVsockFlags::SHUTDOWN_SEND);
@@ -2213,10 +2189,7 @@ mod tests {
             &state,
         );
 
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         // All bytes still pending on client.
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::CreditUpdate);
@@ -2233,10 +2206,7 @@ mod tests {
             &state,
         );
 
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         // Three bytes net transmitted to client.
         assert_eq!(OpType::try_from(header.op.get()).unwrap(), OpType::CreditUpdate);
@@ -2264,10 +2234,7 @@ mod tests {
             panic!("Expected future to be ready")
         };
 
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         assert_eq!(header.src_port.get(), key.host_port);
         assert_eq!(header.dst_port.get(), key.guest_port);
@@ -2285,10 +2252,7 @@ mod tests {
         if let StateAction::UpdateState(new_state) =
             state.do_state_action().now_or_never().expect("task should have completed")
         {
-            let header = control_rx
-                .try_next()
-                .expect("expected control packet")
-                .expect("control stream should not close");
+            let header = control_rx.try_recv().expect("expected control packet");
 
             assert_eq!(header.src_port.get(), key.host_port);
             assert_eq!(header.dst_port.get(), key.guest_port);
@@ -2318,10 +2282,7 @@ mod tests {
         assert!(executor.run_until_stalled(&mut state_action_fut).is_pending());
 
         // Shutdown packet was sent to the guest.
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         let flags = VirtioVsockFlags::from_bits(header.flags.get()).expect("unrecognized flag");
         assert_eq!(flags, VirtioVsockFlags::SHUTDOWN_BOTH);
@@ -2394,10 +2355,7 @@ mod tests {
         let result = state.do_state_action().now_or_never().expect("task should have completed");
 
         assert_eq!(result, StateAction::ForcedShutdown);
-        let header = control_rx
-            .try_next()
-            .expect("expected control packet")
-            .expect("control stream should not close");
+        let header = control_rx.try_recv().expect("expected control packet");
 
         assert_eq!(header.src_port.get(), key.host_port);
         assert_eq!(header.dst_port.get(), key.guest_port);

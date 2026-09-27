@@ -1544,15 +1544,15 @@ mod tests {
         sme.log_empty_scan_defect();
 
         assert_eq!(
-            defect_receiver.try_next().expect("missing canceled scan error"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::CanceledScan { iface_id })),
         );
         assert_eq!(
-            defect_receiver.try_next().expect("missing failed scan error"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::FailedScan { iface_id })),
         );
         assert_eq!(
-            defect_receiver.try_next().expect("missing empty scan results error"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::EmptyScanResults { iface_id })),
         );
     }
@@ -1585,7 +1585,7 @@ mod tests {
         // Verify that the future returns and that a defect is logged.
         assert_matches!(exec.run_until_stalled(&mut scan_result_fut), Poll::Ready(Err(_)));
         assert_eq!(
-            defect_receiver.try_next().expect("missing empty scan results error"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::Timeout { iface_id, source: TimeoutSource::Scan })),
         );
     }
@@ -1661,7 +1661,7 @@ mod tests {
         // Verify that the future returns and that a defect is logged.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Err(_)));
         assert_eq!(
-            defect_receiver.try_next().expect("missing empty scan results error"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::Timeout {
                 iface_id,
                 source: TimeoutSource::Disconnect,
@@ -1877,7 +1877,7 @@ mod tests {
             Poll::Pending => panic!("connect future did not complete"),
         }
         assert_eq!(
-            defect_receiver.try_next().expect("missing connection timeout"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::Timeout { iface_id, source: TimeoutSource::Connect })),
         );
     }
@@ -2016,7 +2016,7 @@ mod tests {
         // Verify that the future returns and that a defect is logged.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Err(_)));
         assert_eq!(
-            defect_receiver.try_next().expect("missing connection timeout"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::Timeout { iface_id, source: TimeoutSource::ApStart })),
         );
     }
@@ -2093,7 +2093,7 @@ mod tests {
         // Verify that the future returns and that a defect is logged.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Err(_)));
         assert_eq!(
-            defect_receiver.try_next().expect("missing connection timeout"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::Timeout { iface_id, source: TimeoutSource::ApStop })),
         );
     }
@@ -2170,7 +2170,7 @@ mod tests {
         // Verify that the future returns and that a defect is logged.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Err(_)));
         assert_eq!(
-            defect_receiver.try_next().expect("missing connection timeout"),
+            defect_receiver.try_recv().ok(),
             Some(Defect::Iface(IfaceFailure::Timeout {
                 iface_id,
                 source: TimeoutSource::ApStatus,

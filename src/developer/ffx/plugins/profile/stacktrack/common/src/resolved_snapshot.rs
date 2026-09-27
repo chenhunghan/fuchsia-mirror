@@ -331,7 +331,9 @@ impl SymbolResolver {
     /// Resolves an address to structured location info for all inlined frames
     /// (from innermost inlined function to the enclosing non-inlined function).
     fn resolve_locations(&self, address: u64) -> Option<Vec<ResolvedLocation>> {
-        if let Ok(locations) = self.symbolizer.resolve_addr(address) {
+        if let Ok(locations) =
+            self.symbolizer.resolve_addr(address, ffx_symbolize::AddressType::Return)
+        {
             return Some(
                 locations
                     .into_iter()

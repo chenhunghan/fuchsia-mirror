@@ -24,17 +24,12 @@ fn main() -> std::process::ExitCode {
             netcfg_basic::main();
             std::process::ExitCode::SUCCESS
         }
-        "netstack_proxy" => netstack_proxy::main(),
         "netstack3" => {
             netstack3::main();
             std::process::ExitCode::SUCCESS
         }
         "reachability" => {
             reachability::main();
-            std::process::ExitCode::SUCCESS
-        }
-        "stack_migration" => {
-            stack_migration::main();
             std::process::ExitCode::SUCCESS
         }
         x => panic!("unknown binary {x}"),

@@ -4,6 +4,7 @@
 
 use crate::fuchsia::debug::{create_debug_directory, handle_debug_request};
 use crate::fuchsia::errors::map_to_status;
+use crate::fuchsia::layer_pager::LayerPagerImpl;
 use crate::fuchsia::memory_pressure::MemoryPressureMonitor;
 use crate::fuchsia::power::FuchsiaPowerManager;
 use crate::fuchsia::volume::MemoryPressureConfig;
@@ -24,13 +25,15 @@ use fidl_fuchsia_fxfs::{
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_memory_attribution as fattribution;
 use fidl_fuchsia_process_lifecycle::{LifecycleRequest, LifecycleRequestStream};
-use fidl_fuchsia_storage_block::BlockMarker;
+use fidl_fuchsia_storage_block::{self as fblock, BlockMarker};
 use fs_inspect::{FsInspect, FsInspectTree, InfoData, UsageData};
 use fuchsia_async as fasync;
 use fuchsia_component_client::connect_to_protocol;
 use futures::TryStreamExt;
 use futures::lock::Mutex;
-use fxfs::filesystem::{FxFilesystem, FxFilesystemBuilder, MIN_BLOCK_SIZE, OpenFxFilesystem, mkfs};
+use fxfs::filesystem::{
+    FxFilesystem, FxFilesystemBuilder, LayerPager, MIN_BLOCK_SIZE, OpenFxFilesystem, mkfs,
+};
 use fxfs::log::*;
 use fxfs::object_store::volume::root_volume;
 use fxfs::serialized_types::LATEST_VERSION;
@@ -41,7 +44,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Weak};
 use storage_device::DeviceHolder;
 use storage_device::block_device::BlockDevice;
-use storage_units::PAGE_SIZE;
+use storage_units::page_size;
 use vfs::directory::helper::DirectlyMutable;
 use vfs::execution_scope::ExecutionScope;
 
@@ -292,11 +295,37 @@ impl Component {
         // explicitly shut down all volumes first, and make this fail if there are remaining active
         // connections.  Fix the bug in fs_test which requires this.
         state.stop(&self.export_dir).await;
-        let client = new_block_client(device).await?;
+        let block_proxy = device.into_proxy();
+        let (mapper_proxy, server_end) = fidl::endpoints::create_proxy::<fblock::MapperMarker>();
+        let layer_pager = match block_proxy.connect_mapper(server_end).await {
+            Ok(Ok(())) => match LayerPagerImpl::new(&mapper_proxy).await {
+                Ok(pager) => {
+                    info!("Connected to mapper; layer files will be pager-backed");
+                    Some(Arc::new(pager) as Arc<dyn LayerPager>)
+                }
+                Err(error) => {
+                    warn!(
+                        error:?;
+                        "Failed to initialize layer pager; falling back to direct reads"
+                    );
+                    None
+                }
+            },
+            Ok(Err(status)) => {
+                info!(status:?; "Device does not support Mapper; layer files will be direct read");
+                None
+            }
+            Err(error) => {
+                warn!(error:?; "Failed to connect mapper; layer files will be direct read");
+                None
+            }
+        };
+        let client = RemoteBlockClient::new(block_proxy).await?;
 
         // TODO(https://fxbug.dev/42063349) Add support for block sizes greater than the page size.
-        assert!(client.block_size() <= PAGE_SIZE.get() as u32);
-        assert!(PAGE_SIZE == MIN_BLOCK_SIZE);
+        let page_size = page_size();
+        assert!(client.block_size() <= page_size.get() as u32);
+        assert!(page_size == MIN_BLOCK_SIZE);
 
         let fs = FxFilesystemBuilder::new()
             .fsck_after_every_transaction(options.fsck_after_every_transaction.unwrap_or(false))
@@ -304,6 +333,7 @@ impl Component {
             .inline_crypto_enabled(options.inline_crypto_enabled.unwrap_or(false))
             .barriers_enabled(options.barriers_enabled.unwrap_or(false))
             .allow_type3_blobs(options.allow_type3_blobs.unwrap_or(false))
+            .layer_pager(layer_pager)
             .power_manager(FuchsiaPowerManager::new())
             .open(DeviceHolder::new(
                 BlockDevice::new(client, options.read_only.unwrap_or(false)).await?,

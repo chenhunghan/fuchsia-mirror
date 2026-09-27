@@ -141,6 +141,7 @@ template("bazel_host_tool") {
 
     base_target = ":${target_name}(${toolchain_variant.base})"
     base_target_outdir = get_label_info(base_target, "root_out_dir")
+
     copy(target_name) {
       forward_variables_from(invoker,
                              [

@@ -79,15 +79,14 @@ pub unsafe fn hexdump_very_ex_raw<W: Write>(
         }
         core::write!(writer, "|")?;
 
-        for i in 0..16 {
-            let c = buf[i];
+        for (i, &c) in buf.iter().enumerate() {
             if i < s && (c.is_ascii_graphic() || c == b' ') {
                 core::write!(writer, "{}", c as char)?;
             } else {
                 core::write!(writer, ".")?;
             }
         }
-        core::write!(writer, "|\n")?;
+        core::writeln!(writer, "|")?;
     }
     Ok(())
 }
@@ -131,8 +130,8 @@ pub unsafe fn hexdump8_very_ex_raw<W: Write>(
             core::write!(writer, "0x{:08x}: ", disp_addr + count as u64)?;
         }
 
-        for i in 0..chunk_len {
-            core::write!(writer, "{:02x} ", buf[i])?;
+        for &b in &buf[..chunk_len] {
+            core::write!(writer, "{:02x} ", b)?;
         }
         for _ in chunk_len..16 {
             core::write!(writer, "   ")?;
@@ -140,15 +139,14 @@ pub unsafe fn hexdump8_very_ex_raw<W: Write>(
 
         core::write!(writer, "|")?;
 
-        for i in 0..chunk_len {
-            let c = buf[i];
+        for &c in &buf[..chunk_len] {
             if c.is_ascii_graphic() || c == b' ' {
                 core::write!(writer, "{}", c as char)?;
             } else {
                 core::write!(writer, ".")?;
             }
         }
-        core::write!(writer, "\n")?;
+        core::writeln!(writer)?;
     }
     Ok(())
 }

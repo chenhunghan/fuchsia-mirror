@@ -134,10 +134,10 @@ TEST(PowerDomainVisitorTest, TestBasicPowerDomain) {
   ASSERT_TRUE(domain_metadata.is_ok());
   ASSERT_TRUE(domain_metadata->domains());
   ASSERT_EQ(domain_metadata->domains()->size(), 2u);
+  ASSERT_EQ(domain_metadata->domains()->at(0).domain_id(), 2u);
   ASSERT_EQ(domain_metadata->domains()->at(0).id(), 2u);
-  ASSERT_EQ(domain_metadata->domains()->at(0).node_id(), 2u);
-  ASSERT_EQ(domain_metadata->domains()->at(1).id(), 2u);
-  ASSERT_EQ(domain_metadata->domains()->at(1).node_id(), 3u);
+  ASSERT_EQ(domain_metadata->domains()->at(1).domain_id(), 2u);
+  ASSERT_EQ(domain_metadata->domains()->at(1).id(), 3u);
   ASSERT_EQ(domain_metadata->domains()->at(1).name(), "basic_power_2");
 }
 

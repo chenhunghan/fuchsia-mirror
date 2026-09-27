@@ -5,8 +5,13 @@
 import("//build/bind/bind.gni")
 import("//build/drivers.gni")
 
+fuchsia_driver_dml("dwmac-dml") {
+  dml = "meta/dwmac.dml"
+  driver_name = "dwmac"
+}
+
 driver_bind_rules("dwmac_bind") {
-  rules = "meta/dwmac.bind"
+  dml_label = ":dwmac-dml"
   tests = "meta/bind-tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -57,7 +62,7 @@ fuchsia_driver_component("dwmac") {
   component_name = "dwmac"
   deps = [ ":dwmac-driver" ]
   info = "meta/dwmac-info.json"
-  manifest = "meta/dwmac.cml"
+  dml_label = ":dwmac-dml"
 }
 
 fuchsia_driver_package("package") {

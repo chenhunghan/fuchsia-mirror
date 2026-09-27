@@ -180,18 +180,18 @@ mod tests {
         assert_eq!(event_handle1.id(), 0);
         assert_eq!(event_handle2.id(), 1);
 
-        let (t1, event1, _) = time_stream.try_next().unwrap().expect("expect time entry");
+        let (t1, event1, _) = time_stream.try_recv().expect("expect time entry");
         assert_eq!(t1, timeout1);
         assert_eq!(event1.id, 0);
         assert_eq!(event1.event, 7);
 
-        let (t2, event2, _) = time_stream.try_next().unwrap().expect("expect time entry");
+        let (t2, event2, _) = time_stream.try_recv().expect("expect time entry");
         assert_eq!(t2, timeout2);
         assert_eq!(event2.id, 1);
         assert_eq!(event2.event, 9);
 
-        assert_matches!(time_stream.try_next(), Err(e) => {
-            assert_eq!(e.to_string(), "receiver channel is empty")
+        assert_matches!(time_stream.try_recv(), Err(e) => {
+            assert_eq!(e.to_string(), "receive failed because channel is empty")
         });
     }
 
@@ -206,11 +206,11 @@ mod tests {
         assert_eq!(event_handle1.id(), 0);
         assert_eq!(event_handle2.id(), 1);
 
-        let (t1, event1, _) = time_stream.try_next().unwrap().expect("expect time entry");
+        let (t1, event1, _) = time_stream.try_recv().expect("expect time entry");
         assert_eq!(event1.id, 0);
         assert_eq!(event1.event, 7);
 
-        let (t2, event2, _) = time_stream.try_next().unwrap().expect("expect time entry");
+        let (t2, event2, _) = time_stream.try_recv().expect("expect time entry");
         assert_eq!(event2.id, 1);
         assert_eq!(event2.event, 9);
 
@@ -218,8 +218,8 @@ mod tests {
         // values since they're dependent on the system clock.
         assert!(t1.into_nanos() > t2.into_nanos());
 
-        assert_matches!(time_stream.try_next(), Err(e) => {
-            assert_eq!(e.to_string(), "receiver channel is empty")
+        assert_matches!(time_stream.try_recv(), Err(e) => {
+            assert_eq!(e.to_string(), "receive failed because channel is empty")
         });
     }
 
@@ -232,7 +232,7 @@ mod tests {
         let event_handle = timer.schedule(5u32);
         assert_eq!(event_handle.id(), 0);
 
-        let (t, event, _) = time_stream.try_next().unwrap().expect("expect time entry");
+        let (t, event, _) = time_stream.try_recv().expect("expect time entry");
         assert_eq!(event.id, 0);
         assert_eq!(event.event, 5);
         assert!(start + zx::MonotonicDuration::from_seconds(10) <= t);

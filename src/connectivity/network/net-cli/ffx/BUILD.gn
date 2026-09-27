@@ -5,6 +5,7 @@
 import("//src/developer/ffx/build/ffx_plugin.gni")
 
 assert(is_host, "ffx_plugins are supported only for the host toolchain")
+
 ffx_plugin("ffx_net") {
   sdk_category = "not-yet-specified"
   edition = "2024"
@@ -27,7 +28,6 @@ ffx_plugin("ffx_net") {
     "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust_fdomain",
     "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust_fdomain",
     "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust_fdomain",
-    "//sdk/fidl/fuchsia.net.stackmigrationdeprecated:fuchsia.net.stackmigrationdeprecated_rust_fdomain",
     "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
     "//src/connectivity/network/net-cli:lib_fdomain",
     "//src/developer/ffx/lib/fho:lib",

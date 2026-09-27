@@ -36,7 +36,7 @@ rustc_library("f2fs_reader") {
     "//third_party/rust_crates:enumn",
     "//third_party/rust_crates:hex",
     "//third_party/rust_crates:log",
-    "//third_party/rust_crates:lru-cache",
+    "//third_party/rust_crates:lru",
     "//third_party/rust_crates:siphasher",
     "//third_party/rust_crates:zerocopy",
   ]

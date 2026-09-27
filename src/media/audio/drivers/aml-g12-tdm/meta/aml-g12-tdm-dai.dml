@@ -1,0 +1,101 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "aml-g12-tdm-dai",
+    composite_name: "aml_tdm",
+    include: [
+        "//sdk/lib/driver/compat/compat.shard.cml",
+        "driver/platform-device.shard.cml",
+    ],
+    program: {
+        compat: "driver/aml-g12-tdm-dai.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+    },
+    use: [
+        {
+            name: "pdev",
+            primary: true,
+            bind: {
+                one_of: [
+                    { compat: "amlogic,t931-audio-dai" },
+                    {
+                        protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                        vid: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_VID.AMLOGIC",
+                        did: [
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.DAI_IN",
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.DAI_OUT",
+                        ],
+                        pid: [
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.S905D2",
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.S905D3",
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.T931",
+                        ],
+                    },
+                ],
+            },
+        },
+        {
+            name: "clock-gate",
+            service: "fuchsia.hardware.clock.Service",
+            availability: "optional",
+            bind: {
+                rules: { "fuchsia.NAME": "clock-gate" },
+            },
+        },
+        {
+            name: "clock-pll",
+            service: "fuchsia.hardware.clock.Service",
+            availability: "optional",
+            bind: {
+                rules: { "fuchsia.NAME": "clock-pll" },
+            },
+        },
+        {
+            name: "gpio-init-0",
+            service: "fuchsia.gpio.Init",
+            availability: "optional",
+        },
+        {
+            name: "gpio-enable",
+            service: "fuchsia.hardware.gpio.Service",
+            availability: "optional",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-enable" },
+            },
+        },
+        {
+            name: "codec-01",
+            service: "fuchsia.hardware.audio.CodecService",
+            availability: "optional",
+            bind: {
+                rules: { "fuchsia.ID": 1 },
+            },
+        },
+        {
+            name: "codec-02",
+            service: "fuchsia.hardware.audio.CodecService",
+            availability: "optional",
+            bind: {
+                rules: { "fuchsia.ID": 2 },
+            },
+        },
+        {
+            name: "codec-03",
+            service: "fuchsia.hardware.audio.CodecService",
+            availability: "optional",
+            bind: {
+                rules: { "fuchsia.ID": 3 },
+            },
+        },
+        {
+            name: "clock-init",
+            service: "fuchsia.clock.Init",
+        },
+        {
+            name: "pin-states-0",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            availability: "optional",
+        },
+    ],
+}

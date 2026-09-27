@@ -150,10 +150,10 @@ impl UnsymbolizedSamples {
                                 let resolved_addr =
                                     seen_bt.entry(*backtrace).or_insert_with_key(|bt_key| {
                                         let resolved_locations = symbolizer
-                                            .resolve_addr(bt_key.0)
+                                            .resolve_addr(bt_key.address, bt_key.address_type)
                                             .unwrap_or_default();
                                         ResolvedAddress {
-                                            addr: bt_key.0,
+                                            addr: bt_key.address,
                                             locations: resolved_locations,
                                         }
                                     }).to_owned();
@@ -177,13 +177,16 @@ impl UnsymbolizedSamples {
                                 let frames = unwinder.unwind(regs_data, 128);
                                 let mut current_call_stack = vec![];
                                 for frame in frames {
-                                    let bt = BacktraceDetails(frame.pc);
+                                    let bt = BacktraceDetails::new(
+                                        frame.pc,
+                                        frame.pc_is_return_address.into(),
+                                    );
                                     let resolved_addr = seen_bt.entry(bt).or_insert_with_key(|bt_key| {
                                         let resolved_locations = symbolizer
-                                            .resolve_addr(bt_key.0)
+                                            .resolve_addr(bt_key.address, bt_key.address_type)
                                             .unwrap_or_default();
                                         ResolvedAddress {
-                                            addr: bt_key.0,
+                                            addr: bt_key.address,
                                             locations: resolved_locations,
                                         }
                                     }).to_owned();
@@ -208,5 +211,122 @@ impl UnsymbolizedSamples {
             std::fs::write(output, format!("{symbolized_samples:#?}\n"))?;
         }
         Ok(SymbolizedRecords { records: symbolized_samples })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ffx_symbolize::AddressType;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn test_backtrace_details_cache_partitioning() {
+        let exact_bt = BacktraceDetails::new(0x1234, AddressType::Exact);
+        let return_bt = BacktraceDetails::new(0x1234, AddressType::Return);
+        let unknown_bt = BacktraceDetails::new(0x1234, AddressType::Unknown);
+
+        assert_ne!(exact_bt, return_bt);
+        assert_ne!(exact_bt, unknown_bt);
+        assert_ne!(return_bt, unknown_bt);
+
+        let mut map = HashMap::new();
+        map.insert(
+            exact_bt,
+            ResolvedAddress {
+                addr: 0x1234,
+                locations: vec![ResolvedLocation {
+                    function: "exact_fn".to_string(),
+                    file_and_line: None,
+                    library: None,
+                    library_offset: 0,
+                }],
+            },
+        );
+        map.insert(
+            return_bt,
+            ResolvedAddress {
+                addr: 0x1234,
+                locations: vec![ResolvedLocation {
+                    function: "return_fn".to_string(),
+                    file_and_line: None,
+                    library: None,
+                    library_offset: 0,
+                }],
+            },
+        );
+        map.insert(
+            unknown_bt,
+            ResolvedAddress {
+                addr: 0x1234,
+                locations: vec![ResolvedLocation {
+                    function: "unknown_fn".to_string(),
+                    file_and_line: None,
+                    library: None,
+                    library_offset: 0,
+                }],
+            },
+        );
+
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(&exact_bt).unwrap().locations[0].function, "exact_fn");
+        assert_eq!(map.get(&return_bt).unwrap().locations[0].function, "return_fn");
+        assert_eq!(map.get(&unknown_bt).unwrap().locations[0].function, "unknown_fn");
+    }
+
+    #[test]
+    fn test_seen_bt_or_insert_with_key_cache_behavior() {
+        let mut seen_bt: HashMap<BacktraceDetails, ResolvedAddress> = HashMap::new();
+        let exact_calls = AtomicUsize::new(0);
+        let return_calls = AtomicUsize::new(0);
+
+        let resolve_mock = |details: &BacktraceDetails| -> ResolvedAddress {
+            let fn_name = match details.address_type {
+                AddressType::Exact => {
+                    exact_calls.fetch_add(1, Ordering::SeqCst);
+                    format!("exact_0x{:x}", details.address)
+                }
+                AddressType::Return => {
+                    return_calls.fetch_add(1, Ordering::SeqCst);
+                    format!("return_0x{:x}", details.address)
+                }
+                AddressType::Unknown => format!("unknown_0x{:x}", details.address),
+            };
+            ResolvedAddress {
+                addr: details.address,
+                locations: vec![ResolvedLocation {
+                    function: fn_name,
+                    file_and_line: None,
+                    library: None,
+                    library_offset: 0,
+                }],
+            }
+        };
+
+        let addr = 0x5000;
+        let exact_key = BacktraceDetails::new(addr, AddressType::Exact);
+        let return_key = BacktraceDetails::new(addr, AddressType::Return);
+
+        // First resolution for Exact key
+        let res1 = seen_bt.entry(exact_key).or_insert_with_key(resolve_mock).clone();
+        assert_eq!(res1.locations[0].function, "exact_0x5000");
+        assert_eq!(exact_calls.load(Ordering::SeqCst), 1);
+
+        // First resolution for Return key at identical address
+        let res2 = seen_bt.entry(return_key).or_insert_with_key(resolve_mock).clone();
+        assert_eq!(res2.locations[0].function, "return_0x5000");
+        assert_eq!(return_calls.load(Ordering::SeqCst), 1);
+
+        // Second lookup for Exact key must hit cache without invoking mock resolver
+        let res3 = seen_bt.entry(exact_key).or_insert_with_key(resolve_mock).clone();
+        assert_eq!(res3.locations[0].function, "exact_0x5000");
+        assert_eq!(exact_calls.load(Ordering::SeqCst), 1); // count remains 1
+
+        // Second lookup for Return key must hit cache without invoking mock resolver
+        let res4 = seen_bt.entry(return_key).or_insert_with_key(resolve_mock).clone();
+        assert_eq!(res4.locations[0].function, "return_0x5000");
+        assert_eq!(return_calls.load(Ordering::SeqCst), 1); // count remains 1
+
+        assert_eq!(seen_bt.len(), 2);
     }
 }

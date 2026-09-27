@@ -210,14 +210,9 @@ where
         let (rx_task_sender, rx_task_receiver) = mpsc::unbounded();
         let (tx_task_sender, tx_task_receiver) = TxTaskSender::new();
 
-        let data_notifier = wake_group.as_ref().and_then(|group| {
-            if let Some(notifier) = ctx.bindings_ctx().wake_groups.get_data_notifier(&group) {
-                Some(notifier)
-            } else {
-                warn!("could not attach socket to nonexistent wake group {group:?}");
-                None
-            }
-        });
+        let data_notifier = wake_group
+            .as_ref()
+            .and_then(|group| ctx.bindings_ctx().wake_groups.data_notifier(group));
 
         let id = ctx.api().tcp::<I>().create(UnconnectedSocketData {
             zx_socket: Arc::clone(&local),

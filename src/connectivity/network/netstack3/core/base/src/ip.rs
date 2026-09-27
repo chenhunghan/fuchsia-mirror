@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::num::NonZeroU32;
 
@@ -30,7 +29,7 @@ impl BroadcastIpExt for Ipv4 {
 }
 
 impl BroadcastIpExt for Ipv6 {
-    type BroadcastMarker = Never;
+    type BroadcastMarker = !;
 }
 
 /// Wrapper struct to provide a convenient [`GenericOverIp`] impl for use
@@ -147,7 +146,7 @@ impl IpTypesIpExt for Ipv4 {
 }
 
 impl IpTypesIpExt for Ipv6 {
-    type BroadcastMarker = Never;
+    type BroadcastMarker = !;
 }
 
 /// An [`Ip`] extension trait adding functionality specific to the IP layer.

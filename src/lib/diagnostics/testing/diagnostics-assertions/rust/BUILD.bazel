@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "diagnostics-assertions",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//src/lib/fuchsia",
+    ],
+    version = "0.1.0",
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:difference",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+alias(
+    name = "rust",
+    testonly = True,
+    actual = ":diagnostics-assertions",
+)

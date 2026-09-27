@@ -46,8 +46,8 @@ def generate_tests_json(
 
     # Read the text file enumerating all the Bazel targets listed in
     # `bazel_test_suite` GN targets.
-    bazel_test_suites_file = (
-        bazel_paths.ninja_build_dir / "bazel_test_suites.txt"
+    bazel_host_test_suites_file = (
+        bazel_paths.ninja_build_dir / "bazel_host_test_suites.txt"
     )
 
     # LINT.IfChange(bazel_host_tests_debug_symbols_json)
@@ -62,9 +62,9 @@ def generate_tests_json(
     # FileNotFoundError in downstream infra scripts.
     bazel_host_tests_debug_manifest.write_text("[]\n")
 
-    if not bazel_test_suites_file.exists():
+    if not bazel_host_test_suites_file.exists():
         return [], {starlark_input}
-    suites = bazel_test_suites_file.read_text().splitlines()
+    suites = bazel_host_test_suites_file.read_text().splitlines()
     if not suites:
         # Skip running `bazel cquery` to get the full list of tests if no Bazel
         # test suites are included in the build graph, to save time on regen.
@@ -207,8 +207,9 @@ def generate_tests_json(
         tests_json.append(test_spec)
         # LINT.ThenChange(//build/bazel/starlark/FuchsiaHostTestInfo.cquery:cquery_output_schema)
 
-    # Write out the top-level debug_symbols.json manifest for all Bazel host tests
-    # so GN debug_symbol_manifests metadata on //:bazel_test_suites can reference it.
+    # Write out the top-level debug_symbols.json manifest for all Bazel host
+    # tests so GN debug_symbol_manifests metadata on //:bazel_host_test_suites
+    # can reference it.
     bazel_host_tests_debug_manifest.write_text(
         json.dumps(host_test_debug_manifests, indent=2) + "\n"
     )
@@ -216,7 +217,7 @@ def generate_tests_json(
     if targets_missing_test_info:
         if len(targets_missing_test_info) == 1:
             raise RuntimeError(
-                f"Target '{targets_missing_test_info[0]}' included in the bazel_test_suites GN group is a test target "
+                f"Target '{targets_missing_test_info[0]}' included in the bazel_host_test_suites GN group is a test target "
                 f"but does not provide FuchsiaHostTestInfo. "
                 f"Wrap it with host_go_test(), host_rustc_test(), host_py_test(), or host_test()."
             )
@@ -225,7 +226,7 @@ def generate_tests_json(
                 f"  - {t}" for t in targets_missing_test_info
             )
             raise RuntimeError(
-                f"The following targets included in the bazel_test_suites GN group are test targets "
+                f"The following targets included in the bazel_host_test_suites GN group are test targets "
                 f"but do not provide FuchsiaHostTestInfo:\n{targets_list}\n"
                 f"Wrap them with host_go_test(), host_rustc_test(), host_py_test(), or host_test()."
             )

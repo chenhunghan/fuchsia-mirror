@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "@rules_fuchsia//fuchsia:defs.bzl",
     "fuchsia_cc_driver",
@@ -12,6 +11,7 @@ load(
     "fuchsia_package",
     "fuchsia_unittest_package",
 )
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -25,7 +25,7 @@ fuchsia_driver_bind_bytecode(
     ],
 )
 
-cc_library(
+fx_cc_library(
     name = "common",
     srcs = [
         "dw-i2c.cc",
@@ -34,7 +34,7 @@ cc_library(
         "dw-i2c.h",
         "dw-i2c-regs.h",
     ],
-    features = ["enable_zircon_asserts"],
+    build_flags = ["//build/config/fuchsia:enable_zircon_asserts"],
     deps = [
         "@fuchsia_sdk//fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_cpp",

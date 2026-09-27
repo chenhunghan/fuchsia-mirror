@@ -34,11 +34,8 @@
                 "filesystem/005",
                 "filesystem/006",
                 "filesystem/007",
-                "filesystem/008",
                 "filesystem/013",
                 "filesystem/014",
-                "filesystem/025",
-                "filesystem/026",
                 "filesystem/030",
                 "filesystem/033",
                 "filesystem/034",
@@ -52,7 +49,6 @@
                 "filesystem/065",
                 "filesystem/068",
                 "filesystem/069",
-                "filesystem/071",
                 "filesystem/079",
 
                 // TODO: https://fxbug.dev/398696732
@@ -60,7 +56,6 @@
                 "fs_filesystem/004",
                 "fs_filesystem/005",
                 "fs_filesystem/006",
-                "fs_filesystem/007",
                 "fs_filesystem/012",
                 "fs_filesystem/013",
                 "fs_filesystem/014",
@@ -116,7 +111,6 @@
                 "fs_filesystem/067",
                 "fs_filesystem/068",
                 "fs_filesystem/069",
-                "fs_filesystem/070",
                 "fs_filesystem/071",
                 "fs_filesystem/072",
                 "fs_filesystem/073",
@@ -129,15 +123,6 @@
                 "fs_filesystem/080",
                 "fs_filesystem/081",
                 "fs_filesystem/082",
-
-                // TODO: https://fxbug.dev/398699134
-                "glblub/001",
-                "glblub/002",
-                "glblub/003",
-                "glblub/004",
-                "glblub/005",
-                "glblub/008",
-                "glblub/009",
 
                 // TODO: https://fxbug.dev/398663317
                 "inet_socket/tcp/001",

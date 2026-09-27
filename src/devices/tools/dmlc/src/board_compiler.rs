@@ -10,7 +10,7 @@ use anyhow::Context;
 use dml_config as fbdc;
 use fidl_fuchsia_driver_metadata as fdr;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,12 +26,18 @@ struct LocalResourceEntry {
 /// Strips the leading '#' from a node/component reference name if present.
 /// In DML/CML, child nodes are often referenced with a leading '#'.
 fn strip_hash(s: &str) -> String {
-    if s.starts_with('#') { s[1..].to_string() } else { s.to_string() }
+    if let Some(stripped) = s.strip_prefix('#') { stripped.to_string() } else { s.to_string() }
 }
 
-pub fn compute_global_id(provider: &str, name: &str) -> u32 {
+fn normalize_config_id(id: &str) -> String {
+    id.trim().trim_start_matches(['#', '/']).to_string()
+}
+
+/// Computes a deterministic, non-zero 32-bit FNV-1a hash identifying an offer from `provider` to
+/// `to_name` with `name`.
+pub fn compute_global_id(provider: &str, to_name: &str, name: &str) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
-    for b in format!("{}:{}", provider, name).bytes() {
+    for b in format!("{}:{}:{}", provider, to_name, name).bytes() {
         hash ^= b as u32;
         hash = hash.wrapping_mul(0x01000193);
     }
@@ -59,6 +65,83 @@ fn get_or_create_device_idx(
     let dev = fbdc::Device { name: Some(name.to_string()), url, ..Default::default() };
     devices.push(dev);
     devices.len() - 1
+}
+
+/// Allocates a sequential, non-zero interrupt controller ID.
+fn allocate_controller_id(next_id: &mut u32) -> u32 {
+    let allocated = *next_id;
+    *next_id = next_id.checked_add(1).expect("Exhausted interrupt controller IDs");
+    allocated
+}
+
+fn resolve_single_irq_controller(
+    irq_obj: &mut serde_json::Map<String, Value>,
+    devices: &[fbdc::Device],
+) -> Result<(), anyhow::Error> {
+    if let Some(ctrl_val) = irq_obj.get("controller") {
+        match ctrl_val {
+            Value::String(ctrl_str) => {
+                let target_node = strip_hash(ctrl_str);
+                if target_node.is_empty() {
+                    anyhow::bail!(
+                        "Empty controller reference '{}' in interrupt constraint",
+                        ctrl_str
+                    );
+                }
+                let dev_idx = devices
+                    .iter()
+                    .position(|d| d.name.as_deref() == Some(&target_node))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Referenced interrupt controller device '{}' not found in board devices",
+                            target_node
+                        )
+                    })?;
+                let controller_id = devices[dev_idx].interrupt_controller_id.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Referenced interrupt controller device '{}' does not have a 'fuchsia.hardware.interrupt.ControllerRegistryService' offer from 'parent'",
+                        target_node
+                    )
+                })?;
+                irq_obj.insert("controller".to_string(), Value::Number(controller_id.into()));
+            }
+            Value::Number(_) => {
+                anyhow::bail!(
+                    "Manual integer controller IDs are not supported in interrupt constraints, use string reference (e.g. \"#<node_name>\")"
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "Invalid controller value in interrupt constraint: expected string reference (e.g. \"#<node_name>\"), got {:?}",
+                    other
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_interrupt_controllers(
+    constraint_val: &mut Value,
+    devices: &[fbdc::Device],
+) -> Result<(), anyhow::Error> {
+    let Some(obj) = constraint_val.as_object_mut() else {
+        return Ok(());
+    };
+
+    if let Some(Value::Array(interrupts)) = obj.get_mut("interrupts") {
+        for irq_val in interrupts.iter_mut() {
+            if let Some(irq_obj) = irq_val.as_object_mut() {
+                resolve_single_irq_controller(irq_obj, devices)?;
+            }
+        }
+    }
+
+    if let Some(Value::Object(irq_obj)) = obj.get_mut("interrupt") {
+        resolve_single_irq_controller(irq_obj, devices)?;
+    }
+
+    Ok(())
 }
 
 fn flatten_value(
@@ -168,10 +251,21 @@ fn flatten_value(
             }
         }
         Value::Object(obj) => {
-            for (key, child_val) in obj {
-                let child_prefix =
-                    if prefix.is_empty() { key.clone() } else { format!("{}.{}", prefix, key) };
-                flatten_value(child_val, &child_prefix, entries)?;
+            // Empty objects (e.g. `direct: {}`) are used to represent unit variants in FIDL
+            // unions or empty marker structs. We emit them as a boolean `true` entry to indicate
+            // presence.
+            if obj.is_empty() && !prefix.is_empty() {
+                entries.push(fdr::DictionaryEntry {
+                    key: prefix.to_string(),
+                    value: fdr::DictionaryValue::Boolean(true),
+                });
+            } else {
+                // Non-empty objects are recursively flattened using dot-separated keys.
+                for (key, child_val) in obj {
+                    let child_prefix =
+                        if prefix.is_empty() { key.clone() } else { format!("{}.{}", prefix, key) };
+                    flatten_value(child_val, &child_prefix, entries)?;
+                }
             }
         }
     }
@@ -221,6 +315,256 @@ fn build_generic_metadata_value(
     Ok(Value::Object(root_obj))
 }
 
+fn resolve_offer_config_id(
+    offer: &DmlOffer,
+    to_name: &str,
+    driver_config_map: &HashMap<String, String>,
+) -> Option<String> {
+    if let Some(config_id) = &offer.driver_config {
+        return Some(normalize_config_id(config_id));
+    }
+    if let Some(meta) = &offer.metadata {
+        if let Some(id_str) = meta.id() {
+            return Some(normalize_config_id(id_str));
+        }
+        return driver_config_map.get(to_name).cloned();
+    }
+    if offer.service.is_none() && (!offer.extra.is_empty() || offer.properties.is_some()) {
+        return driver_config_map.get(to_name).cloned();
+    }
+    if offer.properties.is_some() && offer.service.is_some() {
+        return offer.service.as_ref().map(|s| normalize_config_id(s));
+    }
+    None
+}
+
+fn extract_offer_config_val(offer: &DmlOffer) -> Value {
+    if let Some(meta) = &offer.metadata {
+        if let Some(data) = meta.extra.get("data") {
+            return data.clone();
+        }
+        if let Some(props) = meta.extra.get("properties") {
+            return props.clone();
+        }
+        if !meta.extra.is_empty() {
+            return Value::Object(meta.extra.clone().into_iter().collect());
+        }
+        return Value::Object(serde_json::Map::new());
+    }
+    if let Some(props) = &offer.properties {
+        return props.clone();
+    }
+    if !offer.extra.is_empty() {
+        return Value::Object(offer.extra.clone().into_iter().collect());
+    }
+    Value::Object(serde_json::Map::new())
+}
+
+fn process_offer_driver_config(
+    offer: &DmlOffer,
+    to_name: &str,
+    driver_config_map: &HashMap<String, String>,
+    device: &mut fbdc::Device,
+) -> Result<(), anyhow::Error> {
+    let Some(config_id) = resolve_offer_config_id(offer, to_name, driver_config_map) else {
+        return Ok(());
+    };
+
+    let config_val = extract_offer_config_val(offer);
+    let mut entries = Vec::new();
+    flatten_value(&config_val, "", &mut entries)?;
+    let dictionary = fdr::Dictionary { entries: Some(entries), ..Default::default() };
+    let serialized_bytes =
+        fidl::persist(&dictionary).context("Failed to serialize Dictionary to FIDL")?;
+
+    let dev_metadata = device.metadata.get_or_insert_with(Vec::new);
+    if let Some(existing) = dev_metadata.iter_mut().find(|m| m.id.as_deref() == Some(&config_id)) {
+        existing.data = Some(serialized_bytes);
+    } else {
+        dev_metadata.push(fbdc::StaticMetadata {
+            id: Some(config_id),
+            data: Some(serialized_bytes),
+            ..Default::default()
+        });
+    }
+
+    Ok(())
+}
+
+fn process_service_offer(
+    offer: &DmlOffer,
+    to_name: &str,
+    devices: &[fbdc::Device],
+    iommu_map: &IommuMap,
+    auto_incrementer: &mut crate::workarounds::AutoIncrementer,
+    aggregates_list: &mut Vec<((String, String), Vec<LocalResourceEntry>)>,
+) -> Result<(), anyhow::Error> {
+    let Some(service_name) = &offer.service else {
+        return Ok(());
+    };
+
+    let from = offer
+        .from
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("'from' is missing in service offer for '{}'", to_name))?;
+
+    let provider = if from == "parent" { "pdev".to_string() } else { strip_hash(from) };
+
+    let mut constraint_val =
+        offer.constraints.clone().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    auto_incrementer.apply(service_name, &provider, &mut constraint_val)?;
+    resolve_interrupt_controllers(&mut constraint_val, devices)?;
+    resolve_bti_iommus(&mut constraint_val, iommu_map)?;
+
+    let global_id = compute_global_id(&provider, to_name, offer.name.as_deref().unwrap_or(""));
+    if let Some(obj) = constraint_val.as_object_mut()
+        && !obj.contains_key("id")
+    {
+        obj.insert("id".to_string(), Value::Number(global_id.into()));
+    }
+
+    let entry = LocalResourceEntry {
+        node: to_name.to_string(),
+        constraint: constraint_val,
+        name: offer.name.clone(),
+        service: service_name.clone(),
+    };
+    let key = (provider, service_name.clone());
+    if let Some(existing) = aggregates_list.iter_mut().find(|(k, _)| *k == key) {
+        existing.1.push(entry);
+    } else {
+        aggregates_list.push((key, vec![entry]));
+    }
+
+    Ok(())
+}
+
+/// Replaces the IOMMU references in the BTI constraints of `constraint_val`
+/// with IOMMU IDs using `iommu_map`.
+///
+/// If a BTI constraint does not specify an IOMMU then it is assigned the IOMMU
+/// ID 0.
+///
+/// ```json
+/// // Constraints before.
+/// {
+///   "btis": [
+///     {
+///       "id": 0,
+///       "iommu": "#foo"
+///     },
+///     {
+///       "id": 1
+///     }
+///   ],
+///   ...
+/// }
+///
+/// // Constraints after.
+/// {
+///   "btis": [
+///     {
+///       "id": 0,
+///
+///       // Assuming the ID of IOMMU "foo" is 2.
+///       "iommu_id": 2
+///     },
+///     {
+///       "id": 1,
+///       "iommu_id": 0
+///     }
+///   ],
+///   ...
+/// }
+/// ```
+///
+/// Returns an error if:
+/// - A BTI constraint defines `iommu_id`.
+/// - An IOMMU reference does not start with `#`.
+/// - A referenced IOMMU is not found in `iommu_map`.
+fn resolve_bti_iommus(
+    constraint_val: &mut Value,
+    iommu_map: &IommuMap,
+) -> Result<(), anyhow::Error> {
+    let Some(obj) = constraint_val.as_object_mut() else {
+        return Ok(());
+    };
+
+    if let Some(Value::Array(btis)) = obj.get_mut("btis") {
+        for bti_val in btis.iter_mut() {
+            if let Some(bti_obj) = bti_val.as_object_mut() {
+                resolve_single_bti_iommu(bti_obj, iommu_map)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Replaces the IOMMU reference in the BTI constraint `bti_obj` with an IOMMU
+/// ID using `iommu_map`.
+///
+/// If the BTI constraint does not specify an IOMMU then it is assigned the
+/// IOMMU ID 0.
+///
+/// ```json
+/// // BTI constraint before.
+/// {
+///   "id": 0,
+///   "iommu": "#foo"
+/// }
+///
+/// // BTI constraint after.
+/// {
+///   "id": 0,
+///
+///   // Assuming the ID of IOMMU "foo" is 2.
+///   "iommu_id": 2
+/// }
+/// ```
+///
+/// Returns an error if:
+/// - `bti_obj` defines `iommu_id`.
+/// - The IOMMU reference does not start with `#`.
+/// - A referenced IOMMU is not found in `iommu_map`.
+fn resolve_single_bti_iommu(
+    bti_obj: &mut serde_json::Map<String, Value>,
+    iommu_map: &IommuMap,
+) -> Result<(), anyhow::Error> {
+    if bti_obj.contains_key("iommu_id") {
+        anyhow::bail!(
+            "Explicit \"iommu_id\" definition not allowed: Use `iommu: #<iommu-name>` instead"
+        );
+    }
+
+    match bti_obj.remove("iommu") {
+        Some(Value::String(iommu_reference)) => {
+            let iommu_name = iommu_reference.strip_prefix('#').with_context(|| {
+                format!(
+                    "IOMMU reference {iommu_reference:?} in BTI constraint must start with '#' (e.g. \"#{iommu_reference}\")"
+                )
+            })?;
+            let iommu_id = iommu_map.get_id(iommu_name).with_context(|| {
+                format!("Referenced IOMMU {iommu_name:?} not found in declared iommus")
+            })?;
+            bti_obj.insert("iommu_id".to_string(), Value::Number(iommu_id.into()));
+        }
+        Some(other) => {
+            anyhow::bail!(
+                "Invalid iommu value in BTI constraint: expected string reference starting with '#', got {:?}",
+                other
+            );
+        }
+        None => {
+            // Default to platform bus built-in stub IOMMU (ID 0).
+            bti_obj.insert("iommu_id".to_string(), Value::Number(0.into()));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::Error> {
     if args.out_dir.is_none()
         && (args.fidl_output.is_none() || args.bind_output.is_none() || args.cml_output.is_none())
@@ -254,6 +598,21 @@ pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::
 
     let board_dml = load_dml_file_root(input_path)?;
 
+    // Build a mapping from driver DML names and child device names to their config IDs.
+    // 1. Initial mapping: Load each driver DML file and map the driver's DML name to its primary
+    // configuration ID
+    // 2. Child device mapping: In the child processing loop below, extract the driver name from
+    //    each child's component URL and insert a mapping from `child.name` to that `config_id`.
+    // This enables subsequent offer processing to resolve the config ID for a target device
+    // even when an offer does not specify an explicit `config` or metadata ID.
+    let mut driver_config_map: HashMap<String, String> = HashMap::new();
+    for dml_path in &args.driver_dml {
+        let driver_dml = load_driver_dml(Path::new(dml_path))?;
+        if let Some(config) = driver_dml.driver_configs.first() {
+            driver_config_map.insert(driver_dml.name, config.driver_config.clone());
+        }
+    }
+
     let mut devices = Vec::new();
     let mut aggregates = Vec::new();
 
@@ -262,6 +621,18 @@ pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::
         let idx = get_or_create_device_idx(&mut devices, &child.name, child.url.clone());
         devices[idx].compatible = child.compatible.clone();
         devices[idx].id = child.id;
+        devices[idx].disabled = child.disabled;
+        devices[idx].driver_host = child.driver_host.clone();
+        // Map the child device name to its driver's config ID in `driver_config_map`.
+        if let Some(url) = &child.url {
+            // Extract driver name from component URL (e.g. "fuchsia-pkg://.../buttons#meta/buttons.cm" -> "buttons").
+            let driver_name =
+                url.split('#').next().and_then(|u| u.split('/').next_back()).unwrap_or("");
+            if let Some(config_id) = driver_config_map.get(driver_name) {
+                driver_config_map.insert(child.name.clone(), config_id.clone());
+            }
+        }
+
         if !child.metadata.is_empty() {
             let new_meta: Vec<_> = child
                 .metadata
@@ -289,44 +660,64 @@ pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::
     let mut auto_incrementer =
         crate::workarounds::AutoIncrementer::new(&board_dml.metadata_mappings);
     let mut aggregates_list = Vec::<((String, String), Vec<LocalResourceEntry>)>::new();
+    let mut next_controller_id: u32 = 1;
+
+    // Allocate interrupt controller IDs for devices receiving ControllerRegistryService from parent
+    for offer in &board_dml.offer {
+        if offer.service.as_deref() == Some("fuchsia.hardware.interrupt.ControllerRegistryService")
+        {
+            let to_name = strip_hash(&offer.to);
+            let from = offer.from.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("'from' is missing in service offer for '{}'", to_name)
+            })?;
+            if from != "parent" {
+                anyhow::bail!(
+                    "fuchsia.hardware.interrupt.ControllerRegistryService offer to '{}' must come from 'parent', found '{}'",
+                    to_name,
+                    from
+                );
+            }
+            if offer.name.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+                anyhow::bail!(
+                    "'name' is missing in fuchsia.hardware.interrupt.ControllerRegistryService offer for '{}'",
+                    to_name
+                );
+            }
+            let dev_idx = devices
+                .iter()
+                .position(|d| d.name.as_deref() == Some(&to_name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Target device '{}' for ControllerRegistryService offer not found in board devices",
+                        to_name
+                    )
+                })?;
+            if devices[dev_idx].interrupt_controller_id.is_none() {
+                let allocated = allocate_controller_id(&mut next_controller_id);
+                devices[dev_idx].interrupt_controller_id = Some(allocated);
+            }
+        }
+    }
+
+    let (iommus, iommu_map) = process_iommus(&board_dml.iommus)?;
 
     // Process offers
     for offer in &board_dml.offer {
-        let to_name = strip_hash(&offer.to);
-        let _ = get_or_create_device_idx(&mut devices, &to_name, None);
-
-        if let Some(service_name) = &offer.service {
-            let from = offer.from.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("'from' is missing in service offer for '{}'", to_name)
-            })?;
-
-            let provider = if from == "parent" { "pdev".to_string() } else { strip_hash(from) };
-
-            let mut constraint_val =
-                offer.constraints.clone().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-
-            auto_incrementer.apply(service_name, &provider, &mut constraint_val)?;
-
-            let global_id = compute_global_id(&provider, offer.name.as_deref().unwrap_or(&to_name));
-            if let Some(obj) = constraint_val.as_object_mut() {
-                if !obj.contains_key("id") {
-                    obj.insert("id".to_string(), Value::Number(global_id.into()));
-                }
-            }
-
-            let entry = LocalResourceEntry {
-                node: to_name.clone(),
-                constraint: constraint_val,
-                name: offer.name.clone(),
-                service: service_name.clone(),
-            };
-            let key = (provider, service_name.clone());
-            if let Some(existing) = aggregates_list.iter_mut().find(|(k, _)| *k == key) {
-                existing.1.push(entry);
-            } else {
-                aggregates_list.push((key, vec![entry]));
-            }
+        if offer.service.as_deref() == Some("fuchsia.hardware.interrupt.ControllerRegistryService")
+        {
+            continue;
         }
+        let to_name = strip_hash(&offer.to);
+        let dev_idx = get_or_create_device_idx(&mut devices, &to_name, None);
+        process_offer_driver_config(offer, &to_name, &driver_config_map, &mut devices[dev_idx])?;
+        process_service_offer(
+            offer,
+            &to_name,
+            &devices,
+            &iommu_map,
+            &mut auto_incrementer,
+            &mut aggregates_list,
+        )?;
     }
 
     for ((provider, service), resources) in &aggregates_list {
@@ -416,6 +807,7 @@ pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::
     let board_config = fbdc::BoardConfig {
         devices: Some(devices),
         aggregates: Some(aggregates),
+        iommus: Some(iommus),
         ..Default::default()
     };
     let serialized_board_config =
@@ -471,6 +863,121 @@ pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::
     std::fs::write(cml_output_path, final_cml_code)
         .context("Failed to write generated cml file")?;
     Ok(())
+}
+
+/// Validates IDs of IOMMUs in `dml_iommus`, ensuring there are no duplicate
+/// names or IDs. Generates unique IDs for IOMMUs in `dml_iommus` that do not
+/// explicitly define an ID.
+///
+/// Returns:
+/// - A `Vec<fbdc::Iommu>` for [`BoardConfig`](fbdc::BoardConfig).
+/// - An [`IommuMap`] providing bidirectional lookup between IOMMU names and IDs.
+fn process_iommus(dml_iommus: &[DmlIommu]) -> Result<(Vec<fbdc::Iommu>, IommuMap), anyhow::Error> {
+    let mut iommu_map = IommuMap::with_capacity(dml_iommus.len());
+
+    // Fill the map with the IOMMU IDs explicitly defined in the DML.
+    for iommu in dml_iommus {
+        if let Some(id) = iommu.id {
+            if id == 0 {
+                anyhow::bail!(
+                    "IOMMU {} has ID 0 which is reserved for the platform bus stub IOMMU",
+                    iommu.name
+                );
+            }
+            iommu_map.insert(iommu.name.clone(), id)?;
+        }
+    }
+
+    let mut next_iommu_id: u32 = 1;
+    let mut iommus = Vec::<fbdc::Iommu>::with_capacity(dml_iommus.len());
+    for iommu in dml_iommus {
+        let iommu_id = if let Some(id) = iommu.id {
+            id
+        } else {
+            // Generate a unique IOMMU ID.
+            while iommu_map.contains_id(next_iommu_id) {
+                next_iommu_id = next_iommu_id.checked_add(1).context("Exhausted IOMMU IDs")?;
+            }
+            let id = next_iommu_id;
+            iommu_map.insert(iommu.name.clone(), id)?;
+            next_iommu_id = next_iommu_id.checked_add(1).context("Exhausted IOMMU IDs")?;
+            id
+        };
+
+        let iommu_type = match (&iommu.arm_smmu, &iommu.stub_iommu) {
+            (Some(arm), None) => {
+                fbdc::IommuType::ArmSmmu(fbdc::ArmSmmu { base_address: arm.base_address })
+            }
+            (None, Some(_)) => fbdc::IommuType::StubIommu(fbdc::StubIommu {}),
+            (Some(_), Some(_)) => {
+                anyhow::bail!(
+                    "IOMMU '{}' cannot specify both 'arm_smmu' and 'stub_iommu'",
+                    iommu.name
+                );
+            }
+            (None, None) => {
+                anyhow::bail!(
+                    "IOMMU '{}' must specify either 'arm_smmu' or 'stub_iommu'",
+                    iommu.name
+                );
+            }
+        };
+
+        iommus.push(fbdc::Iommu {
+            name: Some(iommu.name.clone()),
+            id: Some(iommu_id),
+            iommu_type: Some(iommu_type),
+            ..Default::default()
+        });
+    }
+
+    Ok((iommus, iommu_map))
+}
+
+/// Bidirectional map between IOMMU names and IDs.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct IommuMap {
+    name_to_id: HashMap<String, u32>,
+    id_to_name: HashMap<u32, String>,
+}
+
+impl IommuMap {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            name_to_id: HashMap::with_capacity(capacity),
+            id_to_name: HashMap::with_capacity(capacity),
+        }
+    }
+
+    /// Inserts a name-to-id mapping, ensuring both name and ID are unique.
+    pub fn insert(&mut self, name: String, id: u32) -> Result<(), anyhow::Error> {
+        if name.starts_with('#') {
+            // '#' is reserved for references. An IOMMU name is not a reference.
+            anyhow::bail!("IOMMU name {:?} cannot start with '#'", name);
+        }
+        if let Some(other) = self.id_to_name.get(&id) {
+            anyhow::bail!("IOMMUs {:?} and {:?} have the same ID {}", name, other, id);
+        }
+        if self.name_to_id.contains_key(&name) {
+            anyhow::bail!("Multiple IOMMUs have the same name {:?}", name);
+        }
+        self.name_to_id.insert(name.clone(), id);
+        self.id_to_name.insert(id, name);
+        Ok(())
+    }
+
+    pub fn get_id(&self, name: &str) -> Option<u32> {
+        self.name_to_id.get(name).copied()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_name(&self, id: u32) -> Option<&str> {
+        self.id_to_name.get(&id).map(String::as_str)
+    }
+
+    pub fn contains_id(&self, id: u32) -> bool {
+        self.id_to_name.contains_key(&id)
+    }
 }
 
 #[cfg(test)]
@@ -749,17 +1256,17 @@ mod tests {
         let retrieved = fbdc::get_uint64(&dict, "large_uint").unwrap();
         assert_eq!(retrieved, 18446744073709551615u64);
     }
-
     #[test]
     fn test_compute_global_id() {
-        let id1 = compute_global_id("pdev", "gpio-pin-1");
-        let id2 = compute_global_id("pdev", "gpio-pin-1");
-        let id3 = compute_global_id("pdev", "gpio-pin-2");
+        let id1 = compute_global_id("pdev", "to1", "gpio-pin-1");
+        let id2 = compute_global_id("pdev", "to1", "gpio-pin-1");
+        let id3 = compute_global_id("pdev", "to1", "gpio-pin-2");
+        let id4 = compute_global_id("pdev", "to2", "gpio-pin-1");
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
+        assert_ne!(id1, id4);
         assert_ne!(id1, 0);
     }
-
     #[test]
     fn test_compile_board_minimal() {
         let temp_dir = std::env::temp_dir().join("test_temp_compile_board_minimal");
@@ -811,5 +1318,2045 @@ mod tests {
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_interrupt_controller_id() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "gia_node",
+                        "compatible": "google,level-gia"
+                    },
+                    {
+                        "name": "regular_node",
+                        "compatible": "google,regular"
+                    },
+                    {
+                        "name": "gia_node",
+                        "metadata": [
+                            { "id": "test.meta", "data": [1, 2] }
+                        ]
+                    }
+                ],
+                "offers": [
+                    {
+                        "name": "pdev",
+                        "from": "parent",
+                        "to": "#gia_node",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    },
+                    {
+                        "from": "parent",
+                        "to": "regular_node",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                {
+                                    "number": 10,
+                                    "mode": "LevelHigh",
+                                    "controller": "#gia_node"
+                                },
+                                {
+                                    "number": 20,
+                                    "mode": "EdgeHigh"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let devices = board_config.devices.as_ref().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].name.as_deref(), Some("gia_node"));
+        assert_eq!(devices[0].interrupt_controller_id, Some(1));
+        assert_eq!(devices[1].name.as_deref(), Some("regular_node"));
+        assert_eq!(devices[1].interrupt_controller_id, None);
+
+        // Verify that IRQ constraints with controller IDs are parsed properly
+        let pdev_dict = fbdc::pdev_constraints(&board_config, "regular_node").unwrap();
+        let irqs = fbdc::irq_list(pdev_dict);
+        assert_eq!(irqs.len(), 2);
+        assert_eq!(irqs[0].number, 10);
+        assert_eq!(irqs[0].mode.as_deref(), Some("LevelHigh"));
+        assert_eq!(irqs[0].controller, Some(1));
+
+        assert_eq!(irqs[1].number, 20);
+        assert_eq!(irqs[1].mode.as_deref(), Some("EdgeHigh"));
+        assert_eq!(irqs[1].controller, None);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_interrupt_controller_reference() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_ref");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "auto_gia_1",
+                        "compatible": "google,level-gia"
+                    },
+                    {
+                        "name": "auto_gia_2",
+                        "compatible": "google,level-gia"
+                    },
+                    {
+                        "name": "auto_gia_3",
+                        "compatible": "google,level-gia"
+                    },
+                    {
+                        "name": "unreferenced_node",
+                        "compatible": "google,unreferenced"
+                    },
+                    {
+                        "name": "client_node",
+                        "compatible": "google,client"
+                    }
+                ],
+                "offers": [
+                    {
+                        "name": "pdev",
+                        "from": "parent",
+                        "to": "#auto_gia_1",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    },
+                    {
+                        "name": "pdev",
+                        "from": "parent",
+                        "to": "#auto_gia_2",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    },
+                    {
+                        "name": "pdev",
+                        "from": "parent",
+                        "to": "#auto_gia_3",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    },
+                    {
+                        "from": "parent",
+                        "to": "client_node",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                {
+                                    "number": 10,
+                                    "mode": "LevelHigh",
+                                    "controller": "#auto_gia_1"
+                                },
+                                {
+                                    "number": 11,
+                                    "mode": "LevelHigh",
+                                    "controller": "#auto_gia_1"
+                                },
+                                {
+                                    "number": 20,
+                                    "mode": "EdgeHigh",
+                                    "controller": "#auto_gia_2"
+                                },
+                                {
+                                    "number": 30,
+                                    "mode": "LevelHigh",
+                                    "controller": "auto_gia_3"
+                                },
+                                {
+                                    "number": 40
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let devices = board_config.devices.as_ref().unwrap();
+
+        let find_dev =
+            |name: &str| devices.iter().find(|d| d.name.as_deref() == Some(name)).unwrap();
+        assert_eq!(find_dev("auto_gia_1").interrupt_controller_id, Some(1));
+        assert_eq!(find_dev("auto_gia_2").interrupt_controller_id, Some(2));
+        assert_eq!(find_dev("auto_gia_3").interrupt_controller_id, Some(3));
+        assert_eq!(find_dev("unreferenced_node").interrupt_controller_id, None);
+        assert_eq!(find_dev("client_node").interrupt_controller_id, None);
+
+        let pdev_dict = fbdc::pdev_constraints(&board_config, "client_node").unwrap();
+        let irqs = fbdc::irq_list(pdev_dict);
+        assert_eq!(irqs.len(), 5);
+
+        // First reference to #auto_gia_1 gets allocated ID 1
+        assert_eq!(irqs[0].number, 10);
+        assert_eq!(irqs[0].controller, Some(1));
+
+        // Second reference to #auto_gia_1 reuses ID 1
+        assert_eq!(irqs[1].number, 11);
+        assert_eq!(irqs[1].controller, Some(1));
+
+        // Reference to auto_gia_2 gets allocated ID 2
+        assert_eq!(irqs[2].number, 20);
+        assert_eq!(irqs[2].controller, Some(2));
+
+        // Reference to auto_gia_3 (without leading #) gets allocated ID 3
+        assert_eq!(irqs[3].number, 30);
+        assert_eq!(irqs[3].controller, Some(3));
+
+        // No controller specified
+        assert_eq!(irqs[4].number, 40);
+        assert_eq!(irqs[4].controller, None);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_interrupt_controller_empty_reference_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_empty_ref");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "node_a" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "node_a",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": "#" }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Empty controller reference"),
+            "Expected empty controller reference error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_invalid_type_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_invalid_type");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r#"{
+                "name": "test_board",
+                "children": [
+                    { "name": "node_a" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "node_a",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": [1, 2] }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Invalid controller value"),
+            "Expected invalid controller value error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_nonexistent_reference_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_nonexistent");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "node_a" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "node_a",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": "#nonexistent_node" }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Referenced interrupt controller device 'nonexistent_node' not found in board devices"),
+            "Expected nonexistent device error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_raw_integer_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_integer");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r#"{
+                "name": "test_board",
+                "children": [
+                    { "name": "node_a" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "node_a",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": 42 }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Manual integer controller IDs are not supported"),
+            "Expected manual integer controller IDs not supported error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_zero_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_zero");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r#"{
+                "name": "test_board",
+                "children": [
+                    { "name": "node_a" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "node_a",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": 0 }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Manual integer controller IDs are not supported"),
+            "Expected manual integer controller IDs not supported error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_empty_string_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_empty_str");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r#"{
+                "name": "test_board",
+                "children": [
+                    { "name": "node_a" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "node_a",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": "" }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Empty controller reference"),
+            "Expected empty controller reference error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_singular_object() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_singular");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "ctrl_node" },
+                    { "name": "client_node" }
+                ],
+                "offers": [
+                    {
+                        "name": "pdev",
+                        "from": "parent",
+                        "to": "#ctrl_node",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    },
+                    {
+                        "from": "parent",
+                        "to": "client_node",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupt": {
+                                "number": 42,
+                                "controller": "#ctrl_node"
+                            }
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let devices = board_config.devices.as_ref().unwrap();
+
+        let ctrl = devices.iter().find(|d| d.name.as_deref() == Some("ctrl_node")).unwrap();
+        assert_eq!(ctrl.interrupt_controller_id, Some(1));
+
+        let client = devices.iter().find(|d| d.name.as_deref() == Some("client_node")).unwrap();
+        assert_eq!(client.interrupt_controller_id, None);
+
+        let pdev_dict = fbdc::pdev_constraints(&board_config, "client_node").unwrap();
+        let irq_ctrl = fbdc::get_uint32(pdev_dict, "interrupt.controller");
+        assert_eq!(irq_ctrl, Some(1));
+        let irq_num = fbdc::get_uint32(pdev_dict, "interrupt.number");
+        assert_eq!(irq_num, Some(42));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_interrupt_controller_multiple_offers_same_controller() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_multi_offer");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "controller_x" },
+                    { "name": "controller_y" },
+                    { "name": "client_a" },
+                    { "name": "client_b" }
+                ],
+                "offers": [
+                    {
+                        "name": "pdev",
+                        "from": "parent",
+                        "to": "#controller_x",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    },
+                    {
+                        "name": "pdev",
+                        "from": "parent",
+                        "to": "#controller_y",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    },
+                    {
+                        "from": "parent",
+                        "to": "client_a",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": "#controller_x" }
+                            ]
+                        }
+                    },
+                    {
+                        "from": "parent",
+                        "to": "client_b",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 2, "controller": "#controller_y" },
+                                { "number": 3, "controller": "#controller_x" }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let devices = board_config.devices.as_ref().unwrap();
+
+        let find_dev =
+            |name: &str| devices.iter().find(|d| d.name.as_deref() == Some(name)).unwrap();
+        // controller_x is offered first -> ID 1
+        assert_eq!(find_dev("controller_x").interrupt_controller_id, Some(1));
+        // controller_y is offered next -> ID 2
+        assert_eq!(find_dev("controller_y").interrupt_controller_id, Some(2));
+
+        let pdev_a = fbdc::pdev_constraints(&board_config, "client_a").unwrap();
+        let irqs_a = fbdc::irq_list(pdev_a);
+        assert_eq!(irqs_a.len(), 1);
+        assert_eq!(irqs_a[0].controller, Some(1));
+
+        let pdev_b = fbdc::pdev_constraints(&board_config, "client_b").unwrap();
+        let irqs_b = fbdc::irq_list(pdev_b);
+        assert_eq!(irqs_b.len(), 2);
+        assert_eq!(irqs_b[0].controller, Some(2));
+        assert_eq!(irqs_b[1].controller, Some(1));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_interrupt_controller_missing_registry_offer_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_missing_registry");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "ctrl_node" },
+                    { "name": "client_node" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "client_node",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "constraints": {
+                            "interrupts": [
+                                { "number": 1, "controller": "#ctrl_node" }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("does not have a 'fuchsia.hardware.interrupt.ControllerRegistryService' offer from 'parent'"),
+            "Expected missing ControllerRegistryService offer error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_registry_offer_wrong_source_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_wrong_source");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "other_node" },
+                    { "name": "ctrl_node" }
+                ],
+                "offers": [
+                    {
+                        "name": "pdev",
+                        "from": "#other_node",
+                        "to": "#ctrl_node",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("must come from 'parent'"),
+            "Expected wrong source error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_interrupt_controller_registry_offer_missing_name_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_intr_ctrl_missing_name");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "ctrl_node" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "to": "#ctrl_node",
+                        "service": "fuchsia.hardware.interrupt.ControllerRegistryService"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains(
+                "'name' is missing in fuchsia.hardware.interrupt.ControllerRegistryService offer"
+            ),
+            "Expected missing name error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_service_offer_name_and_constraint_name() {
+        let temp_dir = std::env::temp_dir().join("test_temp_offer_name_constraint");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "pmic_node",
+                        "compatible": "fuchsia,test-pmic"
+                    },
+                    {
+                        "name": "dpu_node",
+                        "compatible": "fuchsia,test-display"
+                    }
+                ],
+                "offers": [
+                    {
+                        "from": "#pmic_node",
+                        "to": "#dpu_node",
+                        "service": "fuchsia.hardware.vreg.Service",
+                        "name": "test-vreg",
+                        "constraints": {
+                            "name": "regulator_1"
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let aggregates = board_config.aggregates.as_ref().unwrap();
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].provider.as_deref(), Some("pmic_node"));
+        assert_eq!(aggregates[0].service.as_deref(), Some("fuchsia.hardware.vreg.Service"));
+
+        let resources = aggregates[0].resources.as_ref().unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].name.as_deref(), Some("test-vreg"));
+        assert_eq!(resources[0].node.as_deref(), Some("dpu_node"));
+
+        let constraint_entries =
+            resources[0].constraint.as_ref().unwrap().entries.as_ref().unwrap();
+        let name_entry = constraint_entries.iter().find(|e| e.key == "name").unwrap();
+        assert_eq!(name_entry.value, fdr::DictionaryValue::Str("regulator_1".to_string()));
+
+        let expected_id = compute_global_id("pmic_node", "dpu_node", "test-vreg") as i64;
+        let id_entry = constraint_entries.iter().find(|e| e.key == "id").unwrap();
+        assert_eq!(id_entry.value, fdr::DictionaryValue::Int64(expected_id));
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_gpio_service_offer_id() {
+        let temp_dir = std::env::temp_dir().join("test_temp_gpio_offer_global_id");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "gpio_controller",
+                        "compatible": "fuchsia,test-gpio"
+                    },
+                    {
+                        "name": "buttons_node",
+                        "compatible": "fuchsia,test-buttons"
+                    }
+                ],
+                "offers": [
+                    {
+                        "from": "#gpio_controller",
+                        "to": "#buttons_node",
+                        "service": "fuchsia.hardware.gpio.Service",
+                        "name": "test-pin",
+                        "constraints": {
+                            "pin": 51,
+                            "name": "test-pin"
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let aggregates = board_config.aggregates.as_ref().unwrap();
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].provider.as_deref(), Some("gpio_controller"));
+        assert_eq!(aggregates[0].service.as_deref(), Some("fuchsia.hardware.gpio.Service"));
+
+        let resources = aggregates[0].resources.as_ref().unwrap();
+        assert_eq!(resources.len(), 1);
+
+        let constraint_entries =
+            resources[0].constraint.as_ref().unwrap().entries.as_ref().unwrap();
+
+        let expected_id = compute_global_id("gpio_controller", "buttons_node", "test-pin") as i64;
+        let id_entry = constraint_entries.iter().find(|e| e.key == "id").unwrap();
+        assert_eq!(id_entry.value, fdr::DictionaryValue::Int64(expected_id));
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_service_offer_preserves_explicit_id() {
+        let temp_dir = std::env::temp_dir().join("test_temp_service_offer_preserves_explicit_id");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "pmic_node",
+                        "compatible": "fuchsia,test-pmic"
+                    },
+                    {
+                        "name": "dpu_node",
+                        "compatible": "fuchsia,test-display"
+                    }
+                ],
+                "offers": [
+                    {
+                        "from": "#pmic_node",
+                        "to": "#dpu_node",
+                        "service": "fuchsia.hardware.vreg.Service",
+                        "name": "test-vreg",
+                        "constraints": {
+                            "name": "regulator_1",
+                            "id": 999
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let aggregates = board_config.aggregates.as_ref().unwrap();
+        assert_eq!(aggregates.len(), 1);
+
+        let resources = aggregates[0].resources.as_ref().unwrap();
+        assert_eq!(resources.len(), 1);
+
+        let constraint_entries =
+            resources[0].constraint.as_ref().unwrap().entries.as_ref().unwrap();
+
+        let id_entry = constraint_entries.iter().find(|e| e.key == "id").unwrap();
+        assert_eq!(id_entry.value, fdr::DictionaryValue::Int64(999));
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_duplicate_gpio_pin_enforces_single_consumer_in_metadata() {
+        let temp_dir = std::env::temp_dir().join("test_temp_duplicate_gpio_pin_single_consumer");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "gpio_controller",
+                        "compatible": "fuchsia,test-gpio"
+                    },
+                    {
+                        "name": "consumer_a",
+                        "compatible": "fuchsia,test-a"
+                    },
+                    {
+                        "name": "consumer_b",
+                        "compatible": "fuchsia,test-b"
+                    }
+                ],
+                "offers": [
+                    {
+                        "from": "#gpio_controller",
+                        "to": "#consumer_a",
+                        "service": "fuchsia.hardware.gpio.Service",
+                        "name": "reset-pin",
+                        "constraints": {
+                            "pin": 51
+                        }
+                    },
+                    {
+                        "from": "#gpio_controller",
+                        "to": "#consumer_b",
+                        "service": "fuchsia.hardware.gpio.Service",
+                        "name": "reset-pin",
+                        "constraints": {
+                            "pin": 51
+                        }
+                    }
+                ],
+                "metadata_mappings": [
+                    {
+                        "metadata_id": "fuchsia.hardware.pinimpl.Metadata",
+                        "aggregations": [
+                            {
+                                "service": "fuchsia.hardware.gpio.Service",
+                                "field": "pins"
+                            }
+                        ]
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let aggregates = board_config.aggregates.as_ref().unwrap();
+        assert_eq!(aggregates.len(), 1);
+
+        let resources = aggregates[0].resources.as_ref().unwrap();
+        assert_eq!(resources.len(), 2);
+
+        let id_a = resources[0]
+            .constraint
+            .as_ref()
+            .unwrap()
+            .entries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.key == "id")
+            .unwrap();
+        let id_b = resources[1]
+            .constraint
+            .as_ref()
+            .unwrap()
+            .entries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.key == "id")
+            .unwrap();
+        // Distinct consumers receive distinct IDs, and deduplicate_metadata_resources keeps only
+        // the first pin entry (`id_a`), ensuring only `consumer_a` can bind to the pin.
+        assert_ne!(id_a.value, id_b.value);
+
+        let gpio_dev = board_config
+            .devices
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|d| d.name.as_deref() == Some("gpio_controller"))
+            .unwrap();
+        let meta_bytes = gpio_dev.metadata.as_ref().unwrap()[0].data.as_ref().unwrap();
+        let meta_dict: fdr::Dictionary = fidl::unpersist(meta_bytes).unwrap();
+        let meta_entries = meta_dict.entries.as_ref().unwrap();
+        let pins_count = meta_entries.iter().find(|e| e.key == "pins._count").unwrap();
+        assert_eq!(pins_count.value, fdr::DictionaryValue::Int64(1));
+        let pin_0_id = meta_entries.iter().find(|e| e.key == "pins.0.id").unwrap();
+        assert_eq!(pin_0_id.value, id_a.value);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+    #[test]
+    fn test_compile_board_offer_metadata() {
+        use std::collections::HashMap;
+        let temp_dir = std::env::temp_dir().join("test_temp_offer_metadata");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "gpio-buttons",
+                        "url": "fuchsia-pkg://fuchsia.com/buttons#meta/buttons.cm",
+                        "compatible": "fuchsia,gpio-buttons"
+                    }
+                ],
+                "offers": [
+                    {
+                        "service": "fuchsia.hardware.gpio.Service",
+                        "name": "power",
+                        "from": "#gpio-controller-ff634400",
+                        "to": "#gpio-buttons",
+                        "constraints": {
+                            "pin": 92,
+                            "name": "power"
+                        }
+                    },
+                    {
+                        "driver_config": "fuchsia.buttons.GpioButtonsMetadata",
+                        "from": "#gpio-controller-ff634400",
+                        "to": "#gpio-buttons",
+                        "buttons": [
+                            {
+                                "type": {
+                                    "direct": {}
+                                 },
+                                "gpio_a_index": 0,
+                                "id": "POWER"
+                            }
+                        ],
+                        "gpios": [
+                            {
+                                "type": {
+                                    "interrupt": {}
+                                },
+                                "flags": 128
+                            }
+                        ]
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let driver_file = temp_dir.join("buttons.dml");
+        fs::write(
+            &driver_file,
+            r##"{
+                "name": "buttons",
+                "capabilities": [
+                    {
+                        "service": "fuchsia.hardware.buttons.Service"
+                    },
+                    {
+                        "driver_config": "fuchsia.buttons.GpioButtonsMetadata",
+                        "properties": {
+                            "buttons": {
+                                "type": "vector",
+                                "max_count": 10,
+                                "element": { "type": "object" }
+                            },
+                            "gpios": {
+                                "type": "vector",
+                                "max_count": 10,
+                                "element": { "type": "object" }
+                            }
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![driver_file.to_str().unwrap().to_string()],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let bytes = fs::read(&fidl_out).unwrap();
+        let board_config = fidl::unpersist::<fbdc::BoardConfig>(&bytes).unwrap();
+        let devices = board_config.devices.unwrap();
+        let gpio_buttons =
+            devices.iter().find(|d| d.name.as_deref() == Some("gpio-buttons")).unwrap();
+        let metadata = gpio_buttons.metadata.as_ref().unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id.as_deref(), Some("fuchsia.buttons.GpioButtonsMetadata"));
+        let dict = fidl::unpersist::<fdr::Dictionary>(metadata[0].data.as_ref().unwrap()).unwrap();
+        let flat =
+            dict.entries.unwrap().into_iter().map(|e| (e.key, e.value)).collect::<HashMap<_, _>>();
+        assert_eq!(flat.get("buttons._count"), Some(&fdr::DictionaryValue::Int64(1)));
+        assert_eq!(flat.get("buttons.0.id"), Some(&fdr::DictionaryValue::Str("POWER".to_string())));
+        assert_eq!(flat.get("buttons.0.gpio_a_index"), Some(&fdr::DictionaryValue::Int64(0)));
+        assert_eq!(flat.get("buttons.0.type.direct"), Some(&fdr::DictionaryValue::Boolean(true)));
+        assert_eq!(flat.get("gpios._count"), Some(&fdr::DictionaryValue::Int64(1)));
+        assert_eq!(flat.get("gpios.0.flags"), Some(&fdr::DictionaryValue::Int64(128)));
+        assert_eq!(flat.get("gpios.0.type.interrupt"), Some(&fdr::DictionaryValue::Boolean(true)));
+
+        // Clean up
+        let _ = fs::remove_file(&main_file);
+        let _ = fs::remove_file(&driver_file);
+        let _ = fs::remove_file(&fidl_out);
+        let _ = fs::remove_file(&bind_out);
+        let _ = fs::remove_file(&cml_out);
+        let _ = fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_disabled_device_configuration() {
+        let temp_dir = std::env::temp_dir().join("test_temp_disabled_device");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "node_disabled",
+                        "compatible": "fuchsia,disabled",
+                        "disabled": true
+                    },
+                    {
+                        "name": "node_explicit_false",
+                        "compatible": "fuchsia,explicit-false",
+                        "disabled": false
+                    },
+                    {
+                        "name": "node_enabled",
+                        "compatible": "fuchsia,enabled"
+                    }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "name": "pdev",
+                        "to": "#node_disabled"
+                    },
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "name": "pdev",
+                        "to": "#node_offer_only"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+        let devices = board_config.devices.as_ref().unwrap();
+
+        let disabled = devices.iter().find(|d| d.name.as_deref() == Some("node_disabled")).unwrap();
+        assert_eq!(disabled.disabled, Some(true));
+
+        let explicit_false =
+            devices.iter().find(|d| d.name.as_deref() == Some("node_explicit_false")).unwrap();
+        assert_eq!(explicit_false.disabled, Some(false));
+
+        let normal = devices.iter().find(|d| d.name.as_deref() == Some("node_enabled")).unwrap();
+        assert_eq!(normal.disabled, None);
+
+        let offer_only =
+            devices.iter().find(|d| d.name.as_deref() == Some("node_offer_only")).unwrap();
+        assert_eq!(offer_only.disabled, None);
+
+        // Verify that offers to disabled devices are preserved in aggregates so they can be
+        // enabled at runtime via `fuchsia.driver.devicetree.EnabledNodes`.
+        let aggregates = board_config.aggregates.as_ref().unwrap();
+        let has_disabled_resource = aggregates.iter().any(|agg| {
+            agg.resources
+                .as_ref()
+                .is_some_and(|res| res.iter().any(|r| r.node.as_deref() == Some("node_disabled")))
+        });
+        assert!(has_disabled_resource);
+
+        // Verify runtime override helper behavior with `enabled_nodes`.
+        assert!(fbdc::is_device_disabled(disabled, &[]));
+        assert!(!fbdc::is_device_disabled(disabled, &["node_disabled".to_string()]));
+        assert!(!fbdc::is_device_disabled(disabled, &["/node_disabled".to_string()]));
+        assert!(fbdc::is_node_force_enabled("pcie-c500000", &["/pcie@c500000".to_string()]));
+        assert!(!fbdc::is_device_disabled(explicit_false, &[]));
+        assert!(!fbdc::is_device_disabled(normal, &[]));
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_iommu_declaration_and_bti_resolution() {
+        let temp_dir = std::env::temp_dir().join("test_temp_iommu_resolution");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "iommus": [
+                    {
+                        "name": "arm-smmu",
+                        "arm_smmu": {
+                            "base_address": 0x0c600001
+                        }
+                    },
+                    {
+                        "name": "stub-iommu",
+                        "stub_iommu": {}
+                    }
+                ],
+                "children": [
+                    {
+                        "name": "child_dev",
+                        "compatible": "fuchsia,test"
+                    }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "name": "pdev",
+                        "to": "#child_dev",
+                        "constraints": {
+                            "btis": [
+                                {
+                                    "iommu": "#arm-smmu",
+                                    "id": 1,
+                                    "name": "bti_0"
+                                },
+                                {
+                                    "iommu": "#arm-smmu",
+                                    "id": 2,
+                                    "name": "bti_1"
+                                },
+                                {
+                                    "iommu": "#stub-iommu",
+                                    "id": 3,
+                                    "name": "bti_stub"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+
+        let iommus = board_config.iommus.as_ref().expect("iommus should be present");
+        assert_eq!(iommus.len(), 2);
+
+        let arm_smmu = iommus.iter().find(|i| i.name.as_deref() == Some("arm-smmu")).unwrap();
+        // ID 1 was autogenerated since 0 is reserved
+        assert_eq!(arm_smmu.id, Some(1));
+        match &arm_smmu.iommu_type {
+            Some(fbdc::IommuType::ArmSmmu(arm)) => {
+                assert_eq!(arm.base_address, 0x0c600001);
+            }
+            other => panic!("Expected ArmSmmu, got {:?}", other),
+        }
+
+        let stub = iommus.iter().find(|i| i.name.as_deref() == Some("stub-iommu")).unwrap();
+        // ID 2 was autogenerated sequentially
+        assert_eq!(stub.id, Some(2));
+        assert!(matches!(stub.iommu_type, Some(fbdc::IommuType::StubIommu(_))));
+
+        let aggregates = board_config.aggregates.as_ref().unwrap();
+        let pdev_agg = aggregates.iter().find(|a| a.provider.as_deref() == Some("pdev")).unwrap();
+        let resource = &pdev_agg.resources.as_ref().unwrap()[0];
+        let dict = resource.constraint.as_ref().unwrap();
+
+        let btis = fbdc::bti_list(dict).unwrap();
+        assert_eq!(btis.len(), 3);
+        assert_eq!(btis[0].id, 1);
+        assert_eq!(btis[0].iommu_id, 1);
+        assert_eq!(btis[0].name.as_deref(), Some("bti_0"));
+
+        assert_eq!(btis[1].id, 2);
+        assert_eq!(btis[1].iommu_id, 1);
+        assert_eq!(btis[1].name.as_deref(), Some("bti_1"));
+
+        assert_eq!(btis[2].id, 3);
+        assert_eq!(btis[2].iommu_id, 2);
+        assert_eq!(btis[2].name.as_deref(), Some("bti_stub"));
+
+        // Clean up
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_bti_omitted_iommu_defaults_to_zero() {
+        let temp_dir = std::env::temp_dir().join("test_temp_bti_omitted_iommu");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    {
+                        "name": "child_dev",
+                        "compatible": "fuchsia,test"
+                    }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "name": "pdev",
+                        "to": "#child_dev",
+                        "constraints": {
+                            "btis": [
+                                {
+                                    "id": 1,
+                                    "name": "bti_default"
+                                },
+                                {
+                                    "id": 2,
+                                    "name": "bti_second"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let fidl_out = temp_dir.join("board-config.fidl");
+        let bind_out = temp_dir.join("board.bind");
+        let cml_out = temp_dir.join("board.cml");
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: None,
+            fidl_output: Some(fidl_out.to_str().unwrap().to_string()),
+            bind_output: Some(bind_out.to_str().unwrap().to_string()),
+            cml_output: Some(cml_out.to_str().unwrap().to_string()),
+            driver_dml: vec![],
+        };
+
+        compile_board(&args, "2026").unwrap();
+
+        let fidl_bytes = fs::read(&fidl_out).unwrap();
+        let board_config: fbdc::BoardConfig = fidl::unpersist(&fidl_bytes).unwrap();
+
+        let aggregates = board_config.aggregates.as_ref().unwrap();
+        let pdev_agg = aggregates.iter().find(|a| a.provider.as_deref() == Some("pdev")).unwrap();
+        let resource = &pdev_agg.resources.as_ref().unwrap()[0];
+        let dict = resource.constraint.as_ref().unwrap();
+
+        let btis = fbdc::bti_list(dict).unwrap();
+        assert_eq!(btis.len(), 2);
+        assert_eq!(btis[0].id, 1);
+        assert_eq!(btis[0].iommu_id, 0);
+        assert_eq!(btis[0].name.as_deref(), Some("bti_default"));
+
+        assert_eq!(btis[1].id, 2);
+        assert_eq!(btis[1].iommu_id, 0);
+        assert_eq!(btis[1].name.as_deref(), Some("bti_second"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_bti_manual_iommu_id_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_bti_manual_iommu_id");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "child_dev" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "to": "#child_dev",
+                        "constraints": {
+                            "btis": [
+                                {
+                                    "id": 1,
+                                    "iommu_id": 0
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Explicit \"iommu_id\" definition not allowed"),
+            "Expected manual iommu_id error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_bti_reference_missing_hash_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_bti_missing_hash");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "iommus": [
+                    {
+                        "name": "arm-smmu",
+                        "arm_smmu": { "base_address": 0x0c600001 }
+                    }
+                ],
+                "children": [
+                    { "name": "child_dev" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "to": "#child_dev",
+                        "constraints": {
+                            "btis": [
+                                {
+                                    "id": 1,
+                                    "iommu": "arm-smmu"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("must start with '#'"),
+            "Expected missing '#' error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_bti_empty_reference_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_bti_empty_ref");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "child_dev" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "to": "#child_dev",
+                        "constraints": {
+                            "btis": [
+                                {
+                                    "id": 1,
+                                    "iommu": "#"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Referenced IOMMU \"\" not found in declared iommus"),
+            "Expected empty reference error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_bti_numeric_iommu_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_bti_numeric_iommu");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "child_dev" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "to": "#child_dev",
+                        "constraints": {
+                            "btis": [
+                                {
+                                    "id": 1,
+                                    "iommu": 42
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("expected string reference starting with '#'"),
+            "Expected expected string reference error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_bti_undeclared_reference_rejected() {
+        let temp_dir = std::env::temp_dir().join("test_temp_bti_undeclared_ref");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "children": [
+                    { "name": "child_dev" }
+                ],
+                "offers": [
+                    {
+                        "from": "parent",
+                        "service": "fuchsia.hardware.platform.device.Service",
+                        "to": "#child_dev",
+                        "constraints": {
+                            "btis": [
+                                {
+                                    "id": 1,
+                                    "iommu": "#unknown-smmu"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("Referenced IOMMU \"unknown-smmu\" not found in declared iommus"),
+            "Expected undeclared IOMMU error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_iommu_map_name_starts_with_hash_error() {
+        let mut map = IommuMap::default();
+        let res = map.insert("#arm-smmu".to_string(), 1);
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(err_msg.contains("IOMMU name \"#arm-smmu\" cannot start with '#'"));
+    }
+
+    #[test]
+    fn test_iommu_definition_with_hash_name_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_iommu_hash_name");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "iommus": [
+                    {
+                        "name": "#arm-smmu",
+                        "arm_smmu": { "base_address": 0x0c600001 }
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("cannot start with '#'"),
+            "Expected hash name error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_iommu_missing_type_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_iommu_missing_type");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "iommus": [
+                    {
+                        "name": "arm-smmu"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("must specify either 'arm_smmu' or 'stub_iommu'"),
+            "Expected missing type error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_iommu_both_types_error() {
+        let temp_dir = std::env::temp_dir().join("test_temp_iommu_both_types");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let main_file = temp_dir.join("main.dml");
+        fs::write(
+            &main_file,
+            r##"{
+                "name": "test_board",
+                "iommus": [
+                    {
+                        "name": "arm-smmu",
+                        "arm_smmu": { "base_address": 0x0c600001 },
+                        "stub_iommu": {}
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let args = CompileBoardArgs {
+            input_file: main_file.to_str().unwrap().to_string(),
+            out_dir: Some(temp_dir.to_str().unwrap().to_string()),
+            fidl_output: None,
+            bind_output: None,
+            cml_output: None,
+            driver_dml: vec![],
+        };
+
+        let res = compile_board(&args, "2026");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.err().unwrap());
+        assert!(
+            err_msg.contains("cannot specify both 'arm_smmu' and 'stub_iommu'"),
+            "Expected both types error, got: {}",
+            err_msg
+        );
     }
 }

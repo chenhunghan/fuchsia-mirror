@@ -14,6 +14,7 @@ rustc_library("fbl") {
   edition = "2024"
   sources = [
     "src/array.rs",
+    "src/bits.rs",
     "src/canary.rs",
     "src/conditional_select_nospec.rs",
     "src/confine_array_index.rs",
@@ -66,7 +67,6 @@ rustc_library("fbl") {
     configs += [ "//zircon/kernel/switch:allow-needless-late-init" ]
     configs += [ "//zircon/kernel/switch:allow-unnecessary-unwrap" ]
     configs += [ "//zircon/kernel/switch:allow-new-without-default" ]
-    configs += [ "//zircon/kernel/switch:allow-needless-range-loop" ]
   }
 }
 

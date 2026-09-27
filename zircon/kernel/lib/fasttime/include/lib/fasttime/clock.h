@@ -13,8 +13,6 @@
 
 #include <concepts>
 
-class ClockDispatcher;
-
 namespace fasttime {
 
 // ClockTransformation structures in `libfasttime` need an adapter class
@@ -81,7 +79,7 @@ struct ClockTransformation {
   zx_status_t GetDetails(zx_clock_details_v1_t* out_details) const;
 
  private:
-  friend class ::ClockDispatcher;
+  friend struct ClockTransformationLayoutCheck;
 
   zx_ticks_t GetCurrentTicks() const {
     return is_boot() ? Adapter::GetBootTicks() : Adapter::GetMonoTicks();

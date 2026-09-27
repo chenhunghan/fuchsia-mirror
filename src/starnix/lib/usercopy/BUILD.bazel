@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "usercopy_cpp_reference_routines",
+    srcs = [
+        "hermetic_common.h",
+        "hermetic_copy.cc",
+        "hermetic_copy.h",
+        "hermetic_copy_common.h",
+        "hermetic_copy_until_null_byte.cc",
+        "hermetic_copy_until_null_byte.h",
+        "hermetic_zero.cc",
+        "hermetic_zero.h",
+    ],
+    copts = [
+        "-O3",
+        "-fno-omit-frame-pointer",
+        "-mno-omit-leaf-frame-pointer",
+    ],  # @bazel2gn:raw_overwrite:[ "//build/config:optimize_speed", "//build/config:frame_pointers", ":leaf-frame-pointer" ]
+)
+
+fx_cc_library(
+    name = "usercopy_assembly_routines",
+    srcs = select({
+        "@platforms//cpu:x86_64": [
+            "arch/x64/atomic_compare_exchange.S",
+            "arch/x64/atomic_error.S",
+            "arch/x64/atomic_load.S",
+            "arch/x64/atomic_store.S",
+            "arch/x64/hermetic_copy.S",
+            "arch/x64/hermetic_copy_error.S",
+            "arch/x64/hermetic_copy_until_null_byte.S",
+            "arch/x64/hermetic_zero.S",
+        ],
+        "@platforms//cpu:arm64": [
+            "arch/arm64/atomic_compare_exchange.S",
+            "arch/arm64/atomic_error.S",
+            "arch/arm64/atomic_load.S",
+            "arch/arm64/atomic_store.S",
+            "arch/arm64/hermetic_copy.S",
+            "arch/arm64/hermetic_copy_error.S",
+            "arch/arm64/hermetic_copy_until_null_byte.S",
+            "arch/arm64/hermetic_zero.S",
+        ],
+        "@platforms//cpu:riscv64": [
+            "arch/riscv64/atomic_compare_exchange.S",
+            "arch/riscv64/atomic_error.S",
+            "arch/riscv64/atomic_load.S",
+            "arch/riscv64/atomic_store.S",
+            "arch/riscv64/hermetic_copy.S",
+            "arch/riscv64/hermetic_copy_error.S",
+            "arch/riscv64/hermetic_copy_until_null_byte.S",
+            "arch/riscv64/hermetic_zero.S",
+        ],
+    }),
+)
+
+rustc_library(
+    name = "usercopy",
+    srcs = ["src/lib.rs"],
+    crate_name = "usercopy",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+    visibility = ["//src/starnix/kernel/core:__pkg__"],
+    with_unit_tests = True,
+    deps = [
+        ":usercopy_assembly_routines",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-runtime",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

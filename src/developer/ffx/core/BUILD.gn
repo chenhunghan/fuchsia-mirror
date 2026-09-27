@@ -10,35 +10,13 @@ rustc_library("lib") {
   name = "ffx_core"
   version = "0.1.0"
   edition = "2024"
-  with_unit_tests = true
 
-  deps = [
-    "macro:lib",
-    "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust",
-    "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
-    "//src/developer/ffx/fidl:fuchsia.developer.ffx_rust",
-    "//src/developer/ffx/lib/errors:lib",
-    "//src/developer/ffx/lib/rcs:lib",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:async-trait",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:thiserror",
-  ]
-
-  test_deps = [
-    "//src/lib/fuchsia",
-    "//third_party/rust_crates:assert_matches",
-  ]
+  deps = [ "macro:lib" ]
 
   sources = [ "src/lib.rs" ]
 }
 
 group("tests") {
   testonly = true
-  deps = [
-    ":lib_test",
-    "macro:tests",
-  ]
+  deps = [ "macro:tests" ]
 }

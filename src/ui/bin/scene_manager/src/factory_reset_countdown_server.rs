@@ -49,7 +49,7 @@ mod tests {
         let (server, mut receiver) = make_server_and_receiver();
         let (_proxy, stream) = create_proxy_and_stream::<FactoryResetCountdownMarker>();
         assert_matches!(server.handle_request(stream).await, Ok(()));
-        assert!(receiver.try_next().expect("should return ok").is_some());
+        assert!(receiver.try_recv().is_ok());
     }
 
     #[fuchsia::test(allow_stalls = false)]

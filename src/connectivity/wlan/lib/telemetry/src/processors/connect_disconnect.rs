@@ -9,7 +9,6 @@ use crate::convert::{
 };
 use crate::processors::toggle_events::ClientConnectionsToggleEvent;
 use crate::util::cobalt_logger::{FilteredCobaltLogger, log_cobalt_batch};
-use derivative::Derivative;
 use fidl_fuchsia_metrics::{MetricEvent, MetricEventPayload};
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
 use fidl_fuchsia_wlan_sme as fidl_sme;
@@ -96,17 +95,13 @@ struct FailedToStopState {}
 #[derive(Clone, Debug)]
 struct PnoScanFailedIdleState {}
 
-#[derive(Derivative, Unit)]
-#[derivative(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Unit, Hash)]
 struct InspectConnectedNetwork {
     bssid: String,
     ssid: String,
     protection: String,
     ht_cap: Option<Vec<u8>>,
     vht_cap: Option<Vec<u8>>,
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(Hash = "ignore")]
-    wsc: Option<InspectNetworkWsc>,
     is_wmm_assoc: bool,
     wmm_param: Option<Vec<u8>>,
 }
@@ -119,28 +114,8 @@ impl From<&BssDescription> for InspectConnectedNetwork {
             protection: format!("{:?}", bss_description.protection()),
             ht_cap: bss_description.raw_ht_cap().map(|cap| cap.bytes.into()),
             vht_cap: bss_description.raw_vht_cap().map(|cap| cap.bytes.into()),
-            wsc: bss_description.probe_resp_wsc().as_ref().map(InspectNetworkWsc::from),
             is_wmm_assoc: bss_description.find_wmm_param().is_some(),
             wmm_param: bss_description.find_wmm_param().map(|bytes| bytes.into()),
-        }
-    }
-}
-
-#[derive(PartialEq, Unit, Hash)]
-struct InspectNetworkWsc {
-    device_name: String,
-    manufacturer: String,
-    model_name: String,
-    model_number: String,
-}
-
-impl From<&wlan_common::ie::wsc::ProbeRespWsc> for InspectNetworkWsc {
-    fn from(wsc: &wlan_common::ie::wsc::ProbeRespWsc) -> Self {
-        Self {
-            device_name: String::from_utf8_lossy(&wsc.device_name[..]).to_string(),
-            manufacturer: String::from_utf8_lossy(&wsc.manufacturer[..]).to_string(),
-            model_name: String::from_utf8_lossy(&wsc.model_name[..]).to_string(),
-            model_number: String::from_utf8_lossy(&wsc.model_number[..]).to_string(),
         }
     }
 }

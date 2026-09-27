@@ -112,7 +112,17 @@ function main() {
   # Check if any .profraw files were generated before invoking ffx coverage.
   if [[ -z "$(find "${test_output_dir}" -name "*.profraw" -print -quit)" ]]; then
     fx-warn "No coverage profile (.profraw) files found in ${test_output_dir}"
-    fx-info "Ensure the test target was built with a coverage variant enabled, see //docs/contribute/testing/coverage.md."
+    fx-info "Ensure the test target was built with a coverage variant enabled:"
+    fx-info "  - Fuchsia component tests: --variant coverage"
+    fx-info "  - Host tests: --variant host_coverage"
+    if [[ -f "${FUCHSIA_BUILD_DIR}/args.gn" ]] && ! grep -q "host_coverage" "${FUCHSIA_BUILD_DIR}/args.gn"; then
+      if grep -q "coverage" "${FUCHSIA_BUILD_DIR}/args.gn"; then
+        fx-info "Note: ${FUCHSIA_BUILD_DIR}/args.gn enables 'coverage' (Fuchsia target only), which does not instrument host tests."
+      else
+        fx-info "Note: No coverage variant was found in ${FUCHSIA_BUILD_DIR}/args.gn."
+      fi
+    fi
+    fx-info "See //docs/contribute/testing/coverage.md for details."
     exit 1
   fi
 

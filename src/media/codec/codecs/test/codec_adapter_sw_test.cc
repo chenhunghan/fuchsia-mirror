@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include "test_codec_packets.h"
+
 class CodecAdapterSWDummy : public CodecAdapterSW<fit::deferred_action<fit::closure>> {
  public:
   CodecAdapterSWDummy(std::mutex& lock)
@@ -55,4 +57,38 @@ TEST(CodecAdapterSW, DoesNotCrashOnDestruction) {
   // To pass, this test must not crash.
   std::mutex lock;
   auto under_test = CodecAdapterSWDummy(lock);
+}
+
+TEST(BufferPool, ResetAndFreeBuffer) {
+  BufferPool pool;
+  auto buffers = Buffers({1024, 2048});
+
+  // Add buffers to pool
+  pool.AddBuffer(buffers.ptr(0));
+  pool.AddBuffer(buffers.ptr(1));
+
+  // Allocate buffers
+  const CodecBuffer* buf0 = pool.AllocateBuffer(1024);
+  const CodecBuffer* buf1 = pool.AllocateBuffer(2048);
+  EXPECT_EQ(buf0, buffers.ptr(0));
+  EXPECT_EQ(buf1, buffers.ptr(1));
+  EXPECT_TRUE(pool.has_buffers_in_use());
+
+  // Reset the pool, forgetting all active allocations. This should not crash
+  // even if buffers are in use.
+  pool.Reset(false);
+  EXPECT_FALSE(pool.has_buffers_in_use());
+
+  // A late/delayed free of the old buffer should be safely ignored and not
+  // push it back to the free list or crash.
+  pool.FreeBuffer(buf0->base());
+
+  // Stop waits so that AllocateBuffer returns immediately instead of blocking
+  // if the queue is empty.
+  pool.StopAllWaits();
+
+  // If we try to allocate now, it should return nullptr because the pool was reset,
+  // and the late free should have been ignored.
+  const CodecBuffer* allocated = pool.AllocateBuffer();
+  EXPECT_EQ(allocated, nullptr);
 }

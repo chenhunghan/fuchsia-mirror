@@ -210,15 +210,6 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             arg_sets=test_args,
         )
 
-    def skip_if_wep_not_supported(self, test_params: TestParams) -> None:
-        # TODO(b/490162087): Remove this skip once OpenWrt supports WEP security
-        if self.openwrt_ap and (
-            isinstance(test_params.dut_security_mode, SecurityWep)
-            or isinstance(test_params.origin_security_mode, SecurityWep)
-            or isinstance(test_params.target_security_mode, SecurityWep)
-        ):
-            raise signals.TestSkip("OpenWrt does not support WEP security")
-
     def name_func(
         self,
         test_params: TestParams,
@@ -354,7 +345,6 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             raise signals.TestAbortClass(
                 "No access point configured for this test."
             )
-        self.skip_if_wep_not_supported(test_params)
         # Setup APs using test params
         roam_params = await self.setup_aps(test_params)
 

@@ -27,7 +27,6 @@
                 "MMapFileTest.WriteSharedTruncateSIGBUS",
 
                 // TODO(https://fxbug.dev/347826447): Re-enable once FAULT_BEYOND_CONTENT_SIZE implemented.
-                "ElfTest.OutOfBoundsPhdrs",
                 "MMapFileTest.InternalSigBus",
                 "MMapFileTest.InternalSigBusZeroing",
                 "MMapFileTest.MapOffsetBeyondEnd",

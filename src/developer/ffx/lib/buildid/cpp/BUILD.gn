@@ -37,6 +37,5 @@ if (is_host) {
   source_set("buildid") {
     sources = [ "linux.cc" ]
     public = [ "buildid.h" ]
-    configs += [ "//build/config:Wno-conversion" ]
   }
 }

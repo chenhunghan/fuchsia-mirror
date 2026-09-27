@@ -161,6 +161,7 @@ const char* TOTAL_DYNAMIC_CHILDREN_KEY = "total_dynamic_children";
 const char* ALLOCATED_BLOCKS_KEY = "allocated_blocks";
 const char* DEALLOCATED_BLOCKS_KEY = "deallocated_blocks";
 const char* FAILED_ALLOCATIONS_KEY = "failed_allocations";
+const char* PEAK_BYTES_REQUESTED_KEY = "peak_bytes_requested";
 }  // namespace
 
 void Inspector::CreateStatsNode() {
@@ -185,6 +186,8 @@ void Inspector::CreateStatsNode() {
         stats_insp.GetRoot().CreateUint(DEALLOCATED_BLOCKS_KEY, stats.deallocated_blocks,
                                         &stats_insp);
         stats_insp.GetRoot().CreateUint(FAILED_ALLOCATIONS_KEY, stats.failed_allocations,
+                                        &stats_insp);
+        stats_insp.GetRoot().CreateUint(PEAK_BYTES_REQUESTED_KEY, stats.peak_bytes_requested,
                                         &stats_insp);
         return fpromise::make_ok_promise(stats_insp);
       },

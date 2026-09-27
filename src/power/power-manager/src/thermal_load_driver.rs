@@ -552,7 +552,7 @@ impl TemperatureInputInspect {
     }
 }
 
-/// Maximum number of recent samples or history averages to retain in memory for shutdown logging.
+/// Maximum number of history averages to retain in memory for shutdown logging.
 const MAX_RECENT_AVERAGES: usize = 30;
 
 struct TemperatureHistoryInspect {
@@ -565,7 +565,7 @@ struct TemperatureHistoryInspect {
     accumulated_average: f64,
     current_max: f32,
     history_averages: VecDeque<Celsius>,
-    recent_samples: VecDeque<Celsius>,
+    recent_samples: Vec<Celsius>,
 }
 
 impl TemperatureHistoryInspect {
@@ -605,19 +605,16 @@ impl TemperatureHistoryInspect {
             accumulated_average: 0.0,
             current_max: f32::MIN,
             history_averages: VecDeque::with_capacity(MAX_RECENT_AVERAGES),
-            recent_samples: VecDeque::with_capacity(MAX_RECENT_AVERAGES),
+            recent_samples: Vec::with_capacity(polls_per_entry as usize),
         }
     }
 
     fn process_measurement(&mut self, time: BootInstant, temp: TemperatureReadings) {
-        if self.recent_samples.len() >= MAX_RECENT_AVERAGES {
-            self.recent_samples.pop_front();
-        }
-        self.recent_samples.push_back(temp.raw);
-
         if self.polls_per_entry == 0 {
             return;
         }
+
+        self.recent_samples.push(temp.raw);
 
         let temp = temp.raw.0;
         self.latest_temperature.set(temp);
@@ -654,7 +651,7 @@ impl TemperatureHistoryInspect {
     }
 
     #[cfg(test)]
-    fn get_recent_samples(&self) -> &VecDeque<Celsius> {
+    fn get_recent_samples(&self) -> &[Celsius] {
         &self.recent_samples
     }
 }
@@ -1399,9 +1396,10 @@ mod tests {
         }
     }
 
-    /// Tests that `recent_samples` evicts oldest samples when `polls_per_entry > MAX_RECENT_AVERAGES`.
+    /// Tests that `recent_samples` preserves all unaveraged samples without gaps even when
+    /// `polls_per_entry > MAX_RECENT_AVERAGES`, and clears once the window completes.
     #[fuchsia::test]
-    fn test_recent_samples_eviction_before_average_completes() {
+    fn test_recent_samples_large_averaging_window() {
         let inspector = inspect::Inspector::default();
         let manager = StateRecorderManager::new(&inspector);
         let sensor_root = inspector.root().create_child("test_sensor");
@@ -1423,12 +1421,25 @@ mod tests {
             );
         }
 
-        // No completed averages yet, and recent_samples capped at MAX_RECENT_AVERAGES (30),
-        // retaining samples 5..35 (25.0°C .. 54.0°C)
+        // All 35 unaveraged samples are preserved (no gap between 0..35)
         assert!(history.get_history_averages().is_empty());
-        assert_eq!(history.get_recent_samples().len(), MAX_RECENT_AVERAGES);
-        assert_eq!(history.get_recent_samples()[0], Celsius(25.0));
-        assert_eq!(history.get_recent_samples()[MAX_RECENT_AVERAGES - 1], Celsius(54.0));
+        assert_eq!(history.get_recent_samples().len(), 35);
+        assert_eq!(history.get_recent_samples()[0], Celsius(20.0));
+        assert_eq!(history.get_recent_samples()[34], Celsius(54.0));
+
+        // Feed the remaining 5 samples (55.0°C .. 59.0°C) to complete the 40-poll window
+        for i in 35..40 {
+            let temp = 20.0 + (i as f64);
+            history.process_measurement(
+                BootInstant::from_nanos((i as i64) * 1_000_000_000),
+                TemperatureReadings { raw: Celsius(temp), filtered: Celsius(temp) },
+            );
+        }
+
+        // First average completes (average of 20.0..=59.0 = 39.5°C) and recent_samples clears
+        assert_eq!(history.get_history_averages().len(), 1);
+        assert_eq!(history.get_history_averages()[0], Celsius(39.5));
+        assert!(history.get_recent_samples().is_empty());
     }
 
     /// Tests thermal shutdown when multiple sensors with different configurations are monitored.

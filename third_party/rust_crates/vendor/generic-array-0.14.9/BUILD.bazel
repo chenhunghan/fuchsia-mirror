@@ -57,6 +57,7 @@ rust_library(
     edition = "2015",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=relaxed_coherence",
     ],
     tags = [
         "cargo-bazel",

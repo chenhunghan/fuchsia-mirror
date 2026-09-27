@@ -2,16 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "@rules_fuchsia//fuchsia:defs.bzl",
     "fuchsia_cc_driver",
     "fuchsia_cc_test",
+    "fuchsia_component_manifest",
     "fuchsia_driver_bind_bytecode",
     "fuchsia_driver_component",
     "fuchsia_package",
+    "fuchsia_structured_config_cpp_elf_lib",
+    "fuchsia_structured_config_values",
     "fuchsia_unittest_package",
 )
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -27,7 +30,7 @@ fuchsia_driver_bind_bytecode(
     ],
 )
 
-cc_library(
+fx_cc_library(
     name = "common",
     srcs = [
         "a1-blocks.h",
@@ -39,11 +42,12 @@ cc_library(
     hdrs = [
         "aml-gpio.h",
     ],
+    build_flags = ["//build/config/fuchsia:enable_zircon_asserts"],
     defines = [
         "_ALL_SOURCE",
     ],
-    features = ["enable_zircon_asserts"],
     deps = [
+        ":aml-gpio-config",
         "//src/devices/lib/amlogic",
         "//src/lib/ddk:ddk_metadata",
         "//zircon/system/ulib/ddk-platform-defs",
@@ -72,11 +76,29 @@ fuchsia_cc_driver(
     ],
 )
 
+fuchsia_component_manifest(
+    name = "manifest",
+    src = "meta/aml-gpio.cml",
+)
+
 fuchsia_driver_component(
     name = "component",
     bind_bytecode = ":aml-gpio-bind",
     driver_lib = ":aml-gpio-driver",
-    manifest = "meta/aml-gpio.cml",
+    manifest = ":manifest",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "aml-gpio-config",
+    cm_label = ":manifest",
+)
+
+fuchsia_structured_config_values(
+    name = "sc-values",
+    cm_label = ":manifest",
+    values = {
+        "suspend_enabled": False,
+    },
 )
 
 fuchsia_package(
@@ -85,6 +107,7 @@ fuchsia_package(
     components = [":component"],
     fuchsia_api_level = "HEAD",
     package_repository_name = "fuchsia.com",
+    resources = [":sc-values"],
     visibility = ["//visibility:public"],
 )
 

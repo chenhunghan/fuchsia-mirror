@@ -35,6 +35,8 @@ _INPUT_ARGS: dict[str, Any] = {
     ),
 }
 
+_SHARED_DATA: str = "/tmp/shared_data"
+
 _MOCK_ARGS: dict[str, Any] = {
     "ffx_config_data": ffx_config.FfxConfigData(
         isolate_dir=fuchsia_controller.IsolateDir("/tmp/isolate"),
@@ -50,6 +52,7 @@ _MOCK_ARGS: dict[str, Any] = {
         emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
+        shared_data=_SHARED_DATA,
     ),
 }
 
@@ -126,6 +129,7 @@ class FuchsiaControllerTests(unittest.TestCase):
             ssh_private_keys=None,
             ssh_public_keys=None,
             ssh_auth_sock=ssh_auth_sock,
+            shared_data=_SHARED_DATA,
         )
         fc_transport.FuchsiaController(
             target_name=_INPUT_ARGS["target_name"],
@@ -136,6 +140,7 @@ class FuchsiaControllerTests(unittest.TestCase):
             config={
                 "log.level": "debug",
                 "log.dir": "/tmp/logs",
+                "shared_data": _SHARED_DATA,
                 "connectivity.enable_usb": "false",
                 "connectivity.usb_driver_autostart": "false",
                 "ssh.auth-sock": ssh_auth_sock,
@@ -175,6 +180,7 @@ class FuchsiaControllerTests(unittest.TestCase):
             ssh_private_keys=None,
             ssh_public_keys=None,
             identities_only=True,
+            shared_data=_SHARED_DATA,
         )
         fc_transport.FuchsiaController(
             target_name=_INPUT_ARGS["target_name"],
@@ -185,6 +191,7 @@ class FuchsiaControllerTests(unittest.TestCase):
             config={
                 "log.level": "debug",
                 "log.dir": "/tmp/logs",
+                "shared_data": _SHARED_DATA,
                 "connectivity.enable_usb": "false",
                 "connectivity.usb_driver_autostart": "false",
                 "ssh.identities-only": "true",

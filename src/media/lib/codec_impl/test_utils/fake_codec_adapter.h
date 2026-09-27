@@ -13,6 +13,12 @@ class FakeCodecAdapter : public CodecAdapter {
   virtual ~FakeCodecAdapter();
 
   // CodecAdapter interface:
+  bool IsSupportsDynamicBuffers() override;
+  uint32_t GetDynamicBuffersMax(CodecPort port) override;
+  void CoreCodecSetForceNewBuffersOnNewDimensions(bool force) override;
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override;
+  uint64_t CoreCodecGetConstraintsVersion(CodecPort port) override;
   bool IsCoreCodecRequiringOutputConfigForFormatDetection() override;
   bool IsCoreCodecMappedBufferUseful(CodecPort port) override;
   bool IsCoreCodecHwBased(CodecPort port) override;
@@ -25,10 +31,11 @@ class FakeCodecAdapter : public CodecAdapter {
   void CoreCodecStartStream() override;
   void CoreCodecQueueInputFormatDetails(
       const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override;
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
   void CoreCodecStopStream() override;
   void CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buffer) override;
+  void CoreCodecRemoveBuffer(CodecPort port, const CodecBuffer* buffer) override;
   void CoreCodecConfigureBuffers(CodecPort port,
                                  const std::vector<std::unique_ptr<CodecPacket>>& packets) override;
   void CoreCodecRecycleOutputPacket(CodecPacket* packet) override;
@@ -41,14 +48,40 @@ class FakeCodecAdapter : public CodecAdapter {
       uint64_t new_output_format_details_version_ordinal) override;
   void CoreCodecMidStreamOutputBufferReConfigPrepare() override;
   void CoreCodecMidStreamOutputBufferReConfigFinish() override;
+  void CoreCodecCloseBufferLifetimeOrdinal(CodecPort port,
+                                           uint64_t buffer_lifetime_ordinal) override;
 
   // Test hooks
+  // Must be called prior to CodecImpl::SetCoreCodecAdapter(), which caches
+  // IsSupportsDynamicBuffers().
+  void SetSupportsDynamicBuffers(bool supports);
+  void SetIsCoreCodecRequiringOutputConfigForFormatDetection(bool require);
+  void SetIsCoreCodecHwBased(CodecPort port, bool is_hw_based);
+  uint64_t IncrementConstraintsVersion(CodecPort port);
   void SetBufferCollectionConstraints(CodecPort port,
                                       fuchsia_sysmem2::BufferCollectionConstraints constraints);
+  void SetOnAddBuffer(fit::function<void(CodecPort, const CodecBuffer*)> hook);
+  void SetOnRemoveBuffer(fit::function<void(CodecPort, const CodecBuffer*)> hook);
+  void SetOnRecycleOutputPacket(fit::function<void(CodecPacket*)> hook);
+  void SetOnStartStream(fit::function<void()> hook);
+  void SetOnMidStreamOutputBufferReConfigPrepare(fit::function<void()> hook);
+  void SetOnEnsureBuffersNotConfigured(fit::function<void(CodecPort)> hook);
+  void SetOnCloseBufferLifetimeOrdinal(fit::function<void(CodecPort, uint64_t)> hook);
 
  private:
+  bool supports_dynamic_buffers_ = false;
+  bool require_output_config_for_format_detection_ = true;
+  bool is_hw_based_[kPortCount] = {false, false};
+  uint64_t constraints_version_[kPortCount] = {0, 0};
   std::optional<fuchsia_sysmem2::BufferCollectionConstraints>
       buffer_collection_constraints_[kPortCount];
+  fit::function<void(CodecPort, const CodecBuffer*)> on_add_buffer_;
+  fit::function<void(CodecPort, const CodecBuffer*)> on_remove_buffer_;
+  fit::function<void(CodecPacket*)> on_recycle_output_packet_;
+  fit::function<void()> on_start_stream_;
+  fit::function<void()> on_mid_stream_output_buffer_re_config_prepare_;
+  fit::function<void(CodecPort)> on_ensure_buffers_not_configured_;
+  fit::function<void(CodecPort, uint64_t)> on_close_buffer_lifetime_ordinal_;
 };
 
 #endif  // SRC_MEDIA_LIB_CODEC_IMPL_TEST_UTILS_FAKE_CODEC_ADAPTER_H_

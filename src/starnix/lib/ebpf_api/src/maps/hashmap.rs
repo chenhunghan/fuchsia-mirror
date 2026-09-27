@@ -192,8 +192,8 @@ mod internal {
                 max_entries: schema.max_entries,
             };
 
-            // Verify that all sizes are valid and we won't see any overflows.
-            if result.checked_total_size().is_none() {
+            // Verify that all sizes are valid and won't cause any overflows.
+            if result.checked_total_size().and_then(MapBuffer::round_up_to_page_size).is_none() {
                 return Err(MapError::InvalidParam);
             }
 
@@ -704,13 +704,16 @@ impl MapImpl for HashMap {
         let next_bucket = match key {
             Some(key) => {
                 // First check if we have another item in the same bucket.
-                let bucket_index = self.get_bucket_index_for_key(&key);
+                let bucket_index = self.get_bucket_index_for_key(key);
                 let bucket = self.bucket(bucket_index).read();
-                let entry = bucket.find(&key).ok_or(MapError::InvalidKey)?;
-                if let Some(next_entry) = self.store().next(&entry) {
-                    return Ok(next_entry.key().load::<16>());
+                if let Some(entry) = bucket.find(key) {
+                    if let Some(next_entry) = self.store().next(&entry) {
+                        return Ok(next_entry.key().load::<16>());
+                    }
+                    bucket_index + 1
+                } else {
+                    0
                 }
-                bucket_index + 1
             }
             None => 0,
         };

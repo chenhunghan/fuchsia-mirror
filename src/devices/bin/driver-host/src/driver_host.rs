@@ -7,23 +7,32 @@ use crate::utils::update_process_name;
 use anyhow::{Context, Result};
 use fidl::encoding::{DefaultFuchsiaResourceDialect, clear_tls_buf};
 use fidl::endpoints::{ClientEnd, ServerEnd};
+use fidl_fuchsia_driver_framework as fidl_fdf;
+use fidl_fuchsia_driver_host as fdh;
+use fidl_fuchsia_ldsvc as fldsvc;
+use fidl_fuchsia_system_state as fss;
+use fuchsia_async as fasync;
 use fuchsia_async::Timer;
 use fuchsia_component::client;
 use fuchsia_sync::Mutex;
 use futures::channel::{mpsc, oneshot};
 use futures::{StreamExt, TryStreamExt};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
 use zx::Status;
-use {
-    fidl_fuchsia_driver_framework as fidl_fdf, fidl_fuchsia_driver_host as fdh,
-    fidl_fuchsia_ldsvc as fldsvc, fidl_fuchsia_system_state as fss, fuchsia_async as fasync,
-};
 
 /// Any stored data is removed after this amount of time
 const EXCEPTIONS_CLEANUP_DEADLINE_SECONDS: i64 = 600;
+
+/// Maximum number of threads, dispatchers, and queued tasks to include in diagnostic dumps so that
+/// a batch of 4 DriverHostInfo entries in DriverHostInfoIterator::GetNext stays well below the
+/// 64 KiB channel message size limit.
+const MAX_THREADS: usize = 32;
+const MAX_DISPATCHERS: usize = 32;
+const MAX_QUEUED_TASKS_PER_DISPATCHER: usize = 16;
+const MAX_TOTAL_QUEUED_TASKS: usize = 32;
 
 /// We use Weak<Driver> to avoid accidentally extending the lifetime of the Driver. Driver must be
 /// droped and have it's destroy hook called in the driver runtime's shutdown observer callback in
@@ -119,7 +128,22 @@ impl DriverHost {
                                 .or_else(ignore_peer_closed)?;
                         }
                         fdh::DriverHostRequest::GetProcessInfo { responder } => {
-                            responder.send(get_process_info()).or_else(ignore_peer_closed)?;
+                            let res = this.get_process_info();
+                            let res_ref = res
+                                .as_ref()
+                                .map(|info| {
+                                    (
+                                        info.job_koid,
+                                        info.process_koid,
+                                        info.main_thread_koid,
+                                        info.threads.as_slice(),
+                                        info.dispatchers.as_slice(),
+                                    )
+                                })
+                                .map_err(|e| *e);
+                            if let Err(e) = responder.send(res_ref).or_else(ignore_peer_closed) {
+                                log::warn!("Failed to send GetProcessInfo response: {e}");
+                            }
                         }
                         fdh::DriverHostRequest::InstallLoader { loader, .. } => {
                             install_loader(loader);
@@ -226,7 +250,7 @@ impl DriverHost {
         self.scope.spawn_local(async move {
             loop {
                 // Drain queue.
-                while let Ok(Some(_)) = rx.try_next() {}
+                while rx.try_recv().is_ok() {}
 
                 // SAFETY: this call does not use any memory allocated by rust and only does
                 // anything if the fdf_env is currently set up, otherwise it does nothing.
@@ -394,6 +418,152 @@ impl DriverHost {
 
         index_to_remove.map(|i| exceptions.remove(i).info)
     }
+
+    fn get_process_info(&self) -> Result<fdh::ProcessInfo, i32> {
+        let job_koid =
+            fuchsia_runtime::job_default().koid().map_err(zx::Status::into_raw)?.raw_koid();
+        let process_koid =
+            fuchsia_runtime::process_self().koid().map_err(Status::into_raw)?.raw_koid();
+        let main_thread_koid = fuchsia_runtime::with_thread_self(|thread| {
+            thread.koid().map_err(zx::Status::into_raw)
+        })?
+        .raw_koid();
+
+        let thread_koids = fuchsia_runtime::process_self().threads().unwrap_or_default();
+        let mut fdf_threads: HashMap<u64, (String, String)> = self
+            .env
+            .dump_all_threads()
+            .into_iter()
+            .map(|t| (t.koid, (t.name, t.scheduler_role)))
+            .collect();
+        let mut threads = Vec::new();
+        let live_fdf_count =
+            thread_koids.iter().filter(|k| fdf_threads.contains_key(&k.raw_koid())).count();
+        let mut non_fdf_budget = MAX_THREADS.saturating_sub(live_fdf_count);
+        for koid in &thread_koids {
+            if threads.len() >= MAX_THREADS {
+                break;
+            }
+            if let Some((name, scheduler_role)) = fdf_threads.remove(&koid.raw_koid()) {
+                threads.push(fdh::ThreadInfo { koid: koid.raw_koid(), name, scheduler_role });
+            } else if non_fdf_budget > 0 {
+                non_fdf_budget -= 1;
+                let name = fuchsia_runtime::process_self()
+                    .get_child(koid, zx::Rights::SAME_RIGHTS)
+                    .and_then(|handle| handle.get_name())
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                threads.push(fdh::ThreadInfo {
+                    koid: koid.raw_koid(),
+                    name,
+                    scheduler_role: String::new(),
+                });
+            }
+        }
+        if threads.len() < MAX_THREADS && !fdf_threads.is_empty() {
+            let mut remaining_fdf: Vec<_> = fdf_threads.into_iter().collect();
+            remaining_fdf.sort_by_key(|(koid, _)| *koid);
+            for (koid, (name, scheduler_role)) in remaining_fdf {
+                if threads.len() >= MAX_THREADS {
+                    break;
+                }
+                if thread_koids.is_empty()
+                    || fuchsia_runtime::process_self()
+                        .get_child(&zx::Koid::from_raw(koid), zx::Rights::SAME_RIGHTS)
+                        .is_ok()
+                {
+                    threads.push(fdh::ThreadInfo { koid, name, scheduler_role });
+                }
+            }
+        }
+
+        let entries = self.env.dump_all_dispatchers();
+        let driver_urls: HashMap<u64, String> = self
+            .drivers
+            .borrow()
+            .iter()
+            .filter_map(|d| {
+                d.0.upgrade().map(|drv| (d.0.as_ptr() as u64, drv.get_url().to_string()))
+            })
+            .collect();
+        let dispatcher_names: HashMap<u64, String> =
+            entries.iter().map(|e| (e.dispatcher_ptr, e.name.clone())).collect();
+
+        let mut total_queued_tasks_remaining = MAX_TOTAL_QUEUED_TASKS;
+        let mut dispatchers = Vec::new();
+        for entry in entries.into_iter().take(MAX_DISPATCHERS) {
+            let driver = driver_urls.get(&entry.driver).cloned().unwrap_or_default();
+            let state = match entry.state {
+                fdf_env::DispatcherState::Running => fdh::DispatcherState::Running,
+                fdf_env::DispatcherState::ShuttingDown => fdh::DispatcherState::ShuttingDown,
+                fdf_env::DispatcherState::Shutdown => fdh::DispatcherState::Shutdown,
+                fdf_env::DispatcherState::Destroyed => fdh::DispatcherState::Destroyed,
+            };
+            let (has_destroy_user_initiated, destroy_user_initiated) =
+                match entry.destroy_user_initiated {
+                    Some(val) => (true, val),
+                    None => (false, false),
+                };
+            let num_queued_tasks = entry.queued_tasks.len() as u64;
+            let limit = MAX_QUEUED_TASKS_PER_DISPATCHER.min(total_queued_tasks_remaining);
+            let queued_tasks: Vec<fdh::QueuedTaskInfo> = entry
+                .queued_tasks
+                .into_iter()
+                .take(limit)
+                .map(|task| {
+                    let initiating_dispatcher_name = dispatcher_names
+                        .get(&task.initiating_dispatcher)
+                        .cloned()
+                        .unwrap_or_default();
+                    let initiating_driver_url =
+                        driver_urls.get(&task.initiating_driver).cloned().unwrap_or_default();
+                    fdh::QueuedTaskInfo {
+                        ptr: task.ptr,
+                        handler: task.handler,
+                        initiating_dispatcher: task.initiating_dispatcher,
+                        initiating_dispatcher_name,
+                        initiating_driver: task.initiating_driver,
+                        initiating_driver_url,
+                    }
+                })
+                .collect();
+            total_queued_tasks_remaining -= queued_tasks.len();
+            dispatchers.push(fdh::DispatcherInfo {
+                driver,
+                name: entry.name,
+                options: entry.options,
+                scheduler_role: entry.scheduler_role,
+                dispatcher_ptr: entry.dispatcher_ptr,
+                driver_ptr: entry.driver,
+                synchronized: entry.synchronized,
+                allow_sync_calls: entry.allow_sync_calls,
+                state,
+                destroy_context: entry.destroy_context,
+                has_destroy_user_initiated,
+                destroy_user_initiated,
+                debug_stats: fdh::DispatcherDebugStats {
+                    num_total_requests: entry.debug_stats.num_total_requests,
+                    num_inlined_requests: entry.debug_stats.num_inlined_requests,
+                    non_inlined: fdh::NonInlinedRequestStats {
+                        allow_sync_calls: entry.debug_stats.non_inlined.allow_sync_calls,
+                        parallel_dispatch: entry.debug_stats.non_inlined.parallel_dispatch,
+                        task: entry.debug_stats.non_inlined.task,
+                        unknown_thread: entry.debug_stats.non_inlined.unknown_thread,
+                        reentrant: entry.debug_stats.non_inlined.reentrant,
+                        channel_wait_not_yet_registered: entry
+                            .debug_stats
+                            .non_inlined
+                            .channel_wait_not_yet_registered,
+                        no_thread_migration: entry.debug_stats.non_inlined.no_thread_migration,
+                    },
+                },
+                num_queued_tasks,
+                queued_tasks,
+            });
+        }
+
+        Ok(fdh::ProcessInfo { job_koid, process_koid, main_thread_koid, threads, dispatchers })
+    }
 }
 
 impl Drop for DriverHost {
@@ -403,20 +573,6 @@ impl Drop for DriverHost {
         // This will block until all dispatcher callbacks complete.
         self.env.destroy_all_dispatchers();
     }
-}
-
-type ProcessInfo =
-    Result<(u64, u64, u64, &'static [fdh::ThreadInfo], &'static [fdh::DispatcherInfo]), i32>;
-
-fn get_process_info() -> ProcessInfo {
-    let job_koid = fuchsia_runtime::job_default().koid().map_err(zx::Status::into_raw)?.raw_koid();
-    let process_koid = fuchsia_runtime::process_self().koid().map_err(Status::into_raw)?.raw_koid();
-    let main_thread_koid =
-        fuchsia_runtime::with_thread_self(|thread| thread.koid().map_err(zx::Status::into_raw))?
-            .raw_koid();
-    static THREAD_INFO: [fdh::ThreadInfo; 0] = [];
-    static DISPATCHER_INFO: [fdh::DispatcherInfo; 0] = [];
-    Ok((job_koid, process_koid, main_thread_koid, &THREAD_INFO, &DISPATCHER_INFO))
 }
 
 unsafe extern "C" {
@@ -437,9 +593,43 @@ fn ignore_peer_closed(err: fidl::Error) -> Result<(), fidl::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fdf::DispatcherBuilder;
 
     #[fuchsia::test]
     async fn get_process_info_test() {
-        assert!(get_process_info().is_ok());
+        let env = fdf_env::Environment::start(0).unwrap();
+        let driver = env.new_driver(&42u32);
+        let _dispatcher = driver
+            .new_dispatcher(DispatcherBuilder::new().name("test-dispatcher"))
+            .unwrap()
+            .release();
+        let _role_dispatcher = driver
+            .new_dispatcher(
+                DispatcherBuilder::new()
+                    .name("role-dispatcher")
+                    .scheduler_role("fuchsia.test.role"),
+            )
+            .unwrap()
+            .release();
+        let (tx, _rx) = oneshot::channel();
+        let driver_host = DriverHost::new(env, tx);
+        let fdh::ProcessInfo { main_thread_koid, threads, dispatchers, .. } =
+            driver_host.get_process_info().unwrap();
+        assert!(!threads.is_empty());
+        assert!(threads.iter().any(|t| t.koid == main_thread_koid));
+        assert!(threads.iter().any(|t| t.name.starts_with("fdf-dispatcher-thread-")));
+        assert!(threads.iter().any(|t| t.scheduler_role == "fuchsia.test.role"));
+        assert_eq!(dispatchers.len(), 2);
+        assert!(dispatchers.iter().any(|d| d.name == "test-dispatcher"));
+        assert!(
+            dispatchers
+                .iter()
+                .any(|d| d.name == "role-dispatcher" && d.scheduler_role == "fuchsia.test.role")
+        );
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        driver.shutdown(move |_| {
+            let _ = shutdown_tx.send(());
+        });
+        shutdown_rx.await.unwrap();
     }
 }

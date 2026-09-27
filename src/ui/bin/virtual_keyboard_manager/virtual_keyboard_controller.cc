@@ -51,11 +51,13 @@ void FidlBoundVirtualKeyboardController::WatchVisibility(WatchVisibilityCallback
     // Called with a watch already active. Resend the current value, so that
     // the old call doesn't hang forever.
     FX_DCHECK(last_sent_visible_ == want_visible_);
-    watch_callback_(want_visible_);
+    auto old_callback = std::move(watch_callback_);
+    watch_callback_ = std::move(callback);
+    old_callback(want_visible_);
+  } else {
+    watch_callback_ = std::move(callback);
+    MaybeNotifyWatcher();
   }
-
-  watch_callback_ = std::move(callback);
-  MaybeNotifyWatcher();
 }
 
 void FidlBoundVirtualKeyboardController::OnUserAction(UserAction action) {
@@ -77,9 +79,9 @@ void FidlBoundVirtualKeyboardController::MaybeNotifyWatcher() {
                          ? (last_sent_visible_.value() ? "true" : "false")
                          : "(unset)");
   if (watch_callback_ && want_visible_ != last_sent_visible_) {
-    watch_callback_(want_visible_);
-    watch_callback_ = {};
+    auto callback = std::move(watch_callback_);
     last_sent_visible_ = want_visible_;
+    callback(want_visible_);
   }
 }
 

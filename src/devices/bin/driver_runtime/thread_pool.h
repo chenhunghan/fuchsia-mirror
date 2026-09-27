@@ -114,6 +114,14 @@ class ThreadPool : public fbl::WAVLTreeContainable<std::unique_ptr<ThreadPool>> 
   std::string_view scheduler_role() const { return scheduler_role_; }
   async::Loop* loop() { return &loop_; }
 
+  struct ThreadInfo {
+    zx_koid_t koid;
+    std::string name;
+    std::string scheduler_role;
+  };
+
+  void DumpThreads(std::vector<ThreadInfo>* out_threads) const;
+
   static constexpr uint32_t kDefaultThreadLimit = 20;
 
  private:
@@ -223,6 +231,8 @@ class ThreadPool : public fbl::WAVLTreeContainable<std::unique_ptr<ThreadPool>> 
   // out of un-stalled threads and should spawn another.
   std::vector<std::pair<zx_koid_t, std::atomic_int64_t*>> thread_entry_time_slots_
       __TA_GUARDED(&lock_);
+  // Tracks the KOID and name of each thread spawned by this thread pool.
+  std::vector<std::pair<zx_koid_t, std::string>> spawned_threads_ __TA_GUARDED(&lock_);
   // True if we've already attempted to spawn a new thread in response to the current thread
   // stall. This prevents us from constantly warning when we're at max threads and there's a
   // persistent stall.

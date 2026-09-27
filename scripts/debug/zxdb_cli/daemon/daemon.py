@@ -416,11 +416,6 @@ class Daemon:
             except Exception:
                 pass
 
-        server.close()
-        await server.wait_closed()
-        if UDS_PATH.exists():
-            UDS_PATH.unlink(missing_ok=True)
-
         if self.dap_proc:
             self.dap_proc.terminate()
 
@@ -431,7 +426,15 @@ class Daemon:
             if self.repo_name:
                 await package_server.stop(self.repo_name)
 
+        server.close()
+        # Set shutdown_complete_event first to allow handle_uds_client to unblock
+        # and close client connection. In Python 3.12+, server.wait_closed() blocks
+        # until all connections drop; doing this out of order causes a mutual deadlock.
         self.shutdown_complete_event.set()
+        await server.wait_closed()
+        if UDS_PATH.exists():
+            UDS_PATH.unlink(missing_ok=True)
+
         return 0
 
     async def _connect_to_dap(self) -> bool:
@@ -568,6 +571,7 @@ class Daemon:
         thread_id: int,
         name: str = "",
         process_id: int | None = None,
+        is_stopped: bool | None = None,
     ) -> Thread:
         """Retrieves an existing Thread or registers a new one with its owning Process."""
         process = (
@@ -576,7 +580,12 @@ class Daemon:
             else None
         )
         if thread_id not in self.threads:
-            thread = Thread(id=thread_id, name=name, process=process)
+            thread = Thread(
+                id=thread_id,
+                name=name,
+                process=process,
+                is_stopped=is_stopped if is_stopped is not None else False,
+            )
             self.threads[thread_id] = thread
             if process:
                 process.threads[thread_id] = thread
@@ -584,6 +593,8 @@ class Daemon:
             thread = self.threads[thread_id]
             if name:
                 thread.name = name
+            if is_stopped is not None:
+                thread.is_stopped = is_stopped
             if process and thread.process != process:
                 if thread.process:
                     thread.process.threads.pop(thread_id, None)
@@ -722,9 +733,12 @@ class Daemon:
                                 )
                     else:
                         process_id = body.get("processId")
+                        is_stopped = body.get("isStopped")
                         if thread_id is not None:
                             self.get_or_create_thread(
-                                thread_id, process_id=process_id
+                                thread_id,
+                                process_id=process_id,
+                                is_stopped=is_stopped,
                             )
                 case "zxdb.updateAsyncBacktrace":
                     self._handle_async_backtrace_update(body)

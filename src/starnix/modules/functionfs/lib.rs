@@ -200,7 +200,11 @@ async fn handle_adb(
 
                 let response = match receive_future.await {
                     Err(err) => {
-                        log_warn!("Failed to call UsbAdbImpl.Receive: {err}");
+                        if err.is_closed() {
+                            log_info!("Receive failed due to connection shutdown: {err}");
+                        } else {
+                            log_warn!("Failed to call UsbAdbImpl.Receive: {err}");
+                        }
                         error!(EINVAL)
                     }
                     Ok(Err(err)) => {
@@ -236,11 +240,23 @@ async fn handle_adb(
             .for_each(|WriteCommand { data, pending }| async move {
                 let response = match proxy.queue_tx(&data).await {
                     Err(err) => {
-                        log_warn!("Failed to call UsbAdbImpl.QueueTx: {err}");
+                        if err.is_closed() {
+                            log_info!("QueueTx failed due to connection shutdown: {err}");
+                        } else {
+                            log_warn!("Failed to call UsbAdbImpl.QueueTx: {err}");
+                        }
                         error!(EINVAL)
                     }
                     Ok(Err(err)) => {
-                        log_warn!("Failed to queue data to adb driver: {err}");
+                        let status = zx::Status::err_from_raw(err);
+                        if matches!(
+                            status,
+                            zx::Status::BAD_STATE | zx::Status::CANCELED | zx::Status::PEER_CLOSED
+                        ) {
+                            log_info!("QueueTx failed due to connection shutdown: {status}");
+                        } else {
+                            log_warn!("Failed to queue data to adb driver: {status}");
+                        }
                         error!(EINVAL)
                     }
                     Ok(Ok(_)) => Ok(data.len()),

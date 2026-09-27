@@ -133,6 +133,8 @@ class SimInterface : public fidl::WireServer<fuchsia_wlan_fullmac::WlanFullmacIm
   void SaeFrameRx(SaeFrameRxRequestView request, SaeFrameRxCompleter::Sync& completer) override;
   void OnWmmStatusResp(OnWmmStatusRespRequestView request,
                        OnWmmStatusRespCompleter::Sync& completer) override;
+  void OnRssiThresholdBreached(OnRssiThresholdBreachedRequestView request,
+                               OnRssiThresholdBreachedCompleter::Sync& completer) override;
 
   // Query an interface
   fuchsia_wlan_fullmac::WlanFullmacImplQueryResponse Query();

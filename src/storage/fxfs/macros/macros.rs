@@ -389,25 +389,66 @@ pub fn derive_serialize_key(input: TokenStream) -> TokenStream {
     let ident = input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let serialize_body = match &input.data {
-        Data::Struct(s) => match &s.fields {
-            Fields::Named(fields) => {
-                let fields = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    quote! { self.#name.serialize_key_to(serializer); }
-                });
-                quote! { #(#fields)* }
-            }
-            Fields::Unnamed(fields) => {
-                let fields = fields.unnamed.iter().enumerate().map(|(i, _)| {
-                    let i = Index::from(i);
-                    quote! { self.#i.serialize_key_to(serializer); }
-                });
-                quote! { #(#fields)* }
-            }
-            Fields::Unit => quote! {},
-        },
+    let (output_type, serialize_body) = match &input.data {
+        Data::Struct(s) => {
+            let output_type = if let Some(last_field) = s.fields.iter().next_back() {
+                let last_ty = &last_field.ty;
+                quote! { <#last_ty as crate::serialized_types::serialized_key::SerializeKey>::Output<'a, B> }
+            } else {
+                quote! { crate::serialized_types::serialized_key::KeySerializer<'a, B> }
+            };
+            let body = match &s.fields {
+                Fields::Named(fields) => {
+                    let fields = fields.named.iter().map(|f| {
+                        let name = &f.ident;
+                        quote! { let serializer = self.#name.serialize_key_to(serializer); }
+                    });
+                    quote! { #(#fields)* serializer }
+                }
+                Fields::Unnamed(fields) => {
+                    let fields = fields.unnamed.iter().enumerate().map(|(i, _)| {
+                        let i = Index::from(i);
+                        quote! { let serializer = self.#i.serialize_key_to(serializer); }
+                    });
+                    quote! { #(#fields)* serializer }
+                }
+                Fields::Unit => quote! { serializer },
+            };
+            (output_type, body)
+        }
         Data::Enum(e) => {
+            if e.variants.len() > 256 {
+                return syn::Error::new_spanned(
+                    &ident,
+                    "SerializeKey only supports enums with up to 256 variants",
+                )
+                .to_compile_error()
+                .into();
+            }
+            let mut unique_last_tys = Vec::new();
+            let mut seen_tys = std::collections::HashSet::new();
+            for variant in &e.variants {
+                let last_ty = match &variant.fields {
+                    Fields::Named(fields) => fields.named.last().map(|f| &f.ty),
+                    Fields::Unnamed(fields) => fields.unnamed.last().map(|f| &f.ty),
+                    Fields::Unit => None,
+                };
+                if let Some(ty) = last_ty {
+                    if seen_tys.insert(quote!(#ty).to_string()) {
+                        unique_last_tys.push(ty);
+                    }
+                }
+            }
+            let output_type = unique_last_tys.into_iter().fold(
+                quote! { crate::serialized_types::serialized_key::KeySerializer<'a, B> },
+                |acc, ty| {
+                    quote! {
+                        <#acc as crate::serialized_types::serialized_key::MergeSerializerOutput<
+                            <#ty as crate::serialized_types::serialized_key::SerializeKey>::Output<'a, B>
+                        >>::Output
+                    }
+                },
+            );
             let arms = e.variants.iter().enumerate().map(|(i, variant)| {
                 let var_ident = &variant.ident;
                 let idx = i as u8;
@@ -416,8 +457,9 @@ pub fn derive_serialize_key(input: TokenStream) -> TokenStream {
                         let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
                         quote! {
                             Self::#var_ident { #(#field_names),* } => {
-                                serializer.write_bytes(&#idx.to_be_bytes());
-                                #(#field_names.serialize_key_to(serializer);)*
+                                let serializer = #idx.serialize_key_to(serializer);
+                                #(let serializer = #field_names.serialize_key_to(serializer);)*
+                                serializer.into()
                             }
                         }
                     }
@@ -427,25 +469,30 @@ pub fn derive_serialize_key(input: TokenStream) -> TokenStream {
                             .collect();
                         quote! {
                             Self::#var_ident(#(#field_names),*) => {
-                                serializer.write_bytes(&#idx.to_be_bytes());
-                                #(#field_names.serialize_key_to(serializer);)*
+                                let serializer = #idx.serialize_key_to(serializer);
+                                #(let serializer = #field_names.serialize_key_to(serializer);)*
+                                serializer.into()
                             }
                         }
                     }
                     Fields::Unit => {
                         quote! {
                             Self::#var_ident => {
-                                serializer.write_bytes(&#idx.to_be_bytes());
+                                let serializer = #idx.serialize_key_to(serializer);
+                                serializer.into()
                             }
                         }
                     }
                 }
             });
-            quote! {
-                match self {
-                    #(#arms)*
-                }
-            }
+            (
+                output_type,
+                quote! {
+                    match self {
+                        #(#arms)*
+                    }
+                },
+            )
         }
         _ => unimplemented!("Unions not supported"),
     };
@@ -513,7 +560,12 @@ pub fn derive_serialize_key(input: TokenStream) -> TokenStream {
 
     TokenStream::from(quote! {
         impl #impl_generics crate::serialized_types::serialized_key::SerializeKey for #ident #ty_generics #where_clause {
-            fn serialize_key_to<B: crate::serialized_types::varint::Buffer>(&self, serializer: &mut crate::serialized_types::serialized_key::KeySerializer<'_, B>) {
+            type Output<'a, B: crate::serialized_types::varint::Buffer + 'a> = #output_type;
+
+            fn serialize_key_to<'a, B: crate::serialized_types::varint::Buffer>(
+                &self,
+                serializer: crate::serialized_types::serialized_key::KeySerializer<'a, B>,
+            ) -> Self::Output<'a, B> {
                 use crate::serialized_types::serialized_key::SerializeKey as _;
                 #serialize_body
             }

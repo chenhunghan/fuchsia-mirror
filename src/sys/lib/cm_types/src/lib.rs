@@ -610,9 +610,7 @@ impl TryFrom<CString> for NamespacePath {
 
 impl From<NamespacePath> for CString {
     fn from(path: NamespacePath) -> Self {
-        // SAFETY: in `Path::new` we already verified that there are no
-        // embedded NULs.
-        unsafe { CString::from_vec_unchecked(path.to_string().as_bytes().to_owned()) }
+        CString::new(path.to_string()).expect("validated path contains no NUL")
     }
 }
 
@@ -790,9 +788,7 @@ impl TryFrom<CString> for Path {
 
 impl From<Path> for CString {
     fn from(path: Path) -> Self {
-        // SAFETY: in `Path::new` we already verified that there are no
-        // embedded NULs.
-        unsafe { CString::from_vec_unchecked(path.to_string().as_bytes().to_owned()) }
+        CString::new(path.to_string()).expect("validated path contains no NUL")
     }
 }
 
@@ -1811,6 +1807,45 @@ mod tests {
             ParseError::TooLong,
             repeat("/x").take(2048).collect::<String>().as_str()
         );
+    }
+
+    #[test]
+    fn test_path_cstring_roundtrip() {
+        for text in ["/foo".to_owned(), "/foo/bar".to_owned(), "/x".repeat(2047)] {
+            let path = Path::new(&text).unwrap();
+            let cstring = CString::from(path.clone());
+            assert_eq!(cstring.as_bytes(), text.as_bytes());
+            assert_eq!(cstring.as_bytes_with_nul().len(), text.len() + 1);
+            assert_eq!(cstring.as_bytes_with_nul().last(), Some(&0));
+            assert_eq!(Path::try_from(cstring).unwrap(), path);
+        }
+    }
+
+    #[test]
+    fn test_namespace_path_cstring_roundtrip() {
+        for text in ["/".to_owned(), "/foo".to_owned(), "/foo/bar".to_owned(), "/x".repeat(2047)] {
+            let path = NamespacePath::new(&text).unwrap();
+            let cstring = CString::from(path.clone());
+            assert_eq!(cstring.as_bytes(), text.as_bytes());
+            assert_eq!(cstring.as_bytes_with_nul().len(), text.len() + 1);
+            assert_eq!(cstring.as_bytes_with_nul().last(), Some(&0));
+            assert_eq!(NamespacePath::try_from(cstring).unwrap(), path);
+        }
+    }
+
+    #[test]
+    fn test_modified_path_cstrings() {
+        let mut path = Path::new("/foo").unwrap();
+        assert!(path.push(Name::new("bar").unwrap()));
+        assert!(path.extend(RelativePath::new("baz/qux").unwrap()));
+        assert_eq!(CString::from(path.clone()).as_bytes_with_nul(), b"/foo/bar/baz/qux\0");
+
+        let mut namespace_path = NamespacePath::from(path);
+        assert_eq!(namespace_path.pop_front(), Some(Name::new("foo").unwrap()));
+        assert_eq!(CString::from(namespace_path.clone()).as_bytes_with_nul(), b"/bar/baz/qux\0");
+        while namespace_path.pop_front().is_some() {}
+        assert_eq!(CString::from(namespace_path).as_bytes_with_nul(), b"/\0");
+        assert_eq!(CString::from(NamespacePath::root()).as_bytes_with_nul(), b"/\0");
     }
 
     #[test]

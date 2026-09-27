@@ -7,30 +7,24 @@
 #ifndef ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_ROOT_JOB_OBSERVER_H_
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_ROOT_JOB_OBSERVER_H_
 
-#include <lib/fit/function.h>
+#include <lib/object-constants.h>
 
 #include <ktl/array.h>
 #include <object/job_dispatcher.h>
-#include <object/signal_observer.h>
+#include <object/opaque_storage.h>
 
-class RootJobObserver final : public SignalObserver {
+class RootJobObserver final {
  public:
-  ~RootJobObserver() final;
+  ~RootJobObserver();
 
   // Create a RootJobObserver that halts the system when the root job terminates
   // (i.e. asserts ZX_JOB_NO_CHILDREN).
   RootJobObserver(fbl::RefPtr<JobDispatcher> root_job, Handle* root_job_handle);
 
-  // Create a RootJobObserver that calls the given callback when the root job
-  // terminates (i.e. asserts ZX_JOB_NO_CHILDREN).
-  //
-  // The callback is called while holding the watched JobDispatcher's lock, so
-  // the callback must avoid calling anything that may attempt to acquire that
-  // lock again, introduce a lock cycle, etc.
-  //
-  // Exposed for testing.
-  using Callback = fit::inline_function<void(), 3 * sizeof(void*)>;
-  RootJobObserver(fbl::RefPtr<JobDispatcher> root_job, Handle* root_job_handle, Callback callback);
+  RootJobObserver(const RootJobObserver&) = delete;
+  RootJobObserver& operator=(const RootJobObserver&) = delete;
+  RootJobObserver(RootJobObserver&&) = delete;
+  RootJobObserver& operator=(RootJobObserver&&) = delete;
 
   // Record that any critical process is in some stage of being torn down.
   static void SetCriticalProcessDying();
@@ -42,12 +36,7 @@ class RootJobObserver final : public SignalObserver {
   static zx_koid_t GetCriticalProcessKoid();
 
  private:
-  // |SignalObserver| implementation.
-  void OnMatch(zx_signals_t signals, OwnedWaitQueue* queue_to_own) final;
-  void OnCancel(zx_signals_t signals) final;
-
-  fbl::RefPtr<JobDispatcher> root_job_;
-  Callback callback_;
+  OpaqueStorage<kRootJobObserverStorageSize, kRootJobObserverStorageAlign> opaque_storage_;
 };
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_ROOT_JOB_OBSERVER_H_

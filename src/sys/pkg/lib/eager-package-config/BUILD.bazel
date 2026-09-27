@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "eager-package-config",
+    srcs = [
+        "src/lib.rs",
+        "src/omaha_client.rs",
+        "src/pkg_resolver.rs",
+    ],
+    crate_name = "eager_package_config",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+    ],
+    version = "0.0.1",
+    visibility = ["//src/sys/pkg:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/fuchsia-url",
+        "//src/sys/pkg/lib/channel-config",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:omaha_client",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+            "//sdk/rust/zx",
+            "//src/lib/fidl/rust/fidl",
+            "//src/lib/fuchsia-fs",
+            "//third_party/rust_crates/vendor:futures",
+            "//third_party/rust_crates/vendor:thiserror",
+        ],
+        "//conditions:default": [],
+    }),
+)

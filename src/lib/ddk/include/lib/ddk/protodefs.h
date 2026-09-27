@@ -11,6 +11,9 @@
 // The value must be a unique identifier that is just the previous protocol
 // value plus 1.
 
+#ifndef SRC_LIB_DDK_INCLUDE_LIB_DDK_PROTODEFS_H_
+#define SRC_LIB_DDK_INCLUDE_LIB_DDK_PROTODEFS_H_
+
 // clang-format off
 
 #ifndef DDK_PROTOCOL_DEF
@@ -20,10 +23,6 @@
 // Do not publish aliases in /dev/class/...
 #define PF_NOPUB 1
 #endif
-DDK_PROTOCOL_DEF(BLOCK,                   1,    "block", 0)
-DDK_PROTOCOL_DEF(BLOCK_IMPL,              2,    "block-impl", PF_NOPUB)
-DDK_PROTOCOL_DEF(BLOCK_PARTITION,         3,    "block-partition", 0)
-DDK_PROTOCOL_DEF(BLOCK_VOLUME,            4,    "block-volume", 0)
 DDK_PROTOCOL_DEF(CODEC,                   6,    "codec", 0)
 // 8 was console
 DDK_PROTOCOL_DEF(DEVICE,                  9,    "device", 0)
@@ -190,3 +189,6 @@ DDK_PROTOCOL_DEF(MALI_UTIL,               174, "mali-util", 0)
 DDK_PROTOCOL_DEF(HRTIMER,                 175, "hrtimer", 0)
 #undef DDK_PROTOCOL_DEF
 #endif
+
+#undef SRC_LIB_DDK_INCLUDE_LIB_DDK_PROTODEFS_H_
+#endif  // SRC_LIB_DDK_INCLUDE_LIB_DDK_PROTODEFS_H_

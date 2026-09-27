@@ -217,10 +217,10 @@ mod tests {
         // Subsequent requests within 24 hours should not file a report. We know we don't file a
         // report because nothing is polled from the receiver.
         let () = ch.installation_error().unwrap();
-        assert_matches!(recv.try_next(), Err(_));
+        assert_matches!(recv.try_recv(), Err(_));
         time_source.advance(TWENTY_FOUR_HOURS - Duration::from_secs(1));
         let () = ch.installation_error().unwrap();
-        assert_matches!(recv.try_next(), Err(_));
+        assert_matches!(recv.try_recv(), Err(_));
 
         // When we hit 24 hrs, we'll file a new report.
         time_source.advance(Duration::from_secs(1));
@@ -248,7 +248,7 @@ mod tests {
 
         // If num checks < min, we SHOULD NOT file a crash report.
         let () = ch.consecutive_failed_update_checks(0).unwrap();
-        assert_matches!(recv.try_next(), Err(_));
+        assert_matches!(recv.try_recv(), Err(_));
 
         // If num checks >= min, we SHOULD file a crash report on a backoff (e.g. 1, 2, 4, etc).
         let () = ch.consecutive_failed_update_checks(1).unwrap();
@@ -258,7 +258,7 @@ mod tests {
         assert_signature(recv.next().await.unwrap(), "fuchsia-2-consecutive-failed-update-checks");
 
         let () = ch.consecutive_failed_update_checks(3).unwrap();
-        assert_matches!(recv.try_next(), Err(_));
+        assert_matches!(recv.try_recv(), Err(_));
 
         let () = ch.consecutive_failed_update_checks(4).unwrap();
         assert_signature(recv.next().await.unwrap(), "fuchsia-4-consecutive-failed-update-checks");

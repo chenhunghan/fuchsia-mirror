@@ -1237,7 +1237,7 @@ mod tests {
                 assert_eq!(events_rx.next().await.expect("receive event"), event);
             }
             let _: mpsc::TryRecvError =
-                events_rx.try_next().expect_err("got unexpected bridge event");
+                events_rx.try_recv().expect_err("got unexpected bridge event");
         }
     }
 }

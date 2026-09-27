@@ -159,19 +159,15 @@ where
             return Ok(());
         }
 
-        let free_list_ref = free_list.as_mut().map(|f| &mut **f);
+        let free_list_ref = free_list.as_deref_mut();
         let mut new_elem = allocate_element(free_list_ref)?;
         self.num_elems += 1;
         new_elem.bitoff = bitoff;
         new_elem.bitlen = bitlen;
 
         let mut cursor = self.elems.cursor_front_mut();
-        loop {
-            let (e_bitoff, e_bitlen) = match cursor.get() {
-                Some(e) => (e.bitoff, e.bitlen),
-                None => break,
-            };
-            if e_bitoff + e_bitlen >= bitoff {
+        while let Some(e) = cursor.get() {
+            if e.bitoff + e.bitlen >= bitoff {
                 break;
             }
             cursor.move_next();
@@ -203,11 +199,8 @@ where
 
         cursor.move_next();
         let mut max = elem_bitoff + elem_bitlen;
-        loop {
-            let (succ_bitoff, succ_bitlen) = match cursor.get() {
-                Some(s) => (s.bitoff, s.bitlen),
-                None => break,
-            };
+        while let Some(s) = cursor.get() {
+            let (succ_bitoff, succ_bitlen) = (s.bitoff, s.bitlen);
             if succ_bitoff > max {
                 break;
             }
@@ -217,7 +210,7 @@ where
             elem_bitlen = max - elem_bitoff;
             let erased = cursor.erase().unwrap();
             self.num_elems -= 1;
-            let free_list_ref = free_list.as_mut().map(|f| &mut **f);
+            let free_list_ref = free_list.as_deref_mut();
             release_element(free_list_ref, erased);
         }
 
@@ -241,11 +234,8 @@ where
         }
 
         let mut cursor = self.elems.cursor_front_mut();
-        loop {
-            let (elem_bitoff, elem_bitlen) = match cursor.get() {
-                Some(e) => (e.bitoff, e.bitlen),
-                None => break,
-            };
+        while let Some(e) = cursor.get() {
+            let (elem_bitoff, elem_bitlen) = (e.bitoff, e.bitlen);
 
             if elem_bitoff + elem_bitlen < bitoff {
                 cursor.move_next();
@@ -262,7 +252,7 @@ where
                     cursor.move_next();
                     continue;
                 }
-                let free_list_ref = free_list.as_mut().map(|f| &mut **f);
+                let free_list_ref = free_list.as_deref_mut();
                 let mut new_elem = allocate_element(free_list_ref)?;
                 self.num_elems += 1;
                 new_elem.bitoff = bitmax;
@@ -283,7 +273,7 @@ where
             self.num_bits = self.num_bits - elem_bitlen;
             self.num_elems -= 1;
             let erased = cursor.erase().unwrap();
-            let free_list_ref = free_list.as_mut().map(|f| &mut **f);
+            let free_list_ref = free_list.as_deref_mut();
             release_element(free_list_ref, erased);
         }
         Ok(())

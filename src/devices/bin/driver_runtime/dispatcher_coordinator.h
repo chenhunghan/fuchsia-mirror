@@ -48,6 +48,8 @@ class DispatcherCoordinator {
   static zx_status_t TokenTransfer(zx_handle_t token, fdf_handle_t channel);
 
   // Implementation of fdf_env_*.
+  static void DumpDispatchers(std::vector<DumpState>* out_states);
+  static void DumpThreads(std::vector<ThreadPool::ThreadInfo>* out_threads);
   static uint32_t GetThreadLimit(std::string_view scheduler_role);
   static zx_status_t SetThreadLimit(std::string_view scheduler_role, uint32_t max_threads);
   static uint32_t GetSchedulerRoleOpts(std::string_view scheduler_role);

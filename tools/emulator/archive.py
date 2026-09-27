@@ -5,12 +5,16 @@
 
 import argparse
 import os
+import subprocess
 import sys
-import tarfile
+import tempfile
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser("Archives a directory")
+    parser.add_argument(
+        "--tarmaker", help="Path to the tarmaker binary", required=True
+    )
     parser.add_argument(
         "--src", help="Path to the directory to archive", required=True
     )
@@ -22,12 +26,25 @@ def main():
 
     deps = []
 
-    with tarfile.open(args.dst, "w:gz") as tar:
+    with tempfile.NamedTemporaryFile("w") as manifest_file:
         for dirpath, dirnames, filenames in os.walk(args.src):
             for filename in filenames:
                 path = os.path.join(dirpath, filename)
                 deps.append(os.path.relpath(path))
-                tar.add(path, arcname=os.path.relpath(path, args.src))
+                manifest_file.write(
+                    f"{os.path.relpath(path, args.src)}={path}\n"
+                )
+        manifest_file.flush()
+        subprocess.run(
+            [
+                args.tarmaker,
+                "--manifest",
+                manifest_file.name,
+                "--output",
+                args.dst,
+            ],
+            check=True,
+        )
 
     with open(args.depfile, "w") as depfile:
         depfile.write("%s: %s\n" % (args.dst, " ".join(sorted(deps))))

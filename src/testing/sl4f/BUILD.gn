@@ -48,7 +48,6 @@ rustc_library("lib") {
     "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
     "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
     "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
-    "//sdk/fidl/fuchsia.net.stackmigrationdeprecated:fuchsia.net.stackmigrationdeprecated_rust",
     "//sdk/fidl/fuchsia.paver:fuchsia.paver_rust",
     "//sdk/fidl/fuchsia.power.metrics:fuchsia.power.metrics_rust",
     "//sdk/fidl/fuchsia.recovery:fuchsia.recovery_rust",
@@ -119,7 +118,6 @@ rustc_library("lib") {
     "//src/lib/test_util",
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:tempfile",
-    "//third_party/rust_crates:test-case",
   ]
 
   sources = [

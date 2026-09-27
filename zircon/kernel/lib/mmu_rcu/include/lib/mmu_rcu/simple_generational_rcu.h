@@ -91,7 +91,7 @@ class SimpleGenerational {
     // Note: Although it is believed this should be acq_rel, the model upgrades this to a seq_cst
     // order for state explosion reasons.
     uint32_t current_gen = static_cast<uint32_t>(
-        state_.fetch_add(1 << (initial_gen * kCountBits), ktl::memory_order_seq_cst) >> kGenBit);
+        state_.fetch_add(1ul << (initial_gen * kCountBits), ktl::memory_order_seq_cst) >> kGenBit);
     // Ideally we actually incremented the correct counter. If so, we are done.
     if (initial_gen == current_gen) {
       return current_gen;
@@ -104,7 +104,7 @@ class SimpleGenerational {
     // Note: Although it is believed this should be acquire, the model upgrades this to a seq_cst
     // order for state explosion reasons.
     current_gen = static_cast<uint32_t>(
-        state_.fetch_add(1 << (current_gen * kCountBits), ktl::memory_order_seq_cst) >> kGenBit);
+        state_.fetch_add(1ul << (current_gen * kCountBits), ktl::memory_order_seq_cst) >> kGenBit);
     // At this point we have incremented both counters and have effectively constrained the possible
     // races with Synchronize. At this point there are only a couple of scenarios to consider.
     //  * Synchronize has not yet run and/or not yet stored a new generation. In this case
@@ -127,7 +127,7 @@ class SimpleGenerational {
     // 'current_gen' counter, so this can be relaxed.
     // Note: Although it is believed this should be relaxed, the model upgrades this to a seq_cst
     // order for state explosion reasons.
-    state_.fetch_sub(1 << (other_gen * kCountBits), ktl::memory_order_seq_cst);
+    state_.fetch_sub(1ul << (other_gen * kCountBits), ktl::memory_order_seq_cst);
     return current_gen;
   }
 
@@ -144,7 +144,7 @@ class SimpleGenerational {
     // the counter.
     // Note: Although it is believed this should be release, the model upgrades this to a seq_cst
     // order for state explosion reasons.
-    state_.fetch_sub(1 << (gen * kCountBits), ktl::memory_order_acq_rel);
+    state_.fetch_sub(1ul << (gen * kCountBits), ktl::memory_order_acq_rel);
   }
 
   // Performs a synchronization with any outstanding readers. On return the caller can be certain

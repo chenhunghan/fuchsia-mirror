@@ -268,9 +268,13 @@ zx_status_t ContiguousPooledMemoryAllocator::Init(uint32_t alignment_log2) {
     alignment_log2 = safe_cast<uint32_t>(system_page_alignment);
   }
   max_supported_alignment_log2_ = alignment_log2;
-  const uint64_t vmo_size = fbl::round_up<uint64_t>(size_, zx_system_get_page_size());
-  zx_status_t status = zx::vmo::create_contiguous(parent_device_->bti(), vmo_size, alignment_log2,
-                                                  &local_contiguous_vmo);
+  auto vmo_size = CheckRoundUp(size_, zx_system_get_page_size());
+  if (!vmo_size.IsValid()) {
+    LOG(ERROR, "size_ overflow heap_name_: %s", heap_name_);
+    return ZX_ERR_INVALID_ARGS;
+  }
+  zx_status_t status = zx::vmo::create_contiguous(parent_device_->bti(), vmo_size.ValueOrDie(),
+                                                  alignment_log2, &local_contiguous_vmo);
   if (status != ZX_OK) {
     LOG(ERROR, "Could not allocate contiguous memory, status %d heap_name_: %s", status,
         heap_name_);
@@ -284,8 +288,13 @@ zx_status_t ContiguousPooledMemoryAllocator::InitPhysical(zx_paddr_t paddr) {
   // __builtin_ctzll is UB when paddr is 0. Zircon will never allocate a physically contiguous VMO
   // using physical page 0, but guard against 0 here anyway to avoid taking a dep on that here.
   max_supported_alignment_log2_ = paddr != 0 ? __builtin_ctzll(paddr) : sizeof(paddr) * 8;
-  const uint64_t vmo_size = fbl::round_up<uint64_t>(size_, zx_system_get_page_size());
-  zx::result<zx::vmo> physical_vmo_result = parent_device_->CreatePhysicalVmo(paddr, vmo_size);
+  auto vmo_size = CheckRoundUp(size_, zx_system_get_page_size());
+  if (!vmo_size.IsValid()) {
+    LOG(ERROR, "size_ overflow heap_name_: %s", heap_name_);
+    return ZX_ERR_INVALID_ARGS;
+  }
+  zx::result<zx::vmo> physical_vmo_result =
+      parent_device_->CreatePhysicalVmo(paddr, vmo_size.ValueOrDie());
   if (!physical_vmo_result.is_ok()) {
     LOG(ERROR, "Failed to create physical VMO: %s heap_name_: %s",
         physical_vmo_result.status_string(), heap_name_);
@@ -705,10 +714,17 @@ void ContiguousPooledMemoryAllocator::CheckGuardRegion(const char* region_name, 
     // TODO(dustingreen): In a later CL, integrate anything that's needed from the code above into
     // ReportPatternCheckFailedRange(), and make ReportPatternCheckFailedRange() work even if unused
     // page checking is disabled.
-    uint64_t page_aligned_base = fbl::round_down(error_start, zx_system_get_page_size());
-    uint64_t page_aligned_end = fbl::round_up(error_end + 1, zx_system_get_page_size());
-    ralloc_region_t diff_range{.base = page_aligned_base,
-                               .size = page_aligned_end - page_aligned_base};
+    auto page_aligned_base = CheckRoundDown(error_start, zx_system_get_page_size());
+    auto page_aligned_end =
+        CheckRoundUp(safemath::CheckAdd(error_end, 1), zx_system_get_page_size());
+    ZX_ASSERT(page_aligned_base.IsValid());
+    ZX_ASSERT(page_aligned_end.IsValid());
+    auto page_aligned_size = safemath::CheckSub(page_aligned_end, page_aligned_base);
+    ZX_ASSERT(page_aligned_size.IsValid());
+    ralloc_region_t diff_range{
+        .base = page_aligned_base.ValueOrDie(),
+        .size = page_aligned_size.ValueOrDie(),
+    };
     ReportPatternCheckFailedRange(diff_range, "guard");
 
     IncrementGuardRegionFailureInspectData();
@@ -804,11 +820,17 @@ void ContiguousPooledMemoryAllocator::CheckUnusedPagesCallback(async_dispatcher_
     return;
   }
   uint64_t page_size = zx_system_get_page_size();
-  uint64_t start =
-      fbl::round_down(unused_check_phase_ * size_ / kUnusedCheckPartialCount, page_size);
-  uint64_t end =
-      fbl::round_down((unused_check_phase_ + 1) * size_ / kUnusedCheckPartialCount, page_size);
-  CheckAnyUnusedPages(start, end);
+  auto start = CheckRoundDown(
+      safemath::CheckDiv(safemath::CheckMul(unused_check_phase_, size_), kUnusedCheckPartialCount),
+      page_size);
+  auto end = CheckRoundDown(safemath::CheckDiv(safemath::CheckMul(unused_check_phase_ + 1, size_),
+                                               kUnusedCheckPartialCount),
+                            page_size);
+  // These are always valid since unused_check_phase_ + 1 <= kUnusedCheckPartialCount (64) and
+  // size_ (the size of a mapped contiguous VMO) is far below UINT64_MAX / kUnusedCheckPartialCount.
+  ZX_ASSERT(start.IsValid());
+  ZX_ASSERT(end.IsValid());
+  CheckAnyUnusedPages(start.ValueOrDie(), end.ValueOrDie());
   unused_check_phase_ = (unused_check_phase_ + 1) % kUnusedCheckPartialCount;
   // Ignore status - if the post fails, that means the driver is being shut down.
   unused_checker_.PostDelayed(dispatcher,
@@ -1361,9 +1383,13 @@ void ContiguousPooledMemoryAllocator::ForUnusedGuardPatternRangesInternal(
   // DMA-write-after-free detection purposes, followed by the rest of unused_guard_pattern_period_
   // that's loaned.  The meta pattern repeats through the whole offset space from 0 to size_, but
   // only applies to portions of the space which are not currently used.
-  uint64_t meta_pattern_start = fbl::round_down(region_base, unused_guard_pattern_period_bytes_);
-  uint64_t meta_pattern_end = fbl::round_up(region_end, unused_guard_pattern_period_bytes_);
-  for (uint64_t meta_pattern_base = meta_pattern_start; meta_pattern_base < meta_pattern_end;
+  auto meta_pattern_start = CheckRoundDown(region_base, unused_guard_pattern_period_bytes_);
+  auto meta_pattern_end = CheckRoundUp(region_end, unused_guard_pattern_period_bytes_);
+  if (!meta_pattern_start.IsValid() || !meta_pattern_end.IsValid()) {
+    return;
+  }
+  for (uint64_t meta_pattern_base = meta_pattern_start.ValueOrDie();
+       meta_pattern_base < meta_pattern_end.ValueOrDie();
        meta_pattern_base += unused_guard_pattern_period_bytes_) {
     ralloc_region_t raw_keep{
         .base = meta_pattern_base,

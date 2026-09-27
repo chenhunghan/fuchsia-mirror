@@ -61,6 +61,8 @@ rust_library(
     edition = "2018",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=httparse_simd",
+        "--cfg=httparse_simd_neon_intrinsics",
     ],
     tags = [
         "cargo-bazel",

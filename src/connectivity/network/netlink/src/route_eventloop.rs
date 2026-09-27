@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use core::debug_assert;
-use std::convert::Infallible as Never;
 use std::pin::pin;
 
 use assert_matches::assert_matches;
@@ -540,7 +539,7 @@ impl<
     // non-recoverable errors. This more localized approach leads to better
     // error attribution in crash reports (i.e. the stack trace alone indicates
     // which type of error occurred).
-    pub(crate) async fn run(mut self) -> Never {
+    pub(crate) async fn run(mut self) -> ! {
         loop {
             self.run_one_step().await;
         }
@@ -1034,7 +1033,7 @@ impl<
     S: crate::messaging::Sender<<NetlinkRoute as ProtocolFamily>::Response>,
 > RouteEventLoop<H, S>
 {
-    pub(crate) async fn run(self, on_initialized: Option<oneshot::Sender<()>>) -> Never {
+    pub(crate) async fn run(self, on_initialized: Option<oneshot::Sender<()>>) -> ! {
         let Self {
             interfaces_proxy,
             interfaces_state_proxy,

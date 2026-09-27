@@ -967,7 +967,7 @@ TEST_F(DriverTest, SetProfileByRole) {
 
 TEST_F(DriverTest, GetFragmentProtocol) {
   const char* kFragmentName = "fragment-name";
-  const uint32_t kFragmentProtoId = ZX_PROTOCOL_BLOCK;
+  const uint32_t kFragmentProtoId = ZX_PROTOCOL_I2C;
   const uint64_t kFragmentOps = 0x1234;
   const uint64_t kFragmentCtx = 0x4567;
 

@@ -29,6 +29,7 @@ static_library("journal") {
   public_deps = [
     "//sdk/lib/fit",
     "//sdk/lib/fit-promise",
+    "//src/storage/lib/block_protocol:block_fifo",
     "//src/storage/lib/buffer",
     "//src/storage/lib/operation",
     "//src/storage/lib/range",
@@ -91,12 +92,12 @@ test("journal-unit") {
   ]
   deps = [
     ":journal",
-    "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_c",
     "//sdk/lib/fit",
     "//sdk/lib/fit-promise",
     "//src/lib/fxl/test:gtest_main",
     "//src/storage/lib/block_client/cpp:fake_device",
     "//src/storage/lib/block_client/cpp:interface",
+    "//src/storage/lib/block_protocol:block_fifo",
     "//src/storage/lib/buffer",
     "//src/storage/lib/operation",
     "//src/storage/lib/vfs/cpp/transaction",
@@ -115,7 +116,7 @@ source_set("fuzz-utils") {
   sources = [ "fuzzer_utils.cc" ]
   public_deps = [
     ":journal",
-    "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_c",
+    "//src/storage/lib/block_protocol:block_fifo",
     "//src/storage/lib/buffer",
     "//src/storage/lib/operation",
     "//src/storage/lib/vfs/cpp/transaction",

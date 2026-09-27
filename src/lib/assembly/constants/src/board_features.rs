@@ -45,8 +45,6 @@ pub enum BoardFeature {
     KeysafeTa,
     /// ARM Mali GPU driver support.
     MaliGpu,
-    /// Require the use of Netstack3.
-    NetworkRequireNetstack3,
     /// Support for running as a guest in a virtual machine.
     Paravirtualization,
     /// Device flashing and paving utilities support.
@@ -132,7 +130,6 @@ impl AsRef<str> for BoardFeature {
             Self::Keymint => "fuchsia::keymint",
             Self::KeysafeTa => "fuchsia::keysafe_ta",
             Self::MaliGpu => "fuchsia::mali_gpu",
-            Self::NetworkRequireNetstack3 => "fuchsia::network_require_netstack3",
             Self::Paravirtualization => "fuchsia::paravirtualization",
             Self::Paver => "fuchsia::paver",
             Self::PmmChecker => "fuchsia::pmm_checker",

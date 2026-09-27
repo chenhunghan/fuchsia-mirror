@@ -32,6 +32,9 @@ class CodecPacket {
   // communicate regarding a CodecPacket.
   uint32_t packet_index() const;
 
+  // Associates `buffer` with this packet and holds a CodecBuffer::KeepAlive on
+  // `buffer` until SetBuffer(nullptr) (or another SetBuffer call or packet
+  // destruction).
   void SetBuffer(const CodecBuffer* buffer);
   const CodecBuffer* buffer() const;
 
@@ -66,9 +69,14 @@ class CodecPacket {
   void CacheFlush() const;
   void CacheFlushAndInvalidate() const;
 
-  // The rest is protected for the benefit of tests. Sub-classes outside tests
-  // are not supported.
+  // The constructor is protected for the benefit of CodecPacketForTest.
+  // Sub-classes outside tests are not supported.
  protected:
+  // The buffer ptr is not owned.  The buffer lifetime is slightly longer than
+  // the Packet lifetime.
+  CodecPacket(uint64_t buffer_lifetime_ordinal, uint32_t packet_index);
+
+ private:
   // The public section is for the core codec to call - the private section is
   // only for CodecImpl to call.
   friend class CodecImpl;
@@ -76,10 +84,6 @@ class CodecPacket {
 
   static constexpr uint32_t kStartOffsetNotSet = std::numeric_limits<uint32_t>::max();
   static constexpr uint32_t kValidLengthBytesNotSet = std::numeric_limits<uint32_t>::max();
-
-  // The buffer ptr is not owned.  The buffer lifetime is slightly longer than
-  // the Packet lifetime.
-  CodecPacket(uint64_t buffer_lifetime_ordinal, uint32_t packet_index);
 
   // This is separate from the constructor because some core codec tests use
   // CodecPacket but don't have a CodecImpl, and there's no compelling reason to
@@ -114,6 +118,13 @@ class CodecPacket {
   // This value doesn't change for a given constructed CodecPacket.
   uint32_t allocated_packet_index() const;
 
+  // This is intentionally private so that the CodecAdapter can't call this.
+  //
+  // Tracks whether an output packet has a pending delivery or short-circuit
+  // closure in CodecImpl::output_queue_ or CodecImpl::shared_fidl_queue_.
+  void SetQueued(bool is_queued);
+  bool is_queued() const;
+
   const CodecImpl* parent_ = nullptr;
 
   const uint64_t buffer_lifetime_ordinal_ = 0;
@@ -125,9 +136,10 @@ class CodecPacket {
   // packet_index is in-flight, not while the packet_index is free from
   // CodecImpl's point of view (per is_free()).
   //
-  // A CodecAdapter can optionally ensure this is nullptr when a packet becomes
-  // free from the CodecAdapter's point of view (during handling of
-  // CoreCodecRecycleOutputPacket, whether the handling is sync or async).
+  // A CodecAdapter must call SetBuffer(nullptr) when a packet becomes free from
+  // the CodecAdapter's point of view (during sync or async handling of
+  // CoreCodecRecycleOutputPacket, and before the packet can be reused) so that
+  // buffer_keep_alive_ is released and does not prevent ZX_VMO_ZERO_CHILDREN.
   //
   // A CodecAdapter can rely on this being nullptr at the start of the first
   // CoreCodecRecycleOutputPacket call for this packet.
@@ -155,6 +167,12 @@ class CodecPacket {
   // An input packet starts out free with the client, and and output packet
   // starts out free with the codec server.  Either way, it starts free.
   bool is_free_ = true;
+
+  // True while an output packet has a pending OnOutputPacket closure in
+  // CodecImpl::output_queue_ / CodecImpl::shared_fidl_queue_ (with is_free_
+  // false) or a pending immediate ShortCircuitOutputPacketLocked closure in
+  // CodecImpl::shared_fidl_queue_ (with is_free_ true).
+  bool is_queued_ = false;
 
   // Starts true when a packet is truly new.  In addition, a CodecAdapter may
   // set this back to true whenever the packet is logically new from the

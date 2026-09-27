@@ -77,8 +77,8 @@ def hardlink_or_copy_writable(
 
 def copy_directory_if_changed(
     src_dir: FilePath, dst_dir: FilePath, tracked_files: list[FilePath]
-) -> None:
-    """Copy directory from |src_path| to |dst_path| if |tracked_files| have different mtimes.
+) -> bool:
+    """Copy directory from |src_dir| to |dst_dir| if |tracked_files| have different mtimes.
 
     NOTE this function deliberately uses __mtime__, instead of content, of
     tracked_files to determine whether directories need a re-copy. This follows
@@ -87,6 +87,16 @@ def copy_directory_if_changed(
     understands timestamps.
 
     See http://b/365838961 for details.
+
+    Args:
+        src_dir: Source directory to copy from.
+        dst_dir: Destination directory to copy to.
+        tracked_files: List of file paths relative to src_dir and dst_dir whose
+            mtimes are checked to determine if the directory needs to be copied.
+
+    Returns:
+        True if the directory was copied, False if all tracked files had
+        matching mtimes and the copy was skipped.
     """
     assert os.path.isdir(
         src_dir
@@ -112,12 +122,13 @@ def copy_directory_if_changed(
         return True
 
     if all_tracked_files_unchanged(src_dir, dst_dir, tracked_files):
-        return
+        return False
 
     if os.path.lexists(dst_dir):
         rmtree_threaded(dst_dir)
 
     copy_directory_threaded(src_dir, dst_dir)
+    return True
 
 
 def rmtree_threaded(dirname: FilePath) -> None:
@@ -129,7 +140,7 @@ def rmtree_threaded(dirname: FilePath) -> None:
     # Find all the files in the tree, from the bottom up so that the directories are emptied from
     # the bottom-up (the order they'll be deleted in.)
     files: list[str] = []
-    for root, _, filenames in os.walk(dirname, topdown=False):
+    for root, _, filenames in os.walk(str(dirname), topdown=False):
         files.extend([os.path.join(root, filename) for filename in filenames])
 
     # Delete all the files in one big threadpool
@@ -142,7 +153,7 @@ def rmtree_threaded(dirname: FilePath) -> None:
 def copy_directory_threaded(src_dir: FilePath, dst_dir: FilePath) -> None:
     directories: list[str] = []
     files: list[tuple[str, str]] = []
-    for root, dirnames, filenames in os.walk(src_dir):
+    for root, dirnames, filenames in os.walk(str(src_dir)):
         relroot = os.path.relpath(root, src_dir)
         if relroot != ".":
             directories.append(os.path.join(dst_dir, relroot))

@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_proc_macro")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "split_enum_storage",
+    srcs = ["src/lib.rs"],
+    crate_name = "split_enum_storage",
+    edition = "2024",
+    proc_macro_deps = [
+        ":split_enum_storage_macro",
+    ],
+)
+
+rustc_proc_macro(
+    name = "split_enum_storage_macro",
+    srcs = ["src/macro.rs"],
+    crate_name = "split_enum_storage_macro",
+    crate_root = "src/macro.rs",
+    edition = "2024",
+    deps = [
+        "//third_party/rust_crates/vendor:proc-macro2",
+        "//third_party/rust_crates/vendor:quote",
+        "//third_party/rust_crates/vendor:syn",
+    ],
+)

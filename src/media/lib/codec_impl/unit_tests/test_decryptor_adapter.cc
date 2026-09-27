@@ -355,7 +355,7 @@ class DecryptorAdapterTest : public gtest::RealLoopFixture {
     packet.set_buffer_index(buffer_index)
         .set_stream_lifetime_ordinal(kStreamLifetimeOrdinal)
         .set_start_offset(0)
-        .set_valid_length_bytes(size)
+        .set_valid_length_bytes(static_cast<uint32_t>(size))
         .set_timestamp_ish(timestamp_ish++)
         .set_start_access_unit(true);
 

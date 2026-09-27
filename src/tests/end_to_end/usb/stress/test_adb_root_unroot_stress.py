@@ -6,7 +6,7 @@
 import logging
 
 import fuchsia_base_test
-from mobly import asserts, signals, test_runner
+from mobly import asserts, test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -35,11 +35,9 @@ class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """setup_class is called once before running tests."""
         await super().setup_class()
-        if not await self.dut.adb.is_supported():
-            raise signals.TestAbortClass("ADB is not supported on this target")
-
-        self._serial = self.dut.serial_number
-        _LOGGER.info("Device serial number: %s", self._serial)
+        # Ensure ADB is supported and enabled on this device before starting the test
+        # (raises NotSupportedError or NotEnabledError otherwise).
+        _ = self.dut.adb
 
     async def _test_logic(self, iteration: int) -> None:
         """Test case logic that performs root/unroot."""
@@ -49,9 +47,8 @@ class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
         try:
             # Ensure we start as non-root
-            await self.dut.adb.run(["unroot"])
-            await self.dut.adb.run(["wait-for-device"], timeout=30.0)
-            output = await self.dut.adb.run(["shell", "id"])
+            self.dut.adb.unroot(timeout=30.0)
+            output = self.dut.adb.run(["shell", "id"])
             asserts.assert_in(
                 "uid=2000(shell)",
                 output,
@@ -59,19 +56,43 @@ class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
             )
 
             # Switch to root
-            await self.dut.adb.run(["root"])
-            await self.dut.adb.run(["wait-for-device"], timeout=30.0)
-            output = await self.dut.adb.run(["shell", "id"])
+            self.dut.adb.root(timeout=30.0)
+            output = self.dut.adb.run(["shell", "id"])
             asserts.assert_in(
                 "uid=0(root)",
                 output,
                 msg=f"Expected root user (uid=0) but got: {output}",
             )
+
+            # Switch back to non-root
+            self.dut.adb.unroot(timeout=30.0)
+            output = self.dut.adb.run(["shell", "id"])
+            asserts.assert_in(
+                "uid=2000(shell)",
+                output,
+                msg=f"Expected shell user (uid=2000) but got: {output}",
+            )
+
+            # Test use_adb_root context manager
+            with self.dut.adb.use_adb_root(timeout=30.0):
+                output = self.dut.adb.run(["shell", "id"])
+                asserts.assert_in(
+                    "uid=0(root)",
+                    output,
+                    msg=f"Expected root user (uid=0) but got: {output}",
+                )
+
+            # Ensure previous non-root state was restored upon exiting context
+            output = self.dut.adb.run(["shell", "id"])
+            asserts.assert_in(
+                "uid=2000(shell)",
+                output,
+                msg=f"Expected shell user (uid=2000) but got: {output}",
+            )
         finally:
             # Always restore non-root state
-            await self.dut.adb.run(["unroot"])
-            await self.dut.adb.run(["wait-for-device"], timeout=30.0)
-            output = await self.dut.adb.run(["shell", "id"])
+            self.dut.adb.unroot(timeout=30.0)
+            output = self.dut.adb.run(["shell", "id"])
             asserts.assert_in(
                 "uid=2000(shell)",
                 output,

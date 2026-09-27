@@ -36,9 +36,7 @@ use net_types::Witness as _;
 use net_types::ip::{Ip, IpAddress as _, IpInvariant, IpVersion, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr};
 use netemul::{TestFakeEndpoint, TestInterface, TestNetwork, TestRealm, TestSandbox};
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
-use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, Netstack3, NetstackVersion, TestSandboxExt as _,
-};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{Result, devices};
 use netstack_testing_macros::netstack_test;
 use packet::{
@@ -261,22 +259,18 @@ enum IpEndpointsSocketTestCase {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(IpEndpointsSocketTestCase::Udp; "udp_socket")]
 #[test_case(IpEndpointsSocketTestCase::Tcp; "tcp_socket")]
 #[test_case(IpEndpointsSocketTestCase::Packet(fpacket::Kind::Network); "packet_dgram_socket")]
 #[test_case(IpEndpointsSocketTestCase::Packet(fpacket::Kind::Link); "packet_raw_socket")]
-async fn ip_endpoints_socket<N: Netstack, I: Ip>(
-    name: &str,
-    socket_type: IpEndpointsSocketTestCase,
-) {
+async fn ip_endpoints_socket<I: Ip>(name: &str, socket_type: IpEndpointsSocketTestCase) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_client", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
         .expect("failed to create client realm");
     let server = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_server", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
         .expect("failed to create server realm");
 
     let (_tun_pair, client_port, server_port) = devices::create_tun_pair_with(
@@ -383,10 +377,10 @@ fn is_packet_spurious(ip_version: IpVersion, mut body: &[u8]) -> Result<bool> {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn ip_endpoint_packets<N: Netstack>(name: &str) {
+async fn ip_endpoint_packets(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create client realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create client realm");
 
     let tun = fuchsia_component::client::connect_to_protocol::<fnet_tun::ControlMarker>()
         .expect("failed to connect to tun protocol");
@@ -653,7 +647,6 @@ enum SocketType {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(SocketType::Udp, true; "UDP specified")]
 #[test_case(SocketType::Udp, false; "UDP unspecified")]
@@ -661,13 +654,10 @@ enum SocketType {
 #[test_case(SocketType::Tcp, false; "TCP unspecified")]
 // Verify socket connectivity over loopback.
 // The Netstack is expected to treat the unspecified address as loopback.
-async fn socket_loopback_test<N: Netstack, I: Ip>(
-    name: &str,
-    socket_type: SocketType,
-    specified: bool,
-) {
+async fn socket_loopback_test<I: Ip>(name: &str, socket_type: SocketType, specified: bool) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create realm");
     let address = specified
         .then_some(I::LOOPBACK_ADDRESS.get())
         .unwrap_or(I::UNSPECIFIED_ADDRESS)
@@ -681,13 +671,12 @@ async fn socket_loopback_test<N: Netstack, I: Ip>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(SocketType::Udp)]
 #[test_case(SocketType::Tcp)]
-async fn socket_clone_bind<N: Netstack>(name: &str, socket_type: SocketType) {
+async fn socket_clone_bind(name: &str, socket_type: SocketType) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let network = sandbox.create_network("net").await.expect("failed to create network");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let interface = realm.join_network(&network, "stack").await.expect("join network failed");
     interface
         .add_address_and_subnet_route(fidl_subnet!("192.168.1.10/16"))
@@ -787,7 +776,6 @@ struct Network<'a, A> {
 /// See https://stackoverflow.com/a/72673740 for a more thorough explanation.
 async fn with_multinic_and_peer_networks<
     'params,
-    N: Netstack,
     I: TestIpExt,
     F: for<'a> FnOnce(
         Vec<Network<'a, I::Addr>>,
@@ -803,8 +791,9 @@ async fn with_multinic_and_peer_networks<
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let sandbox = &sandbox;
 
-    let multinic =
-        sandbox.create_netstack_realm::<N, _>(format!("{name}_multinic")).expect("create realm");
+    let multinic = sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_multinic"))
+        .expect("create realm");
     let multinic = &multinic;
 
     let networks: Vec<_> = future::join_all((0..num_peers).map(|i| async move {
@@ -832,7 +821,7 @@ async fn with_multinic_and_peer_networks<
         let network = sandbox.create_network(format!("net_{i}")).await.expect("create network");
         let (peer_realm, peer_interface) = {
             let peer = sandbox
-                .create_netstack_realm::<N, _>(format!("{name}_peer_{i}"))
+                .create_netstack_realm::<Netstack3, _>(format!("{name}_peer_{i}"))
                 .expect("create realm");
             let peer_iface = peer
                 .join_network(&network, format!("peer-{i}-ep"))
@@ -870,7 +859,6 @@ async fn with_multinic_and_peer_networks<
 }
 
 async fn with_multinic_and_peers<
-    N: Netstack,
     S: MakeSocket,
     I: TestIpExt,
     F: FnOnce(Vec<MultiNicAndPeerConfig<S>>) -> R,
@@ -882,7 +870,7 @@ async fn with_multinic_and_peers<
     port: u16,
     call_with_sockets: F,
 ) {
-    with_multinic_and_peer_networks::<N, I, _>(name, num_peers, subnet, |networks, multinic, ()| {
+    with_multinic_and_peer_networks::<I, _>(name, num_peers, subnet, |networks, multinic, ()| {
         Box::pin(async move {
             let config = future::join_all(networks.iter().map(
                 |Network {
@@ -950,83 +938,23 @@ struct MultiNicAndPeerConfig<S> {
     peer_socket: S,
 }
 
-#[derive(PartialEq)]
-enum ProtocolWithZirconSocket {
-    Tcp,
-    FastUdp,
-}
-
 #[netstack_test]
-#[variant(N, Netstack)]
-#[test_case(ProtocolWithZirconSocket::Tcp)]
-#[test_case(ProtocolWithZirconSocket::FastUdp)]
-async fn zx_socket_rights<N: Netstack>(name: &str, protocol: ProtocolWithZirconSocket) {
-    // TODO(https://fxbug.dev/42182397): Remove this test when Fast UDP is
-    // supported by Netstack3.
-    if matches!(N::VERSION, NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3)
-        && protocol == ProtocolWithZirconSocket::FastUdp
-    {
-        return;
-    }
-
+async fn zx_socket_rights(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let netstack = match N::VERSION {
-        NetstackVersion::Netstack2 { tracing: false, fast_udp: false } => sandbox
-            .create_realm(
-                format!("{}", name),
-                [KnownServiceProvider::Netstack(NetstackVersion::Netstack2 {
-                    fast_udp: true,
-                    tracing: false,
-                })],
-            )
-            .expect("create realm"),
-        NetstackVersion::Netstack3 => {
-            sandbox.create_netstack_realm::<N, _>(format!("{}", name)).expect("create realm")
-        }
-        v @ (NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-        | NetstackVersion::ProdNetstack2
-        | NetstackVersion::ProdNetstack3) => panic!(
-            "netstack_test should only be parameterized with Netstack2 or Netstack3: got {:?}",
-            v
-        ),
-    };
+    let netstack = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
 
     let provider = netstack
         .connect_to_protocol::<fposix_socket::ProviderMarker>()
         .expect("connect to socket provider");
-    let socket = match protocol {
-        ProtocolWithZirconSocket::Tcp => {
-            let socket = provider
-                .stream_socket(
-                    fposix_socket::Domain::Ipv4,
-                    fposix_socket::StreamSocketProtocol::Tcp,
-                )
-                .await
-                .expect("call stream socket")
-                .expect("request stream socket");
-            let fposix_socket::StreamSocketDescribeResponse { socket, .. } =
-                socket.into_proxy().describe().await.expect("call describe");
-            socket
-        }
-        ProtocolWithZirconSocket::FastUdp => {
-            let response = provider
-                .datagram_socket(
-                    fposix_socket::Domain::Ipv4,
-                    fposix_socket::DatagramSocketProtocol::Udp,
-                )
-                .await
-                .expect("call datagram socket")
-                .expect("request datagram socket");
-            let socket = match response {
-                fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(_) => {
-                    panic!("expected fast udp socket, got sync udp")
-                }
-                fposix_socket::ProviderDatagramSocketResponse::DatagramSocket(socket) => socket,
-            };
-            let fposix_socket::DatagramSocketDescribeResponse { socket, .. } =
-                socket.into_proxy().describe().await.expect("call describe");
-            socket
-        }
+    let socket = {
+        let socket = provider
+            .stream_socket(fposix_socket::Domain::Ipv4, fposix_socket::StreamSocketProtocol::Tcp)
+            .await
+            .expect("call stream socket")
+            .expect("request stream socket");
+        let fposix_socket::StreamSocketDescribeResponse { socket, .. } =
+            socket.into_proxy().describe().await.expect("call describe");
+        socket
     };
 
     let zx::HandleBasicInfo { rights, .. } = socket

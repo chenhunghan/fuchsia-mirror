@@ -83,6 +83,8 @@ void RainfallDemo::SetWindowSize(vk::Extent2D window_size) {
   if (window_size_ == window_size)
     return;
   window_size_ = window_size;
+  depth_buffer_ = nullptr;
+  framebuffer_cache_.clear();
   InitializeDemoScenes();
 }
 
@@ -101,6 +103,10 @@ void RainfallDemo::DrawFrame(const escher::FramePtr& frame, const escher::ImageP
   TRACE_DURATION("gfx", "RainfallDemo::DrawFrame");
   FX_DCHECK(frame && output_image && renderer_);
 
+  // Must happen before creating any resources whose size depends on the window size; otherwise
+  // they would immediately be invalidated by the size change.
+  SetWindowSize({output_image->width(), output_image->height()});
+
   if (!default_texture_) {
     auto gpu_uploader =
         std::make_shared<escher::BatchGpuUploader>(escher()->GetWeakPtr(), frame->frame_number());
@@ -114,8 +120,6 @@ void RainfallDemo::DrawFrame(const escher::FramePtr& frame, const escher::ImageP
     depth_buffer_ = CreateDepthBuffer(escher(), output_image);
   }
 
-  SetWindowSize({output_image->width(), output_image->height()});
-
   frame->cmds()->AddWaitSemaphore(framebuffer_acquired,
                                   vk::PipelineStageFlagBits::eColorAttachmentOutput);
   {
@@ -128,6 +132,11 @@ void RainfallDemo::DrawFrame(const escher::FramePtr& frame, const escher::ImageP
     for (uint32_t i = 0; i < batch.size(); i++) {
       textures.push_back(default_texture_);
     }
-    renderer_->DrawBatch(frame->cmds(), batch, textures, color_data, output_image, depth_buffer_);
+    auto it = framebuffer_cache_.find(output_image.get());
+    if (it == framebuffer_cache_.end()) {
+      auto fb = renderer_->CreateFramebuffer(escher::ImageView::New(output_image), depth_buffer_);
+      it = framebuffer_cache_.emplace(output_image.get(), std::move(fb)).first;
+    }
+    renderer_->DrawBatch(frame->cmds(), batch, textures, color_data, it->second);
   }
 }

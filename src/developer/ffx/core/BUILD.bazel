@@ -12,7 +12,7 @@ package(
 
 rustc_library(
     name = "lib",
-    srcs = ["src/lib_bazel_stub.rs"],
+    srcs = ["src/lib.rs"],
     crate_name = "ffx_core",
     edition = "2024",
     proc_macro_deps = [

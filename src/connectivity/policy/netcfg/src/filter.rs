@@ -2,26 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU64;
+use std::collections::HashSet;
 
 use fidl_fuchsia_net_filter as fnet_filter;
-use fidl_fuchsia_net_filter_deprecated as fnet_filter_deprecated;
 use fidl_fuchsia_net_filter_ext::{
     self as fnet_filter_ext, Action, Change, CommitError, Domain, InstalledIpRoutine,
     InstalledNatRoutine, IpHook, Matchers, Namespace, NamespaceId, NatHook, PushChangesError,
     Resource, ResourceId, Routine, RoutineId, RoutineType, Rule, RuleId,
 };
 use fidl_fuchsia_net_interfaces_ext as fnet_interfaces_ext;
-use fidl_fuchsia_net_masquerade as fnet_masquerade;
 use fidl_fuchsia_net_matchers_ext as fnet_matchers_ext;
-use fuchsia_async::DurationExt as _;
 
-use anyhow::{Context as _, bail};
-use log::{error, info, warn};
+use anyhow::Context as _;
+use log::info;
 
-use crate::{FilterConfig, InterfaceId, InterfaceType, exit_with_fidl_error};
+use crate::{FilterConfig, InterfaceType};
 
 /// An error observed on the `fuchsia.net.filter` API.
 #[derive(Debug)]
@@ -30,111 +25,41 @@ pub(crate) enum FilterError {
     Commit(CommitError),
 }
 
-// A container to dispatch filtering functions depending on the
-// filtering API present.
-pub(crate) enum FilterControl {
-    Deprecated(fnet_filter_deprecated::FilterProxy),
-    Current(Box<FilterState>),
-}
-
-impl FilterControl {
-    // Determine whether to use the fuchsia.net.filter.deprecated API or the
-    // fuchsia.net.filter API. When the deprecated API is present and active,
-    // we should use it.
-    pub(super) async fn new(
-        deprecated_proxy: Option<fnet_filter_deprecated::FilterProxy>,
-        current_proxy: Option<fnet_filter::ControlProxy>,
-    ) -> Result<Self, anyhow::Error> {
-        if let Some(proxy) = deprecated_proxy {
-            if probe_for_presence(&proxy).await {
-                return Ok(FilterControl::Deprecated(proxy));
-            }
-        }
-
-        if let Some(proxy) = current_proxy {
-            let controller_id = fnet_filter_ext::ControllerId(String::from("netcfg"));
-            let filter = FilterControl::Current(Box::new(FilterState {
-                controller: fnet_filter_ext::Controller::new(&proxy, &controller_id)
-                    .await
-                    .context("could not create controller from filter proxy")?,
-                uninstalled_ip_routines: filter_routines(false /* installed */),
-                installed_ip_routines: filter_routines(true /* installed */),
-                current_installed_rule_index: 0,
-                masquerade: MasqueradeState {
-                    routine_id: masquerade_routine(),
-                    next_rule_index: 0,
-                },
-            }));
-            return Ok(filter);
-        }
-
-        Err(anyhow::anyhow!("no filtering proxy available!"))
-    }
-
-    /// Updates the initial network filter configuration using either
-    /// fuchsia.net.filter.deprecated or fuchsia.net.filter.
-    pub(super) async fn update_filters(
-        &mut self,
-        config: FilterConfig,
-        filter_enabled_state: &FilterEnabledState,
-    ) -> Result<(), anyhow::Error> {
-        match self {
-            FilterControl::Deprecated(proxy) => update_filters_deprecated(proxy, config).await,
-            FilterControl::Current(state) => {
-                state.update_filters_current(config, filter_enabled_state).await
-            }
-        }
-    }
-}
-
-// Filtering state for Masquerade NAT on the current `fuchsia.net.filter` API.
-struct MasqueradeState {
-    // The routine that holds all masquerade rules.
-    routine_id: RoutineId,
-    // The index to use for the next masquerade rule.
-    //
-    // Note: By using a simple counter, we don't re-use indices that were once
-    // used but are now available. The upside to this approach is that all
-    // filtering config has a stable order: older filtering config will always
-    // have a lower index (and therefore a higher priority) than newer filtering
-    // config. On the other hand, we do run the risk of overflowing the index
-    // if Netcfg were to add/remove u32::MAX filtering rules. That should only
-    // happen under pathological circumstances, and thus is a non-concern.
-    next_rule_index: u32,
-}
-
 // Filtering state on the current `fuchsia.net.filter` API.
-pub(super) struct FilterState {
+pub(crate) struct FilterControl {
     controller: fnet_filter_ext::Controller,
-    uninstalled_ip_routines: netfilter::parser::FilterRoutines,
-    installed_ip_routines: netfilter::parser::FilterRoutines,
     masquerade: MasqueradeState,
-    current_installed_rule_index: u32,
     // TODO(https://fxbug.dev/331469354): Add NAT routines when this
     // functionality has been added to fuchsia.net.filter.
 }
 
-impl FilterState {
-    // Commit the initial filter state using fuchsia.net.filter.
-    async fn update_filters_current(
+impl FilterControl {
+    pub(super) async fn new(proxy: fnet_filter::ControlProxy) -> Result<Self, anyhow::Error> {
+        let controller_id = fnet_filter_ext::ControllerId(String::from("netcfg"));
+        Ok(Self {
+            controller: fnet_filter_ext::Controller::new(&proxy, &controller_id)
+                .await
+                .context("could not create controller from filter proxy")?,
+            masquerade: MasqueradeState { routine_id: masquerade_routine(), next_rule_index: 0 },
+        })
+    }
+
+    /// Updates the initial network filter configuration using
+    /// fuchsia.net.filter.
+    pub(super) async fn update_filters(
         &mut self,
         config: FilterConfig,
-        filter_enabled_state: &FilterEnabledState,
+        filter_enabled_interface_types: &HashSet<InterfaceType>,
     ) -> Result<(), anyhow::Error> {
-        let FilterState {
-            controller,
-            uninstalled_ip_routines,
-            installed_ip_routines,
-            current_installed_rule_index,
-            masquerade,
-        } = self;
-        let (changes, num_installed_rules) = generate_initial_filter_changes(
-            uninstalled_ip_routines,
-            installed_ip_routines,
+        let Self { controller, masquerade } = self;
+        let uninstalled_ip_routines = filter_routines(false /* installed */);
+        let installed_ip_routines = filter_routines(true /* installed */);
+        let changes = generate_initial_filter_changes(
+            &uninstalled_ip_routines,
+            &installed_ip_routines,
             &masquerade.routine_id,
             config,
-            &filter_enabled_state.interface_types,
-            *current_installed_rule_index,
+            filter_enabled_interface_types,
         )?;
 
         for batch in changes.chunks(usize::from(fnet_filter::MAX_BATCH_SIZE)) {
@@ -146,10 +71,24 @@ impl FilterState {
 
         controller.commit().await.context("failed to commit changes to filter controller")?;
         info!("initial filter configuration has been committed successfully");
-        *current_installed_rule_index =
-            current_installed_rule_index.wrapping_add(num_installed_rules);
         Ok(())
     }
+}
+
+// Filtering state for Masquerade NAT on the `fuchsia.net.filter` API.
+struct MasqueradeState {
+    // The routine that holds all masquerade rules.
+    routine_id: RoutineId,
+    // The index to use for the next masquerade rule.
+    //
+    // Note: By using a simple counter, we don't reuse indices that were once
+    // used but are now available. The upside to this approach is that all
+    // filtering config has a stable order: older filtering config will always
+    // have a lower index (and therefore a higher priority) than newer filtering
+    // config. On the other hand, we do run the risk of overflowing the index
+    // if Netcfg were to add/remove u32::MAX filtering rules. That should only
+    // happen under pathological circumstances, and thus is a non-concern.
+    next_rule_index: u32,
 }
 
 // Netcfg's `FilterRoutines` to maintain the same namespace
@@ -180,32 +119,36 @@ fn namespace_id() -> NamespaceId {
     NamespaceId(String::from("netcfg"))
 }
 
-pub(super) async fn probe_for_presence(filter: &fnet_filter_deprecated::FilterProxy) -> bool {
-    match filter.check_presence().await {
-        Ok(()) => true,
-        Err(fidl::Error::ClientChannelClosed { .. }) => false,
-        Err(e) => panic!("unexpected error while probing: {e}"),
+fn get_enabled_port_classes(
+    interface_types: &HashSet<InterfaceType>,
+) -> HashSet<fnet_interfaces_ext::PortClass> {
+    let mut port_classes = HashSet::new();
+    for interface_type in interface_types {
+        port_classes.extend(interface_type.port_classes());
+        // An AP device can be filtered by specifying AP or WLAN.
+        if *interface_type == InterfaceType::WlanClient {
+            let _replaced: bool = port_classes.insert(fnet_interfaces_ext::PortClass::WlanAp);
+        }
     }
+    return port_classes;
 }
 
-// Create a set of `fnet_filter_ext::Change`s that, when used with
-// `fnet_filter_ext::Controller`, will establish the initial filtering
-// state for the `netcfg` namespace.
+// Create a list of `fnet_filter_ext::Change`s that, when used with
+// `fnet_filter_ext::Controller`, will initialize the filter namespace,
+// routines, and rules for netcfg.
 fn generate_initial_filter_changes(
     uninstalled_ip_routines: &netfilter::parser::FilterRoutines,
     installed_ip_routines: &netfilter::parser::FilterRoutines,
     masquerade_routine: &RoutineId,
     config: FilterConfig,
     filter_enabled_interface_types: &HashSet<InterfaceType>,
-    current_installed_rule_index: u32,
-) -> Result<(Vec<Change>, u32), anyhow::Error> {
-    let namespace = Change::Create(Resource::Namespace(Namespace {
-        id: NamespaceId(String::from("netcfg")),
-        domain: Domain::AllIp,
-    }));
-    let mut changes = vec![namespace];
+) -> Result<Vec<Change>, anyhow::Error> {
+    let mut changes = Vec::new();
+    let namespace = Namespace { id: namespace_id(), domain: Domain::AllIp };
+    changes.push(Change::Create(Resource::Namespace(namespace)));
 
-    // Create uninstalled `Routine`s that the installed `Routine`s can use to
+    // Push uninstalled routines first so that installed routines will have
+    // a reference to an existing routine when they are installed and will
     // `Jump` to `Rule`s. There must be a separate uninstalled `Routine` for
     // each `IpHook` so that there are not issues with a `Rule` containing
     // a matcher that is not allowed in the installed `Routine`'s hook.
@@ -219,7 +162,7 @@ fn generate_initial_filter_changes(
         local_egress.clone().map(|id| Routine { id, routine_type: RoutineType::Ip(None) });
 
     // Push installed routines so that netcfg can install `Jump` rules
-    // at interface installation time that are rooted in these routines.
+    // rooted in these routines.
     fn installed_routine_from_id(id: RoutineId, hook: IpHook) -> Routine {
         Routine {
             id: id,
@@ -266,68 +209,20 @@ fn generate_initial_filter_changes(
         changes.extend(rule_changes);
     }
 
-    // TODO(https://fxbug.dev/530218539): Add PortClass filtering for
-    // interfaces other than LoWPAN once NS2/filter.deprecated is removed.
-    let mut num_installed_rules = 0;
-    if filter_enabled_interface_types.contains(&InterfaceType::Lowpan) {
-        let lowpan_rules = generate_static_port_class_filter_rules(
+    for (i, port_class) in
+        get_enabled_port_classes(filter_enabled_interface_types).into_iter().enumerate()
+    {
+        let port_class_rules = generate_static_port_class_filter_rules(
             uninstalled_ip_routines,
             installed_ip_routines,
-            fnet_interfaces_ext::PortClass::Lowpan,
-            current_installed_rule_index.wrapping_add(num_installed_rules),
+            port_class,
+            u32::try_from(i).expect("rule index overflowed u32"),
         );
-        changes.extend(lowpan_rules.into_iter().map(|rule| Change::Create(Resource::Rule(rule))));
-        num_installed_rules += 1;
+        changes
+            .extend(port_class_rules.into_iter().map(|rule| Change::Create(Resource::Rule(rule))));
     }
 
-    Ok((changes, num_installed_rules))
-}
-
-// Create a list of `fnet_filter_ext::Rule`s that, when used with
-// `fnet_filter_ext::Controller`, will `Jump` on each available
-// `IpHook` to the corresponding uninstalled routine for
-// that `IpHook`.
-fn generate_updated_filter_rules(
-    uninstalled_ip_routines: &netfilter::parser::FilterRoutines,
-    installed_ip_routines: &netfilter::parser::FilterRoutines,
-    interface_id: InterfaceId,
-    current_installed_rule_index: u32,
-) -> Vec<Rule> {
-    let netfilter::parser::FilterRoutines {
-        local_ingress: uninstalled_local_ingress,
-        local_egress: uninstalled_local_egress,
-    } = uninstalled_ip_routines;
-    let netfilter::parser::FilterRoutines { local_ingress, local_egress } = installed_ip_routines;
-
-    // Use the same rule index for all rules created for the
-    // interface. It is assumed that all `Rule`s across the
-    // `FilterRoutines` will inserted in tandem.
-    let local_ingress_rule = local_ingress.clone().map(|routine_id| {
-        create_interface_matching_jump_rule(
-            routine_id,
-            current_installed_rule_index,
-            interface_id,
-            IpHook::LocalIngress,
-            &uninstalled_local_ingress
-                .as_ref()
-                .expect("there should be a corresponding uninstalled routine for local ingress")
-                .name,
-        )
-    });
-    let local_egress_rule = local_egress.clone().map(|routine_id| {
-        create_interface_matching_jump_rule(
-            routine_id,
-            current_installed_rule_index,
-            interface_id,
-            IpHook::LocalEgress,
-            &uninstalled_local_egress
-                .as_ref()
-                .expect("there should be a corresponding uninstalled routine for local egress")
-                .name,
-        )
-    });
-
-    [local_ingress_rule, local_egress_rule].into_iter().flatten().collect()
+    Ok(changes)
 }
 
 fn create_jump_rule(
@@ -350,23 +245,7 @@ fn create_jump_rule(
     }
 }
 
-fn create_interface_matching_jump_rule(
-    routine_id: RoutineId,
-    index: u32,
-    interface_id: InterfaceId,
-    hook: IpHook,
-    target_routine_name: &str,
-) -> Rule {
-    create_jump_rule(
-        routine_id,
-        index,
-        fnet_matchers_ext::Interface::Id(interface_id.into()),
-        hook,
-        target_routine_name,
-    )
-}
-
-/// Generates static filter rules (jump rules) for a given `PortClass` (specifically Lowpan) to
+/// Generates static filter rules (jump rules) for a given `PortClass` to
 /// redirect traffic to uninstalled routines.
 fn generate_static_port_class_filter_rules(
     uninstalled_ip_routines: &netfilter::parser::FilterRoutines,
@@ -426,424 +305,9 @@ fn create_port_class_matching_jump_rule(
     )
 }
 
-// We use Compare-And-Swap (CAS) protocol to update filter rules. $get_rules returns the current
-// generation number. $update_rules will send it with new rules to make sure we are updating the
-// intended generation. If the generation number doesn't match, $update_rules will return a
-// GenerationMismatch error, then we have to restart from $get_rules.
-
-pub(crate) const FILTER_CAS_RETRY_MAX: i32 = 3;
-pub(crate) const FILTER_CAS_RETRY_INTERVAL_MILLIS: i64 = 500;
-
-macro_rules! cas_filter_rules {
-    ($filter:expr, $get_rules:ident, $update_rules:ident, $rules:expr, $error_type:ident) => {
-        for retry in 0..FILTER_CAS_RETRY_MAX {
-            let (_rules, generation) =
-                $filter.$get_rules().await.unwrap_or_else(|err| exit_with_fidl_error(err));
-
-            match $filter
-                .$update_rules(&$rules, generation)
-                .await
-                .unwrap_or_else(|err| exit_with_fidl_error(err))
-            {
-                Ok(()) => {
-                    break;
-                }
-                Err(fnet_filter_deprecated::$error_type::GenerationMismatch)
-                    if retry < FILTER_CAS_RETRY_MAX - 1 =>
-                {
-                    fuchsia_async::Timer::new(
-                        zx::MonotonicDuration::from_millis(FILTER_CAS_RETRY_INTERVAL_MILLIS)
-                            .after_now(),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    bail!("{} failed: {:?}", stringify!($update_rules), e);
-                }
-            }
-        }
-    };
-}
-
-// This is a placeholder macro while some update operations are not supported.
-macro_rules! no_update_filter_rules {
-    ($filter:expr, $get_rules:ident, $update_rules:ident, $rules:expr, $error_type:ident) => {
-        let (_rules, generation) =
-            $filter.$get_rules().await.unwrap_or_else(|err| exit_with_fidl_error(err));
-
-        match $filter
-            .$update_rules(&$rules, generation)
-            .await
-            .unwrap_or_else(|err| exit_with_fidl_error(err))
-        {
-            Ok(()) => {}
-            Err(fnet_filter_deprecated::$error_type::NotSupported) => {
-                error!("{} not supported", stringify!($update_rules));
-            }
-        }
-    };
-}
-
-async fn update_filters_deprecated(
-    filter: &mut fnet_filter_deprecated::FilterProxy,
-    config: FilterConfig,
-) -> Result<(), anyhow::Error> {
-    let FilterConfig { rules, nat_rules, rdr_rules } = config;
-
-    if !rules.is_empty() {
-        let rules = netfilter::parser_deprecated::parse_str_to_rules(&rules.join(""))
-            .context("error parsing filter rules")?;
-        cas_filter_rules!(filter, get_rules, update_rules, rules, FilterUpdateRulesError);
-    }
-
-    if !nat_rules.is_empty() {
-        let nat_rules = netfilter::parser_deprecated::parse_str_to_nat_rules(&nat_rules.join(""))
-            .context("error parsing NAT rules")?;
-        cas_filter_rules!(
-            filter,
-            get_nat_rules,
-            update_nat_rules,
-            nat_rules,
-            FilterUpdateNatRulesError
-        );
-    }
-
-    if !rdr_rules.is_empty() {
-        let rdr_rules = netfilter::parser_deprecated::parse_str_to_rdr_rules(&rdr_rules.join(""))
-            .context("error parsing RDR rules")?;
-        // TODO(https://fxbug.dev/42147284): Change this to cas_filter_rules once
-        // update is supported.
-        no_update_filter_rules!(
-            filter,
-            get_rdr_rules,
-            update_rdr_rules,
-            rdr_rules,
-            FilterUpdateRdrRulesError
-        );
-    }
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct MasqueradeCounter(NonZeroU64);
-
-impl MasqueradeCounter {
-    fn new() -> Self {
-        Self(NonZeroU64::new(1).unwrap())
-    }
-
-    fn increment(&mut self) {
-        *self = Self(self.0.checked_add(1).expect("integer_overflow on u64"));
-    }
-
-    fn decrement(&self) -> Option<Self> {
-        NonZeroU64::new(self.0.get() - 1).map(Self)
-    }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct FilterEnabledState {
-    interface_types: HashSet<InterfaceType>,
-    // A map of interface ID to the number of active masquerade configurations
-    // applied on that interface.
-    masquerade_enabled_interface_ids: HashMap<InterfaceId, MasqueradeCounter>,
-    // Indexed by interface id and stores `RuleId`s inserted for that interface.
-    // All rules for an interface should be removed upon interface removal.
-    // Vec will always be empty when using filter.deprecated.
-    //
-    // Note: Masquerade rules are not held here. Filtering on an interface can
-    // only be disabled when there are no masquerade configurations remaining
-    // (i.e. absence of an `InterfaceId` from `masquerade_enabled_interface_ids`
-    // is proof that there are no installed Masquerade Rules on the interface).
-    currently_enabled_interfaces: HashMap<InterfaceId, Vec<RuleId>>,
-}
-
-impl FilterEnabledState {
-    pub(super) fn new(interface_types: HashSet<InterfaceType>) -> Self {
-        Self { interface_types, ..Default::default() }
-    }
-
-    /// Updates the filter state for the provided `interface_id` using either
-    /// fuchsia.net.filter.deprecated or fuchsia.net.filter.
-    ///
-    /// `interface_type`: The type of the given interface. If the type cannot be
-    /// determined, this will be None, and `FilterEnabledState::interface_types`
-    /// will be ignored.
-    pub(super) async fn maybe_update(
-        &mut self,
-        interface_type: Option<InterfaceType>,
-        interface_id: InterfaceId,
-        filter: &mut FilterControl,
-    ) -> Result<(), anyhow::Error> {
-        match filter {
-            FilterControl::Deprecated(proxy) => self
-                .maybe_update_deprecated(interface_type, interface_id, proxy)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e:?}")),
-            FilterControl::Current(filter_state) => self
-                .maybe_update_current(interface_type, interface_id, filter_state)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e:?}")),
-        }
-    }
-
-    /// Clears tracking and masquerade counts for a removed interface.
-    /// Netstack automatically destroys the rules on interface removal.
-    pub(super) fn remove_interface(&mut self, interface_id: InterfaceId) {
-        let _removed_rules: Option<Vec<RuleId>> =
-            self.currently_enabled_interfaces.remove(&interface_id);
-        let _removed_count: Option<MasqueradeCounter> =
-            self.masquerade_enabled_interface_ids.remove(&interface_id);
-    }
-
-    pub(super) async fn maybe_update_deprecated<
-        Filter: fnet_filter_deprecated::FilterProxyInterface,
-    >(
-        &mut self,
-        interface_type: Option<InterfaceType>,
-        interface_id: InterfaceId,
-        filter: &Filter,
-    ) -> Result<(), fnet_filter_deprecated::EnableDisableInterfaceError> {
-        let should_be_enabled = self.should_enable(interface_type, interface_id);
-        let is_enabled = self.currently_enabled_interfaces.entry(interface_id);
-
-        match (should_be_enabled, is_enabled) {
-            (true, Entry::Vacant(entry)) => {
-                if let Err(e) = filter
-                    .enable_interface(interface_id.get())
-                    .await
-                    .unwrap_or_else(|err| exit_with_fidl_error(err))
-                {
-                    warn!("failed to enable interface {interface_id}: {e:?}");
-                    return Err(e);
-                }
-                let _ = entry.insert(vec![]);
-            }
-            (false, Entry::Occupied(entry)) => {
-                if let Err(e) = filter
-                    .disable_interface(interface_id.get())
-                    .await
-                    .unwrap_or_else(|err| exit_with_fidl_error(err))
-                {
-                    warn!("failed to disable interface {interface_id}: {e:?}");
-                    return Err(e);
-                }
-                let _ = entry.remove();
-            }
-            (true, Entry::Occupied(_)) | (false, Entry::Vacant(_)) => {
-                // Do nothing. The interface's current state aligns with
-                // whether it is present in the map.
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) async fn maybe_update_current(
-        &mut self,
-        interface_type: Option<InterfaceType>,
-        interface_id: InterfaceId,
-        filter: &mut FilterState,
-    ) -> Result<(), FilterError> {
-        let should_be_enabled = self.should_enable(interface_type, interface_id);
-        let is_enabled = self.currently_enabled_interfaces.entry(interface_id);
-
-        match (should_be_enabled, is_enabled) {
-            (true, Entry::Vacant(entry)) => {
-                let FilterState {
-                    controller,
-                    uninstalled_ip_routines,
-                    installed_ip_routines,
-                    current_installed_rule_index,
-                    masquerade: _,
-                } = filter;
-                let rules = generate_updated_filter_rules(
-                    uninstalled_ip_routines,
-                    installed_ip_routines,
-                    interface_id,
-                    *current_installed_rule_index,
-                );
-
-                if !rules.is_empty() {
-                    let rule_changes = rules
-                        .clone()
-                        .into_iter()
-                        .map(|rule| Change::Create(Resource::Rule(rule)))
-                        .collect();
-                    controller.push_changes(rule_changes).await.map_err(FilterError::Push)?;
-                    controller.commit().await.map_err(FilterError::Commit)?;
-                    info!(
-                        "new filter rules for iface with id {interface_id:?} \
-                                have been committed successfully"
-                    );
-                    // Increment the current rule index only on success since
-                    // `commit` will either apply changes in entirety, or none
-                    // at all.
-                    *current_installed_rule_index = current_installed_rule_index.wrapping_add(1);
-                }
-
-                // Get the `RuleId`s from the inserted `Rule`s so that they can be
-                // removed if the interface is disabled.
-                let rule_ids: Vec<_> = rules.into_iter().map(|rule| rule.id).collect();
-                let _ = entry.insert(rule_ids);
-            }
-            (false, Entry::Occupied(entry)) => {
-                let FilterState { controller, .. } = filter;
-                let rule_changes: Vec<_> = entry
-                    .remove()
-                    .into_iter()
-                    .map(|rule_id| Change::Remove(ResourceId::Rule(rule_id)))
-                    .collect();
-
-                if !rule_changes.is_empty() {
-                    controller.push_changes(rule_changes).await.map_err(FilterError::Push)?;
-                    controller.commit().await.map_err(FilterError::Commit)?;
-                    info!(
-                        "removal of filter rules for iface with id {interface_id:?} \
-                                have been committed successfully"
-                    );
-                }
-            }
-            (true, Entry::Occupied(_)) | (false, Entry::Vacant(_)) => {
-                // Do nothing. The interface's current state aligns with
-                // whether it is present in the map.
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Determines whether a given `interface_id` should be enabled.
-    ///
-    /// `interface_type`: The type of the given interface. If the type cannot be
-    /// determined, this will be None, and `FilterEnabledState::interface_types`
-    /// will be ignored.
-    fn should_enable(
-        &self,
-        interface_type: Option<InterfaceType>,
-        interface_id: InterfaceId,
-    ) -> bool {
-        interface_type
-            .as_ref()
-            .map(|ty| match ty {
-                InterfaceType::WlanClient
-                | InterfaceType::Ethernet
-                | InterfaceType::Blackhole
-                | InterfaceType::Lowpan => self.interface_types.contains(ty),
-                // An AP device can be filtered by specifying AP or WLAN.
-                InterfaceType::WlanAp => {
-                    self.interface_types.contains(ty)
-                        | self.interface_types.contains(&InterfaceType::WlanClient)
-                }
-            })
-            .unwrap_or(false)
-            || self.masquerade_enabled_interface_ids.contains_key(&interface_id)
-    }
-
-    pub(crate) fn increment_masquerade_count_on_interface(&mut self, interface_id: InterfaceId) {
-        match self.masquerade_enabled_interface_ids.entry(interface_id) {
-            Entry::Vacant(entry) => {
-                let _new_count = entry.insert(MasqueradeCounter::new());
-            }
-            Entry::Occupied(mut entry) => entry.get_mut().increment(),
-        }
-    }
-
-    pub(crate) fn decrement_masquerade_count_on_interface(&mut self, interface_id: InterfaceId) {
-        match self.masquerade_enabled_interface_ids.entry(interface_id) {
-            Entry::Vacant(_) => panic!(
-                "asked to decrement the masquerade count for a non-configured interface: {}",
-                interface_id
-            ),
-            Entry::Occupied(mut entry) => match entry.get().decrement() {
-                // Subtraction made the count 0; remove it.
-                None => {
-                    let _old_count = entry.remove();
-                }
-                Some(count) => {
-                    let _old_count = entry.insert(count);
-                }
-            },
-        }
-    }
-}
-
-/// Repeatedly attempts to update the NAT rules using `fuchsia.net.filter.deprecated`.
-///
-/// The update will be attempted up to `FILTER_CAS_RETRY_MAX` times.
-async fn update_nat_rules_deprecated(
-    filter: &mut fnet_filter_deprecated::FilterProxy,
-    update_fn: impl Fn(&mut Vec<fnet_filter_deprecated::Nat>) -> Result<(), fnet_masquerade::Error>,
-) -> Result<(), fnet_masquerade::Error> {
-    for _ in 0..FILTER_CAS_RETRY_MAX {
-        let (mut rules, generation) =
-            filter.get_nat_rules().await.expect("call to GetNatRules failed");
-        update_fn(&mut rules)?;
-
-        match filter
-            .update_nat_rules(&rules, generation)
-            .await
-            .expect("call to UpdateNatRules failed")
-        {
-            Ok(()) => return Ok(()),
-            Err(fnet_filter_deprecated::FilterUpdateNatRulesError::GenerationMismatch) => {
-                // We need to try again.
-                fuchsia_async::Timer::new(
-                    zx::MonotonicDuration::from_millis(
-                        crate::filter::FILTER_CAS_RETRY_INTERVAL_MILLIS,
-                    )
-                    .after_now(),
-                )
-                .await;
-            }
-            Err(fnet_filter_deprecated::FilterUpdateNatRulesError::BadRule) => {
-                // This can sometimes be triggered if the NIC is deleted before
-                // the call to `update_nat_rules`.
-                error!(
-                    "Generated Nat rule was invalid. Perhaps the requested \
-                     NIC has been removed {rules:?}"
-                );
-                // There is no point in retrying in this case.
-                return Err(fnet_masquerade::Error::BadRule);
-            }
-        }
-    }
-
-    error!("Failed to update Nat rules");
-    Err(fnet_masquerade::Error::RetryExceeded)
-}
-
-// Attempts to add a new masquerade NAT rule using `fuchsia.net.filter.deprecated`.
-pub(crate) async fn add_masquerade_rule_deprecated(
-    filter: &mut fnet_filter_deprecated::FilterProxy,
-    rule: fnet_filter_deprecated::Nat,
-) -> Result<(), fnet_masquerade::Error> {
-    update_nat_rules_deprecated(filter, |rules| {
-        if rules.iter().any(|existing_rule| existing_rule == &rule) {
-            Err(fnet_masquerade::Error::AlreadyExists)
-        } else {
-            rules.push(rule.clone());
-            Ok(())
-        }
-    })
-    .await
-}
-
-// Attempts to remove an existing masquerade NAT rule using `fuchsia.net.filter.deprecated`.
-pub(crate) async fn remove_masquerade_rule_deprecated(
-    filter: &mut fnet_filter_deprecated::FilterProxy,
-    rule: fnet_filter_deprecated::Nat,
-) -> Result<(), fnet_masquerade::Error> {
-    update_nat_rules_deprecated(filter, |rules| {
-        rules.retain(|existing_rule| existing_rule != &rule);
-        Ok(())
-    })
-    .await
-}
-
 // Attempts to add a new masquerade NAT rule using `fuchsia.net.filter`.
-pub(crate) async fn add_masquerade_rule_current(
-    filter: &mut FilterState,
+pub(crate) async fn add_masquerade_rule(
+    filter: &mut FilterControl,
     matchers: Matchers,
 ) -> Result<RuleId, FilterError> {
     let MasqueradeState { routine_id, next_rule_index } = &mut filter.masquerade;
@@ -860,8 +324,8 @@ pub(crate) async fn add_masquerade_rule_current(
 }
 
 // Attempts to remove an existing masquerade NAT rule using `fuchsia.net.filter`.
-pub(crate) async fn remove_masquerade_rule_current(
-    filter: &mut FilterState,
+pub(crate) async fn remove_masquerade_rule(
+    filter: &mut FilterControl,
     rule: &RuleId,
 ) -> Result<(), FilterError> {
     let rule_changes = vec![Change::Remove(ResourceId::Rule(rule.clone()))];
@@ -871,14 +335,11 @@ pub(crate) async fn remove_masquerade_rule_current(
 
 #[cfg(test)]
 mod tests {
+    use futures::StreamExt as _;
     use test_case::test_case;
-
-    use crate::DeviceClass;
-    use crate::interface::DeviceInfoRef;
 
     use super::*;
 
-    const INTERFACE_ID: InterfaceId = InterfaceId::new(1).unwrap();
     const LOCAL_INGRESS: &str = "local_ingress";
     const UNINSTALLED_LOCAL_INGRESS: &str = "local_ingress_uninstalled";
     const LOCAL_EGRESS: &str = "local_egress";
@@ -988,7 +449,7 @@ mod tests {
         let uninstalled_filter_routines =
             create_filter_routines(namespace, UNINSTALLED_LOCAL_INGRESS, UNINSTALLED_LOCAL_EGRESS);
 
-        let (changes, _num_installed_rules) = generate_initial_filter_changes(
+        let changes = generate_initial_filter_changes(
             &uninstalled_filter_routines,
             &installed_filter_routines,
             &masquerade_routine(),
@@ -998,7 +459,6 @@ mod tests {
                 rdr_rules: vec![],
             },
             &HashSet::new(),
-            0,
         )
         .expect("rules should be formatted correctly");
 
@@ -1008,47 +468,6 @@ mod tests {
         expected_changes.extend(expected_rule_changes);
 
         assert_eq!(changes, expected_changes);
-    }
-
-    #[test]
-    fn test_generate_updated_filter_rules() {
-        let namespace = namespace_id();
-        let installed_filter_routines =
-            create_filter_routines(namespace.clone(), LOCAL_INGRESS, LOCAL_EGRESS);
-        let uninstalled_filter_routines =
-            create_filter_routines(namespace, UNINSTALLED_LOCAL_INGRESS, UNINSTALLED_LOCAL_EGRESS);
-
-        let rules = generate_updated_filter_rules(
-            &uninstalled_filter_routines,
-            &installed_filter_routines,
-            INTERFACE_ID,
-            0,
-        );
-
-        let local_ingress = (
-            installed_filter_routines.local_ingress.unwrap(),
-            uninstalled_filter_routines.local_ingress.unwrap().name,
-            IpHook::LocalIngress,
-        );
-        let local_egress = (
-            installed_filter_routines.local_egress.unwrap(),
-            uninstalled_filter_routines.local_egress.unwrap().name,
-            IpHook::LocalEgress,
-        );
-        let expected_rules: Vec<_> = vec![local_ingress, local_egress]
-            .into_iter()
-            .map(|(installed_routine, uninstalled_routine_name, hook)| {
-                create_interface_matching_jump_rule(
-                    installed_routine,
-                    0,
-                    INTERFACE_ID,
-                    hook,
-                    &uninstalled_routine_name,
-                )
-            })
-            .collect();
-
-        assert_eq!(rules, expected_rules);
     }
 
     #[test]
@@ -1100,105 +519,91 @@ mod tests {
         let uninstalled_filter_routines =
             create_filter_routines(namespace, UNINSTALLED_LOCAL_INGRESS, UNINSTALLED_LOCAL_EGRESS);
 
-        let (changes, num_installed_rules) = generate_initial_filter_changes(
+        let changes = generate_initial_filter_changes(
             &uninstalled_filter_routines,
             &installed_filter_routines,
             &masquerade_routine(),
             FilterConfig { rules: vec![], nat_rules: vec![], rdr_rules: vec![] },
-            &[InterfaceType::Lowpan].into_iter().collect(),
-            0,
+            &[InterfaceType::Lowpan].into(),
         )
         .expect("rules should be formatted correctly");
 
         let mut expected_changes = get_foundational_changes();
-
-        let lowpan_rules = generate_static_port_class_filter_rules(
-            &uninstalled_filter_routines,
-            &installed_filter_routines,
-            fnet_interfaces_ext::PortClass::Lowpan,
-            0,
+        expected_changes.extend(
+            generate_static_port_class_filter_rules(
+                &uninstalled_filter_routines,
+                &installed_filter_routines,
+                fnet_interfaces_ext::PortClass::Lowpan,
+                0,
+            )
+            .into_iter()
+            .map(|rule| Change::Create(Resource::Rule(rule))),
         );
-        expected_changes
-            .extend(lowpan_rules.into_iter().map(|rule| Change::Create(Resource::Rule(rule))));
 
         assert_eq!(changes, expected_changes);
-        assert_eq!(num_installed_rules, 1);
     }
 
-    #[test]
-    fn test_should_enable_filter() {
-        let types_empty: HashSet<InterfaceType> = [].iter().cloned().collect();
-        let types_ethernet: HashSet<InterfaceType> =
-            [InterfaceType::Ethernet].iter().cloned().collect();
-        let types_wlan: HashSet<InterfaceType> =
-            [InterfaceType::WlanClient].iter().cloned().collect();
-        let types_ap: HashSet<InterfaceType> = [InterfaceType::WlanAp].iter().cloned().collect();
-
-        let id = InterfaceId::new(10).unwrap();
-
-        let make_info = |device_class| DeviceInfoRef {
-            device_class,
-            mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1] },
-            topological_path: "",
-        };
-
-        let wlan_info = make_info(DeviceClass::WlanClient);
-        let wlan_ap_info = make_info(DeviceClass::WlanAp);
-        let ethernet_info = make_info(DeviceClass::Ethernet);
-
-        let mut fes = FilterEnabledState::new(types_empty.clone());
-        assert_eq!(fes.should_enable(Some(wlan_info.interface_type()), id), false);
-        assert_eq!(fes.should_enable(Some(wlan_ap_info.interface_type()), id), false);
-        assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), false);
-
-        fes.increment_masquerade_count_on_interface(id);
-        assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), true);
-
-        let mut fes = FilterEnabledState::new(types_ethernet);
-        assert_eq!(fes.should_enable(Some(wlan_info.interface_type()), id), false);
-        assert_eq!(fes.should_enable(Some(wlan_ap_info.interface_type()), id), false);
-        assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), true);
-
-        fes.increment_masquerade_count_on_interface(id);
-        assert_eq!(fes.should_enable(Some(wlan_info.interface_type()), id), true);
-
-        let mut fes = FilterEnabledState::new(types_wlan);
-        assert_eq!(fes.should_enable(Some(wlan_info.interface_type()), id), true);
-        assert_eq!(fes.should_enable(Some(wlan_ap_info.interface_type()), id), true);
-        assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), false);
-
-        fes.increment_masquerade_count_on_interface(id);
-        assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), true);
-
-        let mut fes = FilterEnabledState::new(types_ap);
-        assert_eq!(fes.should_enable(Some(wlan_info.interface_type()), id), false);
-        assert_eq!(fes.should_enable(Some(wlan_ap_info.interface_type()), id), true);
-        assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), false);
-
-        fes.increment_masquerade_count_on_interface(id);
-        assert_eq!(fes.should_enable(Some(wlan_info.interface_type()), id), true);
-        assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), true);
-
-        // Verify that the count can be decremented while keeping filtering enabled.
-        let mut fes = FilterEnabledState::new(types_empty);
-        for _ in 0..3 {
-            fes.increment_masquerade_count_on_interface(id);
-        }
-        for expect_enabled in [true, true, false] {
-            fes.decrement_masquerade_count_on_interface(id);
-            assert_eq!(fes.should_enable(Some(wlan_info.interface_type()), id), expect_enabled);
-            assert_eq!(fes.should_enable(Some(wlan_ap_info.interface_type()), id), expect_enabled);
-            assert_eq!(fes.should_enable(Some(ethernet_info.interface_type()), id), expect_enabled);
-        }
+    #[test_case(
+        &[],
+        &[];
+        "empty"
+    )]
+    #[test_case(
+        &[InterfaceType::Lowpan],
+        &[fnet_interfaces_ext::PortClass::Lowpan];
+        "lowpan"
+    )]
+    #[test_case(
+        &[InterfaceType::Ethernet],
+        &[
+            fnet_interfaces_ext::PortClass::Virtual,
+            fnet_interfaces_ext::PortClass::Ethernet,
+            fnet_interfaces_ext::PortClass::Ppp,
+            fnet_interfaces_ext::PortClass::Bridge,
+        ];
+        "ethernet"
+    )]
+    #[test_case(
+        &[InterfaceType::WlanClient],
+        &[
+            fnet_interfaces_ext::PortClass::WlanClient,
+            fnet_interfaces_ext::PortClass::WlanAp,
+        ];
+        "wlan_client_enables_wlan_client_and_ap"
+    )]
+    #[test_case(
+        &[InterfaceType::WlanAp],
+        &[fnet_interfaces_ext::PortClass::WlanAp];
+        "wlan_ap"
+    )]
+    #[test_case(
+        &[InterfaceType::WlanClient, InterfaceType::WlanAp],
+        &[
+            fnet_interfaces_ext::PortClass::WlanClient,
+            fnet_interfaces_ext::PortClass::WlanAp,
+        ];
+        "wlan_client_and_ap_deduplicated"
+    )]
+    #[test_case(
+        &[InterfaceType::Blackhole],
+        &[fnet_interfaces_ext::PortClass::Blackhole];
+        "blackhole"
+    )]
+    fn test_get_enabled_port_classes(
+        interface_types: &[InterfaceType],
+        expected_port_classes: &[fnet_interfaces_ext::PortClass],
+    ) {
+        let enabled: HashSet<_> =
+            get_enabled_port_classes(&interface_types.iter().copied().collect());
+        let expected: HashSet<_> = expected_port_classes.iter().copied().collect();
+        assert_eq!(enabled, expected);
     }
 
     #[fuchsia::test]
-    async fn test_update_filters_current_large_batch() {
-        use futures::StreamExt as _;
-
+    async fn test_update_filters_large_batch() {
         let (control_client, control_server) =
             fidl::endpoints::create_endpoints::<fnet_filter::ControlMarker>();
-        let client_fut = FilterControl::new(None, Some(control_client.into_proxy()));
+        let client_fut = FilterControl::new(control_client.into_proxy());
         let mut control_stream = control_server.into_stream();
         let control_server_fut = async move {
             match control_stream
@@ -1252,9 +657,9 @@ mod tests {
             push_changes_count
         };
 
-        let filter_enabled_state = FilterEnabledState::default();
+        let filter_enabled_interface_types = HashSet::new();
         let (client_res, push_changes_count) = futures::join!(
-            filter_control.update_filters(config, &filter_enabled_state),
+            filter_control.update_filters(config, &filter_enabled_interface_types),
             server_fut
         );
 

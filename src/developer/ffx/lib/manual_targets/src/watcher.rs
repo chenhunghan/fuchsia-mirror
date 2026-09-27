@@ -463,7 +463,7 @@ mod test {
 
         drop(watcher);
         let mut events = Vec::<ManualTargetEvent>::new();
-        while let Ok(Some(event)) = queue.try_next() {
+        while let Ok(event) = queue.try_recv() {
             events.push(event);
         }
 
@@ -568,7 +568,7 @@ mod test {
 
         drop(watcher);
         let mut events = Vec::<ManualTargetEvent>::new();
-        while let Ok(Some(event)) = queue.try_next() {
+        while let Ok(event) = queue.try_recv() {
             events.push(event);
         }
 

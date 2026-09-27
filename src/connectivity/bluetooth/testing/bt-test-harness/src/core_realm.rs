@@ -194,10 +194,56 @@ impl CoreRealm {
             }))
             .await?;
         builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.bluetooth.AutostartSnoop".parse()?,
+                value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+            }))
+            .await?;
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.bluetooth.LePrivacy".parse()?,
+                value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+            }))
+            .await?;
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.bluetooth.LeBackgroundScanning".parse()?,
+                value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(false)),
+            }))
+            .await?;
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.bluetooth.LeSecurityMode".parse()?,
+                value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::String(
+                    "Mode1".into(),
+                )),
+            }))
+            .await?;
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.bluetooth.BredrConnectable".parse()?,
+                value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+            }))
+            .await?;
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.bluetooth.BredrSecurityMode".parse()?,
+                value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::String(
+                    "Mode4".into(),
+                )),
+            }))
+            .await?;
+        builder
             .add_route(
                 Route::new()
                     .capability(Capability::configuration("fuchsia.bluetooth.FastPairProvider"))
                     .capability(Capability::configuration("fuchsia.bluetooth.Rfcomm"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.AutostartSnoop"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.LePrivacy"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.LeBackgroundScanning"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.LeSecurityMode"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.BredrConnectable"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.BredrSecurityMode"))
                     .from(Ref::self_())
                     .to(&bt_init),
             )

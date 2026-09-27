@@ -44,7 +44,7 @@ pub use zx_status::sys as __sys;
 /// test will still be compiled; it just will not contribute test metadata.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// /// Brief test suite description.
 /// #[cfg(ktest)]
 /// #[unittest::suite(name = "optional_name")]

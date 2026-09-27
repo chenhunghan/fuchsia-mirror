@@ -20,7 +20,10 @@ use manual_targets::watcher::{
     ManualTargetEvent, ManualTargetEventHandler, ManualTargetWatcher,
     recommended_watcher as manual_recommended_watcher,
 };
-use mdns_discovery::{MdnsEventHandler, MdnsWatcher, recommended_watcher};
+pub use mdns_discovery::{
+    FastbootInterface, MdnsBindEvent, MdnsEventHandler, MdnsEventType, MdnsTargetInfo, MdnsWatcher,
+    TargetAddrInfo, TargetIp, TargetIpPort, recommended_watcher,
+};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -30,10 +33,6 @@ use usb_fastboot_discovery::{
     FastbootEvent, FastbootEventHandler, FastbootUsbWatcher,
     recommended_watcher as fastboot_watcher,
 };
-// TODO(colnnelson): Long term it would be nice to have this be pulled into the mDNS library
-// so that it can speak our language. Or even have the mdns library not export FIDL structs
-// but rather some other well-defined type
-use fidl_fuchsia_developer_ffx as ffx;
 
 pub mod desc;
 pub mod emulator_watcher;
@@ -470,6 +469,8 @@ bitflags! {
         const FASTBOOT_FILE = 1 << 4;
         const USB_VSOCK = 1 << 5;
         const GCE = 1 << 6;
+        /// Target was discovered or can be queried via the UART transport watcher.
+        const UART = 1 << 7;
     }
 }
 
@@ -491,7 +492,7 @@ fn wait_for_devices(
     let (sender, queue) = unbounded();
     if sources.contains(DiscoverySources::MDNS) {
         let mdns_sender = sender.clone();
-        config.set_mdns_event_handler(move |res: ffx::MdnsEventType| {
+        config.set_mdns_event_handler(move |res: mdns_discovery::MdnsEventType| {
             // Translate the result to a TargetEvent
             let event = TargetEvent::try_from(res);
             if let Ok(event) = event {

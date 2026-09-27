@@ -113,11 +113,16 @@ func (g *Grouper) Run(ctx context.Context, in <-chan pipeline.RawPath) (<-chan p
 		// pubspec.yaml, go.mod) only register if no ancestor directory already has a README.fuchsia.
 		for dir, readmePaths := range physicalReadmes {
 			isManifestOnly := true
+			var filteredPaths []string
 			for _, p := range readmePaths {
 				if filepath.Base(p) == "README.fuchsia" {
 					isManifestOnly = false
-					break
+					filteredPaths = append(filteredPaths, p)
 				}
+			}
+			if !isManifestOnly {
+				readmePaths = filteredPaths
+				physicalReadmes[dir] = filteredPaths
 			}
 
 			if isManifestOnly {
@@ -436,6 +441,18 @@ func (g *Grouper) ResolveProjectRoot(targetPath string) string {
 		absTarget = filepath.Join(g.FuchsiaDir, absTarget)
 	}
 	absTarget = filepath.Clean(absTarget)
+
+	slashTarget := filepath.ToSlash(absTarget)
+	if idx := strings.Index(slashTarget, "/tools/check-licenses/assets/readmes/"); idx != -1 {
+		logical := slashTarget[idx+len("/tools/check-licenses/assets/readmes/"):]
+		if filepath.Base(logical) == "README.fuchsia" || filepath.Base(logical) == "NOTICE.fuchsia" {
+			logical = filepath.Dir(logical)
+		}
+		if logical == "." || logical == "" {
+			return g.FuchsiaDir
+		}
+		return filepath.Join(g.FuchsiaDir, filepath.FromSlash(logical))
+	}
 
 	var dir string
 	if stat, err := os.Stat(absTarget); err == nil && stat.IsDir() {

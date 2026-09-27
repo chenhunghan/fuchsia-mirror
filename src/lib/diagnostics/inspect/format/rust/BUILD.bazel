@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/bitfields.rs",
+        "src/block.rs",
+        "src/block_index.rs",
+        "src/block_type.rs",
+        "src/constants.rs",
+        "src/container/common.rs",
+        "src/container/fuchsia.rs",
+        "src/container/mod.rs",
+        "src/container/portable.rs",
+        "src/error.rs",
+        "src/lib.rs",
+        "src/utils.rs",
+    ],
+    crate_name = "inspect_format",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:num-derive",
+        "//third_party/rust_crates/vendor:paste",
+    ],
+    test_deps = ["//src/lib/fuchsia"],
+    version = "0.1.0",
+    visibility = ["//:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//src/lib/fuchsia-runtime",
+        ],
+        "//conditions:default": [],
+    }),
+)

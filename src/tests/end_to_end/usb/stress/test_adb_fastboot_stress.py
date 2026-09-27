@@ -6,7 +6,7 @@
 import logging
 
 import fuchsia_base_test
-from mobly import signals, test_runner
+from mobly import test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -32,18 +32,9 @@ class AdbFastbootStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def setup_class(self) -> None:
         await super().setup_class()
-        self._adb_supported = await self.dut.adb.is_supported()
-        if not self._adb_supported:
-            _LOGGER.info("ADB is not supported at runtime on this device")
-            return
-
-        self._serial = self.dut.serial_number
-        _LOGGER.info(f"Device serial number: {self._serial}")
-
-    async def setup_test(self) -> None:
-        await super().setup_test()
-        if not self._adb_supported:
-            raise signals.TestSkip("ADB is not supported in this build")
+        # Ensure ADB is supported and enabled on this device before starting the test
+        # (raises NotSupportedError or NotEnabledError otherwise).
+        _ = self.dut.adb
 
     async def _test_logic(self, iteration: int) -> None:
         _LOGGER.info(
@@ -56,7 +47,7 @@ class AdbFastbootStressTest(fuchsia_base_test.FuchsiaBaseTest):
         _LOGGER.info("Rebooting to bootloader via ADB...")
         self.dut.ffx.notify_intentional_disconnect()
         # adb reboot-bootloader usually returns immediately or quickly
-        await self.dut.adb.run(["reboot-bootloader"])
+        self.dut.adb.run(["reboot-bootloader"])
 
         _LOGGER.info("Waiting for device to enter fastboot mode...")
         await self.dut.fastboot.wait_for_fastboot_mode()
@@ -69,6 +60,7 @@ class AdbFastbootStressTest(fuchsia_base_test.FuchsiaBaseTest):
         # We need to wait for Fuchsia mode (RCS) and online
         await self.dut.fastboot.wait_for_fuchsia_mode()
         await self.dut.wait_for_online()
+        self.dut.adb.wait_for_boot_complete()
 
         _LOGGER.info(
             "Successfully ended the ADB/Fastboot transition test iteration# %s",

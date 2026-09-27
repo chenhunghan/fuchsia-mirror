@@ -19,6 +19,7 @@ use std::collections::hash_map::{Entry, HashMap};
 use std::ops::{ControlFlow, Range};
 use std::sync::Arc;
 use vmo_fifo::Message;
+use zx::sys::zx_page_request_command_t::ZX_PAGER_VMO_READ;
 
 /// Default readahead size used for streaming reads and decompression (128 KiB).
 pub const READ_AHEAD_SIZE: u64 = 128 * 1024;
@@ -168,8 +169,12 @@ impl File {
                 let uncompressed_size = self.uncompressed_size;
 
                 read_aligned_range(&self.extents, read_range, service, move |res| {
-                    let Ok(buffer) = res else {
-                        return ControlFlow::Break(());
+                    let buffer = match res {
+                        Ok(buffer) => buffer,
+                        Err(error) => {
+                            log::error!(error:?; "Failed to read blocks for mapped file");
+                            return ControlFlow::Break(());
+                        }
                     };
                     let valid_len =
                         min(buffer.len() as u64, uncompressed_size.saturating_sub(current_offset))
@@ -197,8 +202,15 @@ impl File {
                 };
 
                 read_aligned_range(&self.extents, aligned_range, service, move |res| {
-                    let Ok(buffer) = res else {
-                        return ControlFlow::Break(());
+                    let buffer = match res {
+                        Ok(buffer) => buffer,
+                        Err(error) => {
+                            log::error!(
+                                error:?;
+                                "Failed to read blocks for compressed mapped file"
+                            );
+                            return ControlFlow::Break(());
+                        }
                     };
                     if decompressor.push(buffer.as_ptr_slice()).is_err() {
                         return ControlFlow::Break(());
@@ -212,8 +224,12 @@ impl File {
                 let cipher = cipher.clone();
 
                 read_aligned_range(&self.extents, read_range, service, move |res| {
-                    let Ok(buffer) = res else {
-                        return ControlFlow::Break(());
+                    let buffer = match res {
+                        Ok(buffer) => buffer,
+                        Err(error) => {
+                            log::error!(error:?; "Failed to read blocks for encrypted mapped file");
+                            return ControlFlow::Break(());
+                        }
                     };
                     let mut dest = page_request.mut_ptr_slice().subslice_mut(0..buffer.len());
                     // Both `buffer` and `dest` are aligned to 64 bytes.
@@ -276,6 +292,9 @@ pub trait DeliveryHandler: Send + Sync + 'static {
     fn register_blob(&self, _key: u64, _merkle_leaves: &[[u8; 32]]) -> Result<(), Error> {
         Ok(())
     }
+
+    /// Unregisters a file when it is closed.
+    fn unregister_file(&self, _key: u64) {}
 }
 
 /// A no-op [`DeliveryHandler`] for sessions that do not run a kernel pager or verify blobs
@@ -290,20 +309,88 @@ impl DeliveryHandler for NoopDeliveryHandler {
     }
 }
 
+const PAGER_SHUTDOWN_KEY: u64 = 0;
+const PAGER_WAKE_KEY: u64 = 1;
+
+/// An RAII guard for the background pager thread spawned by [`Files::spawn_pager_thread`].
+///
+/// The thread services page requests for as long as this guard is kept alive, and stops
+/// when this guard is dropped.
+#[must_use = "Dropping PagerThread immediately stops the background pager thread"]
+pub struct PagerThread<S: ?Sized, D: DeliveryHandler> {
+    files: Arc<Files<S, D>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl<S: ?Sized, D: DeliveryHandler> Drop for PagerThread<S, D> {
+    fn drop(&mut self) {
+        let packet = zx::Packet::from_user_packet(
+            PAGER_SHUTDOWN_KEY,
+            0,
+            zx::UserPacket::from_u8_array([0; 32]),
+        );
+        let _ = self.files.port.queue(&packet);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// A thread-safe registry of active [`File`] instances indexed by their Zircon pager port key.
 pub struct Files<S: ?Sized, D: DeliveryHandler> {
     service: Arc<S>,
     delivery_handler: Arc<D>,
+    port: zx::Port,
     map: Mutex<HashMap<u64, FileEntry<D::Request>>>,
+    deferred_page_requests: Mutex<Vec<(Arc<File>, D::Request)>>,
 }
 
 impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
-    /// Creates a new file registry with the provided block service and delivery handler.
-    pub fn new(service: Arc<S>, delivery_handler: D) -> Self {
+    /// Creates a new file registry with the provided block service, delivery handler, and port.
+    pub fn new(service: Arc<S>, delivery_handler: D, port: zx::Port) -> Self {
         Self {
             service,
             delivery_handler: Arc::new(delivery_handler),
+            port,
             map: Mutex::new(HashMap::new()),
+            deferred_page_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Spawns a background thread to service pager requests for `self`.
+    pub fn spawn_pager_thread(self: &Arc<Self>) -> PagerThread<S, D>
+    where
+        S: 'static,
+    {
+        let files = self.clone();
+        let thread = std::thread::spawn(move || {
+            files.run_pager_loop();
+        });
+        PagerThread { files: self.clone(), thread: Some(thread) }
+    }
+
+    // Runs a synchronous event loop that listens on `self.port` for pager page requests and
+    // dispatches them to `Self::handle_page_request`.
+    fn run_pager_loop(&self) {
+        while let Ok(packet) = self.port.wait(zx::MonotonicInstant::INFINITE) {
+            match packet.contents() {
+                zx::PacketContents::User(_) => match packet.key() {
+                    PAGER_SHUTDOWN_KEY => break,
+                    PAGER_WAKE_KEY => {
+                        let requests = std::mem::take(&mut *self.deferred_page_requests.lock());
+                        for (file, req) in requests {
+                            file.read_range(self.service.as_ref(), req);
+                        }
+                    }
+                    _ => {}
+                },
+                zx::PacketContents::Pager(pager_packet)
+                    if pager_packet.command() == ZX_PAGER_VMO_READ =>
+                {
+                    self.handle_page_request(packet.key(), pager_packet.range());
+                }
+                _ => {}
+            }
         }
     }
 
@@ -317,12 +404,12 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
         self.delivery_handler.register_blob(key, merkle_leaves)
     }
 
-    /// Handles a page request from `PagerThread`.
-    ///
-    /// If the file is loaded, reads the range into a newly allocated buffer immediately.
-    /// If the file is currently loading or unmapped, queues the request to be fulfilled
-    /// when loaded.
-    pub fn handle_page_request(&self, key: u64, range: Range<u64>) {
+    // Handles a page request from `PagerThread`.
+    //
+    // If the file is loaded, reads the range into a newly allocated buffer immediately.
+    // If the file is currently loading or unmapped, queues the request to be fulfilled
+    // when loaded.
+    fn handle_page_request(&self, key: u64, range: Range<u64>) {
         let req = self.delivery_handler.get_page_request(key, range);
         let mut map = self.map.lock();
         match map.entry(key) {
@@ -358,8 +445,8 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
         self.map.lock().entry(key).or_default();
     }
 
-    /// Inserts a file into the registry under `key`, immediately draining and servicing any
-    /// page requests that arrived while metadata was loading.
+    /// Inserts a file into the registry under `key` and dispatches any page requests that
+    /// arrived while metadata was loading.
     fn insert(&self, key: u64, file: Arc<File>) {
         let (reqs, waiters) = {
             let mut map = self.map.lock();
@@ -374,8 +461,22 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
             let _ = waiter.send(file.clone());
         }
 
-        for req in reqs {
-            file.read_range(self.service.as_ref(), req);
+        if !reqs.is_empty() {
+            // `insert` is called inside a block I/O completion callback. Calling
+            // `file.read_range` here would deadlock a single-threaded block completion worker
+            // when a read requires multiple buffer allocations from a full pool: allocating the
+            // next chunk blocks the completion thread waiting for earlier chunks to complete
+            // and free their buffers, which that same thread is responsible for completing.
+            // Instead, hand `reqs` to `PagerThread` so the callback can return immediately.
+            self.deferred_page_requests
+                .lock()
+                .extend(reqs.into_iter().map(|req| (file.clone(), req)));
+            let packet = zx::Packet::from_user_packet(
+                PAGER_WAKE_KEY,
+                0,
+                zx::UserPacket::from_u8_array([0; 32]),
+            );
+            let _ = self.port.queue(&packet);
         }
     }
 
@@ -418,6 +519,7 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
 
     /// Removes the file registered under `key`.
     pub fn remove(&self, key: u64) {
+        self.delivery_handler.unregister_file(key);
         self.map.lock().remove(&key);
     }
 
@@ -437,7 +539,7 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
 impl<S: BlockService + ?Sized> Files<S, NoopDeliveryHandler> {
     /// Creates a file registry without a pager for intermediate (e.g. partition) sessions.
     pub fn new_without_pager(service: Arc<S>) -> Self {
-        Self::new(service, NoopDeliveryHandler)
+        Self::new(service, NoopDeliveryHandler, zx::Port::create())
     }
 }
 
@@ -575,7 +677,7 @@ pub fn read_blob_metadata(
 /// remains in the [`FileEntry::Loading`] state, accumulating incoming page requests in its queue.
 ///
 /// - On success: [`LoadingFileGuard::commit`] consumes the guard, stores the fully initialized
-///   [`File`], and immediately drains and fulfills all queued page requests.
+///   [`File`], and dispatches all queued page requests to [`PagerThread`] to be fulfilled.
 /// - On failure or cancellation: If dropped before `commit` is called (e.g. due to storage I/O
 ///   error, corrupted metadata, or session teardown), the `Drop` implementation cleans up the
 ///   entry by removing `key` from [`Files`]. Dropping the loading slot drops all queued
@@ -586,8 +688,8 @@ struct LoadingFileGuard<S: BlockService + ?Sized + 'static, D: DeliveryHandler> 
 }
 
 impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> LoadingFileGuard<S, D> {
-    /// Commits the loaded file to the registry, transferring ownership and draining all queued
-    /// page requests.
+    /// Commits the loaded file to the registry, transferring ownership and dispatching any queued
+    /// page requests to [`PagerThread`] to be fulfilled.
     fn commit(mut self, file: Arc<File>) {
         self.files.take().unwrap().insert(self.key, file);
     }
@@ -685,8 +787,8 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::OwnedBuffer;
     use crate::reader::tests::FakeBlockService;
+    use crate::reader::{MAX_READ_BUFFER_SIZE, OwnedBuffer};
     use crate::testing::{TestDeliveryHandler, TestVecBuffer};
     use crate::{BLOCK_SIZE, Extent};
     use anyhow::Error;
@@ -696,6 +798,7 @@ mod tests {
     use fuchsia_async as fasync;
     use fxfs_crypto::{Cipher, FxfsCipher, UnwrappedKey};
     use std::sync::Arc;
+    use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
     use storage_ptr_slice::MutPtrByteSlice;
 
     fn serialize_metadata(metadata: &BlobMetadata) -> Vec<u8> {
@@ -1141,8 +1244,11 @@ mod tests {
         let extents = Extents::try_new([Extent::new(0..4096, Some(0))], 0).unwrap();
         let file = Arc::new(File::new(extents, 4096, Transform::None));
         let service = Arc::new(FakeBlockService::new(vec![0u8; 4096]));
-        let files =
-            Files::new(service, TestDeliveryHandler(|_key, _range| TestVecBuffer::new(4096).0));
+        let files = Files::new(
+            service,
+            TestDeliveryHandler(|_key, _range| TestVecBuffer::new(4096).0),
+            zx::Port::create(),
+        );
 
         assert!(!files.is_loading(100));
         files.begin_loading(100);
@@ -1168,11 +1274,23 @@ mod tests {
     struct DelayedBlockService {
         device_data: Vec<u8>,
         pending: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+        allocator: Option<Arc<BufferAllocator>>,
     }
 
     impl DelayedBlockService {
         fn new(device_data: Vec<u8>) -> Arc<Self> {
-            Arc::new(Self { device_data, pending: Mutex::new(Vec::new()) })
+            Arc::new(Self { device_data, pending: Mutex::new(Vec::new()), allocator: None })
+        }
+
+        fn new_with_pool_capacity(device_data: Vec<u8>, pool_capacity: usize) -> Arc<Self> {
+            Arc::new(Self {
+                device_data,
+                pending: Mutex::new(Vec::new()),
+                allocator: Some(Arc::new(BufferAllocator::new(
+                    BLOCK_SIZE as usize,
+                    BufferSource::new(pool_capacity),
+                ))),
+            })
         }
 
         fn wait_and_trigger_sync(&self) {
@@ -1191,7 +1309,15 @@ mod tests {
 
     impl BlockService for DelayedBlockService {
         fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
-            FakeBlockService::new(vec![0u8; max_len]).allocate_buffer(max_len)
+            if let Some(allocator) = &self.allocator {
+                let max_len = std::cmp::min(
+                    std::cmp::min(max_len, MAX_READ_BUFFER_SIZE),
+                    allocator.buffer_source().size(),
+                );
+                allocator.allocate_buffer_sync_owned(max_len)
+            } else {
+                FakeBlockService::new(vec![0u8; max_len]).allocate_buffer(max_len)
+            }
         }
 
         fn read_blocks(
@@ -1313,6 +1439,7 @@ mod tests {
         let files = Arc::new(Files::new(
             service.clone(),
             TestDeliveryHandler(|_k, _r| TestVecBuffer::new(4096).0),
+            zx::Port::create(),
         ));
 
         let data_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
@@ -1387,7 +1514,11 @@ mod tests {
                 Ok(())
             }
         }
-        let files = Arc::new(Files::new(service.clone(), TestRegisterHandler(registered_clone)));
+        let files = Arc::new(Files::new(
+            service.clone(),
+            TestRegisterHandler(registered_clone),
+            zx::Port::create(),
+        ));
 
         // Encode extent descriptors for data (block 0) and metadata (block 1).
         let data_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
@@ -1501,6 +1632,7 @@ mod tests {
                 range: r,
                 dropped: dropped_clone.clone(),
             }),
+            zx::Port::create(),
         ));
 
         let data_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
@@ -1576,12 +1708,10 @@ mod tests {
         let files = Arc::new(Files::new(
             service.clone(),
             TestDeliveryHandler(move |_key, _range| page_request_clone.lock().take().unwrap()),
+            port.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
         ));
 
-        let _pager_thread = crate::PagerThread::spawn(
-            port.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
-            files.clone(),
-        );
+        let _pager_thread = files.spawn_pager_thread();
 
         let pager = Pager::create(PagerOptions::empty()).unwrap();
         let vmo_blob = pager.create_vmo(VmoOptions::empty(), &port, 42, BLOCK_SIZE).unwrap();
@@ -1676,12 +1806,10 @@ mod tests {
         let files = Arc::new(Files::new(
             service.clone(),
             TestDeliveryHandler(move |_key, _range| page_request_clone.lock().take().unwrap()),
+            port.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
         ));
 
-        let _pager_thread = crate::PagerThread::spawn(
-            port.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
-            files.clone(),
-        );
+        let _pager_thread = files.spawn_pager_thread();
 
         let pager = Pager::create(PagerOptions::empty()).unwrap();
         let vmo_blob = pager.create_vmo(VmoOptions::empty(), &port, 42, BLOCK_SIZE).unwrap();
@@ -1750,8 +1878,11 @@ mod tests {
     #[fuchsia::test]
     fn test_process_mapping_command_close_blob() {
         let service = Arc::new(FakeBlockService::new(vec![0u8; 8192]));
-        let files =
-            Arc::new(Files::new(service, TestDeliveryHandler(|_k, _r| TestVecBuffer::new(4096).0)));
+        let files = Arc::new(Files::new(
+            service,
+            TestDeliveryHandler(|_k, _r| TestVecBuffer::new(4096).0),
+            zx::Port::create(),
+        ));
 
         let vmo = zx::Vmo::create(65536).unwrap();
         let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
@@ -2018,6 +2149,7 @@ mod tests {
         let files = Arc::new(Files::new(
             service.clone(),
             TestDeliveryHandler(|_k, r| TestVecBuffer::new_with_range(r).0),
+            zx::Port::create(),
         ));
 
         let data_extents =
@@ -2086,7 +2218,8 @@ mod tests {
         cipher.encrypt(0, 0, 0, 0, MutPtrByteSlice::from(&mut ciphertext[..])).unwrap();
 
         let service = Arc::new(FakeBlockService::new(ciphertext));
-        let files = Arc::new(Files::new(service.clone(), NoRegisterBlobHandler));
+        let files =
+            Arc::new(Files::new(service.clone(), NoRegisterBlobHandler, zx::Port::create()));
 
         let data_extents =
             Extents::try_new([Extent::new(0..(block_count as u64 * BLOCK_SIZE), Some(0))], 0)
@@ -2144,5 +2277,114 @@ mod tests {
             TestVecBuffer::new_with_range(0..(block_count as u64 * BLOCK_SIZE));
         file.read_range(service.as_ref(), page_request);
         assert_eq!(rx.output(), plaintext);
+    }
+
+    #[fuchsia::test]
+    fn test_queued_page_request_does_not_deadlock_single_completion_thread() {
+        // 128 KiB of blob data (> 64 KiB buffer pool) + 1 block (4 KiB) of metadata.
+        let data_size = READ_AHEAD_SIZE as usize;
+        let encoded_metadata = serialize_metadata(&BlobMetadata {
+            merkle_leaves: MerkleLeaves::new(),
+            format: BlobFormat::Uncompressed,
+        });
+        let mut device_data = vec![0xabu8; data_size + BLOCK_SIZE as usize];
+        device_data[data_size..data_size + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        // 64 KiB buffer pool (< 128 KiB READ_AHEAD_SIZE).
+        let block_service = DelayedBlockService::new_with_pool_capacity(device_data, 64 * 1024);
+
+        let (page_request, rx) = TestVecBuffer::new_with_range(0..4096);
+        let page_request = Mutex::new(Some(page_request));
+        let files = Arc::new(Files::new(
+            block_service.clone(),
+            TestDeliveryHandler(move |_key, _range| page_request.lock().take().unwrap()),
+            zx::Port::create(),
+        ));
+        let _pager_thread = files.spawn_pager_thread();
+
+        let data_extents = Extents::try_new([Extent::new(0..READ_AHEAD_SIZE, Some(0))], 0).unwrap();
+        let meta_extents =
+            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(READ_AHEAD_SIZE))], 0).unwrap();
+
+        let blob_key = 200;
+
+        // Start metadata read (txn 0: 4 KiB). Allocates 4 KiB from the 64 KiB pool and queues txn 0
+        // in `block_service.pending`.
+        files.begin_loading(blob_key);
+        let files_clone = files.clone();
+        read_blob_metadata(
+            block_service.as_ref(),
+            &meta_extents,
+            READ_AHEAD_SIZE,
+            move |metadata| {
+                let file = Arc::new(File::new(
+                    data_extents,
+                    metadata.uncompressed_size,
+                    metadata.compression_info.into(),
+                ));
+                files_clone.insert(blob_key, file);
+            },
+        );
+
+        // Queue a page request while txn 0 is still pending. Because `File::read_range` expands
+        // page requests to `READ_AHEAD_SIZE` (128 KiB) and the buffer pool is 64 KiB, servicing
+        // this request requires two sequential 64 KiB buffer allocations (txn 1 and txn 2).
+        files.handle_page_request(blob_key, 0..4096);
+
+        // Complete txn 0 (metadata) followed by txn 1 and txn 2 (the two 64 KiB data chunks) on a
+        // single completion thread. Completing txn 0 inserts the file, which must not block the
+        // completion thread while servicing the queued page request.
+        let block_completion_thread = std::thread::spawn({
+            let block_service = block_service.clone();
+            move || {
+                for _ in 0..3 {
+                    block_service.wait_and_trigger_sync();
+                }
+            }
+        });
+
+        block_completion_thread.join().unwrap();
+
+        // Verify that the 128 KiB readahead was split into two 64 KiB block reads (matching the
+        // 64 KiB pool capacity) and both chunks were committed to the pager.
+        assert_eq!(rx.commits(), vec![(0, 65536), (65536, 65536)]);
+        // Verify that the full 128 KiB of blob data was copied into the page request's buffer.
+        assert_eq!(rx.output(), vec![0xabu8; data_size]);
+    }
+
+    #[fuchsia::test]
+    fn test_pager_thread_lifecycle() {
+        let port = zx::Port::create();
+        let service = Arc::new(FakeBlockService::new(vec![0u8; 4096]));
+        let files = Arc::new(Files::new(
+            service,
+            TestDeliveryHandler(|_key, _range| TestVecBuffer::new(4096).0),
+            port,
+        ));
+        let thread = files.spawn_pager_thread();
+        drop(thread);
+    }
+
+    #[fuchsia::test]
+    fn test_pager_packet() {
+        let port = zx::Port::create();
+        let pager = zx::Pager::create(zx::PagerOptions::empty()).expect("create pager");
+        let vmo = pager.create_vmo(zx::VmoOptions::empty(), &port, 1234, 4096).expect("create vmo");
+
+        let vmo_clone = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate vmo");
+        let _reader_thread = std::thread::spawn(move || {
+            let mut b = [0u8; 1];
+            let _ = vmo_clone.read(&mut b, 0);
+        });
+
+        let packet = port.wait(zx::MonotonicInstant::INFINITE).expect("wait packet");
+        assert_eq!(packet.key(), 1234);
+        if let zx::PacketContents::Pager(pager_packet) = packet.contents() {
+            assert_eq!(pager_packet.command(), ZX_PAGER_VMO_READ);
+            assert_eq!(pager_packet.range(), 0..4096);
+        } else {
+            panic!("Expected pager packet");
+        }
     }
 }

@@ -34,6 +34,7 @@ TEST_F(InitTest, DeviceNotFound) {
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
     ufs_config::Config fake_config;
     fake_config.enable_suspend() = false;
+    fake_config.storage_power_management_enabled() = false;
     args.config(fake_config.ToVmo());
   });
   ASSERT_TRUE(result.is_error());
@@ -58,6 +59,7 @@ TEST_F(InitTest, LinkStartupFailure) {
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
     ufs_config::Config fake_config;
     fake_config.enable_suspend() = false;
+    fake_config.storage_power_management_enabled() = false;
     args.config(fake_config.ToVmo());
   });
   ASSERT_TRUE(result.is_error());
@@ -257,6 +259,7 @@ TEST_F(InitTest, CancelIrqOnInitFailure) {
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
     ufs_config::Config fake_config;
     fake_config.enable_suspend() = false;
+    fake_config.storage_power_management_enabled() = false;
     args.config(fake_config.ToVmo());
   });
   ASSERT_TRUE(result.is_error());
@@ -305,6 +308,7 @@ TEST_F(InitTest, AutoHibernateDisabledByConfig) {
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
     ufs_config::Config fake_config;
     fake_config.enable_suspend() = false;
+    fake_config.storage_power_management_enabled() = false;
     fake_config.enable_auto_hibernate() = false;
     fake_config.auto_hibernate_timer_us() = 1000;
     args.config(fake_config.ToVmo());
@@ -329,6 +333,7 @@ TEST_F(InitTest, AutoHibernateCustomTimerConfig) {
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
     ufs_config::Config fake_config;
     fake_config.enable_suspend() = false;
+    fake_config.storage_power_management_enabled() = false;
     fake_config.enable_auto_hibernate() = true;
     fake_config.auto_hibernate_timer_us() = 50000;
     args.config(fake_config.ToVmo());

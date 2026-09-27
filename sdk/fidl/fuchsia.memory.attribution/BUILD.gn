@@ -48,6 +48,7 @@ fidl("fuchsia.memory.attribution") {
   ]
   sdk_area = "Diagnostics"
   visibility = [
+    ":*",
     "//examples/components/runner/colocated/*",
     "//src/developer/memory/*",
     "//src/devices/bin/driver_manager/*",

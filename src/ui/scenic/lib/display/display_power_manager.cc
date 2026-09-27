@@ -5,11 +5,10 @@
 #include "src/ui/scenic/lib/display/display_power_manager.h"
 
 #include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
+#include <lib/syslog/cpp/macros.h>
 #include <lib/zx/clock.h>
 #include <zircon/errors.h>
 #include <zircon/status.h>
-
-#include "src/ui/scenic/lib/display/display_manager.h"
 
 namespace display {
 
@@ -53,11 +52,26 @@ fuchsia_hardware_display_types::PowerMode ToDisplayPowerMode(const PowerMode& po
 
 }  // namespace
 
-DisplayPowerManager::DisplayPowerManager(DisplayManager& display_manager,
-                                         inspect::Node& parent_node)
-    : display_manager_(display_manager),
-      inspect_display_power_events_(parent_node.CreateChild(kDisplayPowerEvents),
-                                    kInspectHistorySize) {}
+bool PowerModeGeneratesVsyncs(fuchsia_ui_display_singleton::PowerMode mode) {
+  switch (mode) {
+    case fuchsia_ui_display_singleton::PowerMode::kOn:
+    case fuchsia_ui_display_singleton::PowerMode::kDoze:
+    case fuchsia_ui_display_singleton::PowerMode::kDozeSuspend:
+      return true;
+    case fuchsia_ui_display_singleton::PowerMode::kOff:
+      return false;
+    default:
+      // `ToDisplayPowerMode()` forwards unknown modes to the coordinator as `kOn`,
+      // so treat them as generating vsyncs here too.
+      return true;
+  }
+}
+
+DisplayPowerManager::DisplayPowerManager(inspect::Node& parent_node,
+                                         SetDisplayPowerModeFn set_display_power_mode)
+    : inspect_display_power_events_(parent_node.CreateChild(kDisplayPowerEvents),
+                                    kInspectHistorySize),
+      set_display_power_mode_(std::move(set_display_power_mode)) {}
 
 void DisplayPowerManager::SetPowerMode(SetPowerModeRequest& request,
                                        SetPowerModeCompleter::Sync& completer) {
@@ -67,39 +81,12 @@ void DisplayPowerManager::SetPowerMode(SetPowerModeRequest& request,
 
 void DisplayPowerManager::SetPowerMode(PowerMode power_mode,
                                        fit::function<void(fit::result<zx_status_t>)> completer) {
-  // No display
-  if (!display_manager_.default_display()) {
-    completer(fit::error(ZX_ERR_NOT_FOUND));
-    return;
-  }
-
-  // TODO(https://fxbug.dev/42177175): Since currently Scenic only supports one display,
-  // the DisplayPowerManager will only control power of the default display.
-  // Once Scenic and DisplayManager supports multiple displays, this needs to
-  // be updated to control power of all available displays.
-  auto& coordinator_proxy = display_manager_.coordinator_proxy();
-  FX_DCHECK(coordinator_proxy);
-  display::DisplayId id = display_manager_.default_display()->display_id();
-
-  auto set_display_power_mode_result = coordinator_proxy->raw().sync()->SetDisplayPowerMode(
-      id.ToFidl(), ToDisplayPowerMode(power_mode));
-  if (!set_display_power_mode_result.ok()) {
+  const zx_status_t status = set_display_power_mode_(ToDisplayPowerMode(power_mode));
+  if (status != ZX_OK) {
     FX_LOGS(ERROR) << "DisplayPowerManager.SetPowerMode() FAILED to set value: "
-                   << ToString(power_mode)
-                   << " transport error: " << set_display_power_mode_result.status_string();
-    // NOTE: is ZX_ERR_INTERNAL the best value?
-    AddSetPowerModeInspectValues(power_mode, ZX_ERR_INTERNAL);
-    completer(fit::error(ZX_ERR_INTERNAL));
-    return;
-  }
-
-  if (set_display_power_mode_result->is_error()) {
-    FX_LOGS(ERROR) << "DisplayPowerManager.SetPowerMode() FAILED to set value: "
-                   << ToString(power_mode) << " display error: "
-                   << zx_status_get_string(set_display_power_mode_result->error_value());
-    // NOTE: is ZX_ERR_NOT_SUPPORTED the best value?
-    AddSetPowerModeInspectValues(power_mode, ZX_ERR_NOT_SUPPORTED);
-    completer(fit::error(ZX_ERR_NOT_SUPPORTED));
+                   << ToString(power_mode) << ": " << zx_status_get_string(status);
+    AddSetPowerModeInspectValues(power_mode, status);
+    completer(fit::error(status));
     return;
   }
 

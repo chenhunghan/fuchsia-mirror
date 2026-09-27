@@ -13,6 +13,7 @@ load(
 load(
     "@fuchsia_rules_common//debug_symbols:providers.bzl",
     _FuchsiaCollectedUnstrippedBinariesInfo = "FuchsiaCollectedUnstrippedBinariesInfo",
+    _FuchsiaUnstrippedBinariesInfo = "FuchsiaUnstrippedBinariesInfo",
     _FuchsiaUnstrippedBinaryInfo = "FuchsiaUnstrippedBinaryInfo",
     _make_fuchsia_unstripped_binary_info = "make_fuchsia_unstripped_binary_info",
 )
@@ -58,6 +59,7 @@ FuchsiaDeviceTreeSegmentInfo = provider(
 
 FuchsiaCollectedUnstrippedBinariesInfo = _FuchsiaCollectedUnstrippedBinariesInfo
 FuchsiaUnstrippedBinaryInfo = _FuchsiaUnstrippedBinaryInfo
+FuchsiaUnstrippedBinariesInfo = _FuchsiaUnstrippedBinariesInfo
 make_fuchsia_unstripped_binary_info = _make_fuchsia_unstripped_binary_info
 
 FuchsiaComponentManifestShardInfo = provider(

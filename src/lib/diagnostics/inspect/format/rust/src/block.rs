@@ -1063,6 +1063,10 @@ impl<T: Deref<Target = Q> + DerefMut<Target = Q>, Q: WriteBytes + ReadBytes, K: 
     pub fn set_parent(&mut self, new_parent_index: BlockIndex) {
         HeaderFields::set_value_parent_index(self, *new_parent_index);
     }
+
+    pub fn set_name(&mut self, new_name_index: BlockIndex) {
+        HeaderFields::set_value_name_index(self, *new_name_index);
+    }
 }
 
 /// Get the array capacity size for the given |order|.
@@ -1948,6 +1952,20 @@ mod tests {
         assert_eq!(4 + 8 + 16 + 32 + 64, max_array_capacity::<StringRef>(5));
         assert_eq!(4 + 8 + 16 + 32 + 64 + 128, max_array_capacity::<StringRef>(6));
         assert_eq!(4 + 8 + 16 + 32 + 64 + 128 + 256, max_array_capacity::<StringRef>(7));
+    }
+
+    #[fuchsia::test]
+    fn set_parent_and_name() {
+        let (mut container, _storage) =
+            Container::read_and_write(constants::MIN_ORDER_SIZE).unwrap();
+        let mut block =
+            get_reserved(&mut container).become_node(BlockIndex::new(1), BlockIndex::new(2));
+        assert_eq!(*block.name_index(), 1);
+        assert_eq!(*block.parent_index(), 2);
+        block.set_name(BlockIndex::new(3));
+        block.set_parent(BlockIndex::new(4));
+        assert_eq!(*block.name_index(), 3);
+        assert_eq!(*block.parent_index(), 4);
     }
 
     fn get_header(container: &mut Container, size: usize) -> Block<&mut Container, Header> {

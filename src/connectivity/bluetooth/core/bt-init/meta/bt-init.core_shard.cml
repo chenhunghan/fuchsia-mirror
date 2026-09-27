@@ -93,13 +93,16 @@
             to: "#bluetooth-core",
         },
         {
-            config: "fuchsia.bluetooth.FastPairProvider",
-            from: "parent",
-            to: "#bluetooth-core",
-            availability: "optional",
-        },
-        {
-            config: "fuchsia.bluetooth.Rfcomm",
+            config: [
+                "fuchsia.bluetooth.AutostartSnoop",
+                "fuchsia.bluetooth.BredrConnectable",
+                "fuchsia.bluetooth.BredrSecurityMode",
+                "fuchsia.bluetooth.FastPairProvider",
+                "fuchsia.bluetooth.LeBackgroundScanning",
+                "fuchsia.bluetooth.LePrivacy",
+                "fuchsia.bluetooth.LeSecurityMode",
+                "fuchsia.bluetooth.Rfcomm",
+            ],
             from: "parent",
             to: "#bluetooth-core",
             availability: "optional",

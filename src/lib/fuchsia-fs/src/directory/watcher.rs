@@ -44,6 +44,18 @@ pub enum WatcherStreamError {
     ChannelRead(#[from] flex_client::Error),
 }
 
+impl WatcherStreamError {
+    #[cfg(not(feature = "fdomain"))]
+    fn invalid_data() -> Self {
+        WatcherStreamError::ChannelRead(zx_status::Status::IO_DATA_INTEGRITY)
+    }
+
+    #[cfg(feature = "fdomain")]
+    fn invalid_data() -> Self {
+        WatcherStreamError::ChannelRead(flex_client::Error::StreamingAborted)
+    }
+}
+
 /// Describes the type of event that occurred in the directory being watched.
 #[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -148,16 +160,17 @@ impl Watcher {
         self.buf.clear();
     }
 
-    fn get_next_msg(&mut self) -> WatchMessage {
-        assert!(self.idx < self.buf.bytes().len());
+    fn get_next_msg(&mut self) -> Result<WatchMessage, WatcherStreamError> {
+        // SAFETY: idx will always be within buf here - poll_next will reload the buffer with more
+        // data if it is beyond the end.
         let next_msg = VfsWatchMsg::from_raw(&self.buf.bytes()[self.idx..])
-            .expect("Invalid buffer received by Watcher!");
+            .ok_or_else(|| WatcherStreamError::invalid_data())?;
         self.idx += next_msg.len();
 
         let mut pathbuf = PathBuf::new();
         pathbuf.push(OsStr::from_bytes(next_msg.name()));
         let event = next_msg.event();
-        WatchMessage { event, filename: pathbuf }
+        Ok(WatchMessage { event, filename: pathbuf })
     }
 }
 
@@ -187,79 +200,51 @@ impl Stream for Watcher {
             match this.ch.recv_from(cx, &mut this.buf) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
-                    self.state = WatcherState::TerminateOnNextPoll;
+                    this.state = WatcherState::TerminateOnNextPoll;
                     return Poll::Ready(Some(Err(e.into())));
                 }
                 Poll::Pending => return Poll::Pending,
             }
         }
-        Poll::Ready(Some(Ok(this.get_next_msg())))
+        match this.get_next_msg() {
+            Ok(msg) => Poll::Ready(Some(Ok(msg))),
+            Err(e) => {
+                this.state = WatcherState::TerminateOnNextPoll;
+                Poll::Ready(Some(Err(e)))
+            }
+        }
     }
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct IncompleteArrayField<T>(::std::marker::PhantomData<T>);
-impl<T> IncompleteArrayField<T> {
-    #[inline]
-    pub unsafe fn as_ptr(&self) -> *const T {
-        unsafe { ::std::mem::transmute(self) }
-    }
-    #[inline]
-    pub unsafe fn as_slice(&self, len: usize) -> &[T] {
-        unsafe { ::std::slice::from_raw_parts(self.as_ptr(), len) }
-    }
-}
-impl<T> ::std::fmt::Debug for IncompleteArrayField<T> {
-    fn fmt(&self, fmt: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        fmt.write_str("IncompleteArrayField")
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-struct vfs_watch_msg_t {
-    event: fio::WatchEvent,
-    len: u8,
-    name: IncompleteArrayField<u8>,
 }
 
 #[derive(Debug)]
 struct VfsWatchMsg<'a> {
-    inner: &'a vfs_watch_msg_t,
+    event: WatchEvent,
+    name: &'a [u8],
 }
 
 impl<'a> VfsWatchMsg<'a> {
     fn from_raw(buf: &'a [u8]) -> Option<VfsWatchMsg<'a>> {
-        if buf.len() < ::std::mem::size_of::<vfs_watch_msg_t>() {
+        if buf.len() < 2 {
             return None;
         }
-        // This is safe as long as the buffer is at least as large as a vfs_watch_msg_t, which we
-        // just verified. Further, we verify that the buffer has enough bytes to hold the
-        // "incomplete array field" member.
-        let m = unsafe { VfsWatchMsg { inner: &*(buf.as_ptr() as *const vfs_watch_msg_t) } };
-        if buf.len() < ::std::mem::size_of::<vfs_watch_msg_t>() + m.namelen() {
+        let event = fio::WatchEvent::from_primitive(buf[0])?;
+        let namelen = buf[1] as usize;
+        if buf.len() < 2 + namelen {
             return None;
         }
-        Some(m)
+        Some(VfsWatchMsg { event: WatchEvent(event), name: &buf[2..2 + namelen] })
     }
 
     fn len(&self) -> usize {
-        ::std::mem::size_of::<vfs_watch_msg_t>() + self.namelen()
+        2 + self.name.len()
     }
 
     fn event(&self) -> WatchEvent {
-        WatchEvent(self.inner.event)
-    }
-
-    fn namelen(&self) -> usize {
-        self.inner.len as usize
+        self.event
     }
 
     fn name(&self) -> &'a [u8] {
-        // This is safe because we verified during construction that the inner name field has at
-        // least namelen() bytes in it.
-        unsafe { self.inner.name.as_slice(self.namelen()) }
+        self.name
     }
 }
 
@@ -452,6 +437,96 @@ mod tests {
         let msg = w.next().await.expect("the stream yielded no next item");
         assert!(!w.is_terminated());
         assert_matches!(msg, Err(WatcherStreamError::ChannelRead(zx::Status::PEER_CLOSED)));
+        assert!(!w.is_terminated());
+        assert_matches!(w.next().await, None);
+        assert!(w.is_terminated());
+    }
+
+    #[test]
+    fn test_vfs_watch_msg_from_raw() {
+        // Valid message
+        let buf = [fio::WatchEvent::Added as u8, 4, b't', b'e', b's', b't'];
+        let msg = VfsWatchMsg::from_raw(&buf).unwrap();
+        assert_eq!(msg.event(), WatchEvent::ADD_FILE);
+        assert_eq!(msg.name(), b"test");
+        assert_eq!(msg.len(), 6);
+
+        // Invalid event discriminant
+        let buf = [0xff, 4, b't', b'e', b's', b't'];
+        assert_matches!(VfsWatchMsg::from_raw(&buf), None);
+
+        // Too short buffer
+        let buf = [fio::WatchEvent::Added as u8];
+        assert_matches!(VfsWatchMsg::from_raw(&buf), None);
+
+        // Buffer shorter than name length
+        let buf = [fio::WatchEvent::Added as u8, 10, b't', b'e', b's', b't'];
+        assert_matches!(VfsWatchMsg::from_raw(&buf), None);
+    }
+
+    #[fuchsia::test]
+    async fn test_invalid_data() {
+        struct BadDirectory;
+        impl GetEntryInfo for BadDirectory {
+            fn entry_info(&self) -> EntryInfo {
+                EntryInfo::new(fio::INO_UNKNOWN, fio::DirentType::Directory)
+            }
+        }
+        impl Node for BadDirectory {
+            async fn get_attributes(
+                &self,
+                _query: fio::NodeAttributesQuery,
+            ) -> Result<fio::NodeAttributes2, zx::Status> {
+                unimplemented!();
+            }
+            fn close(self: Arc<Self>) {}
+        }
+        impl Directory for BadDirectory {
+            fn open(
+                self: Arc<Self>,
+                scope: ExecutionScope,
+                _path: vfs::path::Path,
+                flags: fio::Flags,
+                object_request: ObjectRequestRef<'_>,
+            ) -> Result<(), zx::Status> {
+                object_request.take().create_connection_sync::<ImmutableConnection<_>, _>(
+                    scope,
+                    self.clone(),
+                    flags,
+                );
+                Ok(())
+            }
+            async fn read_dirents(
+                &self,
+                _pos: &TraversalPosition,
+                _sink: Box<dyn dirents_sink::Sink>,
+            ) -> Result<(TraversalPosition, Box<dyn dirents_sink::Sealed>), zx::Status>
+            {
+                unimplemented!("Not implemented");
+            }
+            fn register_watcher(
+                self: Arc<Self>,
+                _scope: ExecutionScope,
+                _mask: fio::WatchMask,
+                watcher: DirectoryWatcher,
+            ) -> Result<(), zx::Status> {
+                // Send some invalid data
+                #[cfg(not(feature = "fdomain"))]
+                let _ = watcher.channel().write(&[0xff, 0], &mut []);
+                #[cfg(feature = "fdomain")]
+                let _ = watcher.channel().write(&[0xff, 0], std::vec::Vec::new());
+                Ok(())
+            }
+            fn unregister_watcher(self: Arc<Self>, _key: usize) {
+                unimplemented!("Not implemented");
+            }
+        }
+
+        let test_dir = Arc::new(BadDirectory);
+        let client = vfs::directory::serve_read_only(test_dir, ExecutionScope::new());
+        let mut w = Watcher::new(&client).await.unwrap();
+        let msg = w.next().await.expect("the stream yielded no next item");
+        assert_matches!(msg, Err(WatcherStreamError::ChannelRead(zx::Status::IO_DATA_INTEGRITY)));
         assert!(!w.is_terminated());
         assert_matches!(w.next().await, None);
         assert!(w.is_terminated());

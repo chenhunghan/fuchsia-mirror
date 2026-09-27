@@ -12,10 +12,10 @@ use fidl_fuchsia_hardware_google_nanohub as fnanohub;
 use fidl_fuchsia_hardware_serial as fserial;
 use fuchsia_component::client::Service;
 use futures::TryStreamExt;
-use starnix_core::device::serial::SerialDevice;
 use starnix_core::fs::sysfs::build_device_directory;
 use starnix_core::task::Kernel;
 use starnix_logging::{log_error, log_info, log_warn};
+use starnix_modules_serial::SerialDevice;
 use starnix_uapi::auth::FsCred;
 
 use std::sync::Arc;

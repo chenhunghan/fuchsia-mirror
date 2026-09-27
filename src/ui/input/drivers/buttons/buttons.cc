@@ -6,6 +6,7 @@
 
 #include <fidl/fuchsia.buttons/cpp/fidl.h>
 #include <fidl/fuchsia.driver.compat/cpp/wire.h>
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <lib/ddk/metadata.h>
 #include <lib/driver/compat/cpp/device_server.h>
 #include <lib/driver/compat/cpp/metadata.h>
@@ -13,11 +14,113 @@
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
 
-#include <cinttypes>
-
 #include <fbl/alloc_checker.h>
 
+#include "src/ui/input/drivers/buttons/buttons_parser.h"
+
 namespace buttons {
+
+namespace {
+
+fuchsia_buttons::GpioButtonsMetadata ConvertMetadata(
+    const buttons_metadata::ButtonsMetadata& parsed) {
+  fuchsia_buttons::GpioButtonsMetadata metadata;
+  if (parsed.buttons.has_value()) {
+    std::vector<fuchsia_buttons::GpioButtonConfig> buttons;
+    for (const auto& btn : *parsed.buttons) {
+      fuchsia_buttons::GpioButtonConfig config;
+      if (btn.id.has_value()) {
+        switch (*btn.id) {
+          case buttons_metadata::GpioButtonId::kVolumeUp:
+            config.id(fuchsia_buttons::GpioButtonId::kVolumeUp);
+            break;
+          case buttons_metadata::GpioButtonId::kVolumeDown:
+            config.id(fuchsia_buttons::GpioButtonId::kVolumeDown);
+            break;
+          case buttons_metadata::GpioButtonId::kFdr:
+            config.id(fuchsia_buttons::GpioButtonId::kFdr);
+            break;
+          case buttons_metadata::GpioButtonId::kMicMute:
+            config.id(fuchsia_buttons::GpioButtonId::kMicMute);
+            break;
+          case buttons_metadata::GpioButtonId::kPlayPause:
+            config.id(fuchsia_buttons::GpioButtonId::kPlayPause);
+            break;
+          case buttons_metadata::GpioButtonId::kKeyA:
+            config.id(fuchsia_buttons::GpioButtonId::kKeyA);
+            break;
+          case buttons_metadata::GpioButtonId::kKeyM:
+            config.id(fuchsia_buttons::GpioButtonId::kKeyM);
+            break;
+          case buttons_metadata::GpioButtonId::kCamMute:
+            config.id(fuchsia_buttons::GpioButtonId::kCamMute);
+            break;
+          case buttons_metadata::GpioButtonId::kMicAndCamMute:
+            config.id(fuchsia_buttons::GpioButtonId::kMicAndCamMute);
+            break;
+          case buttons_metadata::GpioButtonId::kFunction:
+            config.id(fuchsia_buttons::GpioButtonId::kFunction);
+            break;
+          case buttons_metadata::GpioButtonId::kPower:
+            config.id(fuchsia_buttons::GpioButtonId::kPower);
+            break;
+        }
+      }
+      if (btn.gpio_a_index.has_value()) {
+        config.gpio_a_index(*btn.gpio_a_index);
+      }
+      if (btn.gpio_delay.has_value()) {
+        config.gpio_delay(*btn.gpio_delay);
+      }
+      if (btn.type.has_value()) {
+        if (btn.type->direct.has_value()) {
+          config.type(
+              fuchsia_buttons::GpioButtonType::WithDirect(fuchsia_buttons::DirectGpioButton{}));
+        } else if (btn.type->matrix.has_value()) {
+          fuchsia_buttons::MatrixGpioButton matrix;
+          if (btn.type->matrix->gpio_b_index.has_value()) {
+            matrix.gpio_b_index(*btn.type->matrix->gpio_b_index);
+          }
+          config.type(fuchsia_buttons::GpioButtonType::WithMatrix(std::move(matrix)));
+        }
+      }
+      buttons.push_back(std::move(config));
+    }
+    metadata.buttons(std::move(buttons));
+  }
+
+  if (parsed.gpios.has_value()) {
+    std::vector<fuchsia_buttons::GpioConfig> gpios;
+    for (const auto& g : *parsed.gpios) {
+      fuchsia_buttons::GpioConfig gpio;
+      if (g.flags.has_value()) {
+        gpio.flags(static_cast<fuchsia_buttons::GpioFlag>(*g.flags));
+      }
+      if (g.type.has_value()) {
+        if (g.type->interrupt.has_value()) {
+          gpio.type(fuchsia_buttons::GpioType::WithInterrupt(fuchsia_buttons::InterruptGpio{}));
+        } else if (g.type->matrix_output.has_value()) {
+          fuchsia_buttons::MatrixOutputGpio matrix_out;
+          if (g.type->matrix_output->output_value.has_value()) {
+            matrix_out.output_value(*g.type->matrix_output->output_value);
+          }
+          gpio.type(fuchsia_buttons::GpioType::WithMatrixOutput(std::move(matrix_out)));
+        } else if (g.type->poll.has_value()) {
+          fuchsia_buttons::PollGpio poll;
+          if (g.type->poll->period.has_value()) {
+            poll.period(*g.type->poll->period);
+          }
+          gpio.type(fuchsia_buttons::GpioType::WithPoll(std::move(poll)));
+        }
+      }
+      gpios.push_back(std::move(gpio));
+    }
+    metadata.gpios(std::move(gpios));
+  }
+  return metadata;
+}
+
+}  // namespace
 
 zx::result<> Buttons::Start(fdf::DriverContext context) {
   config_ = context.take_config<buttons_config::Config>();
@@ -29,12 +132,26 @@ zx::result<> Buttons::Start(fdf::DriverContext context) {
   }
   fdf::PDev pdev{std::move(pdev_client_end.value())};
 
+  fuchsia_buttons::GpioButtonsMetadata metadata;
   zx::result metadata_result = pdev.GetFidlMetadata<fuchsia_buttons::GpioButtonsMetadata>();
-  if (metadata_result.is_error()) {
-    fdf::error("Failed to get metadata: {}", metadata_result);
-    return metadata_result.take_error();
+  if (metadata_result.is_ok()) {
+    metadata = std::move(metadata_result.value());
+  } else {
+    // Fall back to reading fuchsia_driver_metadata::Dictionary
+    auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+        "fuchsia.buttons.GpioButtonsMetadata");
+    if (dict_result.is_error()) {
+      fdf::error("Failed to get metadata as GpioButtonsMetadata ({}) or Dictionary ({})",
+                 metadata_result, dict_result);
+      return metadata_result.take_error();
+    }
+    auto parsed = buttons_metadata::ButtonsMetadata::Parse(dict_result.value());
+    if (!parsed.has_value()) {
+      fdf::error("Failed to parse GpioButtonsMetadata from Dictionary");
+      return zx::error(ZX_ERR_INTERNAL);
+    }
+    metadata = ConvertMetadata(*parsed);
   }
-  fuchsia_buttons::GpioButtonsMetadata& metadata = metadata_result.value();
 
   if (!metadata.gpios().has_value()) {
     fdf::error("Metadata missing gpios");

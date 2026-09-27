@@ -12,11 +12,11 @@ use core::convert::TryInto as _;
 use core::fmt::Debug;
 #[cfg(test)]
 use core::fmt::{self, Formatter};
-use core::num::NonZeroU16;
+use core::num::{NonZeroU16, TryFromIntError};
 use core::ops::{Deref, Range};
 
 use explicit::ResultExt as _;
-use net_types::ip::IpAddress;
+use net_types::ip::{Ip, IpAddress};
 use packet::{
     BufferView, BufferViewMut, ByteSliceInnerPacketBuilder, EmptyBuf, FragmentedBytesMut, FromRaw,
     InnerPacketBuilder, MaybeParsed, NestablePacketBuilder, NoOpParsingContext,
@@ -34,6 +34,7 @@ use crate::ip::IpProto;
 use crate::{
     TransportChecksumAction, compute_transport_checksum_parts,
     compute_transport_checksum_serialize, compute_transport_pseudo_header_partial_checksum,
+    remove_transport_pseudo_header_checksum,
 };
 
 use self::data_offset_reserved_flags::DataOffsetReservedFlags;
@@ -47,6 +48,39 @@ pub const MAX_HDR_LEN: usize = 60;
 
 /// The maximum length of the options in a TCP header.
 pub const MAX_OPTIONS_LEN: usize = MAX_HDR_LEN - HDR_PREFIX_LEN;
+
+/// The individual bits of the TCP flags byte.
+pub mod flags {
+    /// The FIN flag.
+    pub const FIN: u8 = 0b0000_0001;
+
+    /// The SYN flag.
+    pub const SYN: u8 = 0b0000_0010;
+
+    /// The RST flag.
+    pub const RST: u8 = 0b0000_0100;
+
+    /// The PSH flag.
+    pub const PSH: u8 = 0b0000_1000;
+
+    /// The ACK flag.
+    pub const ACK: u8 = 0b0001_0000;
+
+    /// The URG flag.
+    pub const URG: u8 = 0b0010_0000;
+
+    /// The ECE flag.
+    pub const ECE: u8 = 0b0100_0000;
+
+    /// The CWR flag.
+    pub const CWR: u8 = 0b1000_0000;
+}
+
+/// The bits of the data offset field that hold the flags byte.
+const FLAGS_MASK: u16 = 0x00FF;
+
+/// The bits of the data offset field that are reserved.
+const RESERVED_BITS_MASK: u16 = 0x0F00;
 
 /// The offset of the checksum field, in bytes, from the start of a TCP header.
 pub const CHECKSUM_OFFSET: usize = 16;
@@ -117,6 +151,11 @@ impl HeaderPrefix {
         }
     }
 
+    /// Return the TCP checksum.
+    pub fn checksum(&self) -> [u8; 2] {
+        self.checksum
+    }
+
     pub fn set_src_port(&mut self, new: NonZeroU16) {
         let old = self.src_port;
         let new = U16::from(new.get());
@@ -134,22 +173,37 @@ impl HeaderPrefix {
     pub fn update_checksum_pseudo_header_address<A: IpAddress>(&mut self, old: A, new: A) {
         self.checksum = internet_checksum::update(self.checksum, old.bytes(), new.bytes());
     }
+
+    pub fn set_flags(&mut self, flags: u8) {
+        let old = self.data_offset_reserved_flags;
+        self.data_offset_reserved_flags.set_flags(flags);
+        let new = self.data_offset_reserved_flags;
+        if new != old {
+            self.checksum =
+                internet_checksum::update(self.checksum, old.as_bytes(), new.as_bytes());
+        }
+    }
+
+    pub fn set_checksum(&mut self, checksum: [u8; 2]) {
+        self.checksum = checksum;
+    }
 }
 
 mod data_offset_reserved_flags {
     use super::*;
 
-    /// The Data Offset field, the reserved zero bits, and the flags.
+    /// The Data Offset field, the reserved bits, and the flags.
     ///
     /// When constructed from a packet, `DataOffsetReservedFlags` ensures that
     /// all bits are preserved even if they are reserved as of this writing.
     /// This allows us to be forwards-compatible with future uses of these bits.
-    /// This forwards-compatibility doesn't matter when user code is only
-    /// parsing a segment because we don't provide getters for any of those
-    /// bits. However, it does matter when copying `DataOffsetReservedFlags`
-    /// into new segments - in these cases, if we were to unconditionally set
-    /// the reserved bits to zero, we could be changing the semantics of a TCP
-    /// segment.
+    /// This matters when copying `DataOffsetReservedFlags` into new segments:
+    /// if we were to unconditionally set the reserved bits to zero, we could be
+    /// changing the semantics of a TCP segment. It also matters to callers that
+    /// need to reason about bits we don't interpret; `flags` and
+    /// `reserved_bits` expose the raw flag byte and the reserved bits so that
+    /// such callers can observe them without this module having to assign them
+    /// meaning.
     #[derive(
         KnownLayout,
         FromBytes,
@@ -169,17 +223,11 @@ mod data_offset_reserved_flags {
     impl DataOffsetReservedFlags {
         pub const EMPTY: DataOffsetReservedFlags = DataOffsetReservedFlags(U16::ZERO);
         pub const ACK_SET: DataOffsetReservedFlags =
-            DataOffsetReservedFlags(U16::from_bytes(Self::ACK_FLAG_MASK.to_be_bytes()));
+            DataOffsetReservedFlags(U16::from_bytes([0, flags::ACK]));
 
         const DATA_OFFSET_SHIFT: u8 = 12;
         const DATA_OFFSET_MAX: u8 = (1 << (16 - Self::DATA_OFFSET_SHIFT)) - 1;
         const DATA_OFFSET_MASK: u16 = (Self::DATA_OFFSET_MAX as u16) << Self::DATA_OFFSET_SHIFT;
-
-        const ACK_FLAG_MASK: u16 = 0b10000;
-        const PSH_FLAG_MASK: u16 = 0b01000;
-        const RST_FLAG_MASK: u16 = 0b00100;
-        const SYN_FLAG_MASK: u16 = 0b00010;
-        const FIN_FLAG_MASK: u16 = 0b00001;
 
         #[cfg(test)]
         pub fn new(data_offset: u8) -> DataOffsetReservedFlags {
@@ -200,49 +248,88 @@ mod data_offset_reserved_flags {
             (self.0.get() >> 12) as u8
         }
 
-        fn get_flag(&self, mask: u16) -> bool {
-            self.0.get() & mask > 0
+        /// The eight flag bits: the six control flags and the two ECN flags.
+        pub fn flags(&self) -> u8 {
+            (self.0.get() & FLAGS_MASK) as u8
+        }
+
+        /// The four reserved bits, held in the low nibble of the returned byte.
+        pub fn reserved_bits(&self) -> u8 {
+            ((self.0.get() & RESERVED_BITS_MASK) >> 8) as u8
+        }
+
+        pub fn set_flags(&mut self, flags: u8) {
+            let v = self.0.get();
+            self.0.set((v & !FLAGS_MASK) | u16::from(flags));
+        }
+
+        fn get_flag(&self, mask: u8) -> bool {
+            self.flags() & mask > 0
         }
 
         pub fn ack(&self) -> bool {
-            self.get_flag(Self::ACK_FLAG_MASK)
+            self.get_flag(flags::ACK)
         }
 
         pub fn psh(&self) -> bool {
-            self.get_flag(Self::PSH_FLAG_MASK)
+            self.get_flag(flags::PSH)
         }
 
         pub fn rst(&self) -> bool {
-            self.get_flag(Self::RST_FLAG_MASK)
+            self.get_flag(flags::RST)
         }
 
         pub fn syn(&self) -> bool {
-            self.get_flag(Self::SYN_FLAG_MASK)
+            self.get_flag(flags::SYN)
         }
 
         pub fn fin(&self) -> bool {
-            self.get_flag(Self::FIN_FLAG_MASK)
+            self.get_flag(flags::FIN)
         }
 
-        fn set_flag(&mut self, mask: u16, set: bool) {
-            let v = self.0.get();
-            self.0.set(if set { v | mask } else { v & !mask });
+        pub fn urg(&self) -> bool {
+            self.get_flag(flags::URG)
+        }
+
+        pub fn ece(&self) -> bool {
+            self.get_flag(flags::ECE)
+        }
+
+        pub fn cwr(&self) -> bool {
+            self.get_flag(flags::CWR)
+        }
+
+        fn set_flag(&mut self, mask: u8, set: bool) {
+            let flags = self.flags();
+            self.set_flags(if set { flags | mask } else { flags & !mask });
         }
 
         pub fn set_psh(&mut self, psh: bool) {
-            self.set_flag(Self::PSH_FLAG_MASK, psh);
+            self.set_flag(flags::PSH, psh);
         }
 
         pub fn set_rst(&mut self, rst: bool) {
-            self.set_flag(Self::RST_FLAG_MASK, rst)
+            self.set_flag(flags::RST, rst)
         }
 
         pub fn set_syn(&mut self, syn: bool) {
-            self.set_flag(Self::SYN_FLAG_MASK, syn)
+            self.set_flag(flags::SYN, syn)
         }
 
         pub fn set_fin(&mut self, fin: bool) {
-            self.set_flag(Self::FIN_FLAG_MASK, fin)
+            self.set_flag(flags::FIN, fin)
+        }
+
+        pub fn set_urg(&mut self, urg: bool) {
+            self.set_flag(flags::URG, urg)
+        }
+
+        pub fn set_ece(&mut self, ece: bool) {
+            self.set_flag(flags::ECE, ece)
+        }
+
+        pub fn set_cwr(&mut self, cwr: bool) {
+            self.set_flag(flags::CWR, cwr)
         }
     }
 }
@@ -440,9 +527,40 @@ impl<B: SplitByteSlice> TcpSegment<B> {
         self.hdr_prefix.data_offset_reserved_flags.fin()
     }
 
+    /// The URG flag.
+    pub fn urg(&self) -> bool {
+        self.hdr_prefix.data_offset_reserved_flags.urg()
+    }
+
+    /// The ECE flag.
+    pub fn ece(&self) -> bool {
+        self.hdr_prefix.data_offset_reserved_flags.ece()
+    }
+
+    /// The CWR flag.
+    pub fn cwr(&self) -> bool {
+        self.hdr_prefix.data_offset_reserved_flags.cwr()
+    }
+
+    /// The segment's flag bits: the six control flags and the two ECN flags.
+    pub fn flags(&self) -> u8 {
+        self.hdr_prefix.data_offset_reserved_flags.flags()
+    }
+
+    /// The segment's reserved bits, held in the low nibble of the returned
+    /// byte.
+    pub fn reserved_bits(&self) -> u8 {
+        self.hdr_prefix.data_offset_reserved_flags.reserved_bits()
+    }
+
     /// The sender's window size.
     pub fn window_size(&self) -> u16 {
         self.hdr_prefix.window_size.get()
+    }
+
+    /// The TCP checksum.
+    pub fn checksum(&self) -> [u8; 2] {
+        self.hdr_prefix.checksum()
     }
 
     /// The length of the header prefix and options.
@@ -450,12 +568,44 @@ impl<B: SplitByteSlice> TcpSegment<B> {
         Ref::bytes(&self.hdr_prefix).len() + self.options.len()
     }
 
-    // The length of the segment as calculated from the header prefix, options,
-    // and body.
-    // TODO(rheacock): remove `allow(dead_code)` when this is used.
-    #[allow(dead_code)]
-    fn total_segment_len(&self) -> usize {
+    /// The length of the segment as calculated from the header prefix, options,
+    /// and body.
+    pub fn total_segment_len(&self) -> usize {
         self.header_len() + self.body.len()
+    }
+
+    /// Recovers the 1's complement partial sum of the TCP segment body
+    /// (payload) without hashing the payload bytes.
+    ///
+    /// The sender computes `tcp_checksum = ~(sum(pseudo_hdr) +
+    /// sum(tcp_hdr_csum_zero) + sum(payload))`. In 1's complement arithmetic
+    /// (RFC 1624), subtracting a sum `S` is equivalent to adding `~S`.
+    ///
+    /// Removing the pseudo header and the wire header prefix and options
+    /// subtracts `sum(pseudo_hdr) + sum(tcp_hdr_csum_zero) +
+    /// sum(tcp_checksum)`. Adding `tcp_checksum` back cancels out the checksum
+    /// field subtraction and leaves exactly `~sum(payload)`. Inverting that
+    /// produces the partial sum `sum(payload)`.
+    ///
+    /// Returns an error if the TCP segment exceeds the maximum length
+    /// representable by the IP pseudo-header.
+    pub fn recover_payload_partial_sum<I: Ip>(
+        &self,
+        src_ip: I::Addr,
+        dst_ip: I::Addr,
+    ) -> Result<[u8; 2], TryFromIntError> {
+        let tcp_checksum = self.checksum();
+        let csum = remove_transport_pseudo_header_checksum::<I>(
+            tcp_checksum,
+            src_ip,
+            dst_ip,
+            IpProto::Tcp.into(),
+            self.total_segment_len(),
+        )?;
+        let csum = internet_checksum::remove(csum, Ref::bytes(&self.hdr_prefix));
+        let csum = internet_checksum::remove(csum, self.options.bytes());
+        let csum = internet_checksum::add(csum, &tcp_checksum);
+        Ok([!csum[0], !csum[1]])
     }
 
     /// Constructs a builder with the same contents as this packet.
@@ -517,6 +667,11 @@ impl<B: SplitByteSliceMut> TcpSegment<B> {
     /// Update the checksum to reflect an updated address in the pseudo header.
     pub fn update_checksum_pseudo_header_address<A: IpAddress>(&mut self, old: A, new: A) {
         self.hdr_prefix.update_checksum_pseudo_header_address(old, new)
+    }
+
+    /// Sets the flag bits in the segment header, updating the checksum.
+    pub fn set_flags(&mut self, flags: u8) {
+        self.hdr_prefix.set_flags(flags);
     }
 }
 
@@ -633,6 +788,22 @@ impl<B: SplitByteSliceMut> TcpSegmentRaw<B> {
             MaybeParsed::Incomplete(_) => {
                 // We don't have the checksum, so there's nothing to update.
             }
+        }
+    }
+
+    /// Sets the flag bits in the segment header, updating the checksum.
+    pub fn set_flags(&mut self, flags: u8) {
+        match &mut self.hdr_prefix {
+            MaybeParsed::Complete(h) => h.set_flags(flags),
+            MaybeParsed::Incomplete(_) => {}
+        }
+    }
+
+    /// Sets the TCP checksum.
+    pub fn set_checksum(&mut self, checksum: [u8; 2]) {
+        match &mut self.hdr_prefix {
+            MaybeParsed::Complete(h) => h.set_checksum(checksum),
+            MaybeParsed::Incomplete(_) => {}
         }
     }
 }
@@ -963,6 +1134,31 @@ impl<A: IpAddress> TcpSegmentBuilder<A> {
         self.data_offset_reserved_flags.fin()
     }
 
+    /// Sets the URG flag.
+    pub fn urg(&mut self, urg: bool) {
+        self.data_offset_reserved_flags.set_urg(urg);
+    }
+
+    /// Sets the ECE flag.
+    pub fn ece(&mut self, ece: bool) {
+        self.data_offset_reserved_flags.set_ece(ece);
+    }
+
+    /// Returns the current value of the ECE flag.
+    pub fn ece_set(&self) -> bool {
+        self.data_offset_reserved_flags.ece()
+    }
+
+    /// Sets the CWR flag.
+    pub fn cwr(&mut self, cwr: bool) {
+        self.data_offset_reserved_flags.set_cwr(cwr);
+    }
+
+    /// Returns the current value of the CWR flag.
+    pub fn cwr_set(&self) -> bool {
+        self.data_offset_reserved_flags.cwr()
+    }
+
     /// Returns the source port for the builder.
     pub fn src_port(&self) -> Option<NonZeroU16> {
         self.src_port
@@ -1198,8 +1394,9 @@ pub mod options {
             self.bytes().len()
         }
 
+        /// Returns the raw bytes of the TCP options.
         #[inline(always)]
-        pub(super) fn bytes(&self) -> &[u8] {
+        pub fn bytes(&self) -> &[u8] {
             self.bytes.deref()
         }
     }
@@ -2281,5 +2478,43 @@ mod tests {
 
         let prefix = Ref::<_, HeaderPrefix>::from_bytes(&buf[..HDR_PREFIX_LEN]).unwrap();
         assert_eq!(prefix.data_offset(), 6); // 24 bytes / 4.
+    }
+
+    #[test_case(TEST_SRC_IPV4, TEST_DST_IPV4; "ipv4")]
+    #[test_case(TEST_SRC_IPV6, TEST_DST_IPV6; "ipv6")]
+    fn test_recover_payload_partial_sum<A: IpAddress>(src: A, dst: A) {
+        let payload = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let buf = new_builder(src, dst)
+            .wrap_body(payload.into_serializer())
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .unwrap()
+            .unwrap_b();
+
+        let mut slice = buf.as_ref();
+        let segment = TcpSegment::parse(&mut slice, TcpParseArgs::new(src, dst)).unwrap();
+
+        let recovered = segment.recover_payload_partial_sum::<A::Version>(src, dst).unwrap();
+        let expected_csum = internet_checksum::checksum(&payload);
+        assert_eq!(recovered, [!expected_csum[0], !expected_csum[1]]);
+    }
+
+    #[test]
+    fn test_set_flags_updates_checksum() {
+        let buf = new_builder(TEST_SRC_IPV4, TEST_DST_IPV4)
+            .wrap_body([1, 2, 3, 4].into_serializer())
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .unwrap()
+            .unwrap_b();
+
+        let mut buf_bytes = buf.as_ref().to_vec();
+        let mut slice = &mut buf_bytes[..];
+        let mut raw = TcpSegmentRaw::parse_mut(&mut slice, ()).unwrap();
+        raw.set_flags(flags::ACK | flags::PSH);
+
+        let mut slice = &buf_bytes[..];
+        let segment =
+            TcpSegment::parse(&mut slice, TcpParseArgs::new(TEST_SRC_IPV4, TEST_DST_IPV4)).unwrap();
+        assert!(segment.psh());
+        assert!(segment.ack_num().is_some());
     }
 }

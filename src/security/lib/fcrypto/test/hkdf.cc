@@ -4,7 +4,6 @@
 
 #include "src/security/lib/fcrypto/hkdf.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <stddef.h>
 #include <zircon/errors.h>
 #include <zircon/types.h>
@@ -18,6 +17,7 @@
 namespace crypto {
 namespace testing {
 namespace {
+constexpr size_t kBlockGuidLen = 16;
 
 TEST(HKDF, Init) {
   size_t md_size;
@@ -26,7 +26,7 @@ TEST(HKDF, Init) {
   Secret ikm;
   Bytes salt;
   ASSERT_OK(ikm.Generate(md_size));
-  ASSERT_OK(salt.Randomize(BLOCK_GUID_LEN));
+  ASSERT_OK(salt.Randomize(kBlockGuidLen));
 
   // Bad version
   HKDF hkdf;
@@ -40,7 +40,7 @@ TEST(HKDF, Init) {
   // Salt is optional
   ASSERT_OK(salt.Resize(0));
   EXPECT_OK(hkdf.Init(digest::kSHA256, ikm, salt));
-  ASSERT_OK(salt.Randomize(BLOCK_GUID_LEN));
+  ASSERT_OK(salt.Randomize(kBlockGuidLen));
 
   // Invalid flags
   EXPECT_STATUS(hkdf.Init(digest::kSHA256, ikm, salt, 0x8000), ZX_ERR_INVALID_ARGS);
@@ -57,7 +57,7 @@ TEST(HKDF, Derive) {
   Secret ikm, key1, key2, key3;
   Bytes salt;
   ASSERT_OK(ikm.Generate(md_size));
-  ASSERT_OK(salt.Randomize(BLOCK_GUID_LEN));
+  ASSERT_OK(salt.Randomize(kBlockGuidLen));
 
   // Uninitialized
   EXPECT_STATUS(hkdf.Derive("init", md_size, &key1), ZX_ERR_INVALID_ARGS);

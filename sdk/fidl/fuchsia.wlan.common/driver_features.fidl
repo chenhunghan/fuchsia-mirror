@@ -155,3 +155,9 @@ type ApfPacketFilterSupport = table {
     /// Only valid if 'supported' is true.
     3: max_filter_length int32;
 };
+
+/// Firmware RSSI threshold monitoring offload support.
+@available(added=NEXT)
+type RssiMonitorSupport = table {
+    1: supported bool;
+};

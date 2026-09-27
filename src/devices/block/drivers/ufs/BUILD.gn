@@ -50,6 +50,7 @@ group("e2e_tests") {
 _common_deps = [
   ":ufs-config",
   "//sdk/fidl/fuchsia.hardware.block.volume:fuchsia.hardware.block.volume_cpp",
+  "//sdk/fidl/fuchsia.hardware.inlineencryption:fuchsia.hardware.inlineencryption_cpp",
   "//sdk/fidl/fuchsia.hardware.interconnect:fuchsia.hardware.interconnect_cpp",
   "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_cpp",
   "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_cpp",
@@ -57,6 +58,7 @@ _common_deps = [
   "//sdk/fidl/fuchsia.hardware.rpmb:fuchsia.hardware.rpmb_cpp",
   "//sdk/fidl/fuchsia.hardware.scsi:fuchsia.hardware.scsi_cpp",
   "//sdk/fidl/fuchsia.hardware.ufs:fuchsia.hardware.ufs_cpp",
+  "//sdk/fidl/fuchsia.hardware.ufs.phy:fuchsia.hardware.ufs.phy_cpp",
   "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_cpp",
   "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_cpp",
   "//sdk/lib/driver/compat/cpp",
@@ -150,6 +152,7 @@ fuchsia_structured_config_values("sc-pci-values") {
   cm_label = ":ufs-pci-dml_manifest"
   values = {
     enable_suspend = false
+    storage_power_management_enabled = false
     enable_auto_hibernate = true
     auto_hibernate_timer_us = 2000
   }
@@ -159,6 +162,7 @@ fuchsia_structured_config_values("sc-pdev-values") {
   cm_label = ":ufs-pdev-manifest"
   values = {
     enable_suspend = false
+    storage_power_management_enabled = false
     enable_auto_hibernate = true
     auto_hibernate_timer_us = 2000
   }

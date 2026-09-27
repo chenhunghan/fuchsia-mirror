@@ -97,12 +97,15 @@ async def get_sag_suspend_stats(
 async def suspend_resume(
     device: FuchsiaDevice,
     deadline: Deadline | None = None,
+    base_idle_duration: timedelta = SUSPEND_RESUME_BASE_IDLE_DURATION,
 ) -> None:
     """Disconnects USB, idles, reconnects.
 
     Args:
         device: Async Fuchsia device object.
         deadline: this will idle for increasing durations, up to this deadline.
+        base_idle_duration: initial duration to sleep while disconnected. On
+            each subsequent attempt, this duration is doubled until deadline.
     """
     if deadline is None:
         deadline = Deadline.from_timeout(SUSPEND_RESUME_DEFAULT_TIMEOUT)
@@ -123,10 +126,11 @@ async def suspend_resume(
         before_off_charger_stats = await get_sag_suspend_stats(device)
 
         sleep_deadline = deadline.subdeadline_with_timeout(
-            SUSPEND_RESUME_BASE_IDLE_DURATION * (2**attempt)
+            base_idle_duration * (2**attempt)
         )
         try:
             await device.suspend()
+            # Measure the sleep duration strictly after device transitions offline
             await control_flows.sleep_until_deadline(sleep_deadline)
         finally:
             await device.resume()

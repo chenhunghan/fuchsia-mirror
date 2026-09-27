@@ -37,6 +37,7 @@ fidl("fuchsia.stash") {
   sources = [ "stash.fidl" ]
   enable_hlcpp = true
   visibility = [
+    ":*",
     "//sdk/ctf/tests/fidl/fuchsia.intl/*",
     "//sdk/ctf/tests/fidl/fuchsia.settings/testing/realm-factory/*",
     "//src/connectivity/bluetooth/core/bt-gap/*",

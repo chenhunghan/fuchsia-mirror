@@ -25,6 +25,7 @@ if (is_host) {
     testonly = true
     sources = [
       "src/checker.rs",
+      "src/code_block_checker.rs",
       "src/include_checker.rs",
       "src/link_checker.rs",
       "src/main.rs",

@@ -876,6 +876,51 @@ pub enum ObjectValueV56 {
     VerifiedAttribute { size: u64, fsverity_metadata: FsverityMetadataV50 },
 }
 
+/// Storage for a pair of related byte and node values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BytesAndNodes {
+    pub bytes: i64,
+    pub nodes: i64,
+}
+
+impl BytesAndNodes {
+    pub fn is_zero(&self) -> bool {
+        self.bytes == 0 && self.nodes == 0
+    }
+}
+
+impl std::ops::Add for BytesAndNodes {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self { bytes: self.bytes + rhs.bytes, nodes: self.nodes + rhs.nodes }
+    }
+}
+
+impl std::ops::AddAssign for BytesAndNodes {
+    fn add_assign(&mut self, rhs: Self) {
+        self.bytes += rhs.bytes;
+        self.nodes += rhs.nodes;
+    }
+}
+
+impl From<BytesAndNodes> for ObjectValue {
+    fn from(value: BytesAndNodes) -> Self {
+        ObjectValue::BytesAndNodes { bytes: value.bytes, nodes: value.nodes }
+    }
+}
+
+impl From<(i64, i64)> for BytesAndNodes {
+    fn from((bytes, nodes): (i64, i64)) -> Self {
+        Self { bytes, nodes }
+    }
+}
+
+impl From<BytesAndNodes> for (i64, i64) {
+    fn from(value: BytesAndNodes) -> Self {
+        (value.bytes, value.nodes)
+    }
+}
+
 impl ObjectValue {
     /// Creates an ObjectValue for a file object.
     pub fn file(

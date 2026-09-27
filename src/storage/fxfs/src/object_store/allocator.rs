@@ -98,7 +98,7 @@ use crate::lsm_tree::types::{
     FuzzyHash, Item, ItemRef, Layer, LayerIterator, LayerKey, MergeType, OrdLowerBound,
     OrdUpperBound, SortByU64, Value,
 };
-use crate::lsm_tree::{LSMTree, Query, compact_with_iterator, layers_from_handles};
+use crate::lsm_tree::{LSMTree, Query, compact_with_iterator, layer_from_handle, open_layers};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle};
 use crate::object_store::object_manager::ReservationUpdate;
 use crate::object_store::transaction::{
@@ -321,7 +321,7 @@ pub struct AllocatorKeyV32 {
 
 impl SortByU64 for AllocatorKey {
     fn get_leading_u64(&self) -> u64 {
-        self.device_range.end
+        self.device_range.end / crate::object_store::extent::MIN_BLOCK_SIZE
     }
 }
 
@@ -908,22 +908,9 @@ impl Allocator {
             let (info, _version) = AllocatorInfo::deserialize_with_version(&mut cursor)
                 .context("Failed to deserialize AllocatorInfo")?;
 
-            let mut handles = Vec::new();
-            let mut total_size = 0;
-            for object_id in &info.layers {
-                let handle = ObjectStore::open_object(
-                    &root_store,
-                    *object_id,
-                    HandleOptions::default(),
-                    None,
-                )
+            let (layers, total_size) = open_layers(&root_store, info.layers.iter().cloned(), None)
                 .await
                 .context("Failed to open allocator layer file")?;
-
-                let size = handle.get_size();
-                total_size += size;
-                handles.push(handle);
-            }
 
             {
                 let mut inner = self.inner.lock();
@@ -947,7 +934,7 @@ impl Allocator {
                 inner.info = info;
             }
 
-            self.tree.append_layers(handles).await.context("Failed to append allocator layers")?;
+            self.tree.append_open_layers(layers);
             self.filesystem.upgrade().unwrap().object_manager().update_reservation(
                 self.object_id,
                 tree::reservation_amount_from_layer_size(total_size),
@@ -2236,7 +2223,7 @@ impl<'a> Flusher<'a> {
         );
         root_store.remove_from_graveyard(&mut transaction, layer_object_handle.object_id());
 
-        let layers = layers_from_handles([layer_object_handle]).await?;
+        let layers = vec![layer_from_handle(layer_object_handle, None).await?];
         transaction
             .commit_with_callback(|_| {
                 self.allocator.tree.set_layers(layers);

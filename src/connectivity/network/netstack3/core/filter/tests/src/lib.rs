@@ -147,7 +147,11 @@ fn crash<I: TestDualStackIpExt + IpExt>() {
     let reply_packet_one = std::thread::spawn(move || {
         let (mut ctx, device_id) = thread_vars;
         ctx.core_api().device::<EthernetLinkDevice>().receive_frame(
-            RecvEthernetFrameMeta { device_id, parsing_context: NetworkParsingContext::default() },
+            RecvEthernetFrameMeta {
+                device_id,
+                parsing_context: NetworkParsingContext::default(),
+                gso_info: None,
+            },
             make_udp_reply_packet::<I>(),
         );
     });
@@ -156,7 +160,11 @@ fn crash<I: TestDualStackIpExt + IpExt>() {
     let reply_packet_two = std::thread::spawn(move || {
         let (mut ctx, device_id) = thread_vars;
         ctx.core_api().device::<EthernetLinkDevice>().receive_frame(
-            RecvEthernetFrameMeta { device_id, parsing_context: NetworkParsingContext::default() },
+            RecvEthernetFrameMeta {
+                device_id,
+                parsing_context: NetworkParsingContext::default(),
+                gso_info: None,
+            },
             make_udp_reply_packet::<I>(),
         );
     });
@@ -262,6 +270,7 @@ fn tcp_accepted_mark<I: TestDualStackIpExt + IpExt>() {
             RecvEthernetFrameMeta {
                 device_id: device_id.clone(),
                 parsing_context: NetworkParsingContext::default(),
+                gso_info: None,
             },
             syn_frame,
         );
@@ -336,6 +345,7 @@ fn tcp_accepted_mark<I: TestDualStackIpExt + IpExt>() {
         RecvEthernetFrameMeta {
             device_id: device_id.clone(),
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         ack_frame,
     );
@@ -553,6 +563,7 @@ fn tcp_dropped_filter<I: TestDualStackIpExt + IpExt>(malformation: TcpMalformati
         RecvEthernetFrameMeta {
             device_id: eth_device_in.clone(),
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         Buf::new(make_malformed_packet(malformation), ..),
     );
@@ -572,6 +583,7 @@ fn tcp_dropped_filter<I: TestDualStackIpExt + IpExt>(malformation: TcpMalformati
         RecvEthernetFrameMeta {
             device_id: eth_device_in,
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         Buf::new(make_malformed_packet(malformation), ..),
     );

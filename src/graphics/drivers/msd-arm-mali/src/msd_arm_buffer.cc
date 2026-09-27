@@ -55,13 +55,7 @@ bool MsdArmBuffer::SetCommittedPages(uint64_t start_page, uint64_t page_count) {
     return DRETF(false, "invalid parameters start_page %lu page_count %lu", start_page, page_count);
 
   committed_region_ = Region::FromStartAndLength(start_page, page_count);
-
-  bool success = true;
-  for (auto& mapping : gpu_mappings_) {
-    if (!mapping->UpdateCommittedMemory())
-      success = false;
-  }
-  return success;
+  return true;
 }
 
 bool MsdArmBuffer::CommitPageRange(uint64_t start_page, uint64_t page_count) {
@@ -70,13 +64,7 @@ bool MsdArmBuffer::CommitPageRange(uint64_t start_page, uint64_t page_count) {
     return DRETF(false, "invalid parameters start_page %lu page_count %lu", start_page, page_count);
 
   committed_region_.Union(Region::FromStartAndLength(start_page, page_count));
-
-  bool success = true;
-  for (auto& mapping : gpu_mappings_) {
-    if (!mapping->UpdateCommittedMemory())
-      success = false;
-  }
-  return success;
+  return true;
 }
 
 bool MsdArmBuffer::DecommitPageRange(uint64_t start_page, uint64_t page_count) {
@@ -89,12 +77,9 @@ bool MsdArmBuffer::DecommitPageRange(uint64_t start_page, uint64_t page_count) {
     DLOG("Trying to decommit region in middle, ignoring");
   }
   committed_region_ = new_region;
-  bool success = true;
-  for (auto& mapping : gpu_mappings_) {
-    if (!mapping->UpdateCommittedMemory())
-      success = false;
-  }
-  return success;
+  flushed_region_.Intersect(Region::FromStartAndLength(committed_region_.start() * page_size,
+                                                       committed_region_.length() * page_size));
+  return true;
 }
 
 bool MsdArmBuffer::EnsureRegionFlushed(uint64_t start_bytes, uint64_t end_bytes) {

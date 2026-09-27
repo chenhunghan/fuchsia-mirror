@@ -27,6 +27,7 @@ struct ParsedMessage {
   std::vector<binder_driver_return_protocol> returns_;
 };
 
+// Parses a binder read buffer into a sequence of `binder_driver_return_protocol` commands.
 ParsedMessage ParseMessage(binder_uintptr_t start, binder_size_t length);
 
 struct __attribute__((packed)) TransactionWriteBuffer {

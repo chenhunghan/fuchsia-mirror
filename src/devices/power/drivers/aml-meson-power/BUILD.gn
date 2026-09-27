@@ -7,8 +7,17 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("aml-meson-power-dml") {
+  dml = "meta/aml-meson-power.dml"
+  driver_name = "aml-meson-power"
+}
+
+fuchsia_driver_dml_cpp_parser("aml-meson-power-metadata") {
+  dml_label = ":aml-meson-power-dml"
+}
+
 driver_bind_rules("aml-meson-power-bind") {
-  rules = "meta/aml-meson-power.bind"
+  dml_label = ":aml-meson-power-dml"
   bind_output = "aml-meson-power.bindbc"
   tests = "meta/bind-tests.json"
   deps = [
@@ -26,7 +35,9 @@ source_set("common") {
     "aml-power.h",
   ]
   public_deps = [
+    ":aml-meson-power-metadata",
     "//sdk/banjo/fuchsia.hardware.powerimpl:fuchsia.hardware.powerimpl_banjo_cpp",
+    "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
     "//sdk/fidl/fuchsia.hardware.amlogic.metadata:fuchsia.hardware.amlogic.metadata_cpp",
     "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_cpp",
     "//sdk/fidl/fuchsia.hardware.pwm:fuchsia.hardware.pwm_cpp",
@@ -56,10 +67,10 @@ fuchsia_cc_driver("aml-meson-power-driver") {
 }
 
 fuchsia_driver_component("aml-meson-power") {
+  dml_label = ":aml-meson-power-dml"
   info = "meta/aml-meson-power-info.json"
   component_name = "aml-meson-power"
   deps = [ ":aml-meson-power-driver" ]
-  manifest = "meta/aml-meson-power.cml"
 }
 
 fuchsia_driver_package("package") {

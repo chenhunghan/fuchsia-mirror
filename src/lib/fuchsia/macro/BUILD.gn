@@ -54,6 +54,9 @@ rustc_macro("macro") {
   sources = [ "src/lib.rs" ]
   crate_name = "fuchsia_macro"
   edition = "2024"
-  visibility = [ "//src/lib/fuchsia:*" ]
+  visibility = [
+    ":*",
+    "//src/lib/fuchsia:*",
+  ]
   deps = [ ":transformer" ]
 }

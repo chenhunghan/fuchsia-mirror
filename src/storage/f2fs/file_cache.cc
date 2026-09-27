@@ -15,6 +15,8 @@ namespace f2fs {
 
 Page::Page(FileCache *file_cache, pgoff_t index) : file_cache_(file_cache), index_(index) {}
 
+Page::~Page() = default;
+
 VnodeF2fs &Page::GetVnode() const { return file_cache_->GetVnode(); }
 
 VmoManager &Page::GetVmoManager() const { return file_cache_->GetVmoManager(); }
@@ -33,6 +35,20 @@ void Page::RecyclePage() {
 }
 
 F2fs *Page::fs() const { return file_cache_->fs(); }
+
+bool Page::SetActive() {
+  if (!SetFlag(PageFlag::kPageActive)) {
+    vnode_ = file_cache_->GetVnodeRefPtr();
+    return false;
+  }
+  return true;
+}
+
+fbl::RefPtr<VnodeF2fs> Page::ClearActive() {
+  auto vnode = std::move(vnode_);
+  ClearFlag(PageFlag::kPageActive);
+  return vnode;
+}
 
 bool LockedPage::SetDirty() {
   if (page_) {
@@ -234,21 +250,45 @@ FileCache::FileCache(VnodeF2fs *vnode, VmoManager *vmo_manager)
     : vnode_(vnode), vmo_manager_(vmo_manager) {}
 
 FileCache::~FileCache() {
-  std::vector<fbl::RefPtr<Page>> pages = FindPagesUnsafe();
-  for (auto &page : pages) {
-    EvictUnsafe(page.get());
+  while (!page_tree_.is_empty()) {
+    Page *raw_page = page_tree_.pop_front();
+    ZX_ASSERT(!raw_page->IsActive());
+    auto page = fbl::ImportFromRawPtr(raw_page);
+    ZX_ASSERT(page->VmoOpUnlock(true) == ZX_OK);
   }
   vmo_manager_->Reset();
 }
 
+fbl::RefPtr<VnodeF2fs> FileCache::GetVnodeRefPtr() {
+  // Node and meta vnodes are managed as persistent singletons directly by F2fs
+  // via std::unique_ptr and are never subject to VnodeCache eviction. Returning
+  // nullptr avoids managing them with intrusive fbl::RefPtr, which would double-free.
+  if (vnode_->IsNode() || vnode_->IsMeta()) {
+    return nullptr;
+  }
+  while (true) {
+    auto vnode = vnode_->GetRefPtr();
+    if (vnode.is_ok()) {
+      return std::move(*vnode);
+    }
+    ZX_ASSERT_MSG(vnode.error_value() == ZX_ERR_SHOULD_WAIT, "%s", vnode.status_string());
+  }
+}
+
 void FileCache::Downgrade(Page *raw_page) {
-  fs::SharedLock tree_lock(tree_lock_);
-  raw_page->ResurrectRef();
-  fbl::RefPtr<Page> page = fbl::ImportFromRawPtr(raw_page);
-  // Leak it to keep alive in FileCache.
-  [[maybe_unused]] auto leak = fbl::ExportToRawPtr(&page);
-  raw_page->ClearActive();
-  recycle_cvar_.notify_all();
+  // Declare |vnode| outside |tree_lock_| so that if dropping the last vnode reference
+  // triggers VnodeF2fs::RecycleNode() -> CleanupCache() -> EvictCleanPages(), the latter
+  // can acquire exclusive tree_lock_ without causing a re-entrant deadlock.
+  fbl::RefPtr<VnodeF2fs> vnode;
+  {
+    fs::SharedLock tree_lock(tree_lock_);
+    raw_page->ResurrectRef();
+    fbl::RefPtr<Page> page = fbl::ImportFromRawPtr(raw_page);
+    // Leak it to keep alive in FileCache.
+    [[maybe_unused]] auto leak = fbl::ExportToRawPtr(&page);
+    vnode = raw_page->ClearActive();
+    recycle_cvar_.notify_all();
+  }
 }
 
 F2fs *FileCache::fs() const { return GetVnode().fs(); }

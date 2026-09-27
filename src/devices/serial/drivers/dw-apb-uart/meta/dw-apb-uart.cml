@@ -15,6 +15,7 @@
         { service: "fuchsia.hardware.powerdomain.Service" },
         { service: "fuchsia.hardware.clock.Service" },
         { service: "fuchsia.hardware.reset.Service" },
+        { service: "fuchsia.hardware.pin.PinStatesService" },
     ],
     expose: [
         {

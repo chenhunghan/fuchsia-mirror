@@ -1,0 +1,37 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "i8042_bind",
+    composite_name: "pc_ps2",
+    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
+    program: {
+        colocate: "true",
+        compat: "driver/pc-ps2.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+    },
+    use: [
+        {
+            name: "acpi",
+            primary: true,
+            bind: {
+                one_of: [
+                    {
+                        protocol: "fuchsia.acpi.BIND_PROTOCOL.DEVICE",
+                        rules: { "fuchsia.acpi.HID": "PNP0303" },
+                    },
+                    {
+                        protocol: "fuchsia.acpi.BIND_PROTOCOL.DEVICE",
+                        rules: { "fuchsia.acpi.FIRST_CID": "PNP0303" },
+                    },
+                ],
+            },
+        },
+        { protocol: "fuchsia.kernel.IoportResource" },
+        { protocol: "fuchsia.kernel.IrqResource" },
+        {
+            name: "irq000",
+            service: "fuchsia.hardware.interrupt.Service",
+        },
+    ],
+}

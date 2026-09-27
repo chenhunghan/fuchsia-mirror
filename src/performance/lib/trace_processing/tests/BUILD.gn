@@ -67,6 +67,11 @@ python_host_test("memory_test") {
   libraries = [ "//src/performance/lib/trace_processing" ]
 }
 
+python_host_test("odpm_power_metrics_test") {
+  main_source = "odpm_power_metrics_test.py"
+  libraries = [ "//src/performance/lib/trace_processing" ]
+}
+
 python_host_test("power_metrics_test") {
   main_source = "power_metrics_test.py"
   libraries = [ "//src/performance/lib/trace_processing" ]
@@ -123,6 +128,7 @@ group("tests") {
     ":agg_cpu_breakdown_test",
     ":cpu_breakdown_test",
     ":memory_test",
+    ":odpm_power_metrics_test",
     ":power_metrics_test",
     ":trace_importing_fxt_test",
     ":trace_importing_test",

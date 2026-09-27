@@ -38,10 +38,11 @@ var (
 )
 
 const (
-	CompilationModeGNArg    string = "compilation_mode"
-	CompilationModeDebug    string = "debug"
-	CompilationModeRelease  string = "release"
-	CompilationModeBalanced string = "balanced"
+	CompilationModeGNArg     string = "compilation_mode"
+	CompilationModeDebug     string = "debug"
+	CompilationModeRelease   string = "release"
+	CompilationModeBalanced  string = "balanced"
+	CompilationModeSanitizer string = "sanitizer"
 )
 
 // canonicalizeBuildEventService translates a GN configuration name for
@@ -399,6 +400,8 @@ func genArgs(
 		compilationMode = CompilationModeBalanced
 	case fintpb.Static_COMPILATION_MODE_RELEASE:
 		compilationMode = CompilationModeRelease
+	case fintpb.Static_COMPILATION_MODE_SANITIZER:
+		compilationMode = CompilationModeSanitizer
 	default:
 		return nil, fmt.Errorf("unknown compilation_mode value: %s", staticSpec.CompilationMode.String())
 	}

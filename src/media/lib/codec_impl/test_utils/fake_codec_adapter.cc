@@ -4,6 +4,7 @@
 
 #include "fake_codec_adapter.h"
 
+#include <lib/media/codec_impl/codec_packet.h>
 #include <lib/media/codec_impl/fourcc.h>
 #include <zircon/assert.h>
 
@@ -29,6 +30,7 @@ constexpr uint32_t kInputMinBufferCountForCamping = 1;
 constexpr uint32_t kOutputMinBufferCountForCamping = 5;
 
 constexpr uint32_t kPerPacketBufferBytesMin = kBytesPerRow * kCodedHeight;
+constexpr uint32_t kDynamicBuffersMax = 64;
 
 }  // namespace
 
@@ -41,14 +43,41 @@ FakeCodecAdapter::~FakeCodecAdapter() {
   // nothing to do here
 }
 
+bool FakeCodecAdapter::IsSupportsDynamicBuffers() { return supports_dynamic_buffers_; }
+
+uint32_t FakeCodecAdapter::GetDynamicBuffersMax(CodecPort port) {
+  return supports_dynamic_buffers_ ? kDynamicBuffersMax : 0;
+}
+
+void FakeCodecAdapter::CoreCodecSetForceNewBuffersOnNewDimensions(bool force) {
+  // nothing to do here
+}
+
+std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
+FakeCodecAdapter::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
+  if (!supports_dynamic_buffers_) {
+    return std::nullopt;
+  }
+  fuchsia::media::StreamBufferConstraints dummy_sbc;
+  fuchsia::media::StreamBufferPartialSettings dummy_ps;
+  CoreCodecGetBufferCollectionConstraints3Result result;
+  result.constraints = CoreCodecGetBufferCollectionConstraints2(port, dummy_sbc, dummy_ps);
+  result.constraints_version = constraints_version_[port];
+  return result;
+}
+
+uint64_t FakeCodecAdapter::CoreCodecGetConstraintsVersion(CodecPort port) {
+  return constraints_version_[port];
+}
+
 bool FakeCodecAdapter::IsCoreCodecRequiringOutputConfigForFormatDetection() {
   // To cause CoreCodecBuildNewOutputConstraints() to get called.
-  return true;
+  return require_output_config_for_format_detection_;
 }
 
 bool FakeCodecAdapter::IsCoreCodecMappedBufferUseful(CodecPort port) { return true; }
 
-bool FakeCodecAdapter::IsCoreCodecHwBased(CodecPort port) { return false; }
+bool FakeCodecAdapter::IsCoreCodecHwBased(CodecPort port) { return is_hw_based_[port]; }
 
 void FakeCodecAdapter::CoreCodecInit(
     const fuchsia::media::FormatDetails& initial_input_format_details) {
@@ -64,7 +93,6 @@ FakeCodecAdapter::CoreCodecGetBufferCollectionConstraints2(
     return *buffer_collection_constraints_[port];
   }
 
-  ZX_DEBUG_ASSERT(false);
   fuchsia_sysmem2::BufferCollectionConstraints result;
   ZX_DEBUG_ASSERT(!result.usage().has_value());
   if (port == kInputPort) {
@@ -100,7 +128,9 @@ void FakeCodecAdapter::CoreCodecSetBufferCollectionInfo(
 }
 
 void FakeCodecAdapter::CoreCodecStartStream() {
-  // nothing to do here
+  if (on_start_stream_) {
+    on_start_stream_();
+  }
 }
 
 void FakeCodecAdapter::CoreCodecQueueInputFormatDetails(
@@ -108,8 +138,8 @@ void FakeCodecAdapter::CoreCodecQueueInputFormatDetails(
   // nothing to do here
 }
 
-void FakeCodecAdapter::CoreCodecQueueInputPacket(CodecPacket* packet) {
-  // nothing to do here
+void FakeCodecAdapter::CoreCodecQueueInputPacket(const CodecPacket* packet) {
+  events_->onCoreCodecInputPacketDone(packet);
 }
 
 void FakeCodecAdapter::CoreCodecQueueInputEndOfStream() {
@@ -121,7 +151,15 @@ void FakeCodecAdapter::CoreCodecStopStream() {
 }
 
 void FakeCodecAdapter::CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buffer) {
-  // nothing to do here
+  if (on_add_buffer_) {
+    on_add_buffer_(port, buffer);
+  }
+}
+
+void FakeCodecAdapter::CoreCodecRemoveBuffer(CodecPort port, const CodecBuffer* buffer) {
+  if (on_remove_buffer_) {
+    on_remove_buffer_(port, buffer);
+  }
 }
 
 void FakeCodecAdapter::CoreCodecConfigureBuffers(
@@ -130,11 +168,16 @@ void FakeCodecAdapter::CoreCodecConfigureBuffers(
 }
 
 void FakeCodecAdapter::CoreCodecRecycleOutputPacket(CodecPacket* packet) {
-  // nothing to do here
+  if (on_recycle_output_packet_) {
+    on_recycle_output_packet_(packet);
+  }
+  packet->SetBuffer(nullptr);
 }
 
 void FakeCodecAdapter::CoreCodecEnsureBuffersNotConfigured(CodecPort port) {
-  // nothing to do here
+  if (on_ensure_buffers_not_configured_) {
+    on_ensure_buffers_not_configured_(port);
+  }
 }
 
 std::unique_ptr<const fuchsia::media::StreamOutputConstraints>
@@ -180,14 +223,68 @@ fuchsia::media::StreamOutputFormat FakeCodecAdapter::CoreCodecGetOutputFormat(
 }
 
 void FakeCodecAdapter::CoreCodecMidStreamOutputBufferReConfigPrepare() {
-  // nothing to do here
+  if (on_mid_stream_output_buffer_re_config_prepare_) {
+    on_mid_stream_output_buffer_re_config_prepare_();
+  }
 }
 
 void FakeCodecAdapter::CoreCodecMidStreamOutputBufferReConfigFinish() {
   // nothing to do here
 }
 
+void FakeCodecAdapter::CoreCodecCloseBufferLifetimeOrdinal(CodecPort port,
+                                                           uint64_t buffer_lifetime_ordinal) {
+  if (on_close_buffer_lifetime_ordinal_) {
+    on_close_buffer_lifetime_ordinal_(port, buffer_lifetime_ordinal);
+  }
+}
+
+void FakeCodecAdapter::SetSupportsDynamicBuffers(bool supports) {
+  supports_dynamic_buffers_ = supports;
+}
+
+void FakeCodecAdapter::SetIsCoreCodecRequiringOutputConfigForFormatDetection(bool require) {
+  require_output_config_for_format_detection_ = require;
+}
+
+void FakeCodecAdapter::SetIsCoreCodecHwBased(CodecPort port, bool is_hw_based) {
+  is_hw_based_[port] = is_hw_based;
+}
+
+uint64_t FakeCodecAdapter::IncrementConstraintsVersion(CodecPort port) {
+  return ++constraints_version_[port];
+}
+
 void FakeCodecAdapter::SetBufferCollectionConstraints(
     CodecPort port, fuchsia_sysmem2::BufferCollectionConstraints constraints) {
   buffer_collection_constraints_[port] = std::move(constraints);
+}
+
+void FakeCodecAdapter::SetOnAddBuffer(fit::function<void(CodecPort, const CodecBuffer*)> hook) {
+  on_add_buffer_ = std::move(hook);
+}
+
+void FakeCodecAdapter::SetOnRemoveBuffer(fit::function<void(CodecPort, const CodecBuffer*)> hook) {
+  on_remove_buffer_ = std::move(hook);
+}
+
+void FakeCodecAdapter::SetOnRecycleOutputPacket(fit::function<void(CodecPacket*)> hook) {
+  on_recycle_output_packet_ = std::move(hook);
+}
+
+void FakeCodecAdapter::SetOnStartStream(fit::function<void()> hook) {
+  on_start_stream_ = std::move(hook);
+}
+
+void FakeCodecAdapter::SetOnMidStreamOutputBufferReConfigPrepare(fit::function<void()> hook) {
+  on_mid_stream_output_buffer_re_config_prepare_ = std::move(hook);
+}
+
+void FakeCodecAdapter::SetOnEnsureBuffersNotConfigured(fit::function<void(CodecPort)> hook) {
+  on_ensure_buffers_not_configured_ = std::move(hook);
+}
+
+void FakeCodecAdapter::SetOnCloseBufferLifetimeOrdinal(
+    fit::function<void(CodecPort, uint64_t)> hook) {
+  on_close_buffer_lifetime_ordinal_ = std::move(hook);
 }

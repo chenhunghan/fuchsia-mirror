@@ -15,7 +15,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use core::borrow::Borrow;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::hash::Hash;
 use core::ops::{Deref, DerefMut};
@@ -31,9 +30,8 @@ use net_types::{MulticastAddr, SpecifiedAddr, UnicastAddr, Witness as _};
 use netstack3_base::sync::{DynDebugReferences, Mutex};
 use netstack3_base::testutil::{
     AlwaysDefaultsSettingsContext, FakeAtomicInstant, FakeCryptoRng, FakeFrameCtx, FakeInstant,
-    FakeNetwork, FakeNetworkLinks, FakeNetworkSpec, FakeSendToken, FakeSocketWritableListener,
-    FakeTimerCtx, FakeTimerCtxExt, FakeTimerId, MonotonicIdentifier, TestAddrs,
-    WithFakeFrameContext, WithFakeTimerContext,
+    FakeNetwork, FakeNetworkLinks, FakeNetworkSpec, FakeSendToken, FakeTimerCtx, FakeTimerCtxExt,
+    FakeTimerId, MonotonicIdentifier, TestAddrs, WithFakeFrameContext, WithFakeTimerContext,
 };
 use netstack3_base::{
     AddressResolutionFailed, CtxPair, DeferredResourceRemovalContext, EventContext,
@@ -60,7 +58,6 @@ use netstack3_device::{
     DeviceLayerStateTypes, DeviceLayerTypes, DeviceProvider, DeviceSendFrameError, WeakDeviceId,
     for_any_device_id,
 };
-use netstack3_filter::testutil::NoOpSocketOpsFilter;
 use netstack3_filter::{FilterTimerId, SocketOpsFilter, SocketOpsFilterBindingContext};
 use netstack3_hashmap::HashMap;
 use netstack3_icmp_echo::{
@@ -339,6 +336,7 @@ where
                 frame_dst,
                 DeviceIpLayerMetadata::with_marks(marks),
                 parsing_context,
+                None,
                 buffer,
             ),
             IpVersion::V6 => ip::receive_ipv6_packet(
@@ -348,6 +346,7 @@ where
                 frame_dst,
                 DeviceIpLayerMetadata::with_marks(marks),
                 parsing_context,
+                None,
                 buffer,
             ),
         }
@@ -363,6 +362,7 @@ where
             RecvEthernetFrameMeta {
                 device_id: device.clone(),
                 parsing_context: NetworkParsingContext::default(),
+                gso_info: None,
             },
             buffer,
         );
@@ -597,6 +597,8 @@ pub struct FakeBindingsCtxState {
     pub rx_available: Vec<LoopbackDeviceId<FakeBindingsCtx>>,
     /// IDs with tx queue signaled available.
     pub tx_available: Vec<DeviceId<FakeBindingsCtx>>,
+    /// Recorded `(SocketInfo, Marks)` passed to `SocketOpsFilter::on_ingress`.
+    pub socket_ingress_filter_marks: Vec<(netstack3_base::socket::SocketInfo, Marks)>,
     /// Deferred resource removals.
     #[cfg(loom)]
     pub deferred_receivers: Vec<loom_notifiers::LoomReceiver>,
@@ -816,7 +818,7 @@ impl FakeBindingsCtx {
 
 impl MatcherBindingsTypes for FakeBindingsCtx {
     type DeviceClass = ();
-    type BindingsPacketMatcher = Never;
+    type BindingsPacketMatcher = !;
 }
 
 impl DeviceBufferBindingsTypes for FakeBindingsCtx {
@@ -824,9 +826,36 @@ impl DeviceBufferBindingsTypes for FakeBindingsCtx {
     type TxAllocator = netstack3_device::queue::BufVecU8Allocator;
 }
 
+struct FakeSocketOpsFilter<'a>(&'a FakeBindingsCtx);
+
+impl SocketOpsFilter<DeviceId<FakeBindingsCtx>> for FakeSocketOpsFilter<'_> {
+    fn on_egress<I: netstack3_filter::FilterIpExt, P: netstack3_filter::FilterIpPacket<I>>(
+        &self,
+        _packet: &P,
+        _device: &DeviceId<FakeBindingsCtx>,
+        _socket_info: netstack3_base::socket::SocketInfo,
+        _marks: &Marks,
+    ) -> netstack3_filter::SocketEgressFilterResult {
+        netstack3_filter::SocketEgressFilterResult::Pass { congestion: false }
+    }
+
+    fn on_ingress(
+        &self,
+        _ip_version: net_types::ip::IpVersion,
+        _packet: packet::FragmentedByteSlice<'_, &[u8]>,
+        _header_len: usize,
+        _device: &DeviceId<FakeBindingsCtx>,
+        socket_info: netstack3_base::socket::SocketInfo,
+        marks: &Marks,
+    ) -> netstack3_filter::SocketIngressFilterResult {
+        self.0.0.lock().state.socket_ingress_filter_marks.push((socket_info, *marks));
+        netstack3_filter::SocketIngressFilterResult::Accept
+    }
+}
+
 impl SocketOpsFilterBindingContext<DeviceId<FakeBindingsCtx>> for FakeBindingsCtx {
     fn socket_ops_filter(&self) -> impl SocketOpsFilter<DeviceId<FakeBindingsCtx>> {
-        NoOpSocketOpsFilter
+        FakeSocketOpsFilter(self)
     }
 }
 
@@ -967,14 +996,13 @@ impl MarksBindingsContext for FakeBindingsCtx {
 
 #[cfg(not(loom))]
 mod fake_notifiers {
-    use core::convert::Infallible as Never;
 
     use super::*;
 
     impl ReferenceNotifiers for FakeBindingsCtx {
-        type ReferenceReceiver<T: 'static> = Never;
+        type ReferenceReceiver<T: 'static> = !;
 
-        type ReferenceNotifier<T: Send + 'static> = Never;
+        type ReferenceNotifier<T: Send + 'static> = !;
 
         fn new_reference_notifier<T: Send + 'static>(
             debug_references: DynDebugReferences,
@@ -1356,7 +1384,11 @@ impl FakeNetworkSpec for FakeCtxNetworkSpec {
     type RecvMeta = EthernetDeviceId<FakeBindingsCtx>;
     fn handle_frame(ctx: &mut FakeCtx, device_id: Self::RecvMeta, data: Buf<Vec<u8>>) {
         ctx.core_api().device::<EthernetLinkDevice>().receive_frame(
-            RecvEthernetFrameMeta { device_id, parsing_context: NetworkParsingContext::default() },
+            RecvEthernetFrameMeta {
+                device_id,
+                parsing_context: NetworkParsingContext::default(),
+                gso_info: None,
+            },
             data,
         )
     }
@@ -1396,7 +1428,6 @@ impl<I: IpExt> UdpReceiveBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx 
 
 impl UdpBindingsTypes for FakeBindingsCtx {
     type ExternalData<I: Ip> = ();
-    type SocketWritableListener = FakeSocketWritableListener;
     type SendToken = FakeSendToken;
 }
 
@@ -1427,7 +1458,6 @@ impl<I: IpExt> IcmpEchoBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx {
 
 impl IcmpEchoBindingsTypes for FakeBindingsCtx {
     type ExternalData<I: Ip> = ();
-    type SocketWritableListener = FakeSocketWritableListener;
     type SendToken = FakeSendToken;
 }
 

@@ -61,6 +61,9 @@ type IdentifyHostResponse = table {
     // a random number with no significance to its value
     // other than that it changes when the device reboots.
     9: boot_id uint64;
+    @available(added=NEXT)
+    // Current "F" release number (milestone) of the Fuchsia system (e.g. 33).
+    10: f_release uint32;
 };
 
 type IdentifyHostError = flexible enum : uint32 {

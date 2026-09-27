@@ -62,7 +62,30 @@ bool VerifyRange(uint64_t physical_address, size_t size_bytes, uint32_t required
   return true;
 }
 
-bool ValidateSecureHeapRange(const fuchsia_sysmem2::wire::SecureHeapRange& range) {
+constexpr char kSysmemSecureMemServerThreadSafetyDescription[] =
+    "|SysmemSecureMemServer| is thread-unsafe.";
+
+}  // namespace
+
+bool SysmemSecureMemServer::IsWithinAllowedHeap(
+    const fuchsia_sysmem2::wire::SecureHeapRange& range) {
+  if (!allowed_heap_.has_value()) {
+    LOG(INFO, "!allowed_heap_.has_value()");
+    return false;
+  }
+  const Range check = Range::BeginLength(range.physical_address(), range.size_bytes());
+  if (check.begin() < allowed_heap_->begin() || check.end() > allowed_heap_->end()) {
+    LOG(INFO,
+        "range not within allowed_heap_ - range begin: 0x%" PRIx64 " end: 0x%" PRIx64
+        " allowed begin: 0x%" PRIx64 " end: 0x%" PRIx64,
+        check.begin(), check.end(), allowed_heap_->begin(), allowed_heap_->end());
+    return false;
+  }
+  return true;
+}
+
+bool SysmemSecureMemServer::ValidateSecureHeapRange(
+    const fuchsia_sysmem2::wire::SecureHeapRange& range) {
   if (!range.has_physical_address()) {
     LOG(INFO, "!range.has_physical_address()");
     return false;
@@ -88,11 +111,15 @@ bool ValidateSecureHeapRange(const fuchsia_sysmem2::wire::SecureHeapRange& range
     return false;
   }
 
+  if (!IsWithinAllowedHeap(range)) {
+    return false;
+  }
+
   return true;
 }
 
-bool ValidateSecureHeapAndRange(const fuchsia_sysmem2::wire::SecureHeapAndRange& heap_range,
-                                bool is_zeroing) {
+bool SysmemSecureMemServer::ValidateSecureHeapAndRange(
+    const fuchsia_sysmem2::wire::SecureHeapAndRange& heap_range, bool is_zeroing) {
   if (!heap_range.has_heap()) {
     LOG(INFO, "!heap_range.has_heap()");
     return false;
@@ -130,7 +157,7 @@ bool ValidateSecureHeapAndRange(const fuchsia_sysmem2::wire::SecureHeapAndRange&
   return true;
 }
 
-bool ValidateSecureHeapAndRangeModification(
+bool SysmemSecureMemServer::ValidateSecureHeapAndRangeModification(
     const fuchsia_sysmem2::wire::SecureHeapAndRangeModification& range_modification) {
   if (!range_modification.has_heap()) {
     LOG(INFO, "!range_modification.has_heap()");
@@ -190,11 +217,6 @@ bool ValidateSecureHeapAndRangeModification(
 
   return true;
 }
-
-constexpr char kSysmemSecureMemServerThreadSafetyDescription[] =
-    "|SysmemSecureMemServer| is thread-unsafe.";
-
-}  // namespace
 
 SysmemSecureMemServer::SysmemSecureMemServer(async_dispatcher_t* dispatcher,
                                              zx::channel tee_client_channel)
@@ -520,6 +542,8 @@ fit::result<fuchsia_sysmem2::Error> SysmemSecureMemServer::GetPhysicalSecureHeap
 
   is_dynamic_ = secmem_session_->DetectIsAdjustAndSkipDeviceSecureModeUpdateAvailable();
   is_dynamic_checked_ = true;
+  allowed_heap_ =
+      Range::BeginLength(entire_heap.range().physical_address(), entire_heap.range().size_bytes());
   max_range_count_ = secmem_session_->GetMaxClientUsableProtectedRangeCount(
       entire_heap.range().physical_address(), entire_heap.range().size_bytes());
 

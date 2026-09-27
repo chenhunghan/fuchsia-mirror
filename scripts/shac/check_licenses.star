@@ -72,14 +72,20 @@ def _check_licenses(ctx):
             filepath = f.get("filepath")
             if filepath and filepath not in ctx.scm.all_files(glob = filepath):
                 filepath = None
-            ctx.emit.finding(
-                level = f.get("level", "error"),
-                message = f.get("message", ""),
-                filepath = filepath,
-                line = f.get("line") if filepath else None,
-                end_line = f.get("end_line") if filepath else None,
-                replacements = f.get("replacements") if filepath else None,
-            )
+            if filepath:
+                ctx.emit.finding(
+                    level = f.get("level", "error"),
+                    message = f.get("message", ""),
+                    filepath = filepath,
+                    line = f.get("line"),
+                    end_line = f.get("end_line"),
+                    replacements = f.get("replacements"),
+                )
+            else:
+                ctx.emit.finding(
+                    level = f.get("level", "error"),
+                    message = f.get("message", ""),
+                )
     elif res.retcode != 0:
         message = res.stderr.strip() or res.stdout.strip() or ("Execution failed with exit code %d" % res.retcode)
         ctx.emit.finding(

@@ -29,9 +29,6 @@ test("listnode-tests") {
     ":listnode",
     "//zircon/system/ulib/zxtest",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_unittest_package("listnode-package") {

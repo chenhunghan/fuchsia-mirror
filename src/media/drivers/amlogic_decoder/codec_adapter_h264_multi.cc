@@ -132,14 +132,14 @@ CodecAdapterH264Multi::CodecAdapterH264Multi(std::mutex& lock,
 }
 
 CodecAdapterH264Multi::~CodecAdapterH264Multi() {
-  // We need to delete the shared_fidl_thread_closure_queue_ on its dispatcher thread, per the
+  // We need to delete the shared_fidl_thread_closure_queue_ on its dispatcher sequence, per the
   // rules of ~ClosureQueue.
   sync_completion_t shared_fidl_finished;
   auto run_on_shared_fidl = [this, &shared_fidl_finished] {
     shared_fidl_thread_closure_queue_.reset();
     sync_completion_signal(&shared_fidl_finished);
   };
-  if (thrd_current() == device_->driver()->shared_fidl_thread()) {
+  if (shared_fidl_thread_closure_queue_->IsSynchronized()) {
     run_on_shared_fidl();
   } else {
     shared_fidl_thread_closure_queue_->Enqueue(run_on_shared_fidl);
@@ -332,7 +332,7 @@ void CodecAdapterH264Multi::CoreCodecQueueInputFormatDetails(
   QueueInputItem(CodecInputItem::FormatDetails(per_stream_override_format_details));
 }
 
-void CodecAdapterH264Multi::CoreCodecQueueInputPacket(CodecPacket* packet) {
+void CodecAdapterH264Multi::CoreCodecQueueInputPacket(const CodecPacket* packet) {
   QueueInputItem(CodecInputItem::Packet(packet));
 }
 
@@ -429,6 +429,7 @@ void CodecAdapterH264Multi::CoreCodecAddBuffer(CodecPort port, const CodecBuffer
     buffer->CacheFlush(0, static_cast<uint32_t>(buffer->size()));
   }
 
+  std::lock_guard<std::mutex> lock(lock_);
   all_output_buffers_.push_back(buffer);
 }
 
@@ -440,10 +441,13 @@ void CodecAdapterH264Multi::CoreCodecConfigureBuffers(
   ZX_DEBUG_ASSERT(port == kOutputPort);
   // output
 
+  std::lock_guard<std::mutex> lock(lock_);
   ZX_DEBUG_ASSERT(all_output_packets_.empty());
   ZX_DEBUG_ASSERT(free_output_packets_.empty());
   ZX_DEBUG_ASSERT(!all_output_buffers_.empty());
   ZX_DEBUG_ASSERT(all_output_buffers_.size() <= packets.size());
+  all_output_packets_.reserve(packets.size());
+  free_output_packets_.reserve(packets.size());
   for (auto& packet : packets) {
     all_output_packets_.push_back(packet.get());
     free_output_packets_.push_back(packet.get()->packet_index());

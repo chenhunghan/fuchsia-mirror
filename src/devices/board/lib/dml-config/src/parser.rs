@@ -2,12 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{AggregateEntry, BoardConfig, Device, ResourceEntry};
+use crate::{AggregateEntry, BoardConfig, Device, Iommu, IommuType, ResourceEntry};
 use anyhow::{Context, anyhow, bail};
 use fdf_fidl::DriverChannel;
 use fidl_fuchsia_driver_metadata as fdr;
 use fidl_next_fuchsia_driver_framework as fdf_framework;
 use fidl_next_fuchsia_hardware_platform_bus as fpbus;
+use fidl_next_fuchsia_hardware_power as fpower;
+use futures::future::try_join_all;
 use phf;
 use std::collections::{HashMap, HashSet};
 use zx;
@@ -41,6 +43,9 @@ fn map_interrupt_mode(mode: Option<&str>) -> fpbus::ZirconInterruptMode {
 
 pub type DriverSpecificMetadata =
     phf::Map<&'static str, &'static [(&'static str, fn() -> anyhow::Result<Vec<u8>>)]>;
+
+pub type DriverSpecificPowerConfigs =
+    phf::Map<&'static str, fn() -> anyhow::Result<Vec<fpower::PowerElementConfiguration>>>;
 
 pub fn make_accept_bind_rule(
     key: &str,
@@ -113,13 +118,18 @@ pub struct ServiceBindConfig {
     pub transport: TransportType,
     pub rules: &'static [PropertyRule],
     pub parent_key_sources: &'static [ValueSource],
+    pub bind_id: bool,
 }
 
 pub const DEFAULT_SERVICE_BIND_CONFIG: ServiceBindConfig = ServiceBindConfig {
     transport: TransportType::Zircon,
     rules: &[],
     parent_key_sources: &[ValueSource::ResourceName],
+    bind_id: false,
 };
+
+pub const DEFAULT_ID_SERVICE_BIND_CONFIG: ServiceBindConfig =
+    ServiceBindConfig { bind_id: true, ..DEFAULT_SERVICE_BIND_CONFIG };
 
 pub struct DmlParserConfig {
     pub service_configs: phf::Map<&'static str, ServiceBindConfig>,
@@ -325,7 +335,7 @@ pub fn generate_parent_spec_generic(
         .service_configs
         .get(service_name)
         .or_else(|| STANDARD_SERVICE_CONFIGS.get(service_name))
-        .unwrap_or(&DEFAULT_SERVICE_BIND_CONFIG);
+        .unwrap_or(&DEFAULT_ID_SERVICE_BIND_CONFIG);
 
     match service_config.transport {
         TransportType::Zircon => {
@@ -369,13 +379,11 @@ pub fn generate_parent_spec_generic(
         }
     }
 
-    if service_config.rules.is_empty() && !bind_rules.iter().any(|r| r.key == "fuchsia.ID") {
-        // TODO(https://fxbug.dev/555962083): Remove this hack
-        let id_opt =
-            crate::get_int64(constraint, "node_id").or_else(|| crate::get_int64(constraint, "id"));
-        if let Some(id) = id_opt {
-            bind_rules.push(make_accept_bind_rule("fuchsia.ID", property_int(id as u32)));
-        }
+    if service_config.bind_id
+        && !bind_rules.iter().any(|r| r.key == "fuchsia.ID")
+        && let Some(id) = crate::get_uint32(constraint, "id")
+    {
+        bind_rules.push(make_accept_bind_rule("fuchsia.ID", property_int(id)));
     }
 
     let resolved_key = service_config.parent_key_sources.iter().find_map(|source| {
@@ -419,13 +427,31 @@ pub async fn publish_dml_devices(
     config: &BoardConfig,
     parser_config: &DmlParserConfig,
     driver_metadata: Option<&DriverSpecificMetadata>,
+    driver_power_configs: Option<&DriverSpecificPowerConfigs>,
+    enabled_nodes: &[String],
 ) -> anyhow::Result<()> {
     let mut provider_metadata = HashMap::<String, Vec<fpbus::Metadata>>::new();
 
+    register_iommus(pbus, config.iommus.as_deref()).await.context("Failed to register IOMMUs")?;
+
+    let devices = config
+        .devices
+        .as_ref()
+        .ok_or_else(|| anyhow!("devices field is missing in BoardConfig"))?;
+
+    let disabled_devices: HashSet<&str> = devices
+        .iter()
+        .filter(|d| crate::is_device_disabled(d, enabled_nodes))
+        .filter_map(|d| d.name.as_deref())
+        .collect();
+
     // 1. Generate driver specific metadata for devices in config
-    if let (Some(drv_meta), Some(devices)) = (driver_metadata, &config.devices) {
+    if let Some(drv_meta) = driver_metadata {
         for dev in devices {
             let name = dev.name.as_deref().unwrap_or("");
+            if disabled_devices.contains(name) {
+                continue;
+            }
             if let Some(generators) = drv_meta.get(name) {
                 for (metadata_id, gen_fn) in *generators {
                     let data = gen_fn()
@@ -440,11 +466,14 @@ pub async fn publish_dml_devices(
         }
     }
 
-    let devices = config
-        .devices
-        .as_ref()
-        .ok_or_else(|| anyhow!("devices field is missing in BoardConfig"))?;
     for (idx, dev) in devices.iter().enumerate() {
+        let dev_name = dev.name.as_deref().unwrap_or("");
+        if disabled_devices.contains(dev_name) {
+            continue;
+        }
+        if dev.disabled.unwrap_or(false) {
+            log::info!("Publishing disabled DML device '{}' due to runtime override", dev_name);
+        }
         let instance_id = idx as u32 + 1;
         let mut node = fpbus::Node {
             name: dev.name.clone(),
@@ -452,9 +481,10 @@ pub async fn publish_dml_devices(
             pid: Some(0),
             did: Some(0),
             instance_id: Some(instance_id),
-            driver_host: dev.url.clone(),
+            driver_host: dev.driver_host.clone(),
             ..Default::default()
         };
+        node.interrupt_controller_id = dev.interrupt_controller_id;
 
         if let Some(compatible) = &dev.compatible {
             node.properties = Some(vec![fdf_framework::NodeProperty2 {
@@ -482,18 +512,26 @@ pub async fn publish_dml_devices(
                 });
             }
             for irq in crate::irq_list(pdev_dict) {
+                let irq_spec = match irq.controller {
+                    Some(controller_id) => fpbus::IrqSpec::UserspaceIrq(fpbus::UserspaceIrq {
+                        irq: irq.number,
+                        controller_id,
+                    }),
+                    None => fpbus::IrqSpec::Irq(irq.number),
+                };
                 irq_list.push(fpbus::Irq {
-                    irq: Some(fpbus::IrqSpec::Irq(irq.number)),
+                    irq: Some(irq_spec),
                     mode: Some(map_interrupt_mode(irq.mode.as_deref())),
                     name: irq.name.clone(),
                     wake_vector: irq.wake_vector,
                     ..Default::default()
                 });
             }
-            for bti in crate::bti_list(pdev_dict) {
+            for bti in crate::bti_list(pdev_dict)? {
                 bti_list.push(fpbus::Bti {
-                    iommu_id: Some(0),
+                    iommu_id: Some(bti.iommu_id),
                     bti_id: Some(bti.id),
+                    name: bti.name,
                     ..Default::default()
                 });
             }
@@ -546,7 +584,6 @@ pub async fn publish_dml_devices(
             }
         }
 
-        let dev_name = dev.name.as_deref().unwrap_or("");
         if let Some(meta) = provider_metadata.get(dev_name) {
             metadata_list.extend(meta.clone());
         }
@@ -555,15 +592,28 @@ pub async fn publish_dml_devices(
             node.metadata = Some(metadata_list);
         }
 
+        if let Some(gen_fn) = driver_power_configs.and_then(|configs| configs.get(dev_name)) {
+            let power_config = gen_fn()
+                .with_context(|| format!("Failed to generate power config for {}", dev_name))?;
+            if !power_config.is_empty() {
+                node.power_config = Some(power_config);
+            }
+        }
+
         let mut resource_parents = Vec::new();
         let mut generated_keys = HashSet::new();
         if let Some(aggregates) = &config.aggregates {
             for (agg_idx, agg) in aggregates.iter().enumerate() {
+                if agg.provider.as_deref().is_some_and(|p| disabled_devices.contains(p)) {
+                    continue;
+                }
                 if let Some(resources) = &agg.resources {
                     for res in resources {
                         if res.node.as_deref() == dev.name.as_deref() {
-                            let parent_and_key = if agg.service.as_deref()
+                            let parent_and_key = if (agg.service.as_deref()
                                 == Some("fuchsia.hardware.platform.device.Service")
+                                || agg.service.as_deref()
+                                    == Some("fuchsia.hardware.interrupt.ControllerRegistryService"))
                                 && dev.compatible.is_some()
                             {
                                 None
@@ -598,8 +648,15 @@ pub async fn publish_dml_devices(
             }
         }
 
-        let mut spec =
-            fdf_framework::CompositeNodeSpec { name: dev.name.clone(), ..Default::default() };
+        if resource_parents.is_empty() && dev.driver_host.is_some() {
+            node.driver_host = dev.driver_host.clone();
+        }
+
+        let mut spec = fdf_framework::CompositeNodeSpec {
+            name: dev.name.clone(),
+            driver_host: dev.driver_host.clone(),
+            ..Default::default()
+        };
 
         let mut parents2 = Vec::new();
 
@@ -626,7 +683,10 @@ pub async fn publish_dml_devices(
                     make_accept_bind_rule("fuchsia.COMPATIBLE", property_string(compatible)),
                 ],
                 properties: vec![
-                    make_property2("fuchsia.NAME", property_string("pdev")),
+                    // TODO(https://fxbug.dev/555962083): Restore `fuchsia.NAME = "pdev"` once all
+                    // composite drivers are migrated from `primary parent "devicetree"` to `"pdev"`
+                    // (`driver-index` rejects `ParentSpec2.properties` when `fuchsia.NAME` does not
+                    // equal the `.bind` primary parent symbol name).
                     make_property2("fuchsia.BIND_PROTOCOL", property_int(BIND_PROTOCOL_DEVICE)),
                     make_property2(
                         "fuchsia.BIND_PLATFORM_DEV_VID",
@@ -681,5 +741,48 @@ pub async fn publish_dml_devices(
         }
     }
 
+    Ok(())
+}
+
+/// Registers `iommus` with the `pbus`.
+async fn register_iommus(
+    pbus: &fidl_next::Client<fpbus::PlatformBus, DriverChannel>,
+    iommus: Option<&[Iommu]>,
+) -> anyhow::Result<()> {
+    let Some(iommus) = iommus else {
+        return Ok(());
+    };
+
+    let futures = iommus
+        .iter()
+        .map(|iommu| {
+            let iommu_name = iommu.name.as_deref().unwrap_or("unnamed");
+            let iommu_id = iommu.id.with_context(|| format!("IOMMU {iommu_name:?} missing id"))?;
+            let fpbus_iommu = match &iommu.iommu_type {
+                Some(IommuType::ArmSmmu(arm_smmu)) => {
+                    fpbus::Iommu::ArmSmmu(fpbus::ArmSmmu { base_address: arm_smmu.base_address })
+                }
+                Some(IommuType::StubIommu(_)) | None => fpbus::Iommu::StubIommu(()),
+                _ => {
+                    bail!("Unsupported IOMMU type for IOMMU {iommu_name:?}");
+                }
+            };
+            let future = async move {
+                log::info!("Registering IOMMU '{iommu_name}' (id: {iommu_id})");
+                pbus.register_iommu(iommu_id, &fpbus_iommu)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to send RegisterIommu FIDL request for IOMMU {iommu_name:?}"
+                        )
+                    })?
+                    .map_err(|e| e.err().unwrap_or(zx::Status::INTERNAL))
+                    .with_context(|| format!("Failed to register IOMMU {iommu_name:?}"))?;
+                Ok::<(), anyhow::Error>(())
+            };
+            Ok(future)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    try_join_all(futures).await?;
     Ok(())
 }

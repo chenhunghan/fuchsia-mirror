@@ -67,6 +67,11 @@ void DefaultFrameScheduler::SetRenderContinuously(bool render_continuously) {
   }
 }
 
+void DefaultFrameScheduler::ForceRenderFrame() {
+  force_render_next_frame_ = true;
+  RequestFrame(zx::time(0), /*schedule_asap=*/true);
+}
+
 std::pair<zx::time, zx::time> DefaultFrameScheduler::ComputePresentationAndWakeupTimesForTargetTime(
     const zx::time& requested_presentation_time, bool schedule_asap) const {
   const zx::time& last_vsync_time = vsync_timing_->last_vsync_time();
@@ -82,8 +87,8 @@ std::pair<zx::time, zx::time> DefaultFrameScheduler::ComputePresentationAndWakeu
     const zx::time next_vsync_time = last_vsync_time + vsync_interval;
     if (requested_presentation_time <= next_vsync_time) {
       // We target scheduling the frame as soon as possible, i.e. "now". However, kernel CPU
-      // scheduling delays might result in new_target_presentation_time being in the past. We pick
-      // the earlier time to avoid violating the DCHECK invariant in ApplyUpdates().
+      // scheduling delays might result in `new_target_presentation_time` being in the past. We pick
+      // the earlier time to avoid violating the `DCHECK` invariant in `ApplyUpdates()`.
       return std::make_pair(next_vsync_time, std::min(now, next_vsync_time));
     }
   }
@@ -98,7 +103,8 @@ std::pair<zx::time, zx::time> DefaultFrameScheduler::ComputePresentationAndWakeu
 }
 
 void DefaultFrameScheduler::RequestFrame(zx::time requested_presentation_time, bool schedule_asap) {
-  FX_DCHECK(HaveUpdatableSessions() || render_continuously_ || !last_frame_is_presented_);
+  FX_DCHECK(HaveUpdatableSessions() || render_continuously_ || !last_frame_is_presented_ ||
+            force_render_next_frame_);
 
   auto [new_target_presentation_time, new_wakeup_time] =
       ComputePresentationAndWakeupTimesForTargetTime(requested_presentation_time, schedule_asap);
@@ -136,7 +142,7 @@ void DefaultFrameScheduler::RequestFrame(zx::time requested_presentation_time, b
 }
 
 void DefaultFrameScheduler::HandleNextFrameRequest() {
-  // Finds and requests a frame for the lowest requested_presentation_time across all sessions'
+  // Finds and requests a frame for the lowest `requested_presentation_time` across all sessions'
   // next update.
   if (!pending_present_requests_.empty()) {
     SessionId last_session = scheduling::kInvalidSessionId;
@@ -161,9 +167,9 @@ void DefaultFrameScheduler::MaybeRenderFrame(async_dispatcher_t*, async::TaskBas
   const uint64_t frame_number = frame_number_;
 
   {
-    // Trace event to track the delta between the targeted wakeup_time_ and the actual wakeup
+    // Trace event to track the delta between the targeted `wakeup_time_` and the actual wakeup
     // time. It is used to detect delays (i.e. if this thread is blocked on the cpu). The intended
-    // wakeup_time_ is used to track the canonical "start" of this frame at various points during
+    // `wakeup_time_` is used to track the canonical "start" of this frame at various points during
     // the frame's execution.
     const zx::duration wakeup_delta = zx::time(async_now(dispatcher_)) - wakeup_time_;
     TRACE_COUNTER("gfx", "Wakeup Time Delta", /* counter_id */ 0, "delta", wakeup_delta.get());
@@ -187,7 +193,7 @@ void DefaultFrameScheduler::MaybeRenderFrame(async_dispatcher_t*, async::TaskBas
   // Apply all updates
   const zx::time update_start_time = zx::time(async_now(dispatcher_));
 
-  // The second value, |wakeup_time_|, here is important for ensuring our flows stay connected.
+  // The second value, `wakeup_time_`, here is important for ensuring our flows stay connected.
   // If you change it please ensure the "request_to_render" flow stays connected.
   const bool needs_render = ApplyUpdates(target_presentation_time, wakeup_time_, frame_number);
 
@@ -201,7 +207,8 @@ void DefaultFrameScheduler::MaybeRenderFrame(async_dispatcher_t*, async::TaskBas
   const zx::time render_start_time = update_end_time;
   frame_predictor_->ReportUpdateDuration(zx::duration(update_end_time - update_start_time));
 
-  if (!needs_render && last_frame_is_presented_ && !render_continuously_) {
+  if (!needs_render && last_frame_is_presented_ && !render_continuously_ &&
+      !force_render_next_frame_) {
     FLATLAND_VERBOSE_LOG << "FrameScheduler::MaybeRenderFrame() frame_number=" << frame_number
                          << "  target_presentation_time=" << target_presentation_time.get()
                          << "  skipping render because there is nothing to render.";
@@ -268,10 +275,12 @@ void DefaultFrameScheduler::MaybeRenderFrame(async_dispatcher_t*, async::TaskBas
 
   inspect_frame_number_.Set(frame_number);
 
+  force_render_next_frame_ = false;
+
   // Render the frame.
   render_scheduled_frame_(frame_number, target_presentation_time, std::move(on_presented_callback));
 
-  // Let all Session Updaters know of the timing of the end of RenderFrame().
+  // Let all Session Updaters know of the timing of the end of `RenderFrame()`.
   on_cpu_work_done_();
 
   // Schedule next frame if any unhandled presents are left.
@@ -295,9 +304,9 @@ void DefaultFrameScheduler::ScheduleUpdateForSession(zx::time requested_presenta
   TRACE_DURATION("gfx", "DefaultFrameScheduler::ScheduleUpdateForSession",
                  "requested_presentation_time", requested_presentation_time.get() / 1'000'000);
 
-  // Utilized in low-hanging optimizations below.  If desired, we could also optimize TRACE_DURATION
-  // calls, although (because we could no longer rely on a RAII scope for duration) we would need
-  // to split each into a TRACE_DURATION_BEGIN/TRACE_DURATION_END pair.
+  // Utilized in low-hanging optimizations below.  If desired, we could also optimize
+  // `TRACE_DURATION` calls, although (because we could no longer rely on a RAII scope for duration)
+  // we would need to split each into a `TRACE_DURATION_BEGIN`/`TRACE_DURATION_END` pair.
   const bool trace_enabled = TRACE_CATEGORY_ENABLED("gfx");
 
   // Micro-optimize tracing.
@@ -361,7 +370,7 @@ std::vector<FuturePresentationInfo> DefaultFrameScheduler::GetFuturePresentation
   zx::time prediction_limit = request.now + requested_prediction_span;
   while (request.now <= prediction_limit && count < kMaxPredictionCount) {
     // We ask for a "0 time" in order to give us the next possible presentation time. It also fits
-    // the Present() pattern most Scenic clients currently use.
+    // the `Present()` pattern most Scenic clients currently use.
     request.requested_presentation_time = zx::time(0);
 
     PredictedTimes times = frame_predictor_->GetPrediction(request);
@@ -373,16 +382,16 @@ std::vector<FuturePresentationInfo> DefaultFrameScheduler::GetFuturePresentation
     // the past.
     //
     // We also guarantee loop termination by the same token. Latch points are monotonically
-    // increasing, which means so is |request.now| so it will eventually reach prediction_limit.
+    // increasing, which means so is `request.now` so it will eventually reach `prediction_limit`.
     request.now = times.latch_point_time + zx::duration(1);
 
-    // last_vsync_time should be the greatest value less than request.now where a vsync
-    // occurred. We can calculate this inductively by adding vsync_intervals to last_vsync_time.
-    // Therefore what we add to last_vsync_time is the difference between now and
-    // last_vsync_time, integer divided by vsync_interval, then multipled by vsync_interval.
+    // `last_vsync_time` should be the greatest value less than `request.now` where a vsync
+    // occurred. We can calculate this inductively by adding `vsync_intervals` to `last_vsync_time`.
+    // Therefore what we add to `last_vsync_time` is the difference between now and
+    // `last_vsync_time`, integer divided by `vsync_interval`, then multiplied by `vsync_interval`.
     //
-    // Because now' is the latch_point, and latch points are monotonically increasing, we
-    // guarantee that |difference| and therefore last_vsync_time is also monotonically increasing.
+    // Because now' is the `latch_point`, and latch points are monotonically increasing, we
+    // guarantee that `difference` and therefore `last_vsync_time` is also monotonically increasing.
     zx::duration difference = request.now - request.last_vsync_time;
     uint64_t num_intervals = difference / request.vsync_interval;
     request.last_vsync_time += request.vsync_interval * num_intervals;
@@ -542,7 +551,7 @@ void DefaultFrameScheduler::SetLatchedTimeForPresentsUpTo(SchedulingIdPair id_pa
   const auto end_it = presents_.upper_bound(id_pair);
   std::for_each(begin_it, end_it,
                 [latched_time](std::pair<const SchedulingIdPair, std::optional<zx::time>>& pair) {
-                  // Update latched time for Present2Infos that haven't already been latched on
+                  // Update latched time for `Present2Infos` that haven't already been latched on
                   // previous frames.
                   if (pair.second == std::nullopt)
                     pair.second = latched_time;
@@ -566,7 +575,7 @@ bool DefaultFrameScheduler::ApplyUpdates(zx::time target_presentation_time, zx::
                          << "  target_presentation_time=" << target_presentation_time.get();
   }
 
-  // NOTE: this name is used by scenic_frame_stats.dart
+  // NOTE: this name is used by `scenic_frame_stats.dart`
   TRACE_DURATION("gfx", "ApplyScheduledSessionUpdates", "target_presentation_time",
                  target_presentation_time.get() / 1'000'000, "frame_number", frame_number);
 
@@ -574,7 +583,7 @@ bool DefaultFrameScheduler::ApplyUpdates(zx::time target_presentation_time, zx::
 
   // TODO(https://fxbug.dev/460278647): together these take significant time.  There are several
   // possibilities for optimization:
-  //   - return vector instead of unordered_map
+  //   - return vector instead of `unordered_map`
   //   - reuse memory instead of allocating extra frame (more effective with vectors than maps)
   const std::unordered_map<SessionId, PresentId> update_map =
       CollectUpdatesForThisFrame(target_presentation_time);
@@ -582,7 +591,7 @@ bool DefaultFrameScheduler::ApplyUpdates(zx::time target_presentation_time, zx::
 
   // Micro-optimize tracing.
   if (TRACE_CATEGORY_ENABLED("gfx")) {
-    // The straightforward approach would be to use TRACE_INSTAFLOW_STEP for each session-present,
+    // The straightforward approach would be to use `TRACE_INSTAFLOW_STEP` for each session-present,
     // but there is a non-negligible cost if there are multiple presents.
     TRACE_DURATION("gfx", "scenic_session_present/prepare_to_render", "frame_number",
                    TA_UINT64(frame_number), "latched_time", TA_INT64(latched_time.get()));
@@ -601,7 +610,7 @@ bool DefaultFrameScheduler::ApplyUpdates(zx::time target_presentation_time, zx::
 void DefaultFrameScheduler::SignalPresentedUpTo(uint64_t frame_number,
                                                 zx::time actual_presentation_time,
                                                 zx::duration presentation_interval) {
-  // Get last present_id up to |frame_number| for each session.
+  // Get last `present_id` up to `frame_number` for each session.
   std::unordered_map<SessionId, PresentId> last_updates;
   std::unordered_map<SessionId, std::map<PresentId, zx::time>> latched_times;
   while (!latched_updates_.empty() && latched_updates_.front().frame_number <= frame_number) {
@@ -609,8 +618,8 @@ void DefaultFrameScheduler::SignalPresentedUpTo(uint64_t frame_number,
 
     // Micro-optimize tracing.
     if (TRACE_CATEGORY_ENABLED("gfx")) {
-      // The straightforward approach would be to use TRACE_INSTAFLOW_STEP for each session-present,
-      // but there is a non-negligible cost if there are multiple presents.
+      // The straightforward approach would be to use `TRACE_INSTAFLOW_STEP` for each
+      // session-present, but there is a non-negligible cost if there are multiple presents.
       TRACE_DURATION("gfx", "scenic_session_present/frame_presented", "frame_number",
                      TA_UINT64(frame_number), "latched_time",
                      TA_INT64(latched_update.latched_time.get()), "presentation_time",

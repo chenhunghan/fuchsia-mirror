@@ -534,6 +534,216 @@ unsafe extern "C" {
     #[doc = " Resumes the dispatchers owned by the driver.\n The runtime will move pending callbacks back to the main queue and start accepting new work."]
     pub fn fdf_env_driver_resume(driver: *const ::core::ffi::c_void);
 }
+pub type fdf_dispatcher_state_t = u32;
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct fdf_non_inlined_stats {
+    pub allow_sync_calls: u64,
+    pub parallel_dispatch: u64,
+    pub task: u64,
+    pub unknown_thread: u64,
+    pub reentrant: u64,
+    pub channel_wait_not_yet_registered: u64,
+    pub no_thread_migration: u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of fdf_non_inlined_stats"][::core::mem::size_of::<fdf_non_inlined_stats>() - 56usize];
+    ["Alignment of fdf_non_inlined_stats"]
+        [::core::mem::align_of::<fdf_non_inlined_stats>() - 8usize];
+    ["Offset of field: fdf_non_inlined_stats::allow_sync_calls"]
+        [::core::mem::offset_of!(fdf_non_inlined_stats, allow_sync_calls) - 0usize];
+    ["Offset of field: fdf_non_inlined_stats::parallel_dispatch"]
+        [::core::mem::offset_of!(fdf_non_inlined_stats, parallel_dispatch) - 8usize];
+    ["Offset of field: fdf_non_inlined_stats::task"]
+        [::core::mem::offset_of!(fdf_non_inlined_stats, task) - 16usize];
+    ["Offset of field: fdf_non_inlined_stats::unknown_thread"]
+        [::core::mem::offset_of!(fdf_non_inlined_stats, unknown_thread) - 24usize];
+    ["Offset of field: fdf_non_inlined_stats::reentrant"]
+        [::core::mem::offset_of!(fdf_non_inlined_stats, reentrant) - 32usize];
+    ["Offset of field: fdf_non_inlined_stats::channel_wait_not_yet_registered"]
+        [::core::mem::offset_of!(fdf_non_inlined_stats, channel_wait_not_yet_registered) - 40usize];
+    ["Offset of field: fdf_non_inlined_stats::no_thread_migration"]
+        [::core::mem::offset_of!(fdf_non_inlined_stats, no_thread_migration) - 48usize];
+};
+pub type fdf_non_inlined_stats_t = fdf_non_inlined_stats;
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct fdf_dispatcher_debug_stats {
+    pub num_total_requests: u64,
+    pub num_inlined_requests: u64,
+    pub non_inlined: fdf_non_inlined_stats_t,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of fdf_dispatcher_debug_stats"]
+        [::core::mem::size_of::<fdf_dispatcher_debug_stats>() - 72usize];
+    ["Alignment of fdf_dispatcher_debug_stats"]
+        [::core::mem::align_of::<fdf_dispatcher_debug_stats>() - 8usize];
+    ["Offset of field: fdf_dispatcher_debug_stats::num_total_requests"]
+        [::core::mem::offset_of!(fdf_dispatcher_debug_stats, num_total_requests) - 0usize];
+    ["Offset of field: fdf_dispatcher_debug_stats::num_inlined_requests"]
+        [::core::mem::offset_of!(fdf_dispatcher_debug_stats, num_inlined_requests) - 8usize];
+    ["Offset of field: fdf_dispatcher_debug_stats::non_inlined"]
+        [::core::mem::offset_of!(fdf_dispatcher_debug_stats, non_inlined) - 16usize];
+};
+pub type fdf_dispatcher_debug_stats_t = fdf_dispatcher_debug_stats;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct fdf_task_debug_info {
+    pub ptr: u64,
+    pub handler: u64,
+    pub initiating_dispatcher: u64,
+    pub initiating_driver: *const ::core::ffi::c_void,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of fdf_task_debug_info"][::core::mem::size_of::<fdf_task_debug_info>() - 32usize];
+    ["Alignment of fdf_task_debug_info"][::core::mem::align_of::<fdf_task_debug_info>() - 8usize];
+    ["Offset of field: fdf_task_debug_info::ptr"]
+        [::core::mem::offset_of!(fdf_task_debug_info, ptr) - 0usize];
+    ["Offset of field: fdf_task_debug_info::handler"]
+        [::core::mem::offset_of!(fdf_task_debug_info, handler) - 8usize];
+    ["Offset of field: fdf_task_debug_info::initiating_dispatcher"]
+        [::core::mem::offset_of!(fdf_task_debug_info, initiating_dispatcher) - 16usize];
+    ["Offset of field: fdf_task_debug_info::initiating_driver"]
+        [::core::mem::offset_of!(fdf_task_debug_info, initiating_driver) - 24usize];
+};
+impl Default for fdf_task_debug_info {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+pub type fdf_task_debug_info_t = fdf_task_debug_info;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct fdf_dispatcher_dump_entry {
+    pub driver: *const ::core::ffi::c_void,
+    pub dispatcher_ptr: u64,
+    pub name: *const ::core::ffi::c_char,
+    pub scheduler_role: *const ::core::ffi::c_char,
+    pub options: u32,
+    pub synchronized: bool,
+    pub allow_sync_calls: bool,
+    pub state: fdf_dispatcher_state_t,
+    pub destroy_context: *const ::core::ffi::c_char,
+    pub has_destroy_user_initiated: bool,
+    pub destroy_user_initiated: bool,
+    pub debug_stats: fdf_dispatcher_debug_stats_t,
+    pub queued_tasks: *const fdf_task_debug_info_t,
+    pub num_queued_tasks: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of fdf_dispatcher_dump_entry"]
+        [::core::mem::size_of::<fdf_dispatcher_dump_entry>() - 152usize];
+    ["Alignment of fdf_dispatcher_dump_entry"]
+        [::core::mem::align_of::<fdf_dispatcher_dump_entry>() - 8usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::driver"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, driver) - 0usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::dispatcher_ptr"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, dispatcher_ptr) - 8usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::name"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, name) - 16usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::scheduler_role"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, scheduler_role) - 24usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::options"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, options) - 32usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::synchronized"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, synchronized) - 36usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::allow_sync_calls"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, allow_sync_calls) - 37usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::state"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, state) - 40usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::destroy_context"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, destroy_context) - 48usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::has_destroy_user_initiated"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, has_destroy_user_initiated) - 56usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::destroy_user_initiated"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, destroy_user_initiated) - 57usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::debug_stats"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, debug_stats) - 64usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::queued_tasks"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, queued_tasks) - 136usize];
+    ["Offset of field: fdf_dispatcher_dump_entry::num_queued_tasks"]
+        [::core::mem::offset_of!(fdf_dispatcher_dump_entry, num_queued_tasks) - 144usize];
+};
+impl Default for fdf_dispatcher_dump_entry {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+pub type fdf_dispatcher_dump_entry_t = fdf_dispatcher_dump_entry;
+unsafe extern "C" {
+    #[doc = " Retrieves structured runtime diagnostic dumps for all dispatchers currently tracked by the\n driver runtime environment.\n\n The caller must free the returned array using |fdf_env_free_all_dispatchers_dump|."]
+    pub fn fdf_env_get_all_dispatchers_dump(
+        out_entries: *mut *mut fdf_dispatcher_dump_entry_t,
+        out_count: *mut usize,
+    );
+}
+unsafe extern "C" {
+    #[doc = " Frees the array returned by |fdf_env_get_all_dispatchers_dump|."]
+    pub fn fdf_env_free_all_dispatchers_dump(
+        entries: *mut fdf_dispatcher_dump_entry_t,
+        count: usize,
+    );
+}
+#[repr(C)]
+pub struct fdf_thread_dump_entry {
+    pub koid: zx_koid_t,
+    pub name: *const ::core::ffi::c_char,
+    pub scheduler_role: *const ::core::ffi::c_char,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of fdf_thread_dump_entry"][::core::mem::size_of::<fdf_thread_dump_entry>() - 24usize];
+    ["Alignment of fdf_thread_dump_entry"]
+        [::core::mem::align_of::<fdf_thread_dump_entry>() - 8usize];
+    ["Offset of field: fdf_thread_dump_entry::koid"]
+        [::core::mem::offset_of!(fdf_thread_dump_entry, koid) - 0usize];
+    ["Offset of field: fdf_thread_dump_entry::name"]
+        [::core::mem::offset_of!(fdf_thread_dump_entry, name) - 8usize];
+    ["Offset of field: fdf_thread_dump_entry::scheduler_role"]
+        [::core::mem::offset_of!(fdf_thread_dump_entry, scheduler_role) - 16usize];
+};
+impl Default for fdf_thread_dump_entry {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+impl ::core::fmt::Debug for fdf_thread_dump_entry {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        write!(
+            f,
+            "fdf_thread_dump_entry {{ name: {:?}, scheduler_role: {:?} }}",
+            self.name, self.scheduler_role
+        )
+    }
+}
+pub type fdf_thread_dump_entry_t = fdf_thread_dump_entry;
+unsafe extern "C" {
+    #[doc = " Retrieves structured runtime diagnostic dumps for all threads currently spawned by the\n driver runtime environment.\n\n The caller must free the returned array using |fdf_env_free_all_threads_dump|."]
+    pub fn fdf_env_get_all_threads_dump(
+        out_entries: *mut *mut fdf_thread_dump_entry_t,
+        out_count: *mut usize,
+    );
+}
+unsafe extern "C" {
+    #[doc = " Frees the array returned by |fdf_env_get_all_threads_dump|."]
+    pub fn fdf_env_free_all_threads_dump(entries: *mut fdf_thread_dump_entry_t, count: usize);
+}
 unsafe extern "C" {
     #[doc = " Creates a dispatcher on a unmanaged thread pool. This means that there are no background threads\n handling this dispatcher and so it has to be ran explicitly using the various run calls.\n See |fdf_env_dispatcher_create_with_owner| for more information about the parameters and return\n value."]
     pub fn fdf_testing_create_unmanaged_dispatcher(

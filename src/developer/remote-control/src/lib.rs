@@ -902,6 +902,7 @@ mod tests {
         );
 
         assert_eq!(resp.boot_timestamp_nanos.unwrap(), BOOT_TIME);
+        assert_eq!(resp.f_release, crate::host_identifier::current_f_release());
 
         Ok(())
     }
@@ -936,6 +937,7 @@ mod tests {
         );
 
         assert_eq!(resp.boot_timestamp_nanos.unwrap(), BOOT_TIME);
+        assert_eq!(resp.f_release, crate::host_identifier::current_f_release());
 
         Ok(())
     }
@@ -974,6 +976,7 @@ mod tests {
         assert_eq!(resp.product_config, None);
         assert_eq!(resp.addresses, None);
         assert_eq!(resp.boot_timestamp_nanos.unwrap(), BOOT_TIME);
+        assert_eq!(resp.f_release, crate::host_identifier::current_f_release());
 
         Ok(())
     }

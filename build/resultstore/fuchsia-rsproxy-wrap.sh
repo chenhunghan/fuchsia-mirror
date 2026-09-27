@@ -209,10 +209,8 @@ esac
 # Infra builds do not use .cfg files from the source tree;
 # they set various RS_* environment variables to override
 # the corresponding flags, e.g.:
-# LINT.IfChange(rs_instance_env_vars)
 #   * RS_rs_instance
 #   * RS_cas_instance
-# LINT.ThenChange(//build/scripts/main_build.py:rs_instance_env_vars)
 #   * RS_rs_service
 #   * RS_cas_service
 
@@ -220,7 +218,6 @@ esac
 # "localhost", for which certs are invalid.  Fix this by using the
 # real name of the service.  Same for cas_service.
 # TODO: pass these from recipes as RS_* environment variables.
-# LINT.IfChange(rs_service_env_vars)
 case "${RS_rs_service:-NOT_SET}" in
   unix://*)
     rsproxy_options+=( --rs_tls_server_name="resultstore.googleapis.com")
@@ -231,7 +228,6 @@ case "${RS_cas_service:-NOT_SET}" in
     rsproxy_options+=( --cas_tls_server_name="remotebuildexecution.googleapis.com")
     ;;
 esac
-# LINT.ThenChange(//build/scripts/main_build.py:rs_service_env_vars)
 
 # Scan wrapped command arguments for a build directory override (-C) to
 # organize log directories for nested sub-builds.

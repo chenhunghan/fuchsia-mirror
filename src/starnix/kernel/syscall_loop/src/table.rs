@@ -170,10 +170,11 @@ pub fn dispatch_syscall(
         };
         pub use starnix_core::syscalls::time::{
             sys_arch32_clock_getres, sys_arch32_clock_gettime, sys_arch32_clock_gettime64,
-            sys_arch32_gettimeofday, sys_arch32_nanosleep, sys_arch32_setitimer,
-            sys_arch32_settimeofday, sys_arch32_timer_create, sys_arch32_timer_delete,
-            sys_arch32_timer_getoverrun, sys_arch32_timer_gettime, sys_arch32_timer_gettime64,
-            sys_arch32_timer_settime, sys_clock_nanosleep as sys_arch32_clock_nanosleep,
+            sys_arch32_getitimer, sys_arch32_gettimeofday, sys_arch32_nanosleep,
+            sys_arch32_setitimer, sys_arch32_settimeofday, sys_arch32_timer_create,
+            sys_arch32_timer_delete, sys_arch32_timer_getoverrun, sys_arch32_timer_gettime,
+            sys_arch32_timer_gettime64, sys_arch32_timer_settime,
+            sys_clock_nanosleep as sys_arch32_clock_nanosleep,
         };
         pub use starnix_core::task::syscalls::{
             sys_arch32_execve, sys_arch32_execveat, sys_arch32_getegid32, sys_arch32_geteuid32,
@@ -354,6 +355,7 @@ pub fn dispatch_syscall(
             geteuid32[0],
             getgid32[0],
             getgroups32[2],
+            getitimer[2],
             getpeername[3],
             getpgid[1],
             getpid[0],

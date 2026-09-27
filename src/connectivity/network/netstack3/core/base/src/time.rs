@@ -8,7 +8,6 @@ pub(crate) mod local_timer_heap;
 #[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil;
 
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
@@ -249,7 +248,7 @@ where
 
 /// An uninstantiable type that performs conversions based on `Into`
 /// implementations and an available outer [`CoreTimerContext`] `CC`.
-pub struct NestedIntoCoreTimerCtx<CC, N>(Never, PhantomData<(CC, N)>);
+pub struct NestedIntoCoreTimerCtx<CC, N>(!, PhantomData<(CC, N)>);
 
 impl<CC, N, T, BT> CoreTimerContext<T, BT> for NestedIntoCoreTimerCtx<CC, N>
 where

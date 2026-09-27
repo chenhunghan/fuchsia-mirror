@@ -70,6 +70,9 @@ class Heap final {
   // Return the number of failed allocations over the lifetime of the Heap.
   size_t TotalFailedAllocations() const { return total_failed_allocations_; }
 
+  // Return the peak bytes requested over the lifetime of the Heap.
+  size_t PeakBytesRequested() const { return max_outstanding_bytes_requested_; }
+
   // Return the maximum size of the VMO.
   size_t maximum_size() const { return max_size_; }
 
@@ -92,6 +95,8 @@ class Heap final {
   size_t total_allocated_blocks_ = 0;
   size_t total_deallocated_blocks_ = 0;
   size_t total_failed_allocations_ = 0;
+  size_t outstanding_bytes_requested_ = 0;
+  size_t max_outstanding_bytes_requested_ = 0;
   size_t max_size_ = 0;
   uintptr_t buffer_addr_ = 0;
   BlockIndex free_blocks_[8] = {};

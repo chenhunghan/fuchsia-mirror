@@ -7,7 +7,7 @@ use crate::log::*;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::{
-    ObjectHandle, ObjectProperties, ReadObjectHandle, WriteBytes, WriteObjectHandle,
+    LayerObject, ObjectHandle, ObjectProperties, ReadObjectHandle, WriteBytes, WriteObjectHandle,
 };
 use crate::object_store::extent_record::{ExtentMode, ExtentValue};
 use crate::object_store::object_manager::ObjectManager;
@@ -18,7 +18,7 @@ use crate::object_store::object_record::{
 use crate::object_store::store_object_handle::{MaybeChecksums, NeedsTrim};
 use crate::object_store::transaction::{
     self, AssocObj, AssociatedObject, LockKey, Mutation, ObjectStoreMutation, Operation, Options,
-    Transaction, lock_keys,
+    ReadGuard, Transaction, lock_keys,
 };
 use crate::object_store::{
     AttributeId, Extent, HandleOptions, HandleOwner, RootDigest, StoreObjectHandle,
@@ -309,14 +309,11 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                         self.block_size().align_up(expected_length as u64).unwrap() as usize
                     )
                     .await;
-                ensure!(
-                    expected_length
-                        == self
-                            .handle
-                            .read(AttributeId::FSVERITY_MERKLE, verity_range.start, buffer.as_mut())
-                            .await?,
-                    FxfsError::Inconsistent
-                );
+                let read = self
+                    .handle
+                    .read_aligned(AttributeId::FSVERITY_MERKLE, verity_range.start, buffer.as_mut())
+                    .await?;
+                ensure!(expected_length == read, FxfsError::Inconsistent);
                 let data = buffer.as_ptr_slice().subslice(0..expected_length);
                 FsverityStateInner::from_ptr_slice(data, self.block_size())?
             }
@@ -575,7 +572,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         let mut buf = self.allocate_buffer(64 * self.block_size().get() as usize).await;
         while offset < size {
             // TODO(b/314842875): Consider optimizations for sparse files.
-            let read = self.read(offset, buf.as_mut()).await? as u64;
+            let read = self.read_aligned(offset, buf.as_mut()).await? as u64;
             assert!(offset + read <= size);
             let slice = buf.as_ptr_slice().subslice(0..read as usize);
 
@@ -1775,17 +1772,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         }
     }
 
-    // Returns the contents of this object. This object must be < |limit| bytes in size.
-    pub async fn contents(&self, limit: usize) -> Result<Box<[u8]>, Error> {
-        let size = self.get_size();
-        if size > limit as u64 {
-            bail!("Object too big ({} > {})", size, limit);
-        }
-        let mut buf = self.allocate_buffer(size as usize).await;
-        self.read(0u64, buf.as_mut()).await?;
-        Ok(buf.to_vec().into_boxed_slice())
-    }
-
     /// Returns the set of file_offset->extent mappings for this file. The extents will be sorted by
     /// their logical offset within the file.
     ///
@@ -1799,12 +1785,25 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         Ok(extents)
     }
 
-    /// Fills |buf| with up to |buf.len()| bytes read from |offset| on the underlying device.
-    /// |offset| and |buf| must both be block-aligned.
+    /// Returns the contents of this object. This object must be < |limit| bytes in size.
+    pub async fn contents(&self, limit: usize) -> Result<Box<[u8]>, Error> {
+        let size = self.get_size();
+        if size > limit as u64 {
+            bail!("Object too big ({} > {})", size, limit);
+        }
+        self.read_bytes(0..size).await
+    }
+
+    /// Reads the contents of this object within `range`. `range` does not need to be block aligned.
     ///
-    /// This is an inherent version of the `ReadObjectHandle::read` trait method which avoids boxing
-    /// the returned `Future`.
-    pub async fn read(&self, offset: u64, mut buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+    /// This method should be avoided in high-performance contexts. Use `read_aligned` instead.
+    pub async fn read_bytes(&self, range: Range<u64>) -> Result<Box<[u8]>, Error> {
+        const MAX_READ_BYTES_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+
+        ensure!(range.start <= range.end, FxfsError::InvalidArgs);
+        if range.is_empty() {
+            return Ok(Box::default());
+        }
         let fs = self.store().filesystem();
         let guard = fs
             .lock_manager()
@@ -1816,16 +1815,105 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             .await;
 
         let size = self.get_size();
+        if range.start >= size {
+            return Ok(Box::default());
+        }
+        let end = std::cmp::min(range.end, size);
+        let total_to_read = (end - range.start) as usize;
+        let block_size = self.block_size();
+        let aligned_start = block_size.align_down(range.start);
+        let aligned_end = block_size.align_up(end).ok_or(FxfsError::TooBig)?;
+        let total_aligned_len = aligned_end - aligned_start;
+
+        let buf_size = std::cmp::min(total_aligned_len, MAX_READ_BYTES_CHUNK_SIZE as u64) as usize;
+        let mut buf = self.allocate_buffer(buf_size).await;
+        let mut out = Vec::with_capacity(total_to_read);
+        let mut current_block_offset = aligned_start;
+
+        while current_block_offset < end {
+            let bytes_read =
+                self.read_aligned_locked(current_block_offset, buf.as_mut(), &guard).await?;
+            let chunk_start = current_block_offset;
+            let chunk_end = current_block_offset + bytes_read as u64;
+            let slice_start = std::cmp::max(range.start, chunk_start);
+            let slice_end = std::cmp::min(end, chunk_end);
+            let buf_offset = (slice_start - chunk_start) as usize;
+            let to_copy = (slice_end - slice_start) as usize;
+            buf.subslice(buf_offset..buf_offset + to_copy).append_to(&mut out);
+            current_block_offset = current_block_offset.saturating_add(buf_size as u64);
+        }
+        Ok(out.into_boxed_slice())
+    }
+
+    /// Reads up to `buf.len()` bytes from `offset` while holding `guard`.
+    ///
+    /// Both `offset` and `buf.len()` must be aligned to the object's `block_size()`.
+    ///
+    /// `guard` must be an active read lock for this object's attribute.
+    ///
+    /// Returns the number of bytes read up to the object's size (or 0 if `offset >= size`). Holes/
+    /// sparse extents within the read range are zero-filled. Callers should not make any
+    /// assumptions about the contents of the buffer past the returned read amount. If this is a
+    /// verified file (fs-verity), the data is validated against the Merkle tree before returning.
+    async fn read_aligned_locked(
+        &self,
+        offset: u64,
+        mut buf: MutableBufferRef<'_>,
+        guard: &ReadGuard<'_>,
+    ) -> Result<usize, Error> {
+        let block_size = self.block_size();
+        debug_assert!(block_size.is_aligned(offset));
+        debug_assert!(block_size.is_aligned(buf.len() as u64));
+
+        let size = self.get_size();
         if offset >= size {
             return Ok(0);
         }
         let length = min(buf.len() as u64, size - offset) as usize;
-        buf = buf.subslice_mut(0..length);
-        self.handle.read_unchecked(self.attribute_id(), offset, buf.reborrow(), &guard).await?;
+        let aligned_length =
+            block_size.align_up(length as u64).ok_or(FxfsError::Inconsistent)? as usize;
+        buf = buf.subslice_mut(0..aligned_length);
+
+        self.handle
+            .read_aligned_unchecked(self.attribute_id(), offset, buf.reborrow(), guard)
+            .await?;
         if self.is_verified_file() {
-            self.verify_data(offset as usize, buf.as_ptr_slice())?;
+            self.verify_data(offset as usize, buf.subslice(0..length).as_ptr_slice())?;
         }
         Ok(length)
+    }
+
+    /// Fills `buf` with bytes read from `offset` on the underlying device.
+    ///
+    /// Both `offset` and `buf.len()` must be aligned to the object's `block_size()`.
+    ///
+    /// Returns the number of bytes read. If `offset >= size`, returns 0. Holes/sparse extents
+    /// within the read range are zero-filled. Callers should not make any assumptions about the
+    /// contents of the buffer past the returned read amount.
+    ///
+    /// If the object is a verified file (fs-verity), the read data is validated against the Merkle
+    /// tree before returning.
+    ///
+    /// This is an inherent version of the `ReadObjectHandle::read_aligned` trait method which
+    /// avoids boxing the returned `Future`.
+    pub async fn read_aligned(
+        &self,
+        offset: u64,
+        buf: MutableBufferRef<'_>,
+    ) -> Result<usize, Error> {
+        let block_size = self.block_size();
+        ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
+        ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
+        let fs = self.store().filesystem();
+        let guard = fs
+            .lock_manager()
+            .read_lock(lock_keys![LockKey::object_attribute(
+                self.store().store_object_id,
+                self.object_id(),
+                self.attribute_id(),
+            )])
+            .await;
+        self.read_aligned_locked(offset, buf, &guard).await
     }
 }
 
@@ -1898,7 +1986,7 @@ impl<S: HandleOwner> ObjectHandle for DataObjectHandle<S> {
 }
 
 impl<S: HandleOwner> ReadObjectHandle for DataObjectHandle<S> {
-    fn read<'a, 'b, 'c>(
+    fn read_aligned<'a, 'b, 'c>(
         &'a self,
         offset: u64,
         buf: MutableBufferRef<'b>,
@@ -1908,13 +1996,15 @@ impl<S: HandleOwner> ReadObjectHandle for DataObjectHandle<S> {
         'b: 'c,
         Self: 'c,
     {
-        Box::pin(DataObjectHandle::read(self, offset, buf))
+        Box::pin(DataObjectHandle::read_aligned(self, offset, buf))
     }
 
     fn get_size(&self) -> u64 {
         self.content_size.load(atomic::Ordering::Relaxed)
     }
 }
+
+impl<S: HandleOwner> LayerObject for DataObjectHandle<S> {}
 
 impl<S: HandleOwner> WriteObjectHandle for DataObjectHandle<S> {
     async fn write_or_append(&self, offset: Option<u64>, buf: BufferRef<'_>) -> Result<u64, Error> {
@@ -2157,7 +2247,7 @@ mod tests {
     async fn test_zero_buf_len_read() {
         let (fs, object) = test_filesystem_and_object().await;
         let mut buf = object.allocate_buffer(0).await;
-        assert_eq!(object.read(0u64, buf.as_mut()).await.expect("read failed"), 0);
+        assert_eq!(object.read_aligned(0u64, buf.as_mut()).await.expect("read failed"), 0);
         fs.close().await.expect("Close failed");
     }
 
@@ -2167,17 +2257,40 @@ mod tests {
         let offset = TEST_OBJECT_SIZE as usize - 2;
         let align = (offset as u64 % fs.block_size()) as usize;
         let len: usize = 2;
-        let mut buf = object.allocate_buffer(align + len + 1).await;
+        let block_size = fs.block_size().get() as usize;
+
+        // Unaligned buffer should fail.
+        let mut unaligned_buf = object.allocate_buffer(align + len + 1).await;
+        assert_matches!(
+            object.read_aligned((offset - align) as u64, unaligned_buf.as_mut()).await,
+            Err(e) if FxfsError::InvalidArgs.matches(&e)
+        );
+
+        let mut buf = object.allocate_buffer(block_size).await;
         buf.fill(123u8);
         assert_eq!(
-            object.read((offset - align) as u64, buf.as_mut()).await.expect("read failed"),
+            object.read_aligned((offset - align) as u64, buf.as_mut()).await.expect("read failed"),
             align + len
         );
         assert_eq!(&buf.as_ptr_slice().subslice(align..align + len).to_vec()[..], &vec![0u8; len]);
-        assert_eq!(
-            &buf.as_ptr_slice().subslice(align + len..buf.len()).to_vec()[..],
-            &vec![123u8; buf.len() - align - len]
+
+        // Unaligned offset should fail.
+        assert_matches!(
+            object.read_aligned((offset - align + 1) as u64, buf.as_mut()).await,
+            Err(e) if FxfsError::InvalidArgs.matches(&e)
         );
+
+        // Reading starting at or after EOF should return 0.
+        let aligned_eof = fs.block_size().align_up(TEST_OBJECT_SIZE).unwrap();
+        assert_eq!(object.read_aligned(aligned_eof, buf.as_mut()).await.expect("read failed"), 0);
+
+        // Also test read_bytes past EOF.
+        let data = object
+            .read_bytes(offset as u64..offset as u64 + len as u64 + 1)
+            .await
+            .expect("read_bytes failed");
+        assert_eq!(&data[..], &vec![0u8; len]);
+
         fs.close().await.expect("Close failed");
     }
 
@@ -2188,30 +2301,56 @@ mod tests {
         let offset = TEST_OBJECT_SIZE as usize - 2;
         let align = (offset as u64 % fs.block_size()) as usize;
         let len: usize = 2;
-        let mut buf = object.allocate_buffer(align + len + 1).await;
+        let block_size = fs.block_size().get() as usize;
+
+        // Unaligned buffer should fail.
+        let mut unaligned_buf = object.allocate_buffer(align + len + 1).await;
+        assert_matches!(
+            handle
+                .read_aligned(AttributeId::DATA, (offset - align) as u64, unaligned_buf.as_mut())
+                .await,
+            Err(e) if FxfsError::InvalidArgs.matches(&e)
+        );
+
+        let mut buf = object.allocate_buffer(block_size).await;
         buf.fill(123u8);
         assert_eq!(
             handle
-                .read(AttributeId::DATA, (offset - align) as u64, buf.as_mut())
+                .read_aligned(AttributeId::DATA, (offset - align) as u64, buf.as_mut())
                 .await
                 .expect("read failed"),
             align + len
         );
         assert_eq!(&buf.as_ptr_slice().subslice(align..align + len).to_vec()[..], &vec![0u8; len]);
-        assert_eq!(
-            &buf.as_ptr_slice().subslice(align + len..buf.len()).to_vec()[..],
-            &vec![123u8; buf.len() - align - len]
+
+        // Unaligned offset should fail.
+        assert_matches!(
+            handle
+                .read_aligned(AttributeId::DATA, (offset - align + 1) as u64, buf.as_mut())
+                .await,
+            Err(e) if FxfsError::InvalidArgs.matches(&e)
         );
+
+        // Reading starting at or after EOF should return 0.
+        let aligned_eof = fs.block_size().align_up(TEST_OBJECT_SIZE).unwrap();
+        assert_eq!(
+            handle
+                .read_aligned(AttributeId::DATA, aligned_eof, buf.as_mut())
+                .await
+                .expect("read failed"),
+            0
+        );
+
         fs.close().await.expect("Close failed");
     }
 
     #[fuchsia::test]
-    async fn test_beyond_eof_read_unchecked() {
+    async fn test_beyond_eof_read_aligned_unchecked() {
         let (fs, object) = test_filesystem_and_object().await;
         let offset = TEST_OBJECT_SIZE as usize - 2;
         let align = (offset as u64 % fs.block_size()) as usize;
-        let len: usize = 2;
-        let mut buf = object.allocate_buffer(align + len + 1).await;
+        let block_size = fs.block_size().get() as usize;
+        let mut buf = object.allocate_buffer(block_size).await;
         buf.fill(123u8);
         let guard = fs
             .lock_manager()
@@ -2222,13 +2361,27 @@ mod tests {
             )])
             .await;
         object
-            .read_unchecked(AttributeId::DATA, (offset - align) as u64, buf.as_mut(), &guard)
+            .read_aligned_unchecked(
+                AttributeId::DATA,
+                (offset - align) as u64,
+                buf.as_mut(),
+                &guard,
+            )
             .await
             .expect("read failed");
         assert_eq!(
-            &buf.as_ptr_slice().subslice(align..buf.len()).to_vec()[..],
-            &vec![0u8; len + 1]
+            &buf.as_ptr_slice().subslice(align..block_size).to_vec()[..],
+            &vec![0u8; block_size - align]
         );
+
+        // Reading entirely past EOF with read_aligned_unchecked fills with zeros.
+        let aligned_eof = fs.block_size().align_up(TEST_OBJECT_SIZE).unwrap();
+        buf.fill(123u8);
+        object
+            .read_aligned_unchecked(AttributeId::DATA, aligned_eof, buf.as_mut(), &guard)
+            .await
+            .expect("read failed");
+        assert_eq!(buf.to_vec(), vec![0u8; block_size]);
         fs.close().await.expect("Close failed");
     }
 
@@ -2237,13 +2390,25 @@ mod tests {
         let (fs, object) = test_filesystem_and_object().await;
         // Deliberately read not right to eof.
         let len = TEST_OBJECT_SIZE as usize - 1;
-        let mut buf = object.allocate_buffer(len).await;
-        buf.fill(123u8);
-        assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed"), len);
+        let data = object.read_bytes(0..len as u64).await.expect("read failed");
         let mut expected = vec![0; len];
         let offset = TEST_DATA_OFFSET as usize;
         expected[offset..offset + TEST_DATA.len()].copy_from_slice(TEST_DATA);
-        assert_eq!(&buf.as_ptr_slice().subslice(0..len).to_vec()[..], &expected[..]);
+        assert_eq!(&data[..], &expected[..]);
+
+        let aligned_len = fs.block_size().align_up(TEST_OBJECT_SIZE).unwrap() as usize;
+        let mut buf = object.allocate_buffer(aligned_len).await;
+        buf.fill(123u8);
+        assert_eq!(
+            object.read_aligned(0, buf.as_mut()).await.expect("read failed"),
+            TEST_OBJECT_SIZE as usize
+        );
+        let mut expected_aligned = vec![0; TEST_OBJECT_SIZE as usize];
+        expected_aligned[offset..offset + TEST_DATA.len()].copy_from_slice(TEST_DATA);
+        assert_eq!(
+            &buf.as_ptr_slice().subslice(0..TEST_OBJECT_SIZE as usize).to_vec()[..],
+            &expected_aligned[..]
+        );
         fs.close().await.expect("Close failed");
     }
 
@@ -2259,15 +2424,13 @@ mod tests {
         object.write_or_append(Some(0u64), buf.as_ref()).await.expect("write failed");
 
         let len = TEST_OBJECT_SIZE as usize - 1;
-        let mut buf = object.allocate_buffer(len).await;
-        buf.fill(123u8);
-        assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed"), len);
+        let data = object.read_bytes(0..len as u64).await.expect("read failed");
 
         let mut expected = vec![0u8; len];
         let offset = TEST_DATA_OFFSET as usize;
         expected[offset..offset + TEST_DATA.len()].copy_from_slice(TEST_DATA);
         expected[..TEST_DATA.len()].copy_from_slice(TEST_DATA);
-        assert_eq!(&buf.to_vec(), &expected);
+        assert_eq!(&data[..], &expected);
         fs.close().await.expect("Close failed");
     }
 
@@ -2294,20 +2457,16 @@ mod tests {
             .expect("write failed");
 
         const LEN1: usize = 1503;
-        let mut buf = object.allocate_buffer(LEN1).await;
-        buf.fill(123u8);
-        assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed"), LEN1);
+        let data1 = object.read_bytes(0..LEN1 as u64).await.expect("read failed");
         let mut expected = [0; LEN1];
         expected[..3].copy_from_slice(&TEST_DATA[..3]);
         expected[1500..].copy_from_slice(b"foo");
-        assert_eq!(&buf.to_vec(), &expected);
+        assert_eq!(&data1[..], &expected);
 
         // Also test a read that ends midway through the deleted extent.
         const LEN2: usize = 601;
-        let mut buf = object.allocate_buffer(LEN2).await;
-        buf.fill(123u8);
-        assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed"), LEN2);
-        assert_eq!(buf.to_vec(), &expected[..LEN2]);
+        let data2 = object.read_bytes(0..LEN2 as u64).await.expect("read failed");
+        assert_eq!(&data2[..], &expected[..LEN2]);
         fs.close().await.expect("Close failed");
     }
 
@@ -2348,7 +2507,10 @@ mod tests {
 
         let mut buffer = object.allocate_buffer(4 * block_size).await;
         buffer.fill(123);
-        assert_eq!(object.read(0, buffer.as_mut()).await.expect("read failed"), 3 * block_size);
+        assert_eq!(
+            object.read_aligned(0, buffer.as_mut()).await.expect("read failed"),
+            3 * block_size
+        );
         assert_eq!(
             &buffer.as_ptr_slice().subslice(0..2 * block_size).to_vec()[..],
             &vec![0xaf; 2 * block_size]
@@ -2357,7 +2519,10 @@ mod tests {
             &buffer.as_ptr_slice().subslice(2 * block_size..3 * block_size).to_vec()[..],
             &vec![0; block_size]
         );
-        assert_eq!(object2.read(0, buffer.as_mut()).await.expect("read failed"), 2 * block_size);
+        assert_eq!(
+            object2.read_aligned(0, buffer.as_mut()).await.expect("read failed"),
+            2 * block_size
+        );
         assert_eq!(
             &buffer.as_ptr_slice().subslice(0..2 * block_size).to_vec()[..],
             &vec![0xef; 2 * block_size]
@@ -2377,11 +2542,8 @@ mod tests {
 
         impl AlignTest {
             async fn new(object: DataObjectHandle<ObjectStore>) -> Self {
-                let mirror = {
-                    let mut buf = object.allocate_buffer(object.get_size() as usize).await;
-                    assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed"), buf.len());
-                    buf.to_vec()
-                };
+                let mirror =
+                    object.read_bytes(0..object.get_size()).await.expect("read failed").into_vec();
                 Self { fill: 0, object, mirror }
             }
 
@@ -2401,15 +2563,12 @@ mod tests {
                     self.mirror.resize(range.end as usize, 0);
                 }
                 self.mirror[range.start as usize..range.end as usize].fill(self.fill);
-                let mut buf = self.object.allocate_buffer(self.mirror.len() + 1).await;
-                assert_eq!(
-                    self.object.read(0, buf.as_mut()).await.expect("read failed"),
-                    self.mirror.len()
-                );
-                assert_eq!(
-                    &buf.as_ptr_slice().subslice(0..self.mirror.len()).to_vec()[..],
-                    self.mirror.as_slice()
-                );
+                let data = self
+                    .object
+                    .read_bytes(0..self.mirror.len() as u64 + 1)
+                    .await
+                    .expect("read failed");
+                assert_eq!(&data[..], self.mirror.as_slice());
             }
         }
 
@@ -2430,6 +2589,68 @@ mod tests {
         // Both unaligned (fills with 6 and 7).
         align.test(1..block_size - 1).await;
         align.test(1..2 * block_size - 1).await;
+
+        fs.close().await.expect("Close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_read_bytes_chunked() {
+        // 16MiB device size.
+        let device = DeviceHolder::new(FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let object = create_object_with_key(fs.clone(), Some(&new_insecure_crypt()), false).await;
+
+        const FILE_SIZE: usize = 5 * 1024 * 1024;
+        let mut data = vec![0u8; FILE_SIZE];
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+
+        const WRITE_CHUNK_SIZE: usize = 1024 * 1024;
+        let mut buf = object.allocate_buffer(WRITE_CHUNK_SIZE).await;
+        for chunk in (0..FILE_SIZE).step_by(WRITE_CHUNK_SIZE) {
+            let end = std::cmp::min(chunk + WRITE_CHUNK_SIZE, FILE_SIZE);
+            buf.subslice_mut(..end - chunk).copy_from_slice(&data[chunk..end]);
+            object
+                .write_or_append(Some(chunk as u64), buf.subslice(..end - chunk))
+                .await
+                .expect("write failed");
+        }
+
+        // Read full file (> 2 MiB, requires multiple 2 MiB chunks).
+        let read_data = object.read_bytes(0..FILE_SIZE as u64).await.expect("read_bytes failed");
+        assert_eq!(&read_data[..], &data[..]);
+
+        // Read an unaligned range that spans multiple 2 MiB chunks.
+        let range = 123_456..4_718_592;
+        let read_data = object.read_bytes(range.clone()).await.expect("read_bytes failed");
+        assert_eq!(&read_data[..], &data[range.start as usize..range.end as usize]);
+
+        // Read an unaligned range that straddles the 2 MiB boundary.
+        let range = (2 * 1024 * 1024 - 500)..(2 * 1024 * 1024 + 500);
+        let read_data = object.read_bytes(range.clone()).await.expect("read_bytes failed");
+        assert_eq!(&read_data[..], &data[range.start as usize..range.end as usize]);
+
+        // Read past EOF.
+        let range = (FILE_SIZE as u64 - 100)..(FILE_SIZE as u64 + 1000);
+        let read_data = object.read_bytes(range).await.expect("read_bytes failed");
+        assert_eq!(&read_data[..], &data[(FILE_SIZE - 100)..]);
+
+        // Read entirely past EOF.
+        let range = (FILE_SIZE as u64 + 10)..(FILE_SIZE as u64 + 100);
+        let read_data = object.read_bytes(range).await.expect("read_bytes failed");
+        assert!(read_data.is_empty());
+
+        // Test contents() method.
+        assert!(object.contents(FILE_SIZE - 1).await.is_err());
+        let contents = object.contents(usize::MAX).await.expect("contents failed");
+        assert_eq!(&contents[..], &data[..]);
+
+        // Test read_bytes with empty ranges.
+        let empty = object.read_bytes(0..0).await.expect("read_bytes failed");
+        assert!(empty.is_empty());
+        let empty = object.read_bytes(100..100).await.expect("read_bytes failed");
+        assert!(empty.is_empty());
 
         fs.close().await.expect("Close failed");
     }
@@ -2474,8 +2695,8 @@ mod tests {
         assert_eq!(allocator.get_allocated_bytes(), allocated_after);
 
         // Read back the data and make sure it is what we expect.
-        let mut buf = object.allocate_buffer(104876).await;
-        assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed"), buf.len());
+        let mut buf = object.allocate_buffer(1048576).await;
+        assert_eq!(object.read_aligned(0, buf.as_mut()).await.expect("read failed"), buf.len());
         assert_eq!(
             &buf.as_ptr_slice().subslice(0..TEST_DATA_OFFSET as usize).to_vec()[..],
             &[47; TEST_DATA_OFFSET as usize]
@@ -2601,7 +2822,7 @@ mod tests {
         // even with allocations disabled...
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(0, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(0, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[0; 4096]);
         }
         object
@@ -2610,7 +2831,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(0, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(0, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
 
@@ -2633,7 +2854,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(4096, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(4096, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
 
@@ -2713,7 +2934,7 @@ mod tests {
         // But we should be able to overwrite in the prealloc'd areas without needing allocations
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(4096, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(4096, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[0; 4096]);
         }
         object
@@ -2722,12 +2943,12 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(4096, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(4096, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(16384, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(16384, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[0; 4096]);
         }
         object
@@ -2736,12 +2957,12 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(16384, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(16384, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(65536, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(65536, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[0; 4096]);
         }
         object
@@ -2750,12 +2971,12 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(65536, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(65536, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(262144, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(262144, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[0; 4096]);
         }
         object
@@ -2764,7 +2985,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(262144, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(262144, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
 
@@ -2788,7 +3009,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(524288).await;
-            object.read(0, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(0, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[96; 524288]);
         }
 
@@ -2842,7 +3063,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(0, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(0, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
 
@@ -2863,7 +3084,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(4096, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(4096, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
 
@@ -2919,7 +3140,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(last_block_offset, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(last_block_offset, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
 
@@ -2944,7 +3165,7 @@ mod tests {
             .expect("overwrite failed");
         {
             let mut read_buf = object.allocate_buffer(4096).await;
-            object.read(next_block_offset, read_buf.as_mut()).await.expect("read failed");
+            object.read_aligned(next_block_offset, read_buf.as_mut()).await.expect("read failed");
             assert_eq!(&read_buf.to_vec()[..], &[95; 4096]);
         }
 
@@ -3041,7 +3262,10 @@ mod tests {
         let mut buf = handle.allocate_buffer(WRITE_ATTR_BATCH_SIZE).await;
         offset = 0;
         for _ in 0..130 {
-            handle.read(offset, buf.as_mut()).await.expect("verification during read should fail");
+            handle
+                .read_aligned(offset, buf.as_mut())
+                .await
+                .expect("verification during read should fail");
             assert_eq!(buf.to_vec(), &[1; WRITE_ATTR_BATCH_SIZE]);
             offset += WRITE_ATTR_BATCH_SIZE as u64;
         }
@@ -3179,7 +3403,14 @@ mod tests {
         // Change file contents and ensure verification fails
         buf.fill(234);
         object.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
-        object.read(0, buf.as_mut()).await.expect_err("verification during read should fail");
+        object
+            .read_aligned(0, buf.as_mut())
+            .await
+            .expect_err("verification during read should fail");
+        object
+            .read_bytes(0..buf.len() as u64)
+            .await
+            .expect_err("verification during read_bytes should fail");
 
         fs.close().await.expect("Close failed");
     }
@@ -3298,7 +3529,7 @@ mod tests {
 
         let mut buf = object.allocate_buffer(file_size as usize).await;
         assert_eq!(
-            handle.read(0, buf.as_mut()).await.expect("Read whole file."),
+            handle.read_aligned(0, buf.as_mut()).await.expect("Read whole file."),
             file_size as usize
         );
 
@@ -3341,7 +3572,7 @@ mod tests {
                 })
                 .await
                 .expect("set verified file metadata failed");
-            object.read(0, buf.as_mut()).await.expect("verified read");
+            object.read_aligned(0, buf.as_mut()).await.expect("verified read");
 
             // Corrupt the merkle tree before closing.
             let mut merkle = object
@@ -3439,7 +3670,7 @@ mod tests {
         buf.fill(123);
         handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
         buf.fill(67);
-        handle.read(0, buf.as_mut()).await.expect("read failed");
+        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
         assert_eq!(buf.to_vec(), vec![123; 5 * fs.block_size().get() as usize]);
         fs.close().await.expect("Close failed");
     }
@@ -3475,7 +3706,10 @@ mod tests {
 
         let mut buf = object.allocate_buffer(fs.block_size().get() as usize).await;
         let offset = (TEST_DATA_OFFSET % fs.block_size()) as usize;
-        object.read(TEST_DATA_OFFSET - offset as u64, buf.as_mut()).await.expect("read failed");
+        object
+            .read_aligned(TEST_DATA_OFFSET - offset as u64, buf.as_mut())
+            .await
+            .expect("read failed");
 
         let mut expected = TEST_DATA.to_vec();
         expected[3..].fill(0);
@@ -3599,7 +3833,7 @@ mod tests {
                     object.truncate(object_size).await.expect("truncate failed");
                     let mut buf = object.allocate_buffer(block_size.get() as usize).await;
                     object
-                        .read(object_size - block_size * 2, buf.as_mut())
+                        .read_aligned(object_size - block_size * 2, buf.as_mut())
                         .await
                         .expect("read failed");
                     assert_eq!(buf.to_vec(), vec![0; block_size.get() as usize]);
@@ -3853,15 +4087,11 @@ mod tests {
             async {
                 recv1.await.unwrap();
                 // Reads should not block.
-                let offset = TEST_DATA_OFFSET as usize;
-                let align = (offset as u64 % fs.block_size()) as usize;
-                let len = TEST_DATA.len();
-                let mut buf = object.allocate_buffer(align + len).await;
-                assert_eq!(
-                    object.read((offset - align) as u64, buf.as_mut()).await.expect("read failed"),
-                    align + TEST_DATA.len()
-                );
-                assert_eq!(&buf.as_ptr_slice().subslice(align..buf.len()).to_vec()[..], TEST_DATA);
+                let data = object
+                    .read_bytes(TEST_DATA_OFFSET..(TEST_DATA_OFFSET + TEST_DATA.len() as u64))
+                    .await
+                    .expect("read failed");
+                assert_eq!(&*data, TEST_DATA);
                 // Tell the first future to continue.
                 send2.send(()).unwrap();
             }
@@ -3872,9 +4102,8 @@ mod tests {
                 // This should block until the first future has completed.
                 recv3.await.unwrap();
                 let _t = object.new_transaction().await.expect("new_transaction failed");
-                let mut buf = object.allocate_buffer(5).await;
-                assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed"), 5);
-                assert_eq!(buf.to_vec(), b"hello");
+                let data = object.read_bytes(0..5).await.expect("read failed");
+                assert_eq!(&*data, b"hello");
             }
             .boxed(),
         );
@@ -3909,16 +4138,18 @@ mod tests {
             let reader = fasync::Task::spawn(async move {
                 let wait_time = rand::random_range(0..5);
                 fasync::Timer::new(Duration::from_millis(wait_time)).await;
-                let mut buf = cloned_object.allocate_buffer(10).await;
+                let mut buf =
+                    cloned_object.allocate_buffer(cloned_object.block_size().get() as usize).await;
                 buf.fill(23);
-                let amount = cloned_object.read(0, buf.as_mut()).await.expect("write failed");
+                let amount =
+                    cloned_object.read_aligned(0, buf.as_mut()).await.expect("read failed");
                 // If we succeed in reading data, it must include the write; i.e. if we see the size
                 // change, we should see the data too.  For this to succeed it requires locking on
                 // the read size to ensure that when we read the size, we get the extents changed in
                 // that same transaction.
                 if amount != 0 {
                     assert_eq!(amount, 10);
-                    assert_eq!(buf.to_vec(), &[123; 10]);
+                    assert_eq!(&buf.as_ptr_slice().subslice(0..10).to_vec()[..], &[123; 10]);
                 }
             });
             writer.await;
@@ -3985,7 +4216,10 @@ mod tests {
         transaction.commit().await.expect("commit failed");
         assert_eq!(object.get_size(), expected_size);
         let mut buf = object.allocate_buffer((fs.block_size() * 10) as usize).await;
-        assert_eq!(object.read(0, buf.as_mut()).await.expect("read failed") as u64, expected_size);
+        assert_eq!(
+            object.read_aligned(0, buf.as_mut()).await.expect("read failed") as u64,
+            expected_size
+        );
         assert_eq!(
             &buf.as_ptr_slice().subslice(0..expected_size as usize).to_vec()[..],
             vec![0u8; expected_size as usize].as_slice()
@@ -4201,38 +4435,60 @@ mod tests {
     }
 
     #[fuchsia::test(threads = 10)]
+    async fn test_read_write_attr_unaligned() {
+        let (_fs, object) = test_filesystem_and_object().await;
+        let data_unaligned = [0x55u8; 5000];
+        object.write_attr(AttributeId(22), &data_unaligned).await.expect("write_attr failed");
+        let rdata = object
+            .read_attr(AttributeId(22))
+            .await
+            .expect("read_attr failed")
+            .expect("no attribute data found");
+        assert_eq!(&data_unaligned[..], &rdata[..]);
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_read_write_attr_empty() {
+        let (_fs, object) = test_filesystem_and_object().await;
+        object.write_attr(AttributeId(23), &[]).await.expect("write_attr failed");
+        let rdata = object
+            .read_attr(AttributeId(23))
+            .await
+            .expect("read_attr failed")
+            .expect("no attribute data found");
+        assert!(rdata.is_empty());
+    }
+
+    #[fuchsia::test(threads = 10)]
     async fn test_allocate_basic() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let block_size = fs.block_size();
         let file_size = block_size * 10;
         object.truncate(file_size).await.unwrap();
 
-        let small_buf_size = 1024;
-        let large_buf_aligned_size = (block_size * 2) as usize;
-        let large_buf_size = (block_size * 2 + 1024) as usize;
+        let small_buf_size = block_size.get() as usize;
+        let medium_buf_size = (block_size * 2) as usize;
+        let large_buf_size = (block_size * 3) as usize;
 
         let mut small_buf = object.allocate_buffer(small_buf_size).await;
-        let mut large_buf_aligned = object.allocate_buffer(large_buf_aligned_size).await;
+        let mut medium_buf = object.allocate_buffer(medium_buf_size).await;
         let mut large_buf = object.allocate_buffer(large_buf_size).await;
 
-        assert_eq!(object.read(0, small_buf.as_mut()).await.unwrap(), small_buf_size);
+        assert_eq!(object.read_aligned(0, small_buf.as_mut()).await.unwrap(), small_buf_size);
         assert_eq!(small_buf.to_vec(), vec![0; small_buf_size]);
-        assert_eq!(object.read(0, large_buf.as_mut()).await.unwrap(), large_buf_size);
+        assert_eq!(object.read_aligned(0, large_buf.as_mut()).await.unwrap(), large_buf_size);
         assert_eq!(large_buf.to_vec(), vec![0; large_buf_size]);
-        assert_eq!(
-            object.read(0, large_buf_aligned.as_mut()).await.unwrap(),
-            large_buf_aligned_size
-        );
-        assert_eq!(large_buf_aligned.to_vec(), vec![0; large_buf_aligned_size]);
+        assert_eq!(object.read_aligned(0, medium_buf.as_mut()).await.unwrap(), medium_buf_size);
+        assert_eq!(medium_buf.to_vec(), vec![0; medium_buf_size]);
 
         // Allocation succeeds, and without any writes to the location it shows up as zero.
         object.allocate(block_size.get()..block_size * 3).await.unwrap();
 
         // Test starting before, inside, and after the allocated section with every sized buffer.
-        for (buf_index, buf) in [small_buf, large_buf, large_buf_aligned].iter_mut().enumerate() {
+        for (buf_index, buf) in [small_buf, large_buf, medium_buf].iter_mut().enumerate() {
             for offset in 0..4 {
                 assert_eq!(
-                    object.read(block_size * offset, buf.as_mut()).await.unwrap(),
+                    object.read_aligned(block_size * offset, buf.as_mut()).await.unwrap(),
                     buf.len(),
                     "buf_index: {}, read offset: {}",
                     buf_index,
@@ -4253,46 +4509,46 @@ mod tests {
 
     #[fuchsia::test(threads = 10)]
     async fn test_allocate_extends_file() {
-        const BUF_SIZE: usize = 1024;
         let (fs, object) = test_filesystem_and_empty_object().await;
-        let mut buf = object.allocate_buffer(BUF_SIZE).await;
         let block_size = fs.block_size();
+        let buf_size = block_size.get() as usize;
+        let mut buf = object.allocate_buffer(buf_size).await;
 
-        assert_eq!(object.read(0, buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
+        assert_eq!(object.read_aligned(0, buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
 
         assert!(TEST_OBJECT_SIZE < block_size * 4);
         // Allocation succeeds, and without any writes to the location it shows up as zero.
         object.allocate(0..block_size * 4).await.unwrap();
-        assert_eq!(object.read(0, buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
-        assert_eq!(object.read(block_size.get(), buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
-        assert_eq!(object.read(block_size * 3, buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
+        assert_eq!(object.read_aligned(0, buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
+        assert_eq!(object.read_aligned(block_size.get(), buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
+        assert_eq!(object.read_aligned(block_size * 3, buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
 
         fs.close().await.expect("close failed");
     }
 
     #[fuchsia::test(threads = 10)]
     async fn test_allocate_past_end() {
-        const BUF_SIZE: usize = 1024;
         let (fs, object) = test_filesystem_and_empty_object().await;
-        let mut buf = object.allocate_buffer(BUF_SIZE).await;
         let block_size = fs.block_size();
+        let buf_size = block_size.get() as usize;
+        let mut buf = object.allocate_buffer(buf_size).await;
 
-        assert_eq!(object.read(0, buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
+        assert_eq!(object.read_aligned(0, buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
 
         assert!(TEST_OBJECT_SIZE < block_size * 4);
         // Allocation succeeds, and without any writes to the location it shows up as zero.
         object.allocate(block_size * 4..block_size * 6).await.unwrap();
-        assert_eq!(object.read(0, buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
-        assert_eq!(object.read(block_size * 4, buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
-        assert_eq!(object.read(block_size * 5, buf.as_mut()).await.unwrap(), buf.len());
-        assert_eq!(buf.to_vec(), &[0; BUF_SIZE]);
+        assert_eq!(object.read_aligned(0, buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
+        assert_eq!(object.read_aligned(block_size * 4, buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
+        assert_eq!(object.read_aligned(block_size * 5, buf.as_mut()).await.unwrap(), buf.len());
+        assert_eq!(buf.to_vec(), vec![0; buf_size]);
 
         fs.close().await.expect("close failed");
     }
@@ -4359,7 +4615,10 @@ mod tests {
             }
 
             let mut expected_buf = object.allocate_buffer(file_size as usize).await;
-            assert_eq!(object.read(0, expected_buf.as_mut()).await.unwrap(), expected_buf.len());
+            assert_eq!(
+                object.read_aligned(0, expected_buf.as_mut()).await.unwrap(),
+                expected_buf.len()
+            );
 
             object
                 .allocate(
@@ -4369,7 +4628,7 @@ mod tests {
                 .unwrap();
 
             let mut read_buf = object.allocate_buffer(file_size as usize).await;
-            assert_eq!(object.read(0, read_buf.as_mut()).await.unwrap(), read_buf.len());
+            assert_eq!(object.read_aligned(0, read_buf.as_mut()).await.unwrap(), read_buf.len());
             assert_eq!(read_buf.to_vec(), expected_buf.to_vec());
 
             fs.close().await.expect("close failed");
@@ -4645,7 +4904,7 @@ mod tests {
 
                 let mut expected_buf = object.allocate_buffer(file_size as usize).await;
                 assert_eq!(
-                    object.read(0, expected_buf.as_mut()).await.unwrap(),
+                    object.read_aligned(0, expected_buf.as_mut()).await.unwrap(),
                     expected_buf.len()
                 );
                 let mut expected_buf_slice = expected_buf.as_mut_ptr_slice();
@@ -4686,7 +4945,7 @@ mod tests {
 
                 let mut buf = object.allocate_buffer(file_size as usize).await;
                 assert_eq!(
-                    object.read(0, buf.as_mut()).await.unwrap(),
+                    object.read_aligned(0, buf.as_mut()).await.unwrap(),
                     buf.len(),
                     "failed length check on case {}",
                     i,

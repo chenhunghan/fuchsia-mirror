@@ -111,9 +111,8 @@ _SDK_TEMPLATES = {
     "api_level_flag": "//fuchsia/workspace/sdk_templates:api_level_flags.template",
     "bind_library": "//fuchsia/workspace/sdk_templates:bind_library.BUILD.template",
     "cc_library": "//fuchsia/workspace/sdk_templates:cc_library.BUILD.template",
-    "cc_prebuilt_library": "//fuchsia/workspace/sdk_templates:cc_prebuilt_library.BUILD.template",
-    "cc_prebuilt_library_linklib": "//fuchsia/workspace/sdk_templates:cc_prebuilt_library_linklib_sub.BUILD.template",
-    "cc_prebuilt_library_distlib": "//fuchsia/workspace/sdk_templates:cc_prebuilt_library_distlib_sub.BUILD.template",
+    "cc_prebuilt_library_static": "//fuchsia/workspace/sdk_templates:cc_prebuilt_library_static.BUILD.template",
+    "cc_prebuilt_library_shared": "//fuchsia/workspace/sdk_templates:cc_prebuilt_library_shared.BUILD.template",
     "companion_host_tool": "//fuchsia/workspace/sdk_templates:companion_host_tool.BUILD.template",
     "component_manifest": "//fuchsia/workspace/sdk_templates:component_manifest.BUILD.template",
     "component_manifest_collection": "//fuchsia/workspace/sdk_templates:component_manifest_collection.BUILD.template",
@@ -1033,10 +1032,6 @@ def _generate_cc_prebuilt_library_build_rules(
     process_context.files_to_copy[meta_sdk_root].extend(files)
 
     prebuilt_variants = []
-    prebuilt_select = {}
-    dist_select = {}
-
-    has_distlibs = False
 
     # Process the arch directories first then the variants, so that the variants
     # will override the arch directories when both are present.
@@ -1045,19 +1040,14 @@ def _generate_cc_prebuilt_library_build_rules(
 
     # Process "binaries" if present.
     if "binaries" in meta:
-        # add all supported architectures to the select, even if they are not available in the current SDK,
-        # so that SDKs for different architectures can be composed by a simple directory merge.
         for arch in process_context.constants.target_cpus:
             prebuilt_variants.append(
                 runtime.make_struct(
-                    name = "%s-HEAD" % (arch),
                     link_lib = meta["binaries"][arch]["link"],
                     constraint = "@fuchsia_sdk//constraints:is_%s_api_HEAD" % (arch),
                     arch = arch,
                     api_level = "HEAD",
-                    has_debug = "debug" in meta["binaries"][arch],
                     debug = meta["binaries"][arch].get("debug", None),
-                    has_dist_lib = "dist" in meta["binaries"][arch],
                     dist_lib = meta["binaries"][arch].get("dist", None),
                     dist_lib_dest = meta["binaries"][arch].get("dist_path", None),
                 ),
@@ -1072,101 +1062,89 @@ def _generate_cc_prebuilt_library_build_rules(
 
             prebuilt_variants.append(
                 runtime.make_struct(
-                    name = "%s-api-%s" % (arch, api_level),
                     link_lib = values["link_lib"],
                     constraint = "@fuchsia_sdk//constraints:is_%s_api_%s" %
                                  (arch, api_level),
                     arch = arch,
                     api_level = api_level,
-                    has_debug = "debug" in values,
                     debug = values.get("debug", None),
-                    has_dist_lib = "dist_lib" in values,
                     dist_lib = values.get("dist_lib", None),
                     dist_lib_dest = values.get("dist_lib_dest", None),
                 ),
             )
 
-    for variant in prebuilt_variants:
-        constraint = "@fuchsia_sdk//constraints:is_%s_api_%s" % (
-            variant.arch,
-            variant.api_level,
-        )
-        dist_select[constraint] = [
-            "//%s/%s:dist" % (relative_dir, variant.name),
-        ]
-        prebuilt_select[constraint] = [
-            "//%s/%s:prebuilts" % (relative_dir, variant.name),
-        ]
+    prebuilt_variants = sorted(prebuilt_variants, key = lambda v: v.constraint)
 
-        per_arch_x_api_build_file = build_file.dirname.get_child(
-            variant.name,
-        ).get_child("BUILD.bazel")
-        ctx.file(per_arch_x_api_build_file, content = _header(), executable = False)
+    link_lib_select = {
+        variant.constraint: variant.link_lib
+        for variant in prebuilt_variants
+    }
+    dist_lib_select = {
+        variant.constraint: variant.dist_lib
+        for variant in prebuilt_variants
+    } if meta["format"] == "shared" else {}
+    debug_lib_select = {
+        variant.constraint: variant.debug or variant.dist_lib
+        for variant in prebuilt_variants
+    } if meta["format"] == "shared" else {}
+    dist_lib_path_select = {
+        variant.constraint: variant.dist_lib_dest
+        for variant in prebuilt_variants
+    } if meta["format"] == "shared" else {}
 
+    process_context.files_to_copy[meta_sdk_root].extend(
+        list(
+            set(link_lib_select.values()) |
+            set(dist_lib_select.values()) |
+            set(debug_lib_select.values()),
+        ),
+    )
+
+    # Generate BUILD file
+    if meta["format"] == "static":
         _merge_template(
             ctx,
-            per_arch_x_api_build_file,
-            _sdk_template_path(runtime, "cc_prebuilt_library_linklib"),
-            {
-                "{{link_lib}}": _final_bazel_path(variant.link_lib),
-                "{{library_type}}": meta["format"],
+            build_file,
+            _sdk_template_path(
+                runtime,
+                "cc_prebuilt_library_static",
+            ),
+            subs | {
+                "{{static_lib_select}}": _get_starlark_dict(
+                    runtime,
+                    {k: _final_bazel_path(v) for k, v in link_lib_select.items()},
+                ),
             },
         )
-        process_context.files_to_copy[meta_sdk_root].append(
-            variant.link_lib,
-        )
-
-        if variant.has_dist_lib:
-            has_distlibs = True
-            dist_lib = variant.dist_lib
-            process_context.files_to_copy[meta_sdk_root].append(
-                dist_lib,
-            )
-
-            debug_lib = variant.debug if variant.has_debug else dist_lib
-            _merge_template(
-                ctx,
-                per_arch_x_api_build_file,
-                _sdk_template_path(
+    elif meta["format"] == "shared":
+        _merge_template(
+            ctx,
+            build_file,
+            _sdk_template_path(
+                runtime,
+                "cc_prebuilt_library_shared",
+            ),
+            subs | {
+                "{{interface_lib_select}}": _get_starlark_dict(
                     runtime,
-                    "cc_prebuilt_library_distlib",
+                    {k: _final_bazel_path(v) for k, v in link_lib_select.items()},
                 ),
-                {
-                    "{{stripped_file}}": _final_bazel_path(dist_lib),
-                    "{{unstripped_file}}": _final_bazel_path(debug_lib),
-                    "{{dist_path}}": variant.dist_lib_dest,
-                },
-            )
-            if debug_lib != dist_lib:
-                process_context.files_to_copy[meta_sdk_root].append(debug_lib)
-
-    # Apply the results.
-
-    prebuilt_select_str = (
-        "variant_select(" + _get_starlark_dict(runtime, prebuilt_select) + ")"
-    )
-
-    # Assumption: if one architecture doesn't have distlib binaries for this library,
-    # the other architectures will also not have them.
-    if has_distlibs:
-        dist_select_str = (
-            "variant_select(" + _get_starlark_dict(runtime, dist_select) + ")"
+                "{{stripped_lib_select}}": _get_starlark_dict(
+                    runtime,
+                    {k: _final_bazel_path(v) for k, v in dist_lib_select.items()},
+                ),
+                "{{unstripped_lib_select}}": _get_starlark_dict(
+                    runtime,
+                    {k: _final_bazel_path(v) for k, v in debug_lib_select.items()},
+                ),
+                "{{dist_path_select}}": _get_starlark_dict(
+                    runtime,
+                    dist_lib_path_select,
+                ),
+            },
         )
     else:
-        dist_select_str = "[]"
-
-    subs.update(
-        {
-            "{{prebuilt_select}}": prebuilt_select_str,
-            "{{dist_select}}": dist_select_str,
-        },
-    )
-    _merge_template(
-        ctx,
-        build_file,
-        _sdk_template_path(runtime, "cc_prebuilt_library"),
-        subs,
-    )
+        runtime.fail("Internal SDK generation error: unknown library format: %s" % (meta["format"]))
 
 # buildifier: disable=unused-variable
 def _generate_package_build_rules(

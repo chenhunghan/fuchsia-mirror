@@ -10,10 +10,6 @@ group("tests") {
   deps = [ ":starnix-fastrpc-tests" ]
 }
 
-fuchsia_package_with_single_component("google_fastrpc") {
-  manifest = "meta/fastrpc.cml"
-}
-
 rustc_library("fastrpc") {
   name = "starnix-modules-fastrpc"
   edition = "2024"

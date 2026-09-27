@@ -41,7 +41,10 @@ rustc_library("lib") {
   sources = [ "src/lib.rs" ]
   crate_name = "compat_info"
   edition = "2024"
-  visibility = [ "//src/developer/*" ]
+  visibility = [
+    ":*",
+    "//src/developer/*",
+  ]
   with_unit_tests = true
   deps = [
     "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust",

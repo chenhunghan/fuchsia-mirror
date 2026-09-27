@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use async_trait::async_trait;
-use daemonize::daemonize;
 use ffx_config::EnvironmentContext;
+use ffx_config::logging::LogDirHandling;
 use ffx_repository_server_start_args::StartCommand;
 use ffx_writer::VerifiedMachineWriter;
 use fho::{Deferred, FfxMain, FfxTool, Result};
@@ -13,6 +13,8 @@ use pkg::config::DEFAULT_REPO_NAME;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 use target_connector::Connector;
 use target_holders::{HostAddrHolder, RemoteControlProxyHolder, TargetInfoQueryHolder};
@@ -82,12 +84,16 @@ pub enum RepoStartError {
     MutuallyExclusiveArgs,
 
     #[exit_with_code(1)]
-    #[error("Cannot daemonize repository server without a log file basename")]
+    #[error("Cannot start background repository server without a log file basename")]
     MissingLogBasename,
 
     #[exit_with_code(1)]
-    #[error("Daemonization failed: {0}")]
-    Daemonize(#[from] daemonize::DaemonizeError),
+    #[error("Context error: {0}")]
+    Context(#[from] ffx_config::environment::ContextError),
+
+    #[exit_with_code(1)]
+    #[error("Logging error: {0}")]
+    Logging(#[from] ffx_config::logging::LoggingError),
 
     #[exit_with_code(1)]
     #[error("Failed to run foreground repository server: {0}")]
@@ -185,7 +191,7 @@ impl FfxMain for ServerStartTool {
                                 60
                             });
 
-                        daemonize(&args, log_basename, self.context.clone(), true).await?;
+                        daemonize(&self.context, &args, &log_basename)?;
 
                         let addr = server::wait_for_start(
                             self.context.clone(),
@@ -194,7 +200,7 @@ impl FfxMain for ServerStartTool {
                         )
                         .await
                         .map_err(RepoStartError::ServerStartTimeout)?;
-                        log::debug!("Daemonized server started successfully");
+                        log::debug!("Background server started successfully");
                         Some(addr)
                     } else {
                         return Err(RepoStartError::MissingLogBasename);
@@ -223,6 +229,46 @@ impl FfxMain for ServerStartTool {
         );
         Some(basename)
     }
+}
+
+/// Spawns the repository server in the background as a detached subprocess.
+fn daemonize(
+    context: &EnvironmentContext,
+    args: &[String],
+    log_basename: &str,
+) -> Result<(), RepoStartError> {
+    let mut cmd = context.rerun_prefix()?;
+    cmd.args(args);
+
+    let mut stdout = Stdio::null();
+    let mut stderr = Stdio::null();
+
+    if ffx_config::logging::is_enabled(context) {
+        let file = PathBuf::from(format!("{log_basename}.log"));
+        stdout = Stdio::from(ffx_config::logging::log_file(
+            context,
+            &file,
+            LogDirHandling::WithDirWithRotate,
+        )?);
+        // Do not rotate the log file a second time for stderr.
+        stderr = Stdio::from(ffx_config::logging::log_file(
+            context,
+            &file,
+            LogDirHandling::WithDirWithoutRotate,
+        )?);
+    }
+
+    cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr).env("RUST_BACKTRACE", "full");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    log::info!("Starting new background process {:?} {:?}", cmd.get_program(), cmd.get_args());
+    let _ = cmd.spawn()?;
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

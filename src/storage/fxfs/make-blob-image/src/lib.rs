@@ -16,7 +16,7 @@ use fxfs::blob_metadata::{
 };
 use fxfs::errors::FxfsError;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem};
-use fxfs::object_handle::{ObjectHandle, WriteBytes};
+use fxfs::object_handle::WriteBytes;
 use fxfs::object_store::directory::Directory;
 use fxfs::object_store::journal::RESERVED_SPACE;
 use fxfs::object_store::journal::super_block::SuperBlockInstance;
@@ -39,8 +39,6 @@ use storage_units::BlockSize;
 pub const BLOB_VOLUME_NAME: &str = "blob";
 
 const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
-
-const READ_BUFFER_BLOCKS: u64 = 512;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct BlobsJsonOutputEntry {
@@ -512,18 +510,7 @@ pub async fn extract_blobs(image: PathBuf, out_dir: PathBuf) -> anyhow::Result<(
             }
             let out_path = out_dir.join(name);
             let mut file = std::fs::File::create(&out_path)?;
-            let mut read_buf = Vec::new();
-            let mut offset = 0;
-            let mut buf =
-                handle.allocate_buffer((handle.block_size() * READ_BUFFER_BLOCKS) as usize).await;
-            loop {
-                let bytes = handle.read(offset, buf.as_mut()).await?;
-                if bytes == 0 {
-                    break;
-                }
-                offset += bytes as u64;
-                buf.subslice(..bytes).append_to(&mut read_buf);
-            }
+            let read_buf = handle.contents(usize::MAX).await?;
 
             let metadata = BlobMetadata::read_from(&handle).await?;
             blob_extraction_futures.push(fasync::unblock(move || -> Result<(), Error> {

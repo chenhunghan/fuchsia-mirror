@@ -50,7 +50,10 @@ source_set("io") {
     "//sdk/lib/fdio",
     "//src/zircon/lib/zircon",
   ]
-  visibility = [ "//src/lib/fsl/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/fsl/*",
+  ]
   public_deps = [
     "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
     "//sdk/lib/async:async-cpp",

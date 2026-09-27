@@ -14,7 +14,6 @@ ffx_plugin("ffx_doctor") {
   deps = [
     "//src/developer/ffx/command:lib",
     "//src/developer/ffx/config:lib",
-    "//src/developer/ffx/fidl:fuchsia.developer.ffx_rust",
     "//src/developer/ffx/lib/diagnostics:lib",
     "//src/developer/ffx/lib/diagnostics/checks:lib",
     "//src/developer/ffx/lib/discovery:lib",
@@ -71,4 +70,9 @@ ffx_plugin("ffx_doctor") {
     "src/types.rs",
     "src/usb.rs",
   ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":ffx_doctor_tests($host_toolchain)" ]
 }

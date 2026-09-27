@@ -1687,6 +1687,7 @@ TEST(State, GetStatsTest) {
   EXPECT_EQ(1u, stats.allocated_blocks);
   EXPECT_EQ(0u, stats.deallocated_blocks);
   EXPECT_EQ(0u, stats.failed_allocations);
+  EXPECT_EQ(32u, stats.peak_bytes_requested);
 }
 
 TEST(State, GetStatsWithFailedAllocationTest) {
@@ -1704,6 +1705,7 @@ TEST(State, GetStatsWithFailedAllocationTest) {
   EXPECT_EQ(2u, stats.allocated_blocks);
   EXPECT_EQ(1u, stats.deallocated_blocks);
   EXPECT_EQ(1u, stats.failed_allocations);
+  EXPECT_EQ(4128u, stats.peak_bytes_requested);
 
   fbl::WAVLTree<BlockIndex, std::unique_ptr<ScannedBlock>> blocks;
   size_t free_blocks, allocated_blocks;

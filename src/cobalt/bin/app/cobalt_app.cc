@@ -207,8 +207,8 @@ CobaltApp::CobaltApp(
     : context_(std::move(context)),
       inspect_node_(std::move(inspect_node)),
       inspect_config_node_(std::move(inspect_config_node)),
-      cobalt_service_(std::move(cobalt_service)),
       validated_clock_(std::move(validated_clock)),
+      cobalt_service_(std::move(cobalt_service)),
       current_channel_provider_(
           CreateCurrentChannelProvider(dispatcher, inspect_node_.CreateChild("system_data"),
                                        cobalt_service_->system_data()->channel())) {

@@ -78,7 +78,8 @@ class TransferRequestProcessor : public RequestProcessor {
   // released, regardless of whether the request is successfully submitted or fails early.
   void SendIoScsiCmd(ScsiCommandUpiu &request, uint8_t lun, uint8_t slot, zx::unowned_vmo data_vmo,
                      uint64_t dma_offset, uint64_t dma_length,
-                     fit::callback<void(zx_status_t)> completion_cb);
+                     fit::callback<void(zx_status_t)> completion_cb,
+                     block_server::internal::InlineCryptoOptions inline_crypto = {});
 
   // This function is a wrapper function that sends a query request UPIU.
   zx::result<std::unique_ptr<QueryResponseUpiu>> SendQueryRequestUpiu(QueryRequestUpiu &request);
@@ -110,7 +111,8 @@ class TransferRequestProcessor : public RequestProcessor {
   template <class RequestType>
   void SendRequestUsingSlot(RequestType &request, uint8_t lun, uint8_t slot,
                             zx::unowned_vmo data_vmo, uint64_t dma_offset, uint64_t dma_length,
-                            fit::callback<void(zx_status_t)> completion_cb);
+                            fit::callback<void(zx_status_t)> completion_cb,
+                            block_server::internal::InlineCryptoOptions inline_crypto = {});
 
   uint32_t GetInflightIoCount() const {
     std::lock_guard<std::mutex> lock(slot_lock_);
@@ -121,10 +123,10 @@ class TransferRequestProcessor : public RequestProcessor {
  private:
   friend class UfsTest;
 
-  zx::result<> FillDescriptorAndSendRequest(uint8_t slot, DataDirection data_dir,
-                                            uint16_t response_offset, uint16_t response_length,
-                                            uint16_t prdt_offset, uint32_t prdt_entry_count,
-                                            bool reliable_write = false) TA_REQ(slot_lock_);
+  zx::result<> FillDescriptorAndSendRequest(
+      uint8_t slot, DataDirection data_dir, uint16_t response_offset, uint16_t response_length,
+      uint16_t prdt_offset, uint32_t prdt_entry_count, bool reliable_write = false,
+      block_server::internal::InlineCryptoOptions inline_crypto = {}) TA_REQ(slot_lock_);
 
   zx::result<> CheckResponse(uint8_t slot_num, AbstractResponseUpiu &response) TA_REQ(slot_lock_);
   // Check for errors in the following order: OCS -> header_response -> scsi_status

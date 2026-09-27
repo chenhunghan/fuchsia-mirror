@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fuchsia",
+    srcs = ["src/lib.rs"],
+    crate_name = "fuchsia",
+    edition = "2024",
+    proc_macro_deps = [
+        "//src/lib/fuchsia/macro",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+        "//src/lib/diagnostics/log/rust",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/lib/scheduler/rust",
+            "//src/lib/diagnostics/fuchsia-async-inspect",
+        ],
+        "//conditions:default": [],
+    }),
+)

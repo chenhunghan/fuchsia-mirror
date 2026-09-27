@@ -19,6 +19,8 @@
 #include <lib/async/cpp/task.h>
 #include <lib/driver/testing/cpp/driver_runtime.h>
 
+#include <thread>
+
 #include <gtest/gtest.h>
 
 namespace wlan::brcmfmac {
@@ -304,6 +306,86 @@ TEST_F(TimerTest, UsesDispatcherTime) {
   EXPECT_EQ(timer.Start(second_delay.get()), ZX_OK);
   dispatcher.posted.Wait();
   EXPECT_EQ(dispatcher.posted_time.load(), dispatcher.current_time.load() + second_delay.get());
+}
+
+TEST_F(TimerTest, DoNotCancelInvalidTasks) {
+  // This can fail both as a use-after-free and a double-free in ASAN if the Timer code is
+  // incorrect. Beware of flakes here, if this flakes it probably means something is actually wrong
+  // in the Timer implementation.
+
+  // The fdf dispatcher implementation does not actually dereference the task pointer that it is
+  // passed when canceling a task. In order to trigger this we need a dispatcher that will attempt
+  // to use the pointer during cancellation.
+  struct FakeDispatcher : public async_dispatcher_t {
+    FakeDispatcher() : async_dispatcher_t{&ops_} {}
+
+    // Make this atomic since we call Timer::Start from multiple threads.
+    std::atomic<async_task_t*> task = nullptr;
+    libsync::Completion posted;
+
+    async_ops_t ops_{
+        .version = ASYNC_OPS_V1,
+        .v1{
+            .now = [](async_dispatcher_t*) { return zx_clock_get_monotonic(); },
+            .post_task = [](async_dispatcher_t* dispatcher, async_task_t* task) -> zx_status_t {
+              auto self = static_cast<FakeDispatcher*>(dispatcher);
+              self->task.store(task);
+              self->posted.Signal();
+              return ZX_OK;
+            },
+            .cancel_task = [](async_dispatcher_t* dispatcher, async_task_t* task) -> zx_status_t {
+              // Reading data from task should be OK. If task was freed before we should see ASAN
+              // errors.
+              EXPECT_NE(task->handler, nullptr);
+              return ZX_OK;
+            },
+        }};
+  };
+
+  FakeDispatcher dispatcher;
+  libsync::Completion callback_started;
+  libsync::Completion callback_proceed;
+
+  Timer timer(
+      &dispatcher,
+      [&] {
+        callback_started.Signal();
+        callback_proceed.Wait();
+      },
+      Timer::Type::OneShot);
+
+  EXPECT_EQ(timer.Start(ZX_USEC(1)), ZX_OK);
+  dispatcher.posted.Wait();
+
+  async_task_t* running_task = dispatcher.task.load();
+  ASSERT_NE(running_task, nullptr);
+
+  // Run the task handler on a separate background thread. This is because our fake dispatcher
+  // doesn't actually do any posting. We have to manually execute the posted task.
+  std::thread handler_thread([&] { running_task->handler(&dispatcher, running_task, ZX_OK); });
+
+  callback_started.Wait();
+
+  // On another separate background thread, trigger the concurrent Start call. This blocks on
+  // Instance::mutex_ held by the executing handler_thread.
+  libsync::Completion trigger_started;
+  std::thread trigger_thread([&] {
+    trigger_started.Signal();
+    EXPECT_EQ(timer.Start(ZX_HOUR(20)), ZX_OK);
+  });
+
+  // Give the trigger thread enough time to call Start and block.
+  trigger_started.Wait();
+  zx_nanosleep(ZX_MSEC(10));
+
+  // Unblock the callback so the handler thread can exit, release the mutex, and destruct/delete the
+  // task.
+  callback_proceed.Signal();
+
+  handler_thread.join();
+  trigger_thread.join();
+
+  timer.Stop();
 }
 
 }  // namespace wlan::brcmfmac

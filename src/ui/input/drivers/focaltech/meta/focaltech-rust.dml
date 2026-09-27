@@ -1,0 +1,76 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "focaltech",
+    composite_name: "focaltech_touch",
+    include: [
+        "driver/platform-device.shard.cml",
+        "driver_component/driver.shard.cml",
+    ],
+    program: {
+        binary: "driver/focaltech-rust.so",
+    },
+    use: [
+        {
+            name: "gpio-int",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-int" },
+            },
+        },
+        {
+            name: "i2c",
+            service: "fuchsia.hardware.i2c.Service",
+            primary: true,
+            bind: { service: "fuchsia.hardware.i2c.Service" },
+        },
+        {
+            name: "gpio-reset",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-reset" },
+            },
+        },
+        {
+            name: "pdev",
+            bind: {
+                one_of: [
+                    {
+                        vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                        protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                        pid: "fuchsia.platform.BIND_PLATFORM_DEV_PID.GENERIC",
+                        did: "fuchsia.platform.BIND_PLATFORM_DEV_DID.FOCALTOUCH",
+                        rules: { "fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID": 0 },
+                    },
+                    {
+                        vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                        compat: "focaltech,ft3x27",
+                    },
+                    {
+                        vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                        compat: "focaltech,ft6336",
+                    },
+                    {
+                        vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                        compat: "focaltech,ft5726",
+                    },
+                    {
+                        vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                        compat: "focaltech,ft5336",
+                    },
+                ],
+            },
+        },
+        {
+            name: "gpio-init-0",
+            service: "fuchsia.gpio.Init",
+            availability: "optional",
+        },
+        {
+            name: "pin-states-0",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            availability: "optional",
+        },
+    ],
+}

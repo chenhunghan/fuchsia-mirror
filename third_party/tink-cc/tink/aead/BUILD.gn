@@ -19,10 +19,10 @@ source_set("aead_wrapper") {
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/tink-cc/tink:aead",
     "//third_party/tink-cc/tink:crypto_format",
-    "//third_party/tink-cc/tink:primitive_set",
     "//third_party/tink-cc/tink:primitive_wrapper",
     "//third_party/tink-cc/tink/internal:monitoring",
     "//third_party/tink-cc/tink/internal:monitoring_util",
+    "//third_party/tink-cc/tink/internal:primitive_set",
     "//third_party/tink-cc/tink/internal:registry_impl",
     "//third_party/tink-cc/tink/internal:util",
     "//third_party/tink-cc/tink/util:status",
@@ -111,16 +111,21 @@ source_set("aead_key_templates") {
 source_set("aes_eax_key_manager") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
-  sources = [ "//third_party/tink-cc/src/tink/aead/aes_eax_key_manager.h" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/aead/aes_eax_key_manager.cc",
+    "//third_party/tink-cc/src/tink/aead/aes_eax_key_manager.h",
+  ]
   public_deps = [
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/tink-cc/proto:aes_eax_proto",
     "//third_party/tink-cc/proto:tink_proto",
     "//third_party/tink-cc/tink:aead",
     "//third_party/tink-cc/tink:core/key_type_manager",
     "//third_party/tink-cc/tink:core/template_util",
+    "//third_party/tink-cc/tink:key_manager",
     "//third_party/tink-cc/tink/subtle:aes_eax_boringssl",
     "//third_party/tink-cc/tink/subtle:random",
     "//third_party/tink-cc/tink/util:constants",
@@ -136,11 +141,15 @@ source_set("aes_eax_key_manager") {
 source_set("aes_gcm_key_manager") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
-  sources = [ "//third_party/tink-cc/src/tink/aead/aes_gcm_key_manager.h" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/aead/aes_gcm_key_manager.cc",
+    "//third_party/tink-cc/src/tink/aead/aes_gcm_key_manager.h",
+  ]
   public_deps = [
     ":cord_aead",
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/tink-cc/proto:aes_gcm_proto",
     "//third_party/tink-cc/proto:tink_proto",
@@ -166,15 +175,26 @@ source_set("aes_gcm_key_manager") {
 source_set("aes_gcm_siv_key_manager") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
-  sources = [ "//third_party/tink-cc/src/tink/aead/aes_gcm_siv_key_manager.h" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/aead/aes_gcm_siv_key_manager.cc",
+    "//third_party/tink-cc/src/tink/aead/aes_gcm_siv_key_manager.h",
+  ]
   public_deps = [
+    ":aes_gcm_siv_key",
+    ":aes_gcm_siv_parameters",
+    ":cord_aead",
     "//third_party/abseil-cpp/absl/memory",
+    "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/tink-cc/proto:aes_gcm_siv_proto",
     "//third_party/tink-cc/proto:tink_proto",
     "//third_party/tink-cc/tink:aead",
     "//third_party/tink-cc/tink:core/key_type_manager",
     "//third_party/tink-cc/tink:core/template_util",
+    "//third_party/tink-cc/tink:insecure_secret_key_access",
+    "//third_party/tink-cc/tink:partial_key_access",
+    "//third_party/tink-cc/tink:restricted_data",
+    "//third_party/tink-cc/tink/aead/internal:cord_aes_gcm_siv_boringssl",
     "//third_party/tink-cc/tink/subtle:aes_gcm_siv_boringssl",
     "//third_party/tink-cc/tink/subtle:random",
     "//third_party/tink-cc/tink/util:constants",
@@ -230,8 +250,10 @@ source_set("aes_ctr_hmac_aead_key_manager") {
 source_set("xchacha20_poly1305_key_manager") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
-  sources =
-      [ "//third_party/tink-cc/src/tink/aead/xchacha20_poly1305_key_manager.h" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/aead/xchacha20_poly1305_key_manager.cc",
+    "//third_party/tink-cc/src/tink/aead/xchacha20_poly1305_key_manager.h",
+  ]
   public_deps = [
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/status",

@@ -6,8 +6,12 @@
 
 #include "src/storage/f2fs/common.h"
 #include "src/storage/f2fs/node.h"
+#include "src/storage/f2fs/vnode.h"
 
 namespace f2fs {
+
+NodePage::~NodePage() = default;
+
 void NodePage::FillNodeFooter(nid_t nid, nid_t ino, size_t ofs) {
   NodeFooter &raw_footer = node().footer;
   raw_footer.nid = CpuToLe(nid);

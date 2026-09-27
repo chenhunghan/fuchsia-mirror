@@ -21,7 +21,7 @@ use crate::internal::datagram::{
     DatagramStateContext, DualStackConverter, DualStackDatagramBoundStateContext, DualStackIpExt,
     IpExt, IpOptions, NonDualStackConverter, NonDualStackDatagramBoundStateContext, SocketState,
 };
-use crate::internal::sndbuf::TxMetadata;
+use crate::internal::tx_metadata::TxMetadata;
 
 /// A mirror trait of [`DatagramStateContext`] allowing foreign crates to
 /// provide blanket impls for it.

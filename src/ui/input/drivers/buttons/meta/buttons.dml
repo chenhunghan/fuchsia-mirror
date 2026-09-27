@@ -6,9 +6,107 @@
     include: [],
     program: {},
     capabilities: [
+        { service: "fuchsia.hardware.buttons.Service" },
         {
-            service: "fuchsia.hardware.buttons.Service",
-            metadata: { id: "fuchsia.buttons.GpioButtonsMetadata" },
+            driver_config: "fuchsia.buttons.GpioButtonsMetadata",
+            defs: {
+                DirectGpioButton: {
+                    type: "object",
+                    properties: {},
+                },
+                MatrixGpioButton: {
+                    type: "object",
+                    properties: {
+                        gpio_b_index: { type: "uint8" },
+                    },
+                },
+                GpioButtonType: {
+                    type: "object",
+                    properties: {
+                        direct: { ref: "#/DirectGpioButton" },
+                        matrix: { ref: "#/MatrixGpioButton" },
+                    },
+                    oneOf: [
+                        [
+                            "direct",
+                            "matrix",
+                        ],
+                    ],
+                },
+                GpioButtonId: {
+                    type: "string",
+                    enum: [
+                        "CAM_MUTE",
+                        "FDR",
+                        "FUNCTION",
+                        "KEY_A",
+                        "KEY_M",
+                        "MIC_AND_CAM_MUTE",
+                        "MIC_MUTE",
+                        "PLAY_PAUSE",
+                        "POWER",
+                        "VOLUME_DOWN",
+                        "VOLUME_UP",
+                    ],
+                },
+                InterruptGpio: {
+                    type: "object",
+                    properties: {},
+                },
+                MatrixOutputGpio: {
+                    type: "object",
+                    properties: {
+                        output_value: { type: "uint8" },
+                    },
+                },
+                PollGpio: {
+                    type: "object",
+                    properties: {
+                        period: { type: "int64" },
+                    },
+                },
+                GpioType: {
+                    type: "object",
+                    properties: {
+                        interrupt: { ref: "#/InterruptGpio" },
+                        matrix_output: { ref: "#/MatrixOutputGpio" },
+                        poll: { ref: "#/PollGpio" },
+                    },
+                },
+                GpioFlag: {
+                    type: "bits",
+                    underlying_type: "uint32",
+                    bits: { INVERTED: 128 },
+                },
+                GpioButtonConfig: {
+                    type: "object",
+                    properties: {
+                        type: { ref: "#/GpioButtonType" },
+                        gpio_a_index: { type: "uint8" },
+                        gpio_delay: { type: "int64" },
+                        id: { ref: "#/GpioButtonId" },
+                    },
+                },
+                GpioConfig: {
+                    type: "object",
+                    properties: {
+                        type: { ref: "#/GpioType" },
+                        flags: { ref: "#/GpioFlag" },
+                    },
+                },
+            },
+            properties: {
+                buttons: {
+                    type: "vector",
+                    element: { ref: "#/GpioButtonConfig" },
+                    max_count: "MAX",
+                },
+                gpios: {
+                    type: "vector",
+                    element: { ref: "#/GpioConfig" },
+                    max_count: "MAX",
+                },
+            },
         },
     ],
     use: [

@@ -57,6 +57,13 @@ rust_library(
     edition = "2015",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=tuple_ty",
+        "--cfg=allow_clippy",
+        "--cfg=maybe_uninit",
+        "--cfg=doctests",
+        "--cfg=raw_ref_macros",
+        "--cfg=stable_const",
+        "--cfg=stable_offset_of",
     ],
     tags = [
         "cargo-bazel",

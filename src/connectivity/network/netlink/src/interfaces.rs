@@ -1561,7 +1561,6 @@ pub(crate) mod testutil {
     use super::*;
 
     use fuchsia_sync::Mutex;
-    use std::convert::Infallible as Never;
     use std::sync::Arc;
 
     use futures::TryStreamExt as _;
@@ -1694,8 +1693,7 @@ pub(crate) mod testutil {
 
     pub(crate) fn setup_with_route_clients(
         route_clients: ClientTable<NetlinkRoute, FakeSender<RouteNetlinkMessage>>,
-    ) -> Setup<impl Future<Output = Never>, impl Stream<Item = fnet_interfaces::WatcherRequest>>
-    {
+    ) -> Setup<impl Future<Output = !>, impl Stream<Item = fnet_interfaces::WatcherRequest>> {
         let (request_sink, request_stream) = mpsc::channel(1);
         let (interfaces_handler, interfaces_handler_sink) = FakeInterfacesHandler::new();
         let (interfaces_proxy, interfaces) =
@@ -2547,7 +2545,7 @@ mod tests {
             let watcher_fut = root_handler(interfaces_request_stream).map(Ok).forward(
                 futures::sink::unfold(watcher_stream.by_ref(), |st, event| async {
                     respond_to_watcher(st.by_ref(), [event]).await;
-                    Ok::<_, std::convert::Infallible>(st)
+                    Ok::<_, !>(st)
                 }),
             );
             let waiter_results = futures::select_biased! {

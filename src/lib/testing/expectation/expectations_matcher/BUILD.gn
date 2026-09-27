@@ -37,6 +37,9 @@ rustc_library("expectations_matcher") {
   sources = [ "src/lib.rs" ]
   edition = "2024"
   rustflags = [ "-Dunused_results" ]
-  visibility = [ "//src/lib/testing/expectation/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/testing/expectation/*",
+  ]
   deps = [ "//src/lib/testing/expectation/ser" ]
 }

@@ -16,16 +16,24 @@ import concurrent.futures
 import inspect
 import json
 import logging
-import os
 import re
 import shlex
-import socket
 import time
 from typing import Any
 
+from honeydew import errors as honeydew_errors
+from honeydew.fuchsia_device import fuchsia_device
+from honeydew.transports.serial import errors as serial_errors
+
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 _DONE_TOKEN: str = "[usb-cli:DONE]"
+_ERROR_TOKEN: str = "[usb-cli:ERROR]"
 _IDENT_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+# How many consecutive failing serial reads to tolerate before giving up on
+# capturing console output. Each failing read costs ~1s (Honeydew's internal
+# socket timeout).
+_MAX_SERIAL_READ_FAILURES: int = 3
 
 
 def _invoke_maybe_async(
@@ -54,15 +62,18 @@ def _invoke_maybe_async(
         return _call_worker()
 
 
-def get_dut_serial(dut: Any) -> str | None:
-    """Extract serial number or hardware identifier from a Honeydew
-    FuchsiaDevice.
+def get_dut_serial(dut: fuchsia_device.FuchsiaDevice | None) -> str | None:
+    """Resolve the hardware serial number of a Honeydew FuchsiaDevice.
 
-    Attempts multiple Honeydew properties and affordances:
-    1. Synchronous or cached `dut.serial_number` attribute (or async coroutine).
-    2. `dut._device_info.serial_number` or `dut._device_info.name`.
-    3. `dut.ffx.get_target_information()` serial.
-    4. `dut.fastboot.get_var("serialno")` if fastboot transport is active.
+    Tries, in order:
+    1. `dut.serial_number()`, which resolves over FIDL and therefore needs the
+       device to still be reachable.
+    2. `dut.ffx.get_target_information()`.
+
+    These tests deliberately tear down the USB functions that carry FIDL and
+    SSH, so callers should resolve the serial once up front while the device
+    is still reachable and then pass it around, rather than relying on the
+    later tiers to work mid-test.
 
     Args:
         dut: FuchsiaDevice object from Honeydew.
@@ -73,94 +84,49 @@ def get_dut_serial(dut: Any) -> str | None:
     if dut is None:
         return None
 
-    # 0. Check if target_serial was already resolved on dut or test instance
-    target_serial = getattr(dut, "target_serial", None)
-    if target_serial:
-        return str(target_serial).strip()
-
-    # 1. Check direct serial_number attribute/property
-    if hasattr(dut, "serial_number"):
-        sn = getattr(dut, "serial_number")
-        if isinstance(sn, str) and sn:
-            return sn.strip()
-        elif callable(sn):
-            try:
-                res = _invoke_maybe_async(sn, timeout_sec=5.0)
-                if isinstance(res, str) and res:
-                    return res.strip()
-            except Exception as e:
-                _LOGGER.debug("Failed calling dut.serial_number(): %s", e)
-
-    # 2. Check _device_info on FuchsiaDevice (ensure single serial, not
-    # multi-device string).
-    # Access Honeydew's internal _device_info attribute as a low-level fallback
-    # when inspecting hardware DUT serials in end-to-end USB test setups.
-    device_info = getattr(dut, "_device_info", None)
-    if device_info:
-        sn = getattr(device_info, "serial_number", None)
-        if sn:
-            sn_str = str(sn).strip()
-            if "\n" not in sn_str and " " not in sn_str:
-                return sn_str
-
-    # 3. Check ffx target info if available (supports dict and TargetInfoData).
+    # 1. Resolve over FIDL. Honeydew caches the result after the first call.
     try:
-        if hasattr(dut, "ffx") and hasattr(dut.ffx, "get_target_information"):
-            info = dut.ffx.get_target_information()
-            if isinstance(info, dict) and info.get("serial"):
-                return str(info["serial"]).strip()
-            dev_sn = getattr(
-                getattr(info, "device", None), "serial_number", None
-            )
-            if dev_sn:
-                return str(dev_sn).strip()
-    except Exception as e:
+        serial_number = _invoke_maybe_async(dut.serial_number, timeout_sec=5.0)
+        if isinstance(serial_number, str) and serial_number:
+            return serial_number.strip()
+    except (honeydew_errors.HoneydewError, OSError, TimeoutError) as e:
+        _LOGGER.debug("Failed calling dut.serial_number(): %s", e)
+
+    # 2. Ask ffx what it knows about the target.
+    try:
+        info = dut.ffx.get_target_information()
+        dev_sn = getattr(getattr(info, "device", None), "serial_number", None)
+        if dev_sn:
+            return str(dev_sn).strip()
+    except (honeydew_errors.HoneydewError, OSError) as e:
         _LOGGER.debug("Failed querying ffx target info for serial: %s", e)
-
-    # 4. Check fastboot transport if available
-    try:
-        if hasattr(dut, "fastboot") and hasattr(dut.fastboot, "get_var"):
-            fastboot_sn = dut.fastboot.get_var("serialno")
-            if fastboot_sn:
-                return str(fastboot_sn).strip()
-    except Exception as e:
-        _LOGGER.debug("Failed querying fastboot serial: %s", e)
 
     return None
 
 
-def get_usb_config(dut: Any) -> str:
+def get_usb_config(dut: fuchsia_device.FuchsiaDevice) -> str:
     """Retrieve the current USB peripheral policy configuration from the DUT.
 
-    Queries the device via SSH first while online, falling back to serial socket
-    if target networking is disconnected or offline.
+    Queries the device deterministically over the serial console.
 
     Args:
         dut: Fuchsia DUT device object.
 
     Returns:
         The raw configuration string from usb-cli get-config.
+
+    Raises:
+        RuntimeError: If no serial console is available or the command could
+            not be dispatched over serial.
     """
     _LOGGER.info("Querying current USB peripheral configuration on target...")
 
-    # 1. Primary: Query via SSH while target is online and CDC/VSOCK is active
-    try:
-        if hasattr(dut, "ffx") and hasattr(dut.ffx, "run_ssh_cmd"):
-            ssh_res = dut.ffx.run_ssh_cmd("usb-cli get-config")
-            if (
-                ssh_res
-                and "Target does not connect via networking" not in str(ssh_res)
-                and "BUG:" not in str(ssh_res)
-            ):
-                res_str = str(ssh_res).strip()
-                if _DONE_TOKEN in res_str or "{" in res_str:
-                    return res_str
-    except Exception as e:
-        _LOGGER.debug("Failed querying usb config via SSH (%s)", e)
-
-    # 2. Fallback: Serial command if target offline or network disconnected.
     res = _send_serial_command("usb-cli get-config", timeout_sec=5.0, dut=dut)
-    if res and (
+    if res is None:
+        raise RuntimeError(
+            "Failed to query USB config from the device over serial console."
+        )
+    if (
         _DONE_TOKEN in res
         or "{" in res
         or "functions" in res
@@ -243,182 +209,139 @@ def parse_usb_config_functions(config_str: str) -> list[str]:
 def _send_serial_command(
     cmd: str,
     timeout_sec: float = 5.0,
-    dut: Any | None = None,
+    dut: fuchsia_device.FuchsiaDevice | None = None,
 ) -> str | None:
     """Send a command over the Honeydew device serial transport.
 
+    Note on framing: the infra serial server only forwards complete
+    newline-terminated lines to the UART, so the command *must* end in `\\n`.
+    Honeydew's `Serial.send()` already wraps commands in `\\r\\n`; a hand-rolled
+    bare `\\r` is silently swallowed and never reaches the console.
+
+    Note on reading: `Serial.read()` explicitly makes no guarantees that output
+    produced by a preceding `send()` is available yet, and each call opens a
+    fresh connection to the serial server, does a single `recv()` and closes.
+    Output can therefore be delayed or lost between polls. Callers must treat
+    an empty result as inconclusive rather than as a failure, and verify the
+    effect of the command by other means.
+
     Args:
-        cmd: Shell command string to execute over the serial socket.
-        timeout_sec: Maximum duration in seconds to wait for command execution.
+        cmd: Shell command string to execute over the serial console.
+        timeout_sec: Maximum duration in seconds to wait for command output.
         dut: Honeydew FuchsiaDevice instance managing the target device.
 
     Returns:
-        The captured command output string if successful, else None.
+        The console output observed after dispatching the command, which may
+        be an empty string if nothing was captured in time. None if the
+        command could not be dispatched at all, i.e. the device has no serial
+        transport configured or the send itself failed.
     """
     if dut is None:
         return None
 
     try:
-        serial = getattr(dut, "serial", None)
-        if serial is None:
-            return None
-
-        # Access internal _socket_path on Honeydew Serial transport for direct
-        # socket connection fallback in low-level end-to-end USB test setup.
-        sp = getattr(serial, "_socket_path", None)
-        if sp and os.path.exists(sp):
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.settimeout(timeout_sec)
-                s.connect(sp)
-                payload = f"{cmd.strip()}\r".encode("utf-8")
-                s.sendall(payload)
-                buf = b""
-                start = time.monotonic()
-                while time.monotonic() - start < timeout_sec:
-                    try:
-                        data = s.recv(1024)
-                        if not data:
-                            break
-                        buf += data
-                        if (
-                            b"[usb-cli:DONE]" in buf
-                            or b"[usb-cli:ERROR]" in buf
-                            or buf.strip().endswith(b"$")
-                        ):
-                            break
-                    except socket.timeout:
-                        break
-            if buf:
-                res = buf.decode("utf-8", errors="replace")
-                _LOGGER.info(
-                    "Sent serial command '%s' via dut.serial socket: %s",
-                    cmd,
-                    res.strip(),
-                )
-                return res
-        elif hasattr(serial, "send") and hasattr(serial, "read"):
-            serial.send(f"{cmd.strip()}\r")
-            text_buf: str = ""
-            start_time = time.monotonic()
-            while time.monotonic() - start_time < timeout_sec:
-                chunk = serial.read(1024)
-                if chunk:
-                    if isinstance(chunk, bytes):
-                        text_buf += chunk.decode("utf-8", errors="replace")
-                    else:
-                        text_buf += str(chunk)
-                    if _DONE_TOKEN in text_buf or text_buf.strip().endswith(
-                        "$"
-                    ):
-                        break
-                time.sleep(0.1)
-            if text_buf:
-                _LOGGER.info(
-                    "Sent serial command '%s' via dut.serial: %s",
-                    cmd,
-                    text_buf.strip(),
-                )
-                return text_buf
-    except Exception as e:
-        _LOGGER.debug("Serial transport is unavailable (%s)", e)
+        serial = dut.serial
+    except honeydew_errors.HoneydewError as e:
+        # Raised when 'serial_socket' was not supplied during device init.
+        _LOGGER.debug("No serial transport configured for the DUT: %s", e)
         return None
 
-    return None
+    if serial is None:
+        return None
+
+    try:
+        serial.send(cmd.strip())
+    except (honeydew_errors.HoneydewError, OSError) as e:
+        _LOGGER.warning("Failed dispatching serial command %r: %s", cmd, e)
+        return None
+
+    # Honeydew's read() opens a fresh connection, performs a single recv with a
+    # 1s timeout, and raises SerialError when nothing arrives in that window.
+    # It is also comparatively expensive (each call forks a liveness-check
+    # process), so poll conservatively and stop as soon as the console goes
+    # quiet. Depending on how the serial server is configured a read may also
+    # replay a buffer it has already served, so duplicate content ends the
+    # poll too.
+    output = ""
+    previous_chunk: str | None = None
+    consecutive_failures = 0
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            chunk = serial.read()
+        except (serial_errors.SerialError, OSError) as e:
+            consecutive_failures += 1
+            _LOGGER.debug("Serial read failed while awaiting %r: %s", cmd, e)
+            # Stop once consecutive timeouts indicate nothing more is coming.
+            # Deliberately do not break merely because `output` is non-empty,
+            # since the console almost always echoes the command immediately
+            # while the [usb-cli:DONE] token takes another second to arrive.
+            if consecutive_failures >= _MAX_SERIAL_READ_FAILURES:
+                break
+            continue
+        consecutive_failures = 0
+        if chunk:
+            if chunk == previous_chunk:
+                break
+            previous_chunk = chunk
+            output += chunk
+            if _DONE_TOKEN in output or _ERROR_TOKEN in output:
+                break
+        time.sleep(0.25)
+
+    _LOGGER.info(
+        "Dispatched serial command %r; console output: %s",
+        cmd,
+        output.strip() or "<none captured>",
+    )
+    return output
 
 
 def set_usb_config(
-    dut: Any, config: str, reboot_if_needed: bool = True
+    dut: fuchsia_device.FuchsiaDevice,
+    config: str,
 ) -> None:
-    """Apply a new USB peripheral configuration on the DUT via usb-cli.
+    """Apply a new USB peripheral configuration on the DUT via usb-cli over serial.
+
+    The command is dispatched deterministically over the serial console because
+    serial is the only transport that survives the CDC Ethernet teardown caused
+    by switching USB peripheral configurations.
+
+    Success is deliberately *not* gated on observing usb-cli's completion
+    token, because Honeydew's serial `read()` offers no synchronization with
+    `send()`, so the acknowledgement is frequently missed (see
+    `_send_serial_command`). Callers confirm the outcome out-of-band instead,
+    by waiting for the expected USB device to enumerate on the host.
 
     Args:
         dut: Fuchsia DUT device object.
         config: Function or configuration string (e.g. 'cdc,adb',
             'sourcesink', 'loopback').
-        reboot_if_needed: If True and restoring non-test config, triggers
-            reboot so CDC Ethernet re-enumerates.
+
+    Raises:
+        RuntimeError: If no serial console is available or the USB
+            configuration command could not be dispatched over serial.
     """
     _LOGGER.info(
         "Applying USB peripheral configuration '%s' on target...", config
     )
 
-    applied = False
-    ssh_res: Any | None = None
-    ssh_err: Exception | None = None
-    quoted_cfg = shlex.quote(config)
-
-    # 1. Attempt serial command if serial transport is available
-    serial_res = _send_serial_command(
-        f"usb-cli set-config {quoted_cfg}", timeout_sec=8.0, dut=dut
-    )
-    if serial_res and (
-        _DONE_TOKEN in serial_res or "Cold reboot" in serial_res
-    ):
-        applied = True
-
-    # 2. Fallback to SSH via run_ssh_cmd if serial command did not apply it
-    if not applied:
-        ffx = getattr(dut, "ffx", None)
-        if ffx and hasattr(ffx, "run_ssh_cmd"):
-            try:
-                ssh_res = ffx.run_ssh_cmd(
-                    cmd=f"usb-cli set-config {quoted_cfg}"
-                )
-                if ssh_res and (
-                    _DONE_TOKEN in str(ssh_res) or "Cold reboot" in str(ssh_res)
-                ):
-                    applied = True
-                    _LOGGER.info(
-                        "Applied USB peripheral configuration '%s' via SSH",
-                        config,
-                    )
-            except Exception as e:
-                ssh_err = e
-                _LOGGER.debug("SSH execution failed: %s", e)
-
     is_test = any(
         f in config.lower() for f in ("sourcesink", "loopback", "test")
     )
+    usb_cli_cmd = f"usb-cli set-config {shlex.quote(config)}"
 
-    # If test config failed to apply over serial and SSH, fail fast instead
-    # of hanging later.
-    if not applied and is_test:
+    serial_res = _send_serial_command(usb_cli_cmd, timeout_sec=8.0, dut=dut)
+    if serial_res is None:
         raise RuntimeError(
-            f"Failed to apply test USB config '{config}' over serial "
-            f"console or SSH: serial_res={serial_res!r}, ssh_res={ssh_res!r}"
-        ) from ssh_err
+            f"Failed to dispatch USB config '{config}' to the device over "
+            f"serial console (serial_res={serial_res!r})"
+        )
 
-    # If target was offline or restore failed, coordinate reboot to reload
-    # default functions.
-    if not applied and not is_test:
+    acknowledged = _DONE_TOKEN in serial_res or "Cold reboot" in serial_res
+    if is_test and not acknowledged:
         _LOGGER.info(
-            "Device unresponsive during restore of '%s'; triggering reboot "
-            "to restore default functions...",
+            "usb-cli did not acknowledge '%s' on the console; relying on "
+            "host-side USB enumeration to confirm the switch.",
             config,
         )
-        if hasattr(dut, "reboot"):
-            try:
-                _invoke_maybe_async(dut.reboot)
-                return
-            except Exception as e:
-                _LOGGER.warning("dut.reboot() failed: %s", e)
-        _send_serial_command("dm reboot", timeout_sec=3.0, dut=dut)
-        return
-
-    # If restoring non-test config and reboot was requested, reboot to
-    # rebind CDC interface.
-    if applied and reboot_if_needed and not is_test:
-        _LOGGER.info("Rebooting device to rebind CDC network interface...")
-        if hasattr(dut, "reboot"):
-            try:
-                _invoke_maybe_async(dut.reboot)
-                return
-            except Exception as e:
-                _LOGGER.warning("dut.reboot() failed: %s", e)
-        if _send_serial_command("dm reboot", timeout_sec=3.0, dut=dut) is None:
-            ffx = getattr(dut, "ffx", None)
-            if ffx and hasattr(ffx, "run_ssh_cmd"):
-                try:
-                    ffx.run_ssh_cmd("dm reboot")
-                except Exception as reboot_err:
-                    _LOGGER.debug("SSH reboot failed: %s", reboot_err)

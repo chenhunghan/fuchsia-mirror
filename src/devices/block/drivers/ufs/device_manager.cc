@@ -272,6 +272,7 @@ void DeviceManager::HandleExceptionEvents() {
   zx::result<ExceptionEventStatus> ee_status = GetExceptionEventStatus();
   if (ee_status.is_error()) {
     fdf::error("Failed to get Exception Event Status");
+    return;
   }
   if (ee_status->urgent_bkops()) {
     if (auto result = HandleBackgroundOpEvent(); result.is_error()) {

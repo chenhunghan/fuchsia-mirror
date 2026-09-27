@@ -24,19 +24,8 @@ extern std::string DoPrePolicyLoadWork() { return "overlayfs_policy"; }
 
 namespace {
 
-class OverlayFsTest : public ::testing::Test {
+class OverlayFsTest : public IsolatedMountNamespaceTest {
  protected:
-  static void SetUpTestSuite() {
-    // The unshare() call will isolate the mount namespaces for the running
-    // test process. This allows the Linux-based tests to execute syscalls with
-    // root permissions, without fear of messing the environment up. While the
-    // Starnix tests don't strictly need to unshare, it's beneficial to run the
-    // same test binaries on Linux and on Starnix so we can be sure the semantics
-    // match. As a side effect, this means that the mounted directories will not
-    // be viewable in traditional ways, e.g. ffx component explore.
-    ASSERT_THAT(unshare(CLONE_NEWNS), SyscallSucceeds());
-  }
-
   void SetUp() override {
     ASSERT_TRUE(test_helper::HasSysAdmin());
 

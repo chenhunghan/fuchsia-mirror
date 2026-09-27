@@ -259,7 +259,7 @@ zx::result<> AddSdEmmcNode(fdf::WireSyncClient<fuchsia_hardware_platform_bus::Pl
           ->AddCompositeNodeSpec(
               fidl::ToWire(fidl_arena, sd_emmc_dev),
               fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                           {.name = "aml_sdio", .parents2 = kSdioParents}}));
+                                           {.name = "aml-sdio", .parents2 = kSdioParents}}));
   if (!result.ok()) {
     zxlogf(ERROR, "Failed to send AddCompositeNodeSpec request: %s",
            result.FormatDescription().data());

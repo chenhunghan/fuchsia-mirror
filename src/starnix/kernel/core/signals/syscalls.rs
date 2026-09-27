@@ -944,8 +944,10 @@ pub fn sys_waitid(
     if let Some(waitable_process) = wait_on_pid(current_task, &task_selector, &waiting_options)? {
         if !user_rusage.is_null() {
             let usage = rusage {
-                ru_utime: timeval_from_duration(waitable_process.time_stats.user_time),
-                ru_stime: timeval_from_duration(waitable_process.time_stats.system_time),
+                ru_utime: timeval_from_duration(waitable_process.zombie_state.time_stats.user_time),
+                ru_stime: timeval_from_duration(
+                    waitable_process.zombie_state.time_stats.system_time,
+                ),
                 ..Default::default()
             };
 
@@ -1028,13 +1030,15 @@ pub fn sys_wait4(
     };
 
     if let Some(waitable_process) = wait_on_pid(current_task, &selector, &waiting_options)? {
-        let status = waitable_process.exit_info.status.wait_status();
+        let status = waitable_process.zombie_state.exit_status.wait_status();
 
         if !user_rusage.is_null() {
             track_stub!(TODO("https://fxbug.dev/322874768"), "real rusage from wait4");
             let usage = rusage {
-                ru_utime: timeval_from_duration(waitable_process.time_stats.user_time),
-                ru_stime: timeval_from_duration(waitable_process.time_stats.system_time),
+                ru_utime: timeval_from_duration(waitable_process.zombie_state.time_stats.user_time),
+                ru_stime: timeval_from_duration(
+                    waitable_process.zombie_state.time_stats.system_time,
+                ),
                 ..Default::default()
             };
             current_task.write_multi_arch_object(user_rusage, usage)?;
@@ -1110,7 +1114,7 @@ mod tests {
         SI_HEADER_SIZE, SI_MAX_SIZE_AS_USIZE, SignalInfoHeader, send_standard_signal,
     };
     use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
-    use crate::task::{EventHandler, ExitStatus, ProcessExitInfo};
+    use crate::task::{EventHandler, ExitStatus, ZombieState};
     use crate::testing::*;
     use starnix_sync::{EventHandlerReadyQueueLock, LockDepMutex};
     use starnix_types::math::round_up_to_system_page_size;
@@ -1118,7 +1122,7 @@ mod tests {
     use starnix_uapi::errors::ERESTARTSYS;
     use starnix_uapi::signals::{
         SIGCHLD, SIGHUP, SIGINT, SIGIO, SIGKILL, SIGRTMIN, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP,
-        SIGUSR1,
+        SIGUSR1, SIGWINCH,
     };
     use starnix_uapi::vfs::FdEvents;
     use starnix_uapi::{SI_QUEUE, sigaction_t, uaddr, uid_t};
@@ -1712,6 +1716,25 @@ mod tests {
         .await;
     }
 
+    /// A signal whose action is to ignore it is dropped rather than queued on the thread group,
+    /// unless a task blocks it.
+    #[::fuchsia::test]
+    async fn test_kill_thread_group_ignored_signal() {
+        spawn_kernel_and_run(async |init_task| {
+            let task = init_task.clone_task_for_test(0, Some(SIGCHLD));
+            task.thread_group().setsid().expect("setsid");
+
+            // SIGWINCH is ignored by default.
+            assert_eq!(sys_kill(&task, 0, SIGWINCH.into()), Ok(()));
+            assert_eq!(task.read().queued_signal_count(SIGWINCH), 0);
+
+            task.write().set_signal_mask(SIGWINCH.into());
+            assert_eq!(sys_kill(&task, 0, SIGWINCH.into()), Ok(()));
+            assert_eq!(task.read().queued_signal_count(SIGWINCH), 1);
+        })
+        .await;
+    }
+
     /// A task should be able to signal a thread group.
     #[::fuchsia::test]
     async fn test_kill_thread_group() {
@@ -2007,11 +2030,11 @@ mod tests {
             let expected_result = WaitResult {
                 pid: child.tid.clone(),
                 uid: 0,
-                exit_info: ProcessExitInfo {
-                    status: ExitStatus::Exit(1),
-                    exit_signal: Some(SIGCHLD),
+                zombie_state: ZombieState {
+                    exit_status: ExitStatus::Exit(1),
+                    time_stats: Default::default(),
                 },
-                time_stats: Default::default(),
+                exit_signal: Some(SIGCHLD),
             };
             child.thread_group().kill(ExitStatus::Exit(1), None);
             std::mem::drop(child);
@@ -2220,7 +2243,10 @@ mod tests {
                 Ok(())
             );
             // The previous wait matched child2, only child1 should be in the available zombies.
-            assert_eq!(current_task.thread_group().read().zombie_children[0].pid(), child1_pid);
+            assert_eq!(
+                current_task.thread_group().read().zombie_children[0].task.get_pid(),
+                child1_pid
+            );
 
             assert_eq!(
                 sys_waitid(
@@ -2356,6 +2382,16 @@ mod tests {
                 0,
             )
             .expect("failed to create SIGCHLD signalfd");
+
+            // Block SIGCHLD so it can be received by the signalfd.
+            sys_rt_sigprocmask(
+                &current_task,
+                SIG_BLOCK,
+                sigchld_mask_addr,
+                UserRef::default(),
+                std::mem::size_of::<SigSet>(),
+            )
+            .expect("failed to block SIGCHLD");
 
             // Create and exit a child process, which should generate a SIGCHLD.
             let child = current_task.clone_task_for_test(0, Some(SIGCHLD));

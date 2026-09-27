@@ -11,6 +11,7 @@ package(
 )
 
 FUCHSIA_SYNC_SRCS = [
+    "src/completion.rs",
     "src/condvar.rs",
     "src/lib.rs",
     "src/mutex.rs",

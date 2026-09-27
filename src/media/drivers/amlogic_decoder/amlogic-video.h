@@ -221,8 +221,9 @@ class AmlogicVideo final : public VideoDecoder::Owner,
   void InitializeInterrupts();
   void SwapOutCurrentInstance() __TA_REQUIRES(video_decoder_lock_);
   void SwapInCurrentInstance() __TA_REQUIRES(video_decoder_lock_);
-  // Signals the current decoder that there's an error and tells it to power off.
-  void PowerOffForError() __TA_REQUIRES(video_decoder_lock_);
+  // Signals the current decoder that there's an error and tells it to stop.
+  void SwapOutForFatalError() __TA_REQUIRES(video_decoder_lock_);
+  void QuiesceAndClearActiveInstance() __TA_REQUIRES(video_decoder_lock_);
 
   // This is currently used in place of zx_vmo_create_contiguous because sysmem fully mitigates
   // physical fragmentation (when contiguous_memory_size is set to at least 2x the observed high

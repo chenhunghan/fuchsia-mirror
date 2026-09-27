@@ -1,0 +1,86 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "amlogic-display",
+    composite_name: "display",
+    include: [
+        "driver/platform-device.shard.cml",
+        "driver_component/driver.shard.cml",
+    ],
+    program: {
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        allowed_scheduler_roles: [ "fuchsia.graphics.display.drivers.amlogic-display.vsync" ],
+        service_connect_validation: "true",
+    },
+    capabilities: [
+        { service: "fuchsia.hardware.display.engine.Service" },
+    ],
+    use: [
+        {
+            name: "pdev",
+            primary: true,
+            bind: {
+                one_of: [
+                    { compat: "amlogic,display" },
+                    {
+                        protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                        vid: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_VID.AMLOGIC",
+                        did: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.DISPLAY",
+                        pid: [
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.A311D",
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.S905D2",
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.S905D3",
+                            "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_PID.T931",
+                        ],
+                    },
+                ],
+            },
+        },
+        { protocol: "fuchsia.scheduler.RoleManager" },
+        { protocol: "fuchsia.sysmem2.Allocator" },
+        {
+            name: "canvas",
+            service: "fuchsia.hardware.amlogiccanvas.Service",
+        },
+        {
+            name: "gpio-lcd-reset",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-lcd-reset" },
+            },
+        },
+        {
+            config: "fuchsia.display.VisualDebuggingLevel",
+            from: "parent",
+            key: "visual_debugging_level",
+            type: "uint8",
+            availability: "optional",
+            default: 0,
+        },
+        {
+            name: "gpio-hdmi-hotplug-detect",
+            service: "fuchsia.hardware.gpio.Service",
+            availability: "optional",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-hdmi-hotplug-detect" },
+            },
+        },
+        {
+            name: "gpio-init-0",
+            service: "fuchsia.gpio.Init",
+            availability: "optional",
+        },
+        {
+            name: "pin-states-0",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            availability: "optional",
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.display.engine.Service",
+            from: "self",
+        },
+    ],
+}

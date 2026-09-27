@@ -209,7 +209,7 @@ TEST_F(DeviceTest, AddChildWithProtoStrPropAndProtoId) {
       ddk::MakeStrProperty(bind_fuchsia::PROTOCOL, static_cast<uint32_t>(ZX_PROTOCOL_I2C));
 
   device_add_args_t args{
-      .name = "child", .str_props = &prop, .str_prop_count = 1, .proto_id = ZX_PROTOCOL_BLOCK};
+      .name = "child", .str_props = &prop, .str_prop_count = 1, .proto_id = ZX_PROTOCOL_I2C};
   zx_device_t* child = nullptr;
   ASSERT_EQ(ZX_OK, parent.Add(&args, &child));
   ASSERT_EQ(ZX_OK, child->CreateNode());
@@ -253,7 +253,7 @@ TEST_F(DeviceTest, AddChildWithStringProps) {
   device_add_args_t args{.name = "child",
                          .str_props = props,
                          .str_prop_count = sizeof(props) / sizeof(props[0]),
-                         .proto_id = ZX_PROTOCOL_BLOCK};
+                         .proto_id = ZX_PROTOCOL_I2C};
   zx_device_t* child = nullptr;
   ASSERT_EQ(ZX_OK, parent.Add(&args, &child));
   ASSERT_EQ(ZX_OK, child->CreateNode());
@@ -470,15 +470,15 @@ TEST_F(DeviceTest, GetProtocolFromDevice) {
   zx_protocol_device_t ops{};
   compat::Device without(compat::kDefaultDevice, &ops, nullptr, std::nullopt, logger(),
                          dispatcher());
-  ASSERT_EQ(ZX_ERR_BAD_STATE, without.GetProtocol(ZX_PROTOCOL_BLOCK, nullptr));
+  ASSERT_EQ(ZX_ERR_BAD_STATE, without.GetProtocol(ZX_PROTOCOL_I2C, nullptr));
 
   // Create a device with a get_protocol hook.
   ops.get_protocol = [](void* ctx, uint32_t proto_id, void* protocol) {
-    EXPECT_EQ(ZX_PROTOCOL_BLOCK, proto_id);
+    EXPECT_EQ(ZX_PROTOCOL_I2C, proto_id);
     return ZX_OK;
   };
   compat::Device with(compat::kDefaultDevice, &ops, nullptr, std::nullopt, logger(), dispatcher());
-  ASSERT_EQ(ZX_OK, with.GetProtocol(ZX_PROTOCOL_BLOCK, nullptr));
+  ASSERT_EQ(ZX_OK, with.GetProtocol(ZX_PROTOCOL_I2C, nullptr));
 }
 
 TEST_F(DeviceTest, DeviceMetadata) {
@@ -543,7 +543,7 @@ TEST_F(DeviceTest, GetFragmentProtocolFromDeviceNoDriver) {
     void* ctx;
   } proto;
   ASSERT_EQ(ZX_ERR_BAD_STATE, device_get_fragment_protocol(with.ZxDevice(), "fragment-name",
-                                                           ZX_PROTOCOL_BLOCK, &proto));
+                                                           ZX_PROTOCOL_I2C, &proto));
 }
 
 TEST_F(DeviceTest, TestBind) {
@@ -714,4 +714,49 @@ TEST_F(DeviceTest, CreateNodeProperties) {
 
   EXPECT_EQ(bind_fuchsia::PROTOCOL, properties[1].key.get());
   EXPECT_EQ(10u, properties[1].value.int_value());
+}
+
+// Verify that the device does not call its release hook if the device failed to be added to its
+// parents list of children.
+TEST_F(DeviceTest, AddDeviceFailureDoesNotRelease) {
+  fdf_testing::TestNode node("root", dispatcher());
+  zx::result node_client = node.CreateNodeChannel();
+  ASSERT_EQ(ZX_OK, node_client.status_value());
+
+  // Create a parent device.
+  zx_protocol_device_t parent_ops{};
+  compat::Device parent(compat::kDefaultDevice, &parent_ops, nullptr, std::nullopt, logger(),
+                        dispatcher());
+  parent.Bind({std::move(node_client.value()), dispatcher()});
+
+  // Track if release was called on the child.
+  struct Context {
+    bool release_called = false;
+  } context;
+
+  zx_protocol_device_t child_ops{
+      .release =
+          [](void* ctx) {
+            auto c = static_cast<Context*>(ctx);
+            c->release_called = true;
+          },
+  };
+
+  // Add a child device but make it fail by passing an invalid inspect VMO.
+  // We use a non-zero invalid handle to trigger `duplicate()` failure.
+  device_add_args_t args{
+      .name = "child",
+      .ctx = &context,
+      .ops = &child_ops,
+      .inspect_vmo = 0xDEADBEEF, // Invalid handle, but not ZX_HANDLE_INVALID
+  };
+  zx_device_t* child = nullptr;
+  ASSERT_NE(ZX_OK, parent.Add(&args, &child));
+  EXPECT_EQ(nullptr, child);
+
+  // Run loop to ensure any pending tasks are run.
+  ASSERT_TRUE(RunLoopUntilIdle());
+
+  // Release should NOT have been called because `Device::Add()` failed.
+  EXPECT_FALSE(context.release_called);
 }

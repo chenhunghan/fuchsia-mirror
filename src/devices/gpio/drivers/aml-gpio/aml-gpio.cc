@@ -13,6 +13,7 @@
 #include <lib/trace/event.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 
 #include <bind/fuchsia/cpp/bind.h>
@@ -23,6 +24,7 @@
 #include "a113-blocks.h"
 #include "a5-blocks.h"
 #include "s905d2-blocks.h"
+#include "src/devices/gpio/drivers/aml-gpio/aml_gpio_config.h"
 
 namespace {
 
@@ -54,6 +56,7 @@ enum {
 
 void AmlGpioDriver::Start(fdf::DriverContext context, fdf::StartCompleter completer) {
   incoming_ = std::shared_ptr<fdf::Namespace>(context.take_incoming());
+  suspend_enabled_ = context.take_config<aml_gpio_config::Config>().suspend_enabled();
 
   executor_.emplace(dispatcher());
 
@@ -212,14 +215,93 @@ void AmlGpioDriver::MapMmios(uint32_t pid, uint32_t irq_count,
               }
               mmios.push_back(std::move(result.value()));
             }
-            InitDevice(pid, irq_count, std::move(mmios), std::move(completer));
+            OnMapMmios(pid, irq_count, std::move(mmios), std::move(completer));
           });
   executor_->schedule_task(std::move(task));
 }
 
+void AmlGpioDriver::OnMapMmios(uint32_t pid, uint32_t irq_count, std::vector<fdf::MmioBuffer> mmios,
+                               fpromise::completer<void, zx_status_t> completer) {
+  if (!suspend_enabled_) {
+    // Skip checking wake vector pins if suspend is disabled.
+    InitDevice(pid, irq_count, std::move(mmios), {}, std::move(completer));
+    return;
+  }
+
+  pdev_->GetMetadata(fuchsia_hardware_pinimpl::Metadata::kSerializableName)
+      .Then([this, pid, irq_count, mmios = std::move(mmios),
+             completer = std::move(completer)](auto& result) mutable {
+        if (!result.ok()) {
+          fdf::error("Failed to send GetMetadata request: {}", result.status_string());
+          completer.complete_error(result.status());
+          return;
+        }
+        if (result->is_error()) {
+          if (result->error_value() == ZX_ERR_NOT_FOUND) {
+            InitDevice(pid, irq_count, std::move(mmios), {}, std::move(completer));
+          } else {
+            fdf::error("Failed to get metadata: {}", zx_status_get_string(result->error_value()));
+            completer.complete_error(result->error_value());
+          }
+          return;
+        }
+
+        const fit::result metadata =
+            fidl::Unpersist<fuchsia_hardware_pinimpl::Metadata>(result.value()->metadata.get());
+        if (metadata.is_error()) {
+          fdf::error("Failed to unpersist metadata: {}",
+                     zx_status_get_string(metadata.error_value().status()));
+          completer.complete_error(metadata.error_value().status());
+          return;
+        }
+
+        OnGetMetadata(pid, irq_count, std::move(mmios), metadata.value(), std::move(completer));
+      });
+}
+void AmlGpioDriver::OnGetMetadata(uint32_t pid, uint32_t irq_count,
+                                  std::vector<fdf::MmioBuffer> mmios,
+                                  const fuchsia_hardware_pinimpl::Metadata& metadata,
+                                  fpromise::completer<void, zx_status_t> completer) {
+  std::set<uint32_t> wake_vector_pins;
+  auto check_call = [&wake_vector_pins](uint32_t pin,
+                                        const fuchsia_hardware_pinimpl::InitCall& call) {
+    if (call.Which() == fuchsia_hardware_pinimpl::InitCall::Tag::kPinConfig) {
+      const auto& config = call.pin_config().value();
+      if (config.wake_vector().has_value() && config.wake_vector().value()) {
+        wake_vector_pins.insert(pin);
+      }
+    }
+  };
+
+  // Check all init steps to build a set of wakeable pins.
+  const auto init_steps = metadata.init_steps().value_or({});
+  for (const auto& step : init_steps) {
+    if (step.Which() == fuchsia_hardware_pinimpl::InitStep::Tag::kCall) {
+      check_call(step.call()->pin(), step.call()->call());
+    }
+  }
+
+  if (wake_vector_pins.size() > irq_count) {
+    fdf::error("{} wakeable pins exceeds {} provided interrupts", wake_vector_pins.size(),
+               irq_count);
+    completer.complete_error(ZX_ERR_INVALID_ARGS);
+    return;
+  }
+
+  InitDevice(pid, irq_count, std::move(mmios), std::move(wake_vector_pins), std::move(completer));
+}
+
 void AmlGpioDriver::InitDevice(uint32_t pid, uint32_t irq_count, std::vector<fdf::MmioBuffer> mmios,
+                               std::set<uint32_t> wake_vector_pins,
                                fpromise::completer<void, zx_status_t> completer) {
   ZX_DEBUG_ASSERT(mmios.size() == MMIO_COUNT);
+
+  if (irq_count > AmlGpio::kMaxInterruptCount) {
+    fdf::error("{} provided interrupts exceeds the hardware maximum of {}", irq_count,
+               AmlGpio::kMaxInterruptCount);
+    completer.complete_error(ZX_ERR_INVALID_ARGS);
+    return;
+  }
 
   cpp20::span<const AmlGpioBlock> gpio_blocks;
   const AmlGpioInterrupt* gpio_interrupt;
@@ -266,10 +348,10 @@ void AmlGpioDriver::InitDevice(uint32_t pid, uint32_t irq_count, std::vector<fdf
     return completer.complete_error(pdev_client.status_value());
   }
 
-  device_.reset(new (&ac)
-                    AmlGpio(*std::move(pdev_client), std::move(mmios[MMIO_GPIO]),
-                            std::move(mmios[MMIO_GPIO_AO]), std::move(mmios[MMIO_GPIO_INTERRUPTS]),
-                            gpio_blocks, gpio_interrupt, pid, std::move(irq_info)));
+  device_.reset(new (&ac) AmlGpio(
+      *std::move(pdev_client), std::move(mmios[MMIO_GPIO]), std::move(mmios[MMIO_GPIO_AO]),
+      std::move(mmios[MMIO_GPIO_INTERRUPTS]), gpio_blocks, gpio_interrupt, pid, std::move(irq_info),
+      std::move(wake_vector_pins)));
   if (!ac.check()) {
     fdf::error("Device object alloc failed");
     return completer.complete_error(ZX_ERR_NO_MEMORY);
@@ -319,16 +401,24 @@ zx::result<> AmlGpioDriver::AddNode() {
 }
 
 uint32_t AmlGpio::GetUnusedIrqIndex(uint32_t pin) const {
+  // wake_irq_status_ and irq_status_ are bitmasks representing which wakeable and non-wakeable
+  // interrupts are in use. Bits [0, wake_vector_pins_.size()) in wake_irq_status_ are valid, and
+  // bits [wake_vector_pins_.size(), irq_info_.size()) in irq_status_ are valid. In other words,
+  // the first wake_vector_pins_.size() interrupt IDs correspond to wakeable interrupts, and the
+  // rest are non-wakeable.
+
+  uint8_t irq_status = irq_status_;
+  uint32_t index_offset = wake_vector_pins_.size();
   if (wake_vector_pins_.contains(pin)) {
-    // First isolate the rightmost 0-bit
-    auto zero_bit_set = static_cast<uint8_t>(~wake_irq_status_ & (wake_irq_status_ + 1));
-    // Count no. of leading zeros
-    return __builtin_ctz(zero_bit_set);
+    // This pin's interrupt is wakeable, so use the appropriate status and offset values.
+    irq_status = wake_irq_status_;
+    index_offset = 0;
   }
+
   // First isolate the rightmost 0-bit
-  auto zero_bit_set = static_cast<uint8_t>(~irq_status_ & (irq_status_ + 1));
-  // Count no. of leading zeros
-  return __builtin_ctz(zero_bit_set) + wake_vector_pins_.size();
+  auto zero_bit_set = static_cast<uint8_t>(~irq_status & (irq_status + 1));
+  // Count no. of trailing zeros
+  return std::countr_zero(zero_bit_set) + index_offset;
 }
 
 void AmlGpio::SetIrqIndex(uint32_t pin, uint8_t index) {
@@ -436,7 +526,7 @@ void AmlGpio::GetInterrupt(fuchsia_hardware_pinimpl::wire::PinImplGetInterruptRe
   }
 
   uint32_t index = GetUnusedIrqIndex(request->pin);
-  if (index > irq_info_.size()) {
+  if (index >= irq_info_.size()) {
     fdf::error("No free IRQ indicies {}, irq_count = {}", (int)index, irq_info_.size());
     return completer.buffer(arena).ReplyError(ZX_ERR_NO_RESOURCES);
   }
@@ -517,19 +607,40 @@ void AmlGpio::GetInterrupt(fuchsia_hardware_pinimpl::wire::PinImplGetInterruptRe
           return completer.buffer(arena).ReplyError(ZX_ERR_CANCELED);
         }
 
-        // The call failed, release this IRQ index.
-        if (!out_irq.ok() || out_irq->is_error()) {
+        auto reply_error = [&](zx_status_t status) {
+          // The call failed, release this IRQ index.
           ClearIrqIndex(irq_index, index);
           irq_info_[index] = InterruptInfo{};
-        }
+          completer.buffer(arena).ReplyError(status);
+        };
 
         if (!out_irq.ok()) {
           fdf::error("Call to pdev_get_interrupt failed: {}", out_irq.status_string());
-          return completer.buffer(arena).ReplyError(out_irq.status());
+          reply_error(out_irq.status());
+          return;
         }
         if (out_irq->is_error()) {
           fdf::error("pdev_get_interrupt failed: {}", zx_status_get_string(out_irq->error_value()));
-          return completer.buffer(arena).Reply(out_irq->take_error());
+          reply_error(out_irq->error_value());
+          return;
+        }
+
+        if (wake_vector_pins_.contains(irq_index)) {
+          // Make sure the interrupt is actually wakeable.
+          zx_info_interrupt_t info{};
+          zx_status_t status = out_irq->value()->irq.get_info(ZX_INFO_INTERRUPT, &info,
+                                                              sizeof(info), nullptr, nullptr);
+          if (status != ZX_OK) {
+            fdf::error("Failed to get interrupt info: {}", zx_status_get_string(status));
+            reply_error(status);
+            return;
+          }
+          if (!(info.options & /* ZX_INTERRUPT_WAKE_VECTOR */ 0x20)) {
+            fdf::error(
+                "Client requested a wakeable interrupt, but platform bus did not provide one");
+            reply_error(ZX_ERR_BAD_STATE);
+            return;
+          }
         }
 
         zx_status_t status =
@@ -538,9 +649,7 @@ void AmlGpio::GetInterrupt(fuchsia_hardware_pinimpl::wire::PinImplGetInterruptRe
           completer.buffer(arena).ReplySuccess(std::move(out_irq->value()->irq));
         } else {
           fdf::error("Failed to duplicate interrupt handle: {}", zx_status_get_string(status));
-          ClearIrqIndex(irq_index, index);
-          irq_info_[index] = InterruptInfo{};
-          completer.buffer(arena).ReplyError(status);
+          reply_error(status);
         }
       });
 }
@@ -617,29 +726,6 @@ void AmlGpio::Configure(fuchsia_hardware_pinimpl::wire::PinImplConfigureRequest*
   }
   if (request->config.has_drive_strength_ua()) {
     SetDriveStrength(request->pin, block, request->config.drive_strength_ua());
-  }
-  if (request->config.has_wake_vector() && request->config.wake_vector()) {
-    // Validate there are enough wake vector interrupts.
-    auto result = pdev_.sync()->GetInterruptById(wake_vector_pins_.size(), 0);
-    if (!result.ok() || result->is_error()) {
-      fdf::error("Not enough interrupts");
-      completer.buffer(arena).ReplyError(ZX_ERR_IO_INVALID);
-      return;
-    }
-    zx_info_interrupt_t info{};
-    zx_status_t status =
-        result->value()->irq.get_info(ZX_INFO_INTERRUPT, &info, sizeof(info), nullptr, nullptr);
-    if (status != ZX_OK) {
-      fdf::error("Failed to get interrupt info");
-      completer.buffer(arena).ReplyError(status);
-      return;
-    }
-    if (!(info.options & /* ZX_INTERRUPT_WAKE_VECTOR */ 0x20)) {
-      fdf::error("Not enough wake vector interrupts");
-      completer.buffer(arena).ReplyError(status);
-      return;
-    }
-    wake_vector_pins_.insert(request->pin);
   }
 
   auto new_config = fuchsia_hardware_pin::wire::Configuration::Builder(arena)

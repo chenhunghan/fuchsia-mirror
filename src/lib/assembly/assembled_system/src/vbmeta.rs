@@ -7,7 +7,7 @@
 use crate::base_package::BasePackage;
 use anyhow::{Context, Result, anyhow};
 use assembly_config_schema::BuildType;
-use assembly_images_config::{VBMeta, VBMetaStyle};
+use assembly_images_config::{VBMeta, VBMetaMode, VBMetaStyle};
 use camino::{Utf8Path, Utf8PathBuf};
 use std::path::Path;
 use utf8_path::path_relative_from_current_dir;
@@ -140,7 +140,11 @@ pub fn construct_vbmeta(
     let relative_path = path_relative_from_current_dir(&generated_path)
         .with_context(|| format!("calculating relative path for: {}", generated_path))?;
 
-    if vbmeta_config.style == VBMetaStyle::VBMetaSystem {
+    // TODO(https://fxbug.dev/517180293): Remove this temporary bridge once Image::VBMeta is refactored
+    // to generically carry `mode` and `name` through assembled_system and update_package.
+    if vbmeta_config.style == VBMetaStyle::VBMetaSystem
+        || (vbmeta_config.mode == VBMetaMode::Firmware && vbmeta_config.name == "vbmeta_system")
+    {
         Ok(ConstructedVBMeta::VBMetaSystem(relative_path))
     } else if vbmeta_config.style == VBMetaStyle::Fuchsia {
         Ok(ConstructedVBMeta::Standalone(relative_path))
@@ -156,7 +160,7 @@ mod tests {
     use crate::base_package::BasePackage;
 
     use assembly_config_schema::BuildType;
-    use assembly_images_config::{VBMeta, VBMetaStyle};
+    use assembly_images_config::{VBMeta, VBMetaMode, VBMetaStyle};
     use camino::{Utf8Path, Utf8PathBuf};
     use fuchsia_hash::Hash;
     use tempfile::tempdir;
@@ -180,6 +184,7 @@ mod tests {
             key_metadata: Some(metadata_path),
             additional_descriptors: vec![],
             include_base_merkle: false,
+            mode: VBMetaMode::Asset,
         };
 
         // Create a fake zbi.
@@ -223,6 +228,7 @@ mod tests {
             key_metadata: Some(metadata_path),
             additional_descriptors: vec![],
             include_base_merkle: false,
+            mode: VBMetaMode::Asset,
         };
 
         // Create a fake zbi.
@@ -266,6 +272,7 @@ mod tests {
             key_metadata: Some(metadata_path),
             additional_descriptors: vec![],
             include_base_merkle: true,
+            mode: VBMetaMode::Asset,
         };
 
         // Create a fake zbi.
@@ -329,6 +336,7 @@ mod tests {
                     key_metadata: None,
                     additional_descriptors: vec![],
                     include_base_merkle: false,
+                    mode: VBMetaMode::Asset,
                 };
 
                 let vbmeta = construct_vbmeta(
@@ -351,5 +359,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn construct_firmware_vbmeta_system() {
+        let tmp = tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap();
+
+        let key_path = dir.join("key");
+        std::fs::write(&key_path, test_keys::ATX_TEST_KEY).unwrap();
+
+        let vbmeta_config = VBMeta {
+            style: VBMetaStyle::Fuchsia,
+            name: "vbmeta_system".into(),
+            filename: Some("vbmeta_system".into()),
+            key: key_path,
+            key_metadata: None,
+            additional_descriptors: vec![],
+            include_base_merkle: false,
+            mode: VBMetaMode::Firmware,
+        };
+
+        let zbi_path = dir.join("fuchsia.zbi");
+        std::fs::write(&zbi_path, "fake zbi").unwrap();
+
+        let vbmeta = construct_vbmeta(
+            dir,
+            &vbmeta_config,
+            zbi_path,
+            Utf8PathBuf::new(),
+            BuildType::Eng,
+            None,
+        )
+        .unwrap();
+
+        let ConstructedVBMeta::VBMetaSystem(vbmeta_path) = vbmeta else {
+            panic!("Expected VBMetaSystem image for firmware vbmeta_system; got {vbmeta:#?}");
+        };
+        assert_eq!(
+            vbmeta_path,
+            path_relative_from_current_dir(dir.join("vbmeta_system.vbmeta")).unwrap()
+        );
     }
 }

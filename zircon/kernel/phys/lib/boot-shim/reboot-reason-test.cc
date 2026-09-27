@@ -444,4 +444,38 @@ TEST(RebootReasonItemTest, BootconfigUnknownReason) {
   }));
 }
 
+TEST(RebootReasonItemTest, PmicBrownoutReasons) {
+  constexpr std::array<std::string_view, 9> kBrownoutCmdlines = {
+      "androidboot.bootreason=reboot,uvlo,pmic,main",
+      "androidboot.bootreason=reboot,uvlo,pmic,sub",
+      "androidboot.bootreason=reboot,uvlo,pmic,if",
+      "androidboot.bootreason=reboot,ocp,pmic,main",
+      "androidboot.bootreason=reboot,ocp,pmic,if",
+      "androidboot.bootreason=reboot,ocp2,pmic,sub",
+      "androidboot.bootreason=reboot,ocp3,pmic,if,usb",
+      "androidboot.bootreason=reboot,sys_ldo_ok,pmic,main",
+      "androidboot.bootreason=reboot,master_dc,reset",
+  };
+
+  std::array<std::byte, 512> image_buffer;
+  zbitl::Image<std::span<std::byte>> image(image_buffer);
+  for (auto cmdline : kBrownoutCmdlines) {
+    ASSERT_TRUE(image.clear().is_ok());
+
+    boot_shim::BootShim<boot_shim::RebootReasonItem> shim("test-shim", stdout);
+    shim.Get<boot_shim::RebootReasonItem>().Init(boot_shim::BootProperties(cmdline),
+                                                 shim.shim_name());
+
+    ASSERT_TRUE(shim.AppendItems(image).is_ok());
+
+    ASSERT_TRUE(HasZbiItem(image, [](const zbi_header_t& header, zbitl::ByteView payload) {
+      EXPECT_GE(payload.size_bytes(), sizeof(zbi_hw_reboot_reason_t));
+      auto* reason = reinterpret_cast<const zbi_hw_reboot_reason_t*>(payload.data());
+      return header.type == ZBI_TYPE_HW_REBOOT_REASON &&
+             (payload.size_bytes() >= sizeof(zbi_hw_reboot_reason_t)) &&
+             *reason == ZBI_HW_REBOOT_REASON_BROWNOUT;
+    }));
+  }
+}
+
 }  // namespace

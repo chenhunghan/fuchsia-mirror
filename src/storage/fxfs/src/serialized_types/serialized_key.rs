@@ -74,12 +74,45 @@ fn compare_keys_slow(mut a: &[u8], mut b: &[u8]) -> Result<cmp::Ordering, Error>
 pub struct KeySerializer<'a, B: Buffer> {
     buffer: &'a mut B,
     start_pos: usize,
-    /// Set to true once `finalize` has been called.
-    done: bool,
     /// Optional delta base subtracted from the first `u64` payload item.
     base: Option<u64>,
-    /// Latched error encountered during serialization, returned upon `finalize`.
-    error: Option<Error>,
+}
+
+/// Proof token returned when key serialization has finalized its length headers.
+///
+/// Variable-length trailing types (`String`, `CasefoldString`, `Vec<u8>`) and terminal enums
+/// consume `KeySerializer` and return `KeySerializerFinalized`, making it a compile-time error to
+/// serialize any subsequent fields after a variable-length trailing field.
+#[derive(Debug)]
+pub struct KeySerializerFinalized(());
+
+impl<B: Buffer> From<KeySerializer<'_, B>> for KeySerializerFinalized {
+    #[inline]
+    fn from(serializer: KeySerializer<'_, B>) -> Self {
+        serializer.finalize()
+    }
+}
+
+/// Combines two `SerializeKey::Output` types across enum variants: produces `KeySerializer<'a, B>`
+/// if both variants are non-terminal, or `KeySerializerFinalized` if either variant is terminal.
+pub trait MergeSerializerOutput<Rhs>: Sized {
+    type Output: Into<KeySerializerFinalized> + From<Self> + From<Rhs>;
+}
+
+impl<'a, B: Buffer + 'a> MergeSerializerOutput<KeySerializer<'a, B>> for KeySerializer<'a, B> {
+    type Output = KeySerializer<'a, B>;
+}
+
+impl<'a, B: Buffer + 'a> MergeSerializerOutput<KeySerializerFinalized> for KeySerializer<'a, B> {
+    type Output = KeySerializerFinalized;
+}
+
+impl<'a, B: Buffer + 'a> MergeSerializerOutput<KeySerializer<'a, B>> for KeySerializerFinalized {
+    type Output = KeySerializerFinalized;
+}
+
+impl MergeSerializerOutput<KeySerializerFinalized> for KeySerializerFinalized {
+    type Output = KeySerializerFinalized;
 }
 
 impl<'a, B: Buffer> KeySerializer<'a, B> {
@@ -88,22 +121,12 @@ impl<'a, B: Buffer> KeySerializer<'a, B> {
     pub fn new(buffer: &'a mut B, base: Option<u64>) -> Self {
         let start_pos = buffer.as_ref().len();
         buffer.put(&[0]);
-        Self { buffer, start_pos, done: false, base, error: None }
-    }
-
-    /// Returns true if no payload items have been written yet for this key.
-    #[inline]
-    fn is_first(&self) -> bool {
-        self.buffer.as_ref().len() == self.start_pos + 1
+        Self { buffer, start_pos, base }
     }
 
     /// Writes an order-preserving varint-encoded 64-bit payload to the buffer without base delta encoding.
     #[inline]
     pub fn write_varint(&mut self, v: u64) {
-        if self.error.is_some() {
-            return;
-        }
-        debug_assert!(!self.done);
         let (bytes, len) = varint::encode_varint_bytes(v);
         self.write_bytes(&bytes[..len]);
     }
@@ -114,19 +137,8 @@ impl<'a, B: Buffer> KeySerializer<'a, B> {
     /// `v - base`. Otherwise, writes `v` as an order-preserving varint.
     #[inline]
     pub fn write_u64(&mut self, v: u64) {
-        if self.error.is_some() {
-            return;
-        }
-        debug_assert!(!self.done);
         if let Some(base) = self.base.take() {
-            if !self.is_first() {
-                self.error = Some(anyhow!("write_u64 with base must be the first item"));
-                return;
-            }
-            if v < base {
-                self.error = Some(anyhow!("Delta encoding underflow: v ({}) < base ({})", v, base));
-                return;
-            }
+            assert!(v >= base, "Delta encoding underflow: v ({v}) < base ({base})");
             self.write_varint(v - base);
         } else {
             self.write_varint(v);
@@ -137,11 +149,8 @@ impl<'a, B: Buffer> KeySerializer<'a, B> {
     /// fit within the initial chunk.
     #[inline]
     pub fn write_bytes(&mut self, bytes: &[u8]) {
-        if self.error.is_some() {
-            return;
-        }
-        debug_assert!(!self.done);
-        debug_assert!(
+        assert!(self.base.is_none(), "write_u64 with base must be the first item");
+        assert!(
             self.buffer.as_ref().len() - self.start_pos - 1 + bytes.len() <= MAX_CHUNK_LEN,
             "Non-terminal key fields must fit within the initial chunk"
         );
@@ -151,11 +160,8 @@ impl<'a, B: Buffer> KeySerializer<'a, B> {
     /// Writes trailing variable-length dynamic bytes to the serialization buffer, crossing chunk
     /// boundaries as needed, then immediately finalizes the key.
     #[inline]
-    pub fn write_last(&mut self, mut bytes: &[u8]) {
-        if self.error.is_some() {
-            return;
-        }
-        debug_assert!(!self.done);
+    pub fn write_last(self, mut bytes: &[u8]) -> KeySerializerFinalized {
+        assert!(self.base.is_none(), "write_u64 with base must be the first item");
         while !bytes.is_empty() {
             let total_minus_1 = self.buffer.as_ref().len() - self.start_pos - 1;
             let chunk_len = total_minus_1 & 0xff;
@@ -170,25 +176,13 @@ impl<'a, B: Buffer> KeySerializer<'a, B> {
             self.buffer.put(&bytes[..to_write]);
             bytes = &bytes[to_write..];
         }
-        let _ = self.finalize();
+        self.finalize()
     }
 
     /// Resolves chunk lengths and finalizes the key serialization.
-    ///
-    /// If an error occurred during serialization, truncates the buffer back to start position
-    /// and returns the error.
     #[inline]
-    pub fn finalize(&mut self) -> Result<(), Error> {
-        if let Some(err) = &self.error {
-            if !self.done {
-                self.done = true;
-                self.buffer.truncate(self.start_pos);
-            }
-            return Err(anyhow!("{}", err));
-        }
-        if self.done {
-            return Ok(());
-        }
+    pub fn finalize(self) -> KeySerializerFinalized {
+        assert!(self.base.is_none(), "write_u64 with base must be the first item");
         let total_minus_1 = self.buffer.as_ref().len() - self.start_pos - 1;
         let chunk_len = total_minus_1 & 0xff;
         let chunk_start = self.start_pos + (total_minus_1 & !0xff);
@@ -198,20 +192,7 @@ impl<'a, B: Buffer> KeySerializer<'a, B> {
         } else {
             self.buffer.as_mut()[chunk_start] = chunk_len as u8;
         }
-        self.done = true;
-        Ok(())
-    }
-}
-
-impl<B: Buffer> Drop for KeySerializer<'_, B> {
-    fn drop(&mut self) {
-        // Roll back unfinalized key bytes on error or early exit to maintain buffer integrity.
-        if !self.done {
-            self.buffer.truncate(self.start_pos);
-            if !std::thread::panicking() && self.error.is_none() {
-                debug_assert!(false, "KeySerializer dropped without being finalized");
-            }
-        }
+        KeySerializerFinalized(())
     }
 }
 
@@ -223,8 +204,6 @@ pub struct KeyDeserializer<'a> {
     remaining_chunks: &'a [u8],
     /// Optional delta base added to the first `u64` payload item.
     base: Option<u64>,
-    /// Whether the next item to read is the first item (eligible for base delta decoding).
-    is_first: bool,
 }
 
 impl<'a> KeyDeserializer<'a> {
@@ -254,7 +233,7 @@ impl<'a> KeyDeserializer<'a> {
         } else {
             &[]
         };
-        Ok((Self { chunk, remaining_chunks, base, is_first: true }, total_len))
+        Ok((Self { chunk, remaining_chunks, base }, total_len))
     }
 
     /// Returns true if all payload bytes have been consumed.
@@ -267,7 +246,7 @@ impl<'a> KeyDeserializer<'a> {
     /// the initial chunk.
     #[inline]
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        self.is_first = false;
+        ensure!(self.base.is_none(), "read_u64 with base must be the first item");
         ensure!(self.chunk.len() >= buf.len(), "Data array boundary overrun");
         buf.copy_from_slice(&self.chunk[..buf.len()]);
         self.chunk = &self.chunk[buf.len()..];
@@ -278,10 +257,9 @@ impl<'a> KeyDeserializer<'a> {
     /// adds the base to reconstruct the original value.
     #[inline]
     pub fn read_u64(&mut self) -> Result<u64, Error> {
-        let is_first = self.is_first;
+        let base = self.base.take();
         let v = self.read_varint()?;
-        if let Some(base) = self.base.take() {
-            ensure!(is_first, "read_u64 with base must be the first item");
+        if let Some(base) = base {
             Ok(v.checked_add(base).ok_or_else(|| {
                 anyhow::anyhow!("Delta decoding overflow: v ({}) + base ({})", v, base)
             })?)
@@ -293,26 +271,16 @@ impl<'a> KeyDeserializer<'a> {
     /// Extracts an order-preserving decoded 64-bit variable length integer from stream.
     #[inline]
     pub fn read_varint(&mut self) -> Result<u64, Error> {
-        self.is_first = false;
+        ensure!(self.base.is_none(), "read_u64 with base must be the first item");
         let (v, remainder) = varint::decode_varint(self.chunk)?;
         self.chunk = remainder;
         Ok(v)
     }
 
-    /// Reads a fixed-length vector of `len` bytes from the unconsumed key payload.
-    #[inline]
-    pub fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, Error> {
-        self.is_first = false;
-        ensure!(self.chunk.len() >= len, "Data array boundary overrun");
-        let vec = self.chunk[..len].to_vec();
-        self.chunk = &self.chunk[len..];
-        Ok(vec)
-    }
-
     /// Consumes and returns all remaining bytes in the key payload.
     #[inline]
-    pub fn read_last(&mut self) -> Vec<u8> {
-        self.is_first = false;
+    pub fn read_last(&mut self) -> Result<Vec<u8>, Error> {
+        ensure!(self.base.is_none(), "read_u64 with base must be the first item");
         let mut result = Vec::with_capacity(self.chunk.len() + self.remaining_chunks.len());
         result.extend_from_slice(self.chunk);
         self.chunk = &[];
@@ -325,37 +293,56 @@ impl<'a> KeyDeserializer<'a> {
                 &[]
             };
         }
-        result
+        Ok(result)
     }
 }
 
 /// Trait defining the translation logic from Fxfs types into order-consistent binaries.
 pub trait SerializeKey: Sized {
+    /// The serializer state returned after writing this type (`KeySerializer` for non-terminal
+    /// types, or `KeySerializerFinalized` for variable-length trailing types).
+    type Output<'a, B: Buffer + 'a>: Into<KeySerializerFinalized>;
+
     /// Encodes key representation sequentially into serialization stream.
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>);
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B>;
 
     /// Decodes serializations sequentially from underlying raw bytes.
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error>;
 
-    /// Serializes this key directly into `buffer` with its length prefix and optional delta base.
+    /// Serializes this key directly into `buffer` with its length prefix and no delta base.
     ///
     /// Matches the ergonomics of serde/bincode `serialize_into`.
     #[inline]
-    fn serialize_key_into<B: Buffer>(
-        &self,
-        buffer: &mut B,
-        base: Option<u64>,
-    ) -> Result<(), Error> {
-        let mut serializer = KeySerializer::new(buffer, base);
-        self.serialize_key_to(&mut serializer);
-        serializer.finalize()
+    fn serialize_key_into<B: Buffer>(&self, buffer: &mut B) {
+        let serializer = KeySerializer::new(buffer, None);
+        let _: KeySerializerFinalized = self.serialize_key_to(serializer).into();
+    }
+
+    /// Serializes this key directly into `buffer` with its length prefix and delta `base`
+    /// subtracted from the leading `u64`.
+    #[inline]
+    fn serialize_key_with_base_into<B: Buffer>(&self, buffer: &mut B, base: u64)
+    where
+        Self: crate::lsm_tree::types::SortByU64,
+    {
+        let serializer = KeySerializer::new(buffer, Some(base));
+        let _: KeySerializerFinalized = self.serialize_key_to(serializer).into();
     }
 }
 
 impl SerializeKey for u8 {
+    type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
+
     #[inline]
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        mut serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
         serializer.write_bytes(std::slice::from_ref(self));
+        serializer
     }
     #[inline]
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
@@ -366,9 +353,15 @@ impl SerializeKey for u8 {
 }
 
 impl SerializeKey for u32 {
+    type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
+
     #[inline]
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
-        serializer.write_varint(*self as u64)
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        mut serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
+        serializer.write_varint(*self as u64);
+        serializer
     }
     #[inline]
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
@@ -377,9 +370,15 @@ impl SerializeKey for u32 {
 }
 
 impl SerializeKey for u64 {
+    type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
+
     #[inline]
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        mut serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
         serializer.write_u64(*self);
+        serializer
     }
     #[inline]
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
@@ -388,18 +387,28 @@ impl SerializeKey for u64 {
 }
 
 impl SerializeKey for String {
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
-        serializer.write_last(self.as_bytes());
+    type Output<'a, B: Buffer + 'a> = KeySerializerFinalized;
+
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
+        serializer.write_last(self.as_bytes())
     }
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
-        Ok(String::from_utf8(deserializer.read_last())?)
+        Ok(String::from_utf8(deserializer.read_last()?)?)
     }
 }
 
 impl SerializeKey for fxfs_unicode::CasefoldString {
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
+    type Output<'a, B: Buffer + 'a> = KeySerializerFinalized;
+
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
         let s: &str = self.as_str();
-        serializer.write_last(s.as_bytes());
+        serializer.write_last(s.as_bytes())
     }
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
         Ok(Self::new(String::deserialize_key_from(deserializer)?))
@@ -407,22 +416,33 @@ impl SerializeKey for fxfs_unicode::CasefoldString {
 }
 
 impl SerializeKey for Vec<u8> {
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
-        serializer.write_last(self);
+    type Output<'a, B: Buffer + 'a> = KeySerializerFinalized;
+
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
+        serializer.write_last(self)
     }
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
-        Ok(deserializer.read_last())
+        deserializer.read_last()
     }
 }
 
 impl SerializeKey for std::ops::Range<u64> {
+    type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
+
     #[inline]
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
         // Range upper-bounds are typically critical when evaluating extent allocations
         // in tree merges, so we write end values before length (end - start) values,
         // which makes narrower ranges sort first on ties, matching OrdUpperBound.
-        self.end.serialize_key_to(serializer);
-        self.end.saturating_sub(self.start).serialize_key_to(serializer);
+        assert!(self.start <= self.end, "Range start must be <= end");
+        let serializer = self.end.serialize_key_to(serializer);
+        (self.end - self.start).serialize_key_to(serializer)
     }
     #[inline]
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
@@ -434,9 +454,14 @@ impl SerializeKey for std::ops::Range<u64> {
 }
 
 impl SerializeKey for std::num::NonZeroU64 {
+    type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
+
     #[inline]
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
-        self.get().serialize_key_to(serializer);
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
+        self.get().serialize_key_to(serializer)
     }
     #[inline]
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
@@ -492,17 +517,10 @@ mod tests {
         for i in 0..keys.len() {
             for j in 0..keys.len() {
                 let mut buf_a = Vec::new();
-                let mut ser_a = KeySerializer::new(&mut buf_a, Some(0));
-                keys[i].serialize_key_to(&mut ser_a);
-                ser_a.finalize().unwrap();
+                keys[i].serialize_key_with_base_into(&mut buf_a, 0);
 
                 let mut buf_b = Vec::new();
-                let mut ser_b = KeySerializer::new(&mut buf_b, Some(0));
-                keys[j].serialize_key_to(&mut ser_b);
-                ser_b.finalize().unwrap();
-
-                std::mem::drop(ser_a);
-                std::mem::drop(ser_b);
+                keys[j].serialize_key_with_base_into(&mut buf_b, 0);
 
                 let cmp = keys[i].cmp_upper_bound(&keys[j]);
                 let ser_cmp = compare_keys(&buf_a, &buf_b).unwrap();
@@ -525,19 +543,19 @@ mod tests {
         // Compare all pairs. We compare against `cmp_upper_bound` which is now a total order
         // for ranges, matching serialization order.
         for i in 0..keys.len() {
+            let base = crate::lsm_tree::types::SortByU64::get_leading_u64(&keys[i]);
+            let mut buf_base = Vec::new();
+            keys[i].serialize_key_with_base_into(&mut buf_base, base);
+            let (mut deser, _) = KeyDeserializer::new(&buf_base, Some(base)).unwrap();
+            assert_eq!(AllocatorKey::deserialize_key_from(&mut deser).unwrap(), keys[i]);
+            assert!(deser.is_empty());
+
             for j in 0..keys.len() {
                 let mut buf_a = Vec::new();
-                let mut ser_a = KeySerializer::new(&mut buf_a, Some(0));
-                keys[i].serialize_key_to(&mut ser_a);
-                ser_a.finalize().unwrap();
+                keys[i].serialize_key_with_base_into(&mut buf_a, 0);
 
                 let mut buf_b = Vec::new();
-                let mut ser_b = KeySerializer::new(&mut buf_b, Some(0));
-                keys[j].serialize_key_to(&mut ser_b);
-                ser_b.finalize().unwrap();
-
-                std::mem::drop(ser_a);
-                std::mem::drop(ser_b);
+                keys[j].serialize_key_with_base_into(&mut buf_b, 0);
 
                 let cmp = keys[i].cmp_upper_bound(&keys[j]);
                 let ser_cmp = compare_keys(&buf_a, &buf_b).unwrap();
@@ -557,7 +575,7 @@ mod tests {
         {
             let mut ser = KeySerializer::new(&mut buf, Some(base));
             ser.write_u64(val);
-            ser.finalize().unwrap();
+            ser.finalize();
         }
 
         // Deserialize
@@ -572,31 +590,11 @@ mod tests {
     }
 
     #[test]
-    fn test_delta_encoding_underflow_returns_error() {
-        let mut buf = Vec::new();
-        let base = 100;
-        let val = 50;
-
-        let mut ser = KeySerializer::new(&mut buf, Some(base));
-        ser.write_u64(val);
-        assert!(ser.finalize().is_err());
-        std::mem::drop(ser);
-        assert_eq!(buf.len(), 0);
-
-        let mut buf2 = Vec::new();
-        assert!(val.serialize_key_into(&mut buf2, Some(base)).is_err());
-        assert_eq!(buf2.len(), 0);
-    }
-
-    #[test]
-    fn test_finalize_after_error_and_write_last_is_idempotent() {
+    #[should_panic(expected = "Delta encoding underflow")]
+    fn test_delta_encoding_underflow_panics() {
         let mut buf = Vec::new();
         let mut ser = KeySerializer::new(&mut buf, Some(100));
-        ser.write_u64(50); // Underflow error latched.
-        ser.write_last(b"trailing"); // Internally calls finalize(), discarding error.
-        assert!(ser.finalize().is_err());
-        std::mem::drop(ser);
-        assert_eq!(buf.len(), 0);
+        ser.write_u64(50);
     }
 
     #[test]
@@ -611,7 +609,7 @@ mod tests {
             let mut ser = KeySerializer::new(&mut buf, Some(base));
             ser.write_u64(val1);
             ser.write_u64(val2);
-            ser.finalize().unwrap();
+            ser.finalize();
         }
 
         // Deserialize
@@ -633,7 +631,7 @@ mod tests {
         {
             let mut ser = KeySerializer::new(&mut buf, None);
             ser.write_u64(val);
-            ser.finalize().unwrap();
+            ser.finalize();
         }
 
         // Deserialize
@@ -661,7 +659,8 @@ mod tests {
     }
 
     #[test]
-    fn test_write_u64_with_base_not_first_returns_error() {
+    #[should_panic(expected = "write_u64 with base must be the first item")]
+    fn test_write_u64_with_base_not_first_panics() {
         let mut buf = Vec::new();
         let base = 100;
         let val = 150;
@@ -669,9 +668,6 @@ mod tests {
         let mut ser = KeySerializer::new(&mut buf, Some(base));
         ser.write_varint(5); // Write something else first
         ser.write_u64(val);
-        assert!(ser.finalize().is_err());
-        std::mem::drop(ser);
-        assert_eq!(buf.len(), 0);
     }
 
     #[test]
@@ -686,7 +682,7 @@ mod tests {
             let mut ser = KeySerializer::new(&mut buf, Some(base));
             ser.write_u64(val1);
             ser.write_u64(val2);
-            ser.finalize().unwrap();
+            ser.finalize();
         }
 
         let (mut deser, length) = KeyDeserializer::new(&buf, Some(base)).unwrap();
@@ -701,11 +697,7 @@ mod tests {
         let s = CasefoldString::new("Hello World".to_string());
 
         let mut buf = Vec::new();
-        {
-            let mut ser = KeySerializer::new(&mut buf, None);
-            s.serialize_key_to(&mut ser);
-            ser.finalize().unwrap();
-        }
+        s.serialize_key_into(&mut buf);
 
         let (mut deser, len) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(len, buf.len());
@@ -721,60 +713,60 @@ mod tests {
         // Key < 254 bytes: single byte prefix.
         let key_100 = vec![42u8; 100];
         let mut buf_100 = Vec::new();
-        key_100.serialize_key_into(&mut buf_100, None).unwrap();
+        key_100.serialize_key_into(&mut buf_100);
         assert_eq!(buf_100[0], 100);
         assert_eq!(buf_100.len(), 101);
         let (mut deser, len) = KeyDeserializer::new(&buf_100, None).unwrap();
         assert_eq!(len, 101);
-        assert_eq!(deser.read_last(), key_100.as_slice());
+        assert_eq!(deser.read_last().unwrap(), key_100.as_slice());
         assert!(deser.is_empty());
 
         // Key == 254 bytes: single byte prefix (254).
         let key_254 = vec![42u8; 254];
         let mut buf_254 = Vec::new();
-        key_254.serialize_key_into(&mut buf_254, None).unwrap();
+        key_254.serialize_key_into(&mut buf_254);
         assert_eq!(buf_254[0], 254);
         assert_eq!(buf_254.len(), 255);
         let (mut deser, len) = KeyDeserializer::new(&buf_254, None).unwrap();
         assert_eq!(len, 255);
-        assert_eq!(deser.read_last(), key_254.as_slice());
+        assert_eq!(deser.read_last().unwrap(), key_254.as_slice());
         assert!(deser.is_empty());
 
         // Key == 255 bytes: chunk 0 has len 255 (256 bytes), chunk 1 has len 0 (1 byte).
         let key_255 = vec![42u8; 255];
         let mut buf_255 = Vec::new();
-        key_255.serialize_key_into(&mut buf_255, None).unwrap();
+        key_255.serialize_key_into(&mut buf_255);
         assert_eq!(buf_255[0], 255);
         assert_eq!(buf_255[256], 0);
         assert_eq!(buf_255.len(), 257);
         let (mut deser, len) = KeyDeserializer::new(&buf_255, None).unwrap();
         assert_eq!(len, 257);
-        assert_eq!(deser.read_last(), key_255.as_slice());
+        assert_eq!(deser.read_last().unwrap(), key_255.as_slice());
         assert!(deser.is_empty());
 
         // Key == 256 bytes: chunk 0 has len 255 (256 bytes), chunk 1 has len 1 (2 bytes).
         let key_256 = vec![42u8; 256];
         let mut buf_256 = Vec::new();
-        key_256.serialize_key_into(&mut buf_256, None).unwrap();
+        key_256.serialize_key_into(&mut buf_256);
         assert_eq!(buf_256[0], 255);
         assert_eq!(buf_256[256], 1);
         assert_eq!(buf_256.len(), 258);
         let (mut deser, len) = KeyDeserializer::new(&buf_256, None).unwrap();
         assert_eq!(len, 258);
-        assert_eq!(deser.read_last(), key_256.as_slice());
+        assert_eq!(deser.read_last().unwrap(), key_256.as_slice());
         assert!(deser.is_empty());
 
         // Key == 510 bytes: chunk 0 (256 bytes), chunk 1 (256 bytes), chunk 2 has len 0 (1 byte).
         let key_510 = vec![42u8; 510];
         let mut buf_510 = Vec::new();
-        key_510.serialize_key_into(&mut buf_510, None).unwrap();
+        key_510.serialize_key_into(&mut buf_510);
         assert_eq!(buf_510[0], 255);
         assert_eq!(buf_510[256], 255);
         assert_eq!(buf_510[512], 0);
         assert_eq!(buf_510.len(), 513);
         let (mut deser, len) = KeyDeserializer::new(&buf_510, None).unwrap();
         assert_eq!(len, 513);
-        assert_eq!(deser.read_last(), key_510.as_slice());
+        assert_eq!(deser.read_last().unwrap(), key_510.as_slice());
         assert!(deser.is_empty());
 
         // Relative ordering: shorter prefixes compare Less than longer extensions.
@@ -796,17 +788,17 @@ mod tests {
 
         let empty: Vec<u8> = Vec::new();
         let mut buf = Vec::new();
-        empty.serialize_key_into(&mut buf, None).unwrap();
+        empty.serialize_key_into(&mut buf);
         assert_eq!(buf, &[0]);
 
         let (mut deser, len) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(len, 1);
         assert!(deser.is_empty());
-        assert_eq!(deser.read_last(), &[0u8; 0]);
+        assert_eq!(deser.read_last().unwrap(), &[0u8; 0]);
 
         let non_empty: Vec<u8> = vec![1];
         let mut buf_non_empty = Vec::new();
-        non_empty.serialize_key_into(&mut buf_non_empty, None).unwrap();
+        non_empty.serialize_key_into(&mut buf_non_empty);
 
         assert_eq!(compare_keys(&buf, &buf).unwrap(), Ordering::Equal);
         assert_eq!(compare_keys(&buf, &buf_non_empty).unwrap(), Ordering::Less);
@@ -822,7 +814,7 @@ mod tests {
             let num_bytes = multiple * MAX_CHUNK_LEN;
             let payload: Vec<u8> = (0..num_bytes).map(|i| (i % 251) as u8).collect();
             let mut buf = Vec::new();
-            payload.serialize_key_into(&mut buf, None).unwrap();
+            payload.serialize_key_into(&mut buf);
 
             // Expected buffer layout: `multiple` chunks of (1 byte length 255 + 255 bytes payload),
             // followed by a single 0 byte (terminating chunk).
@@ -837,7 +829,7 @@ mod tests {
             // Deserialization round-trip.
             let (mut deser, len) = KeyDeserializer::new(&buf, None).unwrap();
             assert_eq!(len, expected_len);
-            let read_back = deser.read_last();
+            let read_back = deser.read_last().unwrap();
             assert_eq!(read_back, payload.as_slice());
             assert!(deser.is_empty());
 
@@ -857,11 +849,11 @@ mod tests {
         for &size in &sizes {
             let payload = vec![0x77u8; size];
             let mut buf = Vec::new();
-            payload.serialize_key_into(&mut buf, None).unwrap();
+            payload.serialize_key_into(&mut buf);
 
             let (mut deser, len) = KeyDeserializer::new(&buf, None).unwrap();
             assert_eq!(len, buf.len());
-            assert_eq!(deser.read_last(), payload.as_slice());
+            assert_eq!(deser.read_last().unwrap(), payload.as_slice());
             assert!(deser.is_empty());
 
             buffers.push((size, buf));
@@ -898,9 +890,9 @@ mod tests {
             p_b[idx] = 0x20;
 
             let mut buf_a = Vec::new();
-            p_a.serialize_key_into(&mut buf_a, None).unwrap();
+            p_a.serialize_key_into(&mut buf_a);
             let mut buf_b = Vec::new();
-            p_b.serialize_key_into(&mut buf_b, None).unwrap();
+            p_b.serialize_key_into(&mut buf_b);
 
             assert_eq!(
                 compare_keys(&buf_a, &buf_b).unwrap(),
@@ -934,7 +926,7 @@ mod tests {
         let (mut deser, len) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(len, buf.len());
         assert_eq!(deser.read_u64().unwrap(), prefix_val);
-        assert_eq!(deser.read_last(), trailing_payload.as_slice());
+        assert_eq!(deser.read_last().unwrap(), trailing_payload.as_slice());
         assert!(deser.is_empty());
 
         // Test comparison: difference in prefix vs difference in trailing payload.
@@ -971,7 +963,7 @@ mod tests {
 
         for payload in &test_payloads {
             let mut clean_buf = Vec::new();
-            payload.serialize_key_into(&mut clean_buf, None).unwrap();
+            payload.serialize_key_into(&mut clean_buf);
 
             // Append garbage to buffer A and different garbage to buffer B.
             let mut buf_with_garbage_a = clean_buf.clone();
@@ -990,7 +982,7 @@ mod tests {
             // KeyDeserializer::new must return the exact length of the serialized key, not the full buffer.
             let (mut deser, parsed_len) = KeyDeserializer::new(&buf_with_garbage_a, None).unwrap();
             assert_eq!(parsed_len, clean_buf.len());
-            assert_eq!(deser.read_last(), payload.as_slice());
+            assert_eq!(deser.read_last().unwrap(), payload.as_slice());
             assert!(deser.is_empty());
         }
     }
@@ -1035,34 +1027,14 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_serializer_rollback() {
-        let mut buf = vec![1, 2, 3];
-        // Rollback on finalize error (delta underflow).
-        {
-            let mut ser = KeySerializer::new(&mut buf, Some(100));
-            ser.write_u64(50);
-            assert!(ser.finalize().is_err());
-        }
-        assert_eq!(buf, vec![1, 2, 3]);
-
-        // Rollback on drop with latched error.
-        {
-            let mut ser = KeySerializer::new(&mut buf, Some(100));
-            ser.write_u64(50);
-            // Dropped with error latched: should roll back to start_pos without panic.
-        }
-        assert_eq!(buf, vec![1, 2, 3]);
-    }
-
-    #[test]
     fn test_word_probe_comparison() {
         use std::cmp::Ordering;
 
         // Keys with early divergence (first 8 bytes differ).
         let mut key1 = Vec::new();
-        100u64.serialize_key_into(&mut key1, None).unwrap();
+        100u64.serialize_key_into(&mut key1);
         let mut key2 = Vec::new();
-        200u64.serialize_key_into(&mut key2, None).unwrap();
+        200u64.serialize_key_into(&mut key2);
         assert_eq!(compare_keys(&key1, &key2).unwrap(), Ordering::Less);
         assert_eq!(compare_keys(&key2, &key1).unwrap(), Ordering::Greater);
         assert_eq!(compare_keys(&key1, &key1).unwrap(), Ordering::Equal);
@@ -1094,9 +1066,9 @@ mod tests {
 
         // Keys shorter than 8 bytes.
         let mut short1 = Vec::new();
-        10u32.serialize_key_into(&mut short1, None).unwrap();
+        10u32.serialize_key_into(&mut short1);
         let mut short2 = Vec::new();
-        20u32.serialize_key_into(&mut short2, None).unwrap();
+        20u32.serialize_key_into(&mut short2);
         assert_eq!(compare_keys(&short1, &short2).unwrap(), Ordering::Less);
         assert_eq!(compare_keys(&short2, &short1).unwrap(), Ordering::Greater);
         assert_eq!(compare_keys(&short1, &short1).unwrap(), Ordering::Equal);
@@ -1116,9 +1088,9 @@ mod tests {
                     let b = vals[j];
 
                     let mut buf_a = Vec::new();
-                    a.serialize_key_into(&mut buf_a, base).unwrap();
+                    a.serialize_key_to(KeySerializer::new(&mut buf_a, base)).finalize();
                     let mut buf_b = Vec::new();
-                    b.serialize_key_into(&mut buf_b, base).unwrap();
+                    b.serialize_key_to(KeySerializer::new(&mut buf_b, base)).finalize();
 
                     let cmp_ab = compare_keys(&buf_a, &buf_b).unwrap();
                     let cmp_ba = compare_keys(&buf_b, &buf_a).unwrap();
@@ -1131,7 +1103,7 @@ mod tests {
                     for k in 0..vals.len() {
                         let c = vals[k];
                         let mut buf_c = Vec::new();
-                        c.serialize_key_into(&mut buf_c, base).unwrap();
+                        c.serialize_key_to(KeySerializer::new(&mut buf_c, base)).finalize();
                         let cmp_bc = compare_keys(&buf_b, &buf_c).unwrap();
                         let cmp_ac = compare_keys(&buf_a, &buf_c).unwrap();
 
@@ -1140,6 +1112,41 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_non_terminal_enum_in_struct() {
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, fxfs_macros::SerializeKey)]
+        enum MyEnum {
+            Unit,
+            Tuple(u32),
+            Struct { x: u64 },
+        }
+
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, fxfs_macros::SerializeKey)]
+        struct Foo {
+            bar: MyEnum,
+            baz: String,
+        }
+
+        let items = [
+            Foo { bar: MyEnum::Unit, baz: "a".to_string() },
+            Foo { bar: MyEnum::Unit, baz: "b".to_string() },
+            Foo { bar: MyEnum::Tuple(1), baz: "a".to_string() },
+            Foo { bar: MyEnum::Struct { x: 10 }, baz: "z".to_string() },
+        ];
+        for (i, a) in items.iter().enumerate() {
+            let mut buf_a = Vec::new();
+            a.serialize_key_into(&mut buf_a);
+            let (mut deser, _) = KeyDeserializer::new(&buf_a, None).unwrap();
+            let decoded = Foo::deserialize_key_from(&mut deser).unwrap();
+            assert_eq!(&decoded, a);
+            for (j, b) in items.iter().enumerate() {
+                let mut buf_b = Vec::new();
+                b.serialize_key_into(&mut buf_b);
+                assert_eq!(compare_keys(&buf_a, &buf_b).unwrap(), i.cmp(&j));
             }
         }
     }
@@ -1185,17 +1192,11 @@ mod fuzz_object_key_compare {
         }
 
         let mut buf_a = Vec::new();
-        let mut ser_a = KeySerializer::new(&mut buf_a, Some(0));
-        key_a.serialize_key_to(&mut ser_a);
-        let _ = ser_a.finalize();
-        std::mem::drop(ser_a);
+        key_a.serialize_key_with_base_into(&mut buf_a, 0);
         assert_eq!(buf_a, input.0[..len_a]);
 
         let mut buf_b = Vec::new();
-        let mut ser_b = KeySerializer::new(&mut buf_b, Some(0));
-        key_b.serialize_key_to(&mut ser_b);
-        let _ = ser_b.finalize();
-        std::mem::drop(ser_b);
+        key_b.serialize_key_with_base_into(&mut buf_b, 0);
         assert_eq!(buf_b, input.1[..len_b]);
 
         let cmp = key_a.cmp_upper_bound(&key_b);
@@ -1235,17 +1236,11 @@ mod fuzz_allocator_key_compare {
         }
 
         let mut buf_a = Vec::new();
-        let mut ser_a = KeySerializer::new(&mut buf_a, Some(0));
-        key_a.serialize_key_to(&mut ser_a);
-        let _ = ser_a.finalize();
-        std::mem::drop(ser_a);
+        key_a.serialize_key_with_base_into(&mut buf_a, 0);
         assert_eq!(buf_a, input.0[..len_a]);
 
         let mut buf_b = Vec::new();
-        let mut ser_b = KeySerializer::new(&mut buf_b, Some(0));
-        key_b.serialize_key_to(&mut ser_b);
-        let _ = ser_b.finalize();
-        std::mem::drop(ser_b);
+        key_b.serialize_key_with_base_into(&mut buf_b, 0);
         assert_eq!(buf_b, input.1[..len_b]);
 
         let cmp = key_a.cmp_upper_bound(&key_b);

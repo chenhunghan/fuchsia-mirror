@@ -4,8 +4,6 @@
 
 use super::{NetlinkSockDiag, NetlinkSockDiagNotifiedGroup};
 
-use std::convert::Infallible as Never;
-
 use derivative::Derivative;
 use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_net_sockets as fnet_sockets;
@@ -230,7 +228,7 @@ impl<S: crate::messaging::Sender<<NetlinkSockDiag as ProtocolFamily>::Response>>
         }
     }
 
-    pub(crate) async fn run(mut self) -> Never {
+    pub(crate) async fn run(mut self) -> ! {
         loop {
             self.run_one_step().await;
         }
@@ -1477,7 +1475,7 @@ mod tests {
         w2.wait_until_complete();
         assert!(event_loop.destruction_watcher_stream.is_some());
         // No new watcher request was made
-        assert!(watcher_rx.try_next().is_err());
+        assert!(watcher_rx.try_recv().is_err());
 
         // Disconnect client 1 -> No change to destruction stream.
         ext_client_1.del_membership(NetlinkSockDiagNotifiedGroup::TcpV4Destroy.into()).unwrap();

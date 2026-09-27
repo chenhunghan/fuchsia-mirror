@@ -91,7 +91,7 @@
             service: "fuchsia.hardware.clock.Service",
             from: "#clock-controller-ff63c000",
             to: "#mmc-ffe07000",
-            constraints: { id: 65548 },
+            constraints: { clock_id: 65548 },
         },
         {
             name: "gpio-emmc-reset",

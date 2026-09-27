@@ -119,6 +119,7 @@
                 "fuchsia.driver.manager.EnableTestShutdownDelays",
                 "fuchsia.driver.manager.SetRootDriverHostCritical",
                 "fuchsia.driver.manager.SuspendTimeoutFallback",
+                "fuchsia.power.StoragePowerManagementEnabled",
                 "fuchsia.power.SuspendEnabled",
             ],
             from: "void",
@@ -154,6 +155,7 @@
             config: [
                 "fuchsia.driver.ExposeDebugCapabilities",
                 "fuchsia.driver.usb.peripheral",
+                "fuchsia.power.StoragePowerManagementEnabled",
                 "fuchsia.power.SuspendEnabled",
                 "fuchsia.usb.PeripheralConfig.Functions",
             ],

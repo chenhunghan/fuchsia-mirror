@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use core::convert::Infallible as Never;
 use core::num::NonZeroU16;
 
 use net_types::Witness as _;
@@ -41,7 +40,7 @@ impl<'a, I: DualStackIpExt, D: netstack3_base::WeakDeviceIdentifier, BT: TcpBind
         Self: 'b;
 
     type UdpProps<'b>
-        = Never
+        = !
     where
         Self: 'b;
 
@@ -392,7 +391,6 @@ mod tests {
         StrongDeviceIdentifier, SubnetMatcher, TcpSocketMatcher, TcpStateMatcher, UdpSocketMatcher,
     };
     use test_case::test_case;
-    use test_util::assert_gt;
 
     use super::*;
     use crate::AcceptError;
@@ -1920,7 +1918,7 @@ mod tests {
                 } => {
                     assert_eq!(segs_out, 4);
                     assert_eq!(segs_in, 3);
-                    assert_gt!(snd_cwnd, 0);
+                    assert!(snd_cwnd > 0, "{snd_cwnd} > 0");
                     assert_eq!(rto, Duration::from_millis(500));
                     assert_eq!(rtt, Duration::from_millis(200));
                     assert_eq!(rtt_var, Duration::from_millis(75));
@@ -1954,7 +1952,7 @@ mod tests {
                 } => {
                     assert_eq!(segs_out, 2);
                     assert_eq!(segs_in, 3);
-                    assert_gt!(snd_cwnd, 0);
+                    assert!(snd_cwnd > 0, "{snd_cwnd} > 0");
                     assert_eq!(rto, Duration::from_millis(500));
                     assert_eq!(rtt, Duration::from_millis(200));
                     assert_eq!(rtt_var, Duration::from_millis(75));

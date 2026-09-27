@@ -60,11 +60,13 @@ class TestAmlSpiDriver : public AmlSpiDriver {
       mmio_region_[AML_SPI_STATREG].SetReadCallback(
           []() { return StatReg::Get().FromValue(0).set_tc(1).set_te(1).set_rr(1).reg_value(); });
 
-      mmio_region_[AML_SPI_CONREG].SetWriteCallback([this](uint32_t value) { conreg_ = value; });
+      mmio_region_[AML_SPI_CONREG].SetWriteCallback(
+          [this](uint64_t value) { conreg_ = static_cast<uint32_t>(value); });
       mmio_region_[AML_SPI_CONREG].SetReadCallback([this]() { return conreg_; });
       mmio_region_[AML_SPI_ENHANCE_CNTL].SetWriteCallback(
-          [this](uint32_t value) { enhance_cntl_ = value; });
-      mmio_region_[AML_SPI_TESTREG].SetWriteCallback([this](uint32_t value) { testreg_ = value; });
+          [this](uint64_t value) { enhance_cntl_ = static_cast<uint32_t>(value); });
+      mmio_region_[AML_SPI_TESTREG].SetWriteCallback(
+          [this](uint64_t value) { testreg_ = static_cast<uint32_t>(value); });
 
       return fpromise::ok(mmio_region_.GetMmioBuffer());
     });

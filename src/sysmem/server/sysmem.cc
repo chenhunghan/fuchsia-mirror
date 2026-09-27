@@ -74,12 +74,6 @@ constexpr int64_t kDefaultContiguousMemorySize = -5;
 
 constexpr char kSysmemConfigFilename[] = "/sysmem-config/config.sysmem_config_persistent_fidl";
 
-// fbl::round_up() doesn't work on signed types.
-template <typename T>
-T AlignUp(T value, T divisor) {
-  return (value + divisor - 1) / divisor * divisor;
-}
-
 // Helper function to build owned HeapProperties table with coherency domain support.
 fuchsia_hardware_sysmem::HeapProperties BuildHeapPropertiesWithCoherencyDomainSupport(
     bool cpu_supported, bool ram_supported, bool inaccessible_supported, bool need_clear,
@@ -599,9 +593,16 @@ zx::result<> Sysmem::Initialize(const CreateArgs& create_args) {
 
   constexpr int64_t kMinProtectedAlignment = 64 * 1024;
   assert(kMinProtectedAlignment % zx_system_get_page_size() == 0);
-  contiguous_memory_size =
-      AlignUp(contiguous_memory_size, safe_cast<int64_t>(zx_system_get_page_size()));
-  protected_memory_size = AlignUp(protected_memory_size, kMinProtectedAlignment);
+  if (!CheckRoundUp(contiguous_memory_size, safe_cast<int64_t>(zx_system_get_page_size()))
+           .AssignIfValid(&contiguous_memory_size)) {
+    LOG(ERROR, "contiguous_memory_size overflow during alignment");
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+  if (!CheckRoundUp(protected_memory_size, kMinProtectedAlignment)
+           .AssignIfValid(&protected_memory_size)) {
+    LOG(ERROR, "protected_memory_size overflow during alignment");
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
 
   auto heap = sysmem::MakeHeap(bind_fuchsia_sysmem_heap::HEAP_TYPE_SYSTEM_RAM, 0);
   RunSyncOnLoop([this, &heap] {
@@ -785,12 +786,25 @@ zx::result<> Sysmem::BeginServing() {
 
 zx_status_t Sysmem::RegisterHeapInternal(
     fuchsia_sysmem2::Heap heap, fidl::ClientEnd<fuchsia_hardware_sysmem::Heap> heap_connection) {
+  if (heap.heap_type() == bind_fuchsia_sysmem_heap::HEAP_TYPE_SYSTEM_RAM) {
+    LOG(ERROR, "RegisterHeapInternal attempt to register system ram heap denied: id: %" PRId64,
+        heap.id().value_or(0));
+    return ZX_ERR_ACCESS_DENIED;
+  }
   class EventHandler : public fidl::WireAsyncEventHandler<fuchsia_hardware_sysmem::Heap> {
    public:
     void OnRegister(
         ::fidl::WireEvent<::fuchsia_hardware_sysmem::Heap::OnRegister>* event) override {
       auto properties = fidl::ToNatural(event->properties);
       std::lock_guard checker(*device_->loop_checker_);
+      if (heap_.heap_type() == bind_fuchsia_sysmem_heap::HEAP_TYPE_SYSTEM_RAM ||
+          device_->secure_allocators_.find(heap_) != device_->secure_allocators_.end()) {
+        LOG(ERROR,
+            "Attempt to register system or secure heap via RegisterHeap denied: heap_type: %s id: "
+            "%" PRId64,
+            heap_.heap_type().value_or("").c_str(), heap_.id().value_or(0));
+        return;
+      }
       // A heap should not be registered twice.
       ZX_DEBUG_ASSERT(heap_client_.is_valid());
       // This replaces any previously registered allocator for heap. This
@@ -815,8 +829,10 @@ zx_status_t Sysmem::RegisterHeapInternal(
       std::lock_guard checker(*device_->loop_checker_);
       auto existing = device_->allocators_.find(heap_);
       if (existing != device_->allocators_.end() &&
-          existing->second == weak_associated_allocator_.lock())
+          existing->second == weak_associated_allocator_.lock()) {
         device_->allocators_.erase(heap_);
+        device_->secure_allocators_.erase(heap_);
+      }
     }
 
     static void Bind(Sysmem* device, fidl::ClientEnd<fuchsia_hardware_sysmem::Heap> heap_client_end,
@@ -1024,9 +1040,9 @@ zx_status_t Sysmem::RegisterSecureMemInternal(
       control.has_mod_protected_range = false;
       secure_mem_controls_.emplace(which_heap, std::move(control));
 
-      ZX_ASSERT(secure_allocators_.find(which_heap) == secure_allocators_.end());
+      ZX_ASSERT(!secure_allocators_.contains(which_heap));
       secure_allocators_[which_heap] = secure_allocator.get();
-      ZX_ASSERT(allocators_.find(which_heap) == allocators_.end());
+      ZX_ASSERT(!allocators_.contains(which_heap));
       allocators_[std::move(which_heap)] = std::move(secure_allocator);
     }
 
@@ -1254,6 +1270,10 @@ void Sysmem::LogCollectionsTimer(async_dispatcher_t* loop_dispatcher, async::Tas
   ZX_ASSERT(ZX_OK == log_all_collections_.PostDelayed(loop_dispatcher, kLogAllCollectionsInterval));
 }
 
+// Security note: fuchsia.hardware.sysmem/Sysmem is a privileged protocol. Access control is
+// enforced via Component Framework capability routing (only drivers that legitimately need to call
+// RegisterHeap or RegisterSecureMem may declare `use` of fuchsia.hardware.sysmem.Sysmem in their
+// component manifest). Normal clients/drivers use fuchsia.sysmem2/Allocator instead.
 void Sysmem::RegisterHeap(RegisterHeapRequest& request, RegisterHeapCompleter::Sync& completer) {
   std::lock_guard checker(client_checker_);
   // TODO(b/316646315): Change RegisterHeap to specify fuchsia_sysmem2::Heap, and remove the

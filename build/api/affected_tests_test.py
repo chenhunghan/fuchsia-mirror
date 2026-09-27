@@ -23,45 +23,149 @@ from build_utils import (
     BazelPaths,
     CommandResult,
     MockBazelLauncher,
-    MockCommandRunner,
     MockNinjaRunner,
 )
 
 
-class PartitioningMockBazelLauncher(MockBazelLauncher):
-    """A mock BazelLauncher used to verify the binary partitioning algorithm
-    used when determining which Bazel tests are affected by changed .bzl files.
+class QueryRecordingMockBazelLauncher(MockBazelLauncher):
+    """A mock BazelLauncher that records query arguments and --query_file contents."""
 
-    Usage is:
-      1) Create instance, passing a mapping from test labels to the .bzl files
-         they depend on.
-
-      2) Pass the instance to the affected_tests.find_tests_affected_by_changed_files()
-         function as the bazel_launcher argument.
-
-      3) Check that the queries attribute contains the expected queries.
-    """
-
-    def __init__(self, target_to_bzl_map: dict[str, list[str]]) -> None:
+    def __init__(
+        self,
+        target_to_bzl_map: dict[str, list[str]],
+        target_to_sources_map: dict[str, list[str]] | None = None,
+        returncode: int = 0,
+    ) -> None:
         super().__init__()
         self.target_to_bzl_map = target_to_bzl_map
+        self.target_to_sources_map = target_to_sources_map or {}
+        self.returncode = returncode
         self.queries: list[list[str]] = []
+        self.query_expressions: list[str] = []
 
     def run_query(
         self, query_type: str, query_args: list[str], ignore_errors: bool
     ) -> CommandResult:
         self.queries.append(query_args)
         query_str = query_args[-1]
-        match = re.search(r"set\((.*?)\)", query_str)
-        if match:
-            targets = match.group(1).split()
-            bzl_files = set()
-            for t in targets:
-                bzl_files.update(self.target_to_bzl_map.get(t, []))
-            return CommandResult(
-                returncode=0, stdout="\n".join(sorted(bzl_files)), stderr=""
+        for arg in query_args:
+            if arg.startswith("--query_file="):
+                query_str = Path(arg.removeprefix("--query_file=")).read_text()
+                break
+        self.query_expressions.append(query_str)
+
+        universe_targets: set[str] | None = None
+        for arg in query_args:
+            if arg.startswith("--universe_scope="):
+                universe_targets = set(
+                    arg.removeprefix("--universe_scope=").split(",")
+                )
+                break
+
+        affected: set[str] = set()
+        rbuildfiles_match = re.search(r"rbuildfiles\((.*?)\)", query_str)
+        if rbuildfiles_match:
+            queried_bzls = {
+                item.replace('\\"', '"').replace("\\\\", "\\")
+                for item in re.findall(
+                    r'"((?:\\.|[^"\\])*)"', rbuildfiles_match.group(1)
+                )
+            }
+            for target, bzls in self.target_to_bzl_map.items():
+                if (
+                    universe_targets is not None
+                    and target not in universe_targets
+                ):
+                    continue
+                normalized_bzls = {
+                    b.removeprefix("@@//").replace(":", "/") for b in bzls
+                }
+                if queried_bzls & (set(bzls) | normalized_bzls):
+                    affected.add(target)
+
+        set_match = re.search(r"set\((.*)\)", query_str)
+        if set_match:
+            set_body = set_match.group(1)
+            # If rbuildfiles(...) follows set(...), trim at the closing ')' of set(...)
+            if ") + siblings(" in set_body:
+                set_body = set_body.partition(") + siblings(")[0]
+            queried_sources = {
+                item.replace('\\"', '"').replace("\\\\", "\\")
+                for item in re.findall(r'"((?:\\.|[^"\\])*)"', set_body)
+            }
+            for target, sources in self.target_to_sources_map.items():
+                if (
+                    universe_targets is not None
+                    and target not in universe_targets
+                ):
+                    continue
+                if queried_sources & set(sources):
+                    affected.add(target)
+
+        return CommandResult(
+            returncode=self.returncode,
+            stdout="\n".join(sorted(affected)),
+            stderr="",
+        )
+
+
+class ChunkByCharLimitTest(unittest.TestCase):
+    def test_empty(self) -> None:
+        self.assertEqual(
+            affected_tests._chunk_by_char_limit(
+                [], separator=",", max_chars=10
+            ),
+            [],
+        )
+
+    def test_fits_in_one_chunk(self) -> None:
+        self.assertEqual(
+            affected_tests._chunk_by_char_limit(
+                ["aa", "bb", "cc"], separator=",", max_chars=8
+            ),
+            [["aa", "bb", "cc"]],
+        )
+
+    def test_separator_counts_against_the_limit(self) -> None:
+        # The three items are 6 chars on their own, but "aa,bb,cc" is 8, so a
+        # 7 char budget must split them.
+        self.assertEqual(
+            affected_tests._chunk_by_char_limit(
+                ["aa", "bb", "cc"], separator=",", max_chars=7
+            ),
+            [["aa", "bb"], ["cc"]],
+        )
+
+    def test_longer_separator_splits_earlier(self) -> None:
+        self.assertEqual(
+            affected_tests._chunk_by_char_limit(
+                ["aa", "bb", "cc"], separator=", ", max_chars=7
+            ),
+            [["aa", "bb"], ["cc"]],
+        )
+
+    def test_oversized_item_gets_its_own_chunk(self) -> None:
+        # An item longer than max_chars cannot be split any further, so it is
+        # emitted alone rather than dropped or merged with a neighbor.
+        self.assertEqual(
+            affected_tests._chunk_by_char_limit(
+                ["a", "toolongtofit", "b"], separator=",", max_chars=4
+            ),
+            [["a"], ["toolongtofit"], ["b"]],
+        )
+
+    def test_no_joined_chunk_exceeds_limit(self) -> None:
+        items = [f"item{i}" for i in range(100)]
+        for max_chars in (6, 7, 13, 20, 999):
+            chunks = affected_tests._chunk_by_char_limit(
+                items, separator=",", max_chars=max_chars
             )
-        return CommandResult(returncode=0, stdout="", stderr="")
+            self.assertEqual(
+                [item for chunk in chunks for item in chunk], items
+            )
+            for chunk in chunks:
+                if len(chunk) > 1:
+                    self.assertLessEqual(len(",".join(chunk)), max_chars)
 
 
 class CreateTestArtifactsMappingTest(unittest.TestCase):
@@ -264,11 +368,35 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         self.bazel_paths = BazelPaths.new(self.root, self.build_dir)
         self.bazel_paths.output_base.mkdir(parents=True)
 
+        (self.root / "BUILD.gn").touch()
         (
             self.build_dir / ninja_artifacts.NINJA_BUILD_PLAN_DEPS_FILE
-        ).write_text(
-            "build.ninja.stamp: ../../BUILD.gn ../../src/foo.gni dep1 dep2 dep3 dep4"
+        ).write_text("build.ninja.stamp: ../../BUILD.gn\n")
+
+        (self.build_dir / ninja_artifacts.LAST_NINJA_TARGETS_FILE).write_text(
+            ":default\n"
         )
+
+        self.ninja_artifacts_path = (
+            self.build_dir / ninja_artifacts.LAST_NINJA_ARTIFACTS_FILE
+        )
+        self.ninja_artifacts_path.write_text(
+            "\n".join(
+                [
+                    "obj/gn/target1",
+                    "obj/gn/target1.o",
+                    "obj/bazel/target2.bazel_outputs/foo",
+                    "obj/bazel/target2.bazel_outputs/package_manifest.json",
+                    "obj/some/target2.out",
+                    "build.ninja.stamp",
+                    "test-list.json",
+                    "test-config.json",
+                ]
+            )
+            + "\n"
+        )
+        st = self.ninja_artifacts_path.stat()
+        os.utime(self.ninja_artifacts_path, (st.st_atime, st.st_mtime + 100))
 
         (self.root / "src/bazel").mkdir(parents=True)
         (self.root / "src/bazel/BUILD.bazel").touch()
@@ -307,13 +435,36 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         self._td.cleanup()
 
     def test_no_change(self) -> None:
-        targets = affected_tests.find_tests_affected_by_changed_files(
+        result = affected_tests.find_tests_affected_by_changed_files(
             ["some/file.txt"],
             self.root,
             MockNinjaRunner(self.build_dir, "obj/some/target2.out\n"),
             MockBazelLauncher.new_with_empty_outputs(),
         )
-        self.assertSetEqual(targets, set())
+        self.assertSetEqual(result.affected_tests, set())
+        self.assertFalse(result.build_not_affected)
+
+    def test_build_not_affected(self) -> None:
+        result = affected_tests.find_tests_affected_by_changed_files(
+            ["docs/README.md"],
+            self.root,
+            MockNinjaRunner(self.build_dir, ""),
+            MockBazelLauncher.new_with_empty_outputs(),
+        )
+        self.assertSetEqual(result.affected_tests, set())
+        self.assertTrue(result.build_not_affected)
+
+    def test_unbuilt_target_does_not_affect_build(self) -> None:
+        # A file change affects obj/some/unbuilt.out in build.ninja, but that
+        # target was not built by this builder (not in last_build_artifacts).
+        result = affected_tests.find_tests_affected_by_changed_files(
+            ["some/unbuilt_file.txt"],
+            self.root,
+            MockNinjaRunner(self.build_dir, "obj/some/unbuilt.out\n"),
+            MockBazelLauncher.new_with_empty_outputs(),
+        )
+        self.assertSetEqual(result.affected_tests, set())
+        self.assertTrue(result.build_not_affected)
 
     def test_one_target_affected(self) -> None:
         targets = affected_tests.find_tests_affected_by_changed_files(
@@ -324,7 +475,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
                 "\n".join(["obj/gn/target1", "obj/gn/target1.o"]),
             ),
             MockBazelLauncher.new_with_empty_outputs(),
-        )
+        ).affected_tests
         self.assertSetEqual(
             targets,
             {affected_tests.AffectedTestTarget("//gn:target1", "fuchsia")},
@@ -343,43 +494,18 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
                 ),
             ),
             MockBazelLauncher.new_with_empty_outputs(),
-        )
+        ).affected_tests
         self.maxDiff = None
         self.assertSetEqual(
             targets,
             {affected_tests.AffectedTestTarget("//bazel:target2", "linux")},
         )
 
-        def new_bazel_query_command_filter(
-            queries: list[tuple[str, str]],
-        ) -> T.Callable[[list[str]], CommandResult]:
-            """Create a command filter for bazel queries performed by affected_test.py
-
-            Args:
-                queries: List of (query, expected_output) pairs.
-            Returns:
-                A new input value for MockCommandRunner.set_command_filter()
-            """
-            return MockCommandRunner.new_command_filter_from_list(
-                [
-                    (
-                        f"bazel query --config=quiet --consistent_labels {q[0]} --keep_going",
-                        q[1],
-                    )
-                    for q in queries
-                ]
-            )
-
-        bazel_launcher = MockBazelLauncher()
-        bazel_launcher.command_runner.set_command_filter(
-            new_bazel_query_command_filter(
-                [
-                    (
-                        "rdeps(//...,set(@@//:bazel/test3.cc))",
-                        "@@//src/bazel:target3",
-                    )
-                ]
-            )
+        bazel_launcher = QueryRecordingMockBazelLauncher(
+            target_to_bzl_map={},
+            target_to_sources_map={
+                "@@//src/bazel:target3": ["@@//:bazel/test3.cc"],
+            },
         )
 
         targets = affected_tests.find_tests_affected_by_changed_files(
@@ -387,7 +513,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             self.root,
             MockNinjaRunner(self.build_dir, ""),
             bazel_launcher,
-        )
+        ).affected_tests
         self.maxDiff = None
         self.assertSetEqual(
             targets,
@@ -396,6 +522,15 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
                     "@@//src/bazel:target3", "linux"
                 )
             },
+        )
+        self.assertEqual(len(bazel_launcher.queries), 1)
+        self.assertIn(
+            "--universe_scope=@@//src/bazel:target3",
+            bazel_launcher.queries[0],
+        )
+        self.assertEqual(
+            bazel_launcher.query_expressions[0],
+            'allrdeps(set("@@//:bazel/test3.cc"))',
         )
 
         targets = affected_tests.find_tests_affected_by_changed_files(
@@ -413,7 +548,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
                 ),
             ),
             MockBazelLauncher.new_with_empty_outputs(),
-        )
+        ).affected_tests
         self.assertSetEqual(
             targets,
             {
@@ -440,12 +575,12 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         with self.tests_json_path.open("wt") as f:
             json.dump(tests_json, f)
 
-        mock_ninja_runner = MockNinjaRunner(self.build_dir, "")
+        MockNinjaRunner(self.build_dir, "")
 
         mock_bazel_launcher = MockBazelLauncher()
         mock_bazel_launcher.push_expected_outputs(
             [
-                # Result of rdeps(deps(set(//src/bazel:test1.cc))) query
+                # Result of allrdeps(set(//src/bazel:test1.cc)) query
                 "@@//src/bazel:test1\n",
             ]
         )
@@ -455,9 +590,9 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         targets = affected_tests.find_tests_affected_by_changed_files(
             ["src/bazel/test1.cc"],
             self.root,
-            mock_ninja_runner,
+            MockNinjaRunner(self.build_dir, ""),
             mock_bazel_launcher,
-        )
+        ).affected_tests
 
         self.assertSetEqual(
             targets,
@@ -467,7 +602,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         # Do the same for the second test.
         mock_bazel_launcher.push_expected_outputs(
             [
-                # Result of rdeps(deps(set(//src/bazel:test2.cc))) query
+                # Result of allrdeps(set(//src/bazel:test2.cc)) query
                 "@@//src/bazel:test2\n",
             ]
         )
@@ -475,9 +610,9 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         targets = affected_tests.find_tests_affected_by_changed_files(
             ["src/bazel/test2.cc"],
             self.root,
-            mock_ninja_runner,
+            MockNinjaRunner(self.build_dir, ""),
             mock_bazel_launcher,
-        )
+        ).affected_tests
         self.assertSetEqual(
             targets,
             {affected_tests.AffectedTestTarget("@@//src/bazel:test2", "linux")},
@@ -486,7 +621,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         # Do the same for a build file.
         mock_bazel_launcher.push_expected_outputs(
             [
-                # Result of rdeps(deps(set(//src/bazel:all))) query
+                # Result of allrdeps(set(//src/bazel:all)) query
                 "@@//src/bazel:test1\n"
                 + "@@//src/bazel:test2\n",
             ]
@@ -494,9 +629,9 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         targets = affected_tests.find_tests_affected_by_changed_files(
             ["src/bazel/BUILD.bazel"],
             self.root,
-            mock_ninja_runner,
+            MockNinjaRunner(self.build_dir, ""),
             mock_bazel_launcher,
-        )
+        ).affected_tests
         self.assertSetEqual(
             targets,
             {
@@ -509,7 +644,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             },
         )
 
-    def test_bzl_file_changes_binary_partitioning(self) -> None:
+    def test_bzl_file_changes_single_query(self) -> None:
         tests_json = [
             {
                 "test": {
@@ -548,44 +683,138 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             "@@//src/bazel:test4": [],
         }
 
-        mock_bazel_launcher = PartitioningMockBazelLauncher(target_to_bzl_map)
+        mock_bazel_launcher = QueryRecordingMockBazelLauncher(
+            target_to_bzl_map=target_to_bzl_map,
+            target_to_sources_map={
+                "@@//src/bazel:test4": ["@@//src/bazel:test4.cc"],
+            },
+        )
 
         targets = affected_tests.find_tests_affected_by_changed_files(
             ["src/bazel/foo.bzl"],
             self.root,
             mock_ninja_runner,
             mock_bazel_launcher,
-        )
+        ).affected_tests
 
         self.assertSetEqual(
             targets,
             {affected_tests.AffectedTestTarget("@@//src/bazel:test2", "linux")},
         )
 
-        self.assertEqual(len(mock_bazel_launcher.queries), 5)
+        self.assertEqual(len(mock_bazel_launcher.queries), 1)
+        self.assertIn(
+            "--universe_scope=@@//src/bazel:test1,@@//src/bazel:test2,@@//src/bazel:test3,@@//src/bazel:test4",
+            mock_bazel_launcher.queries[0],
+        )
+        self.assertEqual(
+            mock_bazel_launcher.query_expressions[0],
+            'allrdeps(siblings(rbuildfiles("src/bazel/foo.bzl")))',
+        )
 
-        def get_query_str(args: list[str]) -> str:
-            return args[-1]
+        # Verify that when both source files (including filenames with query
+        # punctuation such as parentheses) and .bzl files change, a single
+        # combined query expression with quoted labels is executed via --query_file,
+        # and partial analysis exit code 3 (--keep_going) is accepted.
+        mock_bazel_launcher.queries.clear()
+        mock_bazel_launcher.query_expressions.clear()
+        mock_bazel_launcher.returncode = 3
+        targets = affected_tests.find_tests_affected_by_changed_files(
+            ["src/bazel/foo.bzl", "src/bazel/test4.cc", "src/foo/bar(1).txt"],
+            self.root,
+            MockNinjaRunner(self.build_dir, ""),
+            mock_bazel_launcher,
+        ).affected_tests
+        self.assertSetEqual(
+            targets,
+            {
+                affected_tests.AffectedTestTarget(
+                    "@@//src/bazel:test2", "linux"
+                ),
+                affected_tests.AffectedTestTarget(
+                    "@@//src/bazel:test4", "linux"
+                ),
+            },
+        )
+        self.assertEqual(len(mock_bazel_launcher.queries), 1)
+        self.assertEqual(
+            mock_bazel_launcher.query_expressions[0],
+            'allrdeps(set("@@//:src/foo/bar(1).txt" "@@//src/bazel:test4.cc") + siblings(rbuildfiles("src/bazel/foo.bzl")))',
+        )
 
-        self.assertIn(
-            "set(@@//src/bazel:test1 @@//src/bazel:test2 @@//src/bazel:test3 @@//src/bazel:test4)",
-            get_query_str(mock_bazel_launcher.queries[0]),
+        # Verify that fatal bazel query exit codes (such as 2 for syntax/flag
+        # errors) raise RuntimeError instead of silently returning zero affected tests.
+        mock_bazel_launcher.returncode = 2
+        with self.assertRaises(RuntimeError):
+            affected_tests.find_tests_affected_by_changed_files(
+                ["src/bazel/foo.bzl"],
+                self.root,
+                MockNinjaRunner(self.build_dir, ""),
+                mock_bazel_launcher,
+            )
+
+    def test_large_inputs_query_file_and_chunking(self) -> None:
+        tests_json = [
+            {
+                "test": {
+                    "label": "@@//src/bazel:test1",
+                    "os": "linux",
+                },
+            },
+            {
+                "test": {
+                    "label": "@@//src/bazel:test2",
+                    "os": "linux",
+                },
+            },
+        ]
+        with self.tests_json_path.open("wt") as f:
+            json.dump(tests_json, f)
+
+        mock_bazel_launcher = QueryRecordingMockBazelLauncher(
+            target_to_bzl_map={
+                "@@//src/bazel:test2": ["src/bazel/foo.bzl"],
+            },
+            target_to_sources_map={
+                "@@//src/bazel:test1": ["@@//src/bazel:file_1999.cc"],
+            },
         )
-        self.assertIn(
-            "set(@@//src/bazel:test3 @@//src/bazel:test4)",
-            get_query_str(mock_bazel_launcher.queries[1]),
-        )
-        self.assertIn(
-            "set(@@//src/bazel:test1 @@//src/bazel:test2)",
-            get_query_str(mock_bazel_launcher.queries[2]),
-        )
-        self.assertIn(
-            "set(@@//src/bazel:test2)",
-            get_query_str(mock_bazel_launcher.queries[3]),
-        )
-        self.assertIn(
-            "set(@@//src/bazel:test1)",
-            get_query_str(mock_bazel_launcher.queries[4]),
+
+        # 2,000 changed files (> 50 KB of labels) must be written to --query_file
+        # rather than passed as a raw command-line argument, and chunking
+        # --universe_scope when _MAX_UNIVERSE_SCOPE_CHARS is small must union
+        # results across all universe chunks.
+        changed_files = [f"src/bazel/file_{i}.cc" for i in range(2000)] + [
+            "src/bazel/foo.bzl"
+        ]
+        orig_limit = affected_tests._MAX_SINGLE_ARG_CHARS
+        try:
+            affected_tests._MAX_SINGLE_ARG_CHARS = 25
+            targets = affected_tests.find_tests_affected_by_changed_files(
+                changed_files,
+                self.root,
+                MockNinjaRunner(self.build_dir, ""),
+                mock_bazel_launcher,
+            ).affected_tests
+        finally:
+            affected_tests._MAX_SINGLE_ARG_CHARS = orig_limit
+
+        self.assertEqual(len(mock_bazel_launcher.queries), 2)
+        for query_args in mock_bazel_launcher.queries:
+            self.assertTrue(
+                all(len(arg) < 200 for arg in query_args),
+                f"Expected short CLI arguments using --query_file, got {[len(a) for a in query_args]}",
+            )
+        self.assertSetEqual(
+            targets,
+            {
+                affected_tests.AffectedTestTarget(
+                    "@@//src/bazel:test1", "linux"
+                ),
+                affected_tests.AffectedTestTarget(
+                    "@@//src/bazel:test2", "linux"
+                ),
+            },
         )
 
     def test_gn_label_to_build_gn_path(self) -> None:
@@ -648,7 +877,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             self.root,
             new_mock_ninja_runner(),
             mock_bazel_launcher,
-        )
+        ).affected_tests
         self.assertSetEqual(
             targets,
             {
@@ -664,7 +893,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             self.root,
             new_mock_ninja_runner(),
             mock_bazel_launcher,
-        )
+        ).affected_tests
         self.assertSetEqual(
             targets,
             {
@@ -691,7 +920,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             self.root,
             new_mock_ninja_runner(),
             mock_bazel_launcher,
-        )
+        ).affected_tests
         self.assertSetEqual(
             targets,
             {
@@ -708,7 +937,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             self.root,
             new_mock_ninja_runner(),
             mock_bazel_launcher,
-        )
+        ).affected_tests
         self.assertSetEqual(targets, set())
 
         # 5. Modifying only non-BUILD.gn files does not match BUILD.gn logic
@@ -717,7 +946,7 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
             self.root,
             new_mock_ninja_runner(),
             mock_bazel_launcher,
-        )
+        ).affected_tests
         self.assertSetEqual(targets, set())
 
 

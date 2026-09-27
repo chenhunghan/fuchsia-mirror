@@ -21,6 +21,20 @@ if (is_host) {
     deps = [ ":path_normalizer" ]
   }
 
+  python_library("normalize_clang_args") {
+    sources = [ "normalize_clang_args.py" ]
+    deps = [ ":path_normalizer" ]
+  }
+
+  python_library("flags_differences") {
+    sources = [ "flags_differences.py" ]
+  }
+
+  python_build_time_tests("flags_differences_test") {
+    tests = [ "flags_differences_test.py" ]
+    deps = [ ":flags_differences" ]
+  }
+
   python_library("normalize_rustc_args") {
     sources = [ "normalize_rustc_args.py" ]
     deps = [ ":path_normalizer" ]
@@ -35,6 +49,23 @@ if (is_host) {
     sources = [ "shell_utils.py" ]
   }
 
+  python_library("compare_utils") {
+    sources = [ "compare_utils.py" ]
+    library_deps = [
+      ":normalize_clang_args",
+      ":normalize_rustc_args",
+      ":shell_utils",
+      "//build/api:gn_ninja_outputs",
+      "//build/bazel/scripts:bazel_build_args",
+      "//build/bazel/scripts:build_utils",
+    ]
+  }
+
+  python_build_time_tests("compare_utils_test") {
+    tests = [ "compare_utils_test.py" ]
+    deps = [ ":compare_utils" ]
+  }
+
   python_build_time_tests("discover_migration_candidates_test") {
     tests = [ "discover_migration_candidates_test.py" ]
     deps = [ ":discover_migration_candidates" ]
@@ -44,6 +75,11 @@ if (is_host) {
   python_build_time_tests("shell_utils_test") {
     tests = [ "shell_utils_test.py" ]
     inputs = [ "shell_utils.py" ]
+  }
+
+  python_build_time_tests("normalize_clang_args_test") {
+    tests = [ "normalize_clang_args_test.py" ]
+    deps = [ ":normalize_clang_args" ]
   }
 
   python_build_time_tests("normalize_rustc_args_test") {
@@ -56,28 +92,16 @@ if (is_host) {
     deps = [ ":gn_runner" ]
   }
 
-  python_library("build_command_query_utils") {
-    sources = [ "build_command_query_utils.py" ]
-    library_deps = [
-      "//build/api:gn_ninja_outputs",
-      "//build/bazel/scripts:bazel_build_args",
-      "//build/bazel/scripts:build_utils",
-    ]
-  }
-
-  python_build_time_tests("build_command_query_utils_test") {
-    tests = [ "build_command_query_utils_test.py" ]
-    deps = [ ":build_command_query_utils" ]
-  }
-
-  python_binary("compare_rustc_commands") {
+  python_binary("compare_commands") {
     testonly = true
-    main_source = "compare_rustc_commands.py"
+    main_source = "compare_commands.py"
     sources = [
+      "//build/api/gn_ninja_outputs.py",
       "//build/bazel/scripts/bazel_build_args.py",
       "//build/bazel/scripts/build_utils.py",
-      "build_command_query_utils.py",
+      "compare_utils.py",
       "gn_runner.py",
+      "normalize_clang_args.py",
       "normalize_rustc_args.py",
       "path_normalizer.py",
       "shell_utils.py",
@@ -87,8 +111,10 @@ if (is_host) {
   group("tests") {
     testonly = true
     deps = [
-      ":build_command_query_utils_test",
+      ":compare_utils_test",
       ":discover_migration_candidates_test",
+      ":flags_differences_test",
+      ":normalize_clang_args_test",
       ":normalize_rustc_args_test",
       ":path_normalizer_test",
       ":shell_utils_test",

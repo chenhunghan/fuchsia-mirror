@@ -11,7 +11,7 @@
 
 #include "src/storage/lib/trace/trace.h"
 #include "src/storage/lib/vfs/cpp/pseudo_dir.h"
-#include "src/storage/minfs/service/admin.h"
+#include "src/storage/lib/vfs/cpp/service.h"
 #endif
 
 namespace minfs {
@@ -37,8 +37,7 @@ std::unique_ptr<Bcache> Runner::Destroy(std::unique_ptr<Runner> runner) {
 }
 
 #ifdef __Fuchsia__
-Runner::Runner(async_dispatcher_t* dispatcher)
-    : fs::ManagedVfs(dispatcher), dispatcher_(dispatcher) {}
+Runner::Runner(async_dispatcher_t* dispatcher) : fs::ManagedVfs(dispatcher) {}
 #else
 Runner::Runner(std::nullptr_t dispatcher) {}
 #endif
@@ -72,6 +71,15 @@ void Runner::Shutdown(fs::FuchsiaVfs::ShutdownCallback cb) {
   });
 }
 
+void Runner::Shutdown(ShutdownCompleter::Sync& completer) {
+  Shutdown([completer = completer.ToAsync()](zx_status_t status) mutable {
+    if (status != ZX_OK) {
+      FX_LOGS(ERROR) << "filesystem shutdown failed: " << zx_status_get_string(status);
+    }
+    completer.Reply();
+  });
+}
+
 zx::result<fs::FilesystemInfo> Runner::GetFilesystemInfo() { return minfs_->GetFilesystemInfo(); }
 
 zx::result<> Runner::ServeRoot(fidl::ServerEnd<fuchsia_io::Directory> root) {
@@ -86,8 +94,10 @@ zx::result<> Runner::ServeRoot(fidl::ServerEnd<fuchsia_io::Directory> root) {
 
   outgoing->AddEntry(
       fidl::DiscoverableProtocolName<fuchsia_fs::Admin>,
-      fbl::MakeRefCounted<AdminService>(dispatcher_, [this](fs::FuchsiaVfs::ShutdownCallback cb) {
-        this->Shutdown(std::move(cb));
+      fbl::MakeRefCounted<fs::Service>([this](fidl::ServerEnd<fuchsia_fs::Admin> server_end) {
+        admin_bindings_.AddBinding(dispatcher(), std::move(server_end), this,
+                                   fidl::kIgnoreBindingClosure);
+        return ZX_OK;
       }));
 
   zx_status_t status = ServeDirectory(std::move(outgoing), std::move(root));

@@ -32,6 +32,7 @@ rustc_library("concurrent") {
     ":*",
     "//zircon/kernel/lib/fasttime/*",
     "//zircon/kernel/lib/kconcurrent/*",
+    "//zircon/kernel/object/*",
     "//zircon/system/ulib/concurrent/*",
   ]
 }

@@ -26,6 +26,8 @@ impl InspectType for DoubleExponentialHistogramProperty {
     }
 }
 
+crate::impl_inspect_type_internal_histogram!(DoubleExponentialHistogramProperty);
+
 impl DoubleExponentialHistogramProperty {
     pub(crate) fn new(
         name: Cow<'_, str>,

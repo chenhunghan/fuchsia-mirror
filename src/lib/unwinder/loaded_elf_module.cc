@@ -166,6 +166,9 @@ fit::result<Error> LoadedElfModule::LoadPhdrs(const Elf64_Ehdr& ehdr) {
   }
 
   if (ehdr.e_ident[EI_CLASS] == ELFCLASS64) {
+    if (ehdr.e_phentsize != sizeof(Elf64_Phdr)) {
+      return fit::error(Error("Invalid e_phentsize"));
+    }
     // Use resize here since we won't be inserting anything a.la. emplace_back, which means we need
     // the size of the vector to be initialized already so the loop below doesn't think that the
     // vector is empty.
@@ -176,6 +179,9 @@ fit::result<Error> LoadedElfModule::LoadPhdrs(const Elf64_Ehdr& ehdr) {
       return fit::error(err);
     }
   } else {
+    if (ehdr.e_phentsize != sizeof(Elf32_Phdr)) {
+      return fit::error(Error("Invalid e_phentsize"));
+    }
     // Meanwhile here we have to to a translation anyway to upcast the Elf32_Phdrs to Elf64_Phdrs so
     // we can just reserve upfront and then the insertions below will increase the vector's size
     // without reallocating.

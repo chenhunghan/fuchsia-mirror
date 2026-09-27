@@ -2,44 +2,32 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use fidl::endpoints::{ControlHandle as _, RequestStream as _};
 use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
 use fidl_fuchsia_net_reachability as freachability;
-use futures::Stream;
 use log::{error, warn};
 
-use super::NetworkProperties;
+use async_utils::stream::{WithEpitaph as _, WithTag as _};
+
+use super::{ConnectionStream, NetworkProperties};
 
 pub(crate) const MAX_REACHABILITY_WATCHERS: usize = 128;
 
-/// Seals [`ReachabilityWatcherConnectionId`]: its private field makes [`IdAllocator::allocate`]
-/// the only way to construct one. Ids are unique per allocator.
 mod id {
-    /// Identifies a reachability watcher connection.
-    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    pub struct ReachabilityWatcherConnectionId(usize);
+    use crate::network::connection_id;
 
-    /// Mints unique [`ReachabilityWatcherConnectionId`]s.
-    #[derive(Default)]
-    pub struct IdAllocator(usize);
-
-    impl IdAllocator {
-        pub fn allocate(&mut self) -> ReachabilityWatcherConnectionId {
-            let id = ReachabilityWatcherConnectionId(self.0);
-            self.0 += 1;
-            id
-        }
-    }
+    // A `fuchsia.net.reachability.Monitor` watcher connection.
+    connection_id!(ReachabilityWatcherConnectionId => ReachabilityWatcherConnectionIdAllocator);
 }
 
-use id::IdAllocator;
 pub use id::ReachabilityWatcherConnectionId;
+use id::ReachabilityWatcherConnectionIdAllocator;
 
+#[derive(Debug)]
 struct ReachabilityWatcherClient {
     /// Used to close the connection; see [`ReachabilityWatcherClient::close`].
     control_handle: freachability::MonitorControlHandle,
@@ -71,48 +59,15 @@ impl ReachabilityWatcherClient {
     }
 }
 
-pub(crate) struct ReachabilityStream {
-    id: ReachabilityWatcherConnectionId,
-    /// The client's request stream; `None` once the stream has terminated.
-    stream: Option<freachability::MonitorRequestStream>,
-}
-
-impl Stream for ReachabilityStream {
-    /// Yields `(id, Some(request))` per request from the client, then exactly one `(id, None)`
-    /// when the client's stream terminates, which is how the end of a connection is observed.
-    type Item = (
-        ReachabilityWatcherConnectionId,
-        Option<Result<freachability::MonitorRequest, fidl::Error>>,
-    );
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = Pin::into_inner(self);
-        let id = this.id;
-        let poll = match this.stream.as_mut() {
-            Some(stream) => Pin::new(stream).poll_next(cx),
-            None => return Poll::Ready(None),
-        };
-        match poll {
-            Poll::Ready(Some(request)) => Poll::Ready(Some((id, Some(request)))),
-            Poll::Ready(None) => {
-                this.stream = None;
-                Poll::Ready(Some((id, None)))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl futures::stream::FusedStream for ReachabilityStream {
-    fn is_terminated(&self) -> bool {
-        self.stream.is_none()
-    }
-}
+/// Yields `(id, Some(request))` per request from the client, then exactly one `(id, None)` when
+/// the client's stream terminates, which is how the end of a connection is observed.
+pub(crate) type ReachabilityStream =
+    ConnectionStream<ReachabilityWatcherConnectionId, freachability::MonitorRequestStream>;
 
 #[derive(Default)]
 pub(crate) struct ReachabilityHandler {
     watchers: HashMap<ReachabilityWatcherConnectionId, ReachabilityWatcherClient>,
-    next_id: IdAllocator,
+    next_id: ReachabilityWatcherConnectionIdAllocator,
 }
 
 impl ReachabilityHandler {
@@ -138,7 +93,7 @@ impl ReachabilityHandler {
             },
         );
         assert!(previous.is_none(), "reachability watcher {id:?} is already registered");
-        Some(ReachabilityStream { id, stream: Some(stream) })
+        Some(stream.tagged(id).with_epitaph(id))
     }
 
     /// Synthesizes a reachability [`freachability::Snapshot`] from the active default network.
@@ -188,17 +143,23 @@ impl ReachabilityHandler {
     }
 
     /// Handles a single item produced by a client's [`ReachabilityStream`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` does not correspond to a currently registered client. A client is removed
+    /// only when its stream yields the terminal `None` item, and the stream is fused, so every
+    /// item from the stream belongs to a live client.
     pub(crate) fn handle_request(
         &mut self,
         current_snapshot: &freachability::Snapshot,
         id: ReachabilityWatcherConnectionId,
         request: Option<Result<freachability::MonitorRequest, fidl::Error>>,
     ) {
-        let Entry::Occupied(mut entry) = self.watchers.entry(id) else {
-            // A watcher is removed only when its stream yields its terminal item, and the stream
-            // is Fused, so every request belongs to a live watcher.
-            unreachable!("request for unknown reachability watcher {id:?}");
-        };
+        let mut entry = assert_matches!(
+            self.watchers.entry(id),
+            Entry::Occupied(entry) => entry,
+            "request for unknown reachability watcher {id:?}"
+        );
 
         let request = match request {
             Some(Ok(request)) => request,
@@ -278,9 +239,8 @@ impl ReachabilityHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert_matches::assert_matches;
+    use crate::network::split_connection_item;
     use futures::StreamExt as _;
-    use futures::stream::FusedStream as _;
 
     /// The snapshot synthesized when there is no default network, or when it reports
     /// `NoConnectivity` or `LocalConnectivity`.
@@ -325,7 +285,8 @@ mod tests {
         current_snapshot: &freachability::Snapshot,
         stream: &mut ReachabilityStream,
     ) {
-        while let Some((id, request)) = stream.next().await {
+        while let Some(item) = stream.next().await {
+            let (id, request) = split_connection_item(item);
             handler.handle_request(current_snapshot, id, request);
         }
     }
@@ -387,7 +348,7 @@ mod tests {
 
         // Client 1 initial Watch() returns immediately with current snapshot.
         let watch_fut1 = proxy1.watch();
-        let (id, req) = s1.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s1.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         let snapshot = watch_fut1.await.expect("watch error");
         assert_eq!(snapshot, disconnected);
@@ -400,19 +361,19 @@ mod tests {
 
         // Client 2 initial Watch() returns immediately with current snapshot.
         let watch_fut2 = proxy2.watch();
-        let (id, req) = s2.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s2.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         let snapshot2 = watch_fut2.await.expect("watch error");
         assert_eq!(snapshot2, disconnected);
 
         // Both clients call Watch() again: both will hang because snapshot hasn't changed.
         let mut second_watch1 = proxy1.watch();
-        let (id, req) = s1.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s1.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         assert_matches!(futures::poll!(&mut second_watch1), std::task::Poll::Pending);
 
         let mut second_watch2 = proxy2.watch();
-        let (id, req) = s2.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s2.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         assert_matches!(futures::poll!(&mut second_watch2), std::task::Poll::Pending);
 
@@ -426,7 +387,7 @@ mod tests {
         // Client 2 disconnects, and is reaped once its stream terminates.
         drop(proxy2);
         drain_stream(&mut handler, &validated, &mut s2).await;
-        assert!(s2.is_terminated());
+        assert_matches!(futures::poll!(s2.next()), std::task::Poll::Ready(None));
         assert_eq!(handler.watcher_count(), 1);
     }
 
@@ -440,13 +401,13 @@ mod tests {
 
         // Calling SetOptions as the first call should succeed.
         proxy.set_options(&freachability::MonitorOptions::default()).expect("set_options FIDL");
-        let (id, req) = s.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         assert_eq!(handler.watcher_count(), 1);
 
         // Calling SetOptions a second time aborts connection.
         proxy.set_options(&freachability::MonitorOptions::default()).expect("set_options FIDL");
-        let (id, req) = s.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
 
         assert_matches!(
@@ -457,7 +418,7 @@ mod tests {
 
         // The watcher is reaped once its now-shut-down stream terminates.
         drain_stream(&mut handler, &disconnected, &mut s).await;
-        assert!(s.is_terminated());
+        assert_matches!(futures::poll!(s.next()), std::task::Poll::Ready(None));
         assert_eq!(handler.watcher_count(), 0);
 
         // Calling SetOptions after calling Watch aborts connection.
@@ -466,13 +427,13 @@ mod tests {
         let mut s2 = handler.add_stream(stream2).expect("add stream");
 
         let watch_fut = proxy2.watch();
-        let (id, req) = s2.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s2.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         let _ = watch_fut.await.expect("initial watch");
         assert_eq!(handler.watcher_count(), 1);
 
         proxy2.set_options(&freachability::MonitorOptions::default()).expect("set_options FIDL");
-        let (id, req) = s2.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s2.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
 
         assert_matches!(
@@ -482,7 +443,7 @@ mod tests {
         );
 
         drain_stream(&mut handler, &disconnected, &mut s2).await;
-        assert!(s2.is_terminated());
+        assert_matches!(futures::poll!(s2.next()), std::task::Poll::Ready(None));
         assert_eq!(handler.watcher_count(), 0);
     }
 
@@ -496,19 +457,19 @@ mod tests {
 
         // First watch consumes initial snapshot.
         let watch_fut1 = proxy.watch();
-        let (id, req) = s.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         let _ = watch_fut1.await.expect("initial watch");
 
         // Second watch hangs.
         let mut second_watch1 = proxy.watch();
-        let (id, req) = s.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
         assert_matches!(futures::poll!(&mut second_watch1), std::task::Poll::Pending);
 
         // Illegal concurrent watch aborts the channel with ALREADY_EXISTS.
         let second_watch2 = proxy.watch();
-        let (id, req) = s.next().await.expect("stream item");
+        let (id, req) = split_connection_item(s.next().await.expect("stream item"));
         handler.handle_request(&disconnected, id, req);
 
         assert_matches!(
@@ -521,7 +482,7 @@ mod tests {
         // its stream terminates.
         assert_matches!(second_watch1.await, Err(fidl::Error::ClientChannelClosed { .. }));
         drain_stream(&mut handler, &disconnected, &mut s).await;
-        assert!(s.is_terminated());
+        assert_matches!(futures::poll!(s.next()), std::task::Poll::Ready(None));
         assert_eq!(handler.watcher_count(), 0);
     }
 

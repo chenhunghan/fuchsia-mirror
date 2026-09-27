@@ -14,6 +14,11 @@
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_is_physmap_phys_addr(zx_paddr_t paddr) {
+  return is_physmap_phys_addr(paddr);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_vaddr_t cpp_paddr_to_physmap(zx_paddr_t paddr) {
   return reinterpret_cast<zx_vaddr_t>(paddr_to_physmap(paddr));
 }

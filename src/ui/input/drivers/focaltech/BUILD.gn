@@ -16,8 +16,40 @@ declare_args() {
   focaltech_driver_flavor = "cpp"
 }
 
+fuchsia_driver_dml("focaltech-cpp-dml") {
+  dml = "meta/focaltech-cpp.dml"
+  driver_name = "focaltech-cpp"
+  component_name = "focaltech"
+  golden_cml = "meta/focaltech-cpp.cml"
+  golden_bind = "meta/focaltech.bind"
+}
+
+fuchsia_driver_dml("focaltech-rust-dml") {
+  dml = "meta/focaltech-rust.dml"
+  driver_name = "focaltech-rust"
+  component_name = "focaltech"
+  golden_cml = "meta/focaltech-rust.cml"
+  golden_bind = "meta/focaltech.bind"
+}
+
+fuchsia_driver_dml("focaltech-sherlock-cpp-dml") {
+  dml = "meta/focaltech-sherlock-cpp.dml"
+  driver_name = "focaltech-sherlock-cpp"
+  component_name = "focaltech-sherlock"
+  golden_cml = "meta/focaltech-sherlock-cpp.cml"
+  golden_bind = "meta/focaltech.bind"
+}
+
+fuchsia_driver_dml("focaltech-sherlock-rust-dml") {
+  dml = "meta/focaltech-sherlock-rust.dml"
+  driver_name = "focaltech-sherlock-rust"
+  component_name = "focaltech-sherlock"
+  golden_cml = "meta/focaltech-sherlock-rust.cml"
+  golden_bind = "meta/focaltech.bind"
+}
+
 driver_bind_rules("focaltech_touch_bind") {
-  rules = "meta/focaltech.bind"
+  dml_label = ":focaltech-cpp-dml"
   bind_output = "focaltech.bindbc"
   tests = "meta/bind_tests.json"
   deps = [
@@ -133,7 +165,7 @@ fuchsia_driver_component("component-cpp") {
     ":focaltech_touch_bind",
   ]
   info = "meta/focaltech-info.json"
-  manifest = "meta/focaltech-cpp.cml"
+  dml_label = ":focaltech-cpp-dml"
 }
 
 fuchsia_driver_component("component-sherlock-cpp") {
@@ -143,7 +175,7 @@ fuchsia_driver_component("component-sherlock-cpp") {
     ":focaltech_touch_bind",
   ]
   info = "meta/focaltech-sherlock-info.json"
-  manifest = "meta/focaltech-sherlock-cpp.cml"
+  dml_label = ":focaltech-sherlock-cpp-dml"
 }
 
 fuchsia_driver_component("component-rust") {
@@ -153,7 +185,7 @@ fuchsia_driver_component("component-rust") {
     ":focaltech_touch_bind",
   ]
   info = "meta/focaltech-info.json"
-  manifest = "meta/focaltech-rust.cml"
+  dml_label = ":focaltech-rust-dml"
 }
 
 fuchsia_driver_component("component-sherlock-rust") {
@@ -163,7 +195,7 @@ fuchsia_driver_component("component-sherlock-rust") {
     ":focaltech_touch_bind",
   ]
   info = "meta/focaltech-sherlock-info.json"
-  manifest = "meta/focaltech-sherlock-rust.cml"
+  dml_label = ":focaltech-sherlock-rust-dml"
 }
 
 group("component") {

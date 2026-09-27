@@ -4,6 +4,7 @@
 @available(added=HEAD)
 library fuchsia.hardware.ufs.phy;
 
+using fuchsia.hardware.inlineencryption;
 using zx;
 
 /// Interface provided by the UFS MAC (controller driver) to the PHY driver,
@@ -42,4 +43,5 @@ open protocol UfsPhy {
 
 service Service {
     phy client_end:UfsPhy;
+    inline_crypto client_end:fuchsia.hardware.inlineencryption.Device;
 };

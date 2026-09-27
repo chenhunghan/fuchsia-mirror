@@ -38,7 +38,7 @@ impl<Key: FutexKey> FutexTable<Key> {
     /// Resolves the outcome of a blocking wait on this table.
     ///
     /// On success, the waker has already removed the waiter from the queue and there is nothing
-    /// left to do. On error (e.g. ETIMEDOUT, EINTR), the waiter must remove itself from the queue
+    /// left to do. On error (e.g. ETIMEDOUT, EINTR), `remove` takes the waiter out of the queue
     /// to prevent a memory leak.
     ///
     /// Finding nothing to remove means a concurrent wake dequeued the waiter while it was waking
@@ -47,12 +47,9 @@ impl<Key: FutexKey> FutexTable<Key> {
     fn resolve_wait(
         &self,
         result: Result<(), Errno>,
-        key: Key,
-        matcher: WaiterMatcher<'_>,
+        remove: impl FnOnce(&mut FutexTableState<Key>) -> bool,
     ) -> Result<(), Errno> {
-        result.or_else(|e| {
-            if self.state.lock().remove_waiter_from_queue(key, &matcher) { Err(e) } else { Ok(()) }
-        })
+        result.or_else(|e| if remove(&mut self.state.lock()) { Err(e) } else { Ok(()) })
     }
 
     /// Wait on the futex at the given address given a boot deadline.
@@ -104,7 +101,9 @@ impl<Key: FutexKey> FutexTable<Key> {
         std::mem::drop(state);
 
         let result = waiter.wait(current_task);
-        self.resolve_wait(result, key, WaiterMatcher::BootWaiter(&waiter))
+        self.resolve_wait(result, |state| {
+            state.remove_waiter_from_queue(key, &WaiterMatcher::BootWaiter(&waiter))
+        })
     }
 
     /// Wait on the futex at the given address.
@@ -144,7 +143,9 @@ impl<Key: FutexKey> FutexTable<Key> {
         std::mem::drop(state);
 
         let result = current_task.block_until(guard, deadline);
-        self.resolve_wait(result, key, WaiterMatcher::Event(&event))
+        self.resolve_wait(result, |state| {
+            state.remove_waiter_from_queue(key, &WaiterMatcher::Event(&event))
+        })
     }
 
     /// Wake the given number of waiters on futex at the given address. Returns the number of
@@ -279,22 +280,22 @@ impl<Key: FutexKey> FutexTable<Key> {
         // ESRCH  (FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_TRYLOCK_PI,
         //        FUTEX_CMP_REQUEUE_PI) The thread ID in the futex word at
         //        uaddr does not exist.
-        current_task
+        let result = current_task
             .get_task(new_owner_tid as i32)
             .ok()
             .and_then(|o| o.running_state().unwrap().thread.get().map(|t| Arc::clone(&t.thread)))
             .map_or_else(
                 || error!(ESRCH),
                 |owner| current_task.block_with_owner_until(guard, &owner, deadline),
-            )
-            .inspect_err(|_| {
-                // If block_with_owner_until returned an error (e.g., ETIMEDOUT), or if we
-                // failed to find the new owner (ESRCH), we must explicitly remove our waiter
-                // from the PI-mutex queue to prevent a memory leak.
-                self.state
-                    .lock()
-                    .remove_rt_mutex_waiter_from_queue(key, &WaiterMatcher::Event(&event));
-            })
+            );
+
+        // Being gone from the queue means `unlock_pi` picked this waiter as the new owner and
+        // already published its tid in the futex word, so the mutex is held even though the wait
+        // itself failed. Reporting the error would leave the mutex locked by a thread that
+        // believes it does not own it.
+        self.resolve_wait(result, |state| {
+            state.remove_rt_mutex_waiter_from_queue(key, &WaiterMatcher::Event(&event))
+        })
     }
 
     /// Unlock the futex at the given address.
@@ -319,8 +320,8 @@ impl<Key: FutexKey> FutexTable<Key> {
         // Use a relaxed ordering because the compare/exchange below creates a synchronization
         // point with userspace threads in the success case. No synchronization is required in
         // failure cases.
-        let current_value = mm.atomic_load_u32_relaxed(addr)?;
-        if current_value & FUTEX_TID_MASK != tid {
+        let mut expected_value = mm.atomic_load_u32_relaxed(addr)?;
+        if expected_value & FUTEX_TID_MASK != tid {
             // From <https://man7.org/linux/man-pages/man2/futex.2.html>:
             //
             //   EPERM  (FUTEX_UNLOCK_PI) The caller does not own the lock
@@ -330,26 +331,21 @@ impl<Key: FutexKey> FutexTable<Key> {
 
         loop {
             let maybe_waiter = state.pop_rt_mutex_waiter(key.clone());
-            let target_value = if let Some(waiter) = &maybe_waiter { waiter.tid } else { 0 };
+            let target_value = maybe_waiter.as_ref().map_or(0, |waiter| waiter.tid);
 
             // Use acq/rel ordering to synchronize with acquire ordering on userspace lock ops and
             // with the release ordering on userspace unlock ops.
-            match mm.atomic_compare_exchange_u32_acq_rel(addr, current_value, target_value) {
-                CompareExchangeResult::Success => (),
-                // From <https://man7.org/linux/man-pages/man2/futex.2.html>:
-                //
-                //   EINVAL (FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_TRYLOCK_PI,
-                //       FUTEX_UNLOCK_PI) The kernel detected an inconsistency
-                //       between the user-space state at uaddr and the kernel
-                //       state.  This indicates either state corruption or that the
-                //       kernel found a waiter on uaddr which is waiting via
-                //       FUTEX_WAIT or FUTEX_WAIT_BITSET.
-                CompareExchangeResult::Stale { .. } => return error!(EINVAL),
-                // From <https://man7.org/linux/man-pages/man2/futex.2.html>:
-                //
-                //   EACCES No read access to the memory of a futex word.
-                CompareExchangeResult::Error(_) => return error!(EACCES),
+            let handoff =
+                mm.atomic_compare_exchange_u32_acq_rel(addr, expected_value, target_value);
+            if let Err(e) = handoff_result(handoff) {
+                if let Some(waiter) = maybe_waiter {
+                    state.unpop_rt_mutex_waiter(key, waiter);
+                }
+                return Err(e);
             }
+            // The futex word now holds the value just written, which is what a further handoff
+            // has to compare against.
+            expected_value = target_value;
 
             let Some(mut waiter) = maybe_waiter else {
                 // We can stop trying to notify a thread if there are no more waiters.
@@ -365,6 +361,26 @@ impl<Key: FutexKey> FutexTable<Key> {
         }
 
         Ok(())
+    }
+}
+
+/// Maps the outcome of the compare-exchange that hands a PI mutex over to its next owner.
+fn handoff_result(result: CompareExchangeResult<u32>) -> Result<(), Errno> {
+    match result {
+        CompareExchangeResult::Success => Ok(()),
+        // From <https://man7.org/linux/man-pages/man2/futex.2.html>:
+        //
+        //   EINVAL (FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_TRYLOCK_PI,
+        //       FUTEX_UNLOCK_PI) The kernel detected an inconsistency
+        //       between the user-space state at uaddr and the kernel
+        //       state.  This indicates either state corruption or that the
+        //       kernel found a waiter on uaddr which is waiting via
+        //       FUTEX_WAIT or FUTEX_WAIT_BITSET.
+        CompareExchangeResult::Stale { .. } => error!(EINVAL),
+        // From <https://man7.org/linux/man-pages/man2/futex.2.html>:
+        //
+        //   EACCES No read access to the memory of a futex word.
+        CompareExchangeResult::Error(_) => error!(EACCES),
     }
 }
 
@@ -594,77 +610,84 @@ impl<Key: FutexKey> FutexTableState<Key> {
         }
     }
 
-    /// Removes the waiter designated by `matcher` from the queue it is waiting on.
+    /// Puts a waiter popped for a handoff that did not happen back at the head of its queue.
     ///
-    /// This uses a two-step approach:
-    /// 1. O(1) Fast path: Check the `key` where the waiter originally went to sleep.
-    /// 2. O(N) Fallback: If not found (e.g. moved via `FUTEX_REQUEUE`), scan all futexes.
+    /// Clearing `FUTEX_WAITERS` undoes what `pop_rt_mutex_waiter` set, restoring the tid the
+    /// waiter was queued with. The waiter must go back, otherwise it would conclude from its
+    /// absence that it was made the new owner of a mutex it does not hold.
+    fn unpop_rt_mutex_waiter(&mut self, key: Key, mut waiter: RtMutexWaiter) {
+        waiter.tid &= FUTEX_TID_MASK;
+        self.get_rt_mutex_waiters_or_default(key).push_front(waiter);
+    }
+
+    /// Removes the waiter designated by `matcher` from the `FUTEX_WAIT` queue it is waiting on.
     ///
     /// Returns whether the waiter was still queued. A `false` return means the waiter was
     /// already dequeued by a concurrent wake.
     fn remove_waiter_from_queue(&mut self, key: Key, matcher: &WaiterMatcher<'_>) -> bool {
-        if let Entry::Occupied(mut entry) = self.waiters.entry(key) {
-            let found = entry.get_mut().remove_waiter(matcher);
-            if entry.get().is_empty() {
-                entry.remove();
-            }
-            if found {
-                return true;
-            }
-        }
-
-        let mut found = false;
-        let mut key_to_remove = None;
-        for (key, waiters) in self.waiters.iter_mut() {
-            if waiters.remove_waiter(matcher) {
-                found = true;
-                if waiters.is_empty() {
-                    key_to_remove = Some(key.clone());
-                }
-                break;
-            }
-        }
-        if let Some(key) = key_to_remove {
-            self.waiters.remove(&key);
-        }
-        found
+        search_and_remove_waiter(&mut self.waiters, key, matcher)
     }
 
     /// Removes a PI-mutex (`FUTEX_LOCK_PI`) waiter.
     ///
-    /// Operates on the separate `rt_mutex_waiters` map using the same two-step
-    /// O(1)/O(N) algorithm as the other removal methods to handle edge cases where
-    /// PI-mutexes might be requeued (e.g. if `FUTEX_CMP_REQUEUE_PI` is used).
-    fn remove_rt_mutex_waiter_from_queue(&mut self, key: Key, matcher: &WaiterMatcher<'_>) {
-        let predicate =
-            |w: &RtMutexWaiter| !matcher.matches(&w.notifiable) && !w.notifiable.is_stale();
+    /// Returns whether the waiter was still queued. A `false` return means `unlock_pi` already
+    /// dequeued it to make it the new owner of the mutex.
+    fn remove_rt_mutex_waiter_from_queue(&mut self, key: Key, matcher: &WaiterMatcher<'_>) -> bool {
+        search_and_remove_waiter(&mut self.rt_mutex_waiters, key, matcher)
+    }
+}
 
-        if let Entry::Occupied(mut entry) = self.rt_mutex_waiters.entry(key) {
-            let len_before = entry.get().len();
-            entry.get_mut().retain(predicate);
-            if entry.get().len() < len_before {
-                if entry.get().is_empty() {
-                    entry.remove();
-                }
-                return;
-            }
+/// Searches `queues` for the waiter designated by `matcher` and removes it from the queue it is
+/// waiting on.
+///
+/// This uses a two-step approach:
+/// 1. O(1) Fast path: Check the `key` where the waiter originally went to sleep.
+/// 2. O(N) Fallback: If not found (e.g. moved via `FUTEX_REQUEUE`), scan all futexes.
+///
+/// Queues left empty along the way are dropped from `queues`, whether or not they held the
+/// waiter.
+///
+/// Returns whether the waiter was still queued. A `false` return means the waiter was already
+/// dequeued by a concurrent wake.
+fn search_and_remove_waiter<Key: FutexKey, Queue: WaiterQueue>(
+    queues: &mut HashMap<Key, Queue>,
+    key: Key,
+    matcher: &WaiterMatcher<'_>,
+) -> bool {
+    if let Entry::Occupied(mut entry) = queues.entry(key) {
+        let found = entry.get_mut().remove_waiter(matcher);
+        if entry.get().is_empty() {
+            entry.remove();
         }
-
-        let mut key_to_remove = None;
-        for (key, waiters) in self.rt_mutex_waiters.iter_mut() {
-            let len_before = waiters.len();
-            waiters.retain(predicate);
-            if waiters.len() < len_before {
-                if waiters.is_empty() {
-                    key_to_remove = Some(key.clone());
-                }
-                break;
-            }
-        }
-        if let Some(key) = key_to_remove {
-            self.rt_mutex_waiters.remove(&key);
+        if found {
+            return true;
         }
     }
+
+    // The waiter sits in at most one queue, so stop looking once it turns up. The scan still
+    // visits the remaining queues to drop the ones left empty.
+    let mut found = false;
+    queues.retain(|_, waiters| {
+        if !found {
+            found = waiters.remove_waiter(matcher);
+        }
+        !waiters.is_empty()
+    });
+    found
+}
+
+/// A queue of waiters parked on a single futex key.
+trait WaiterQueue {
+    /// Removes the waiter designated by `matcher` from the queue, also garbage collecting stale
+    /// waiters.
+    ///
+    /// Returns whether that waiter was in the queue. Removing stale waiters alone does not count
+    /// as a match: a caller that concludes it was dequeued by a wake would otherwise report a
+    /// wake that never happened.
+    fn remove_waiter(&mut self, matcher: &WaiterMatcher<'_>) -> bool;
+
+    /// Returns whether the queue holds no waiter.
+    fn is_empty(&self) -> bool;
 }
 
 /// Designates the waiter a removal operation is looking for.
@@ -791,31 +814,56 @@ impl FutexWaiters {
         self.0.append(&mut other.0);
     }
 
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Removes the waiter designated by `matcher` from the queue, also garbage collecting stale
-    /// waiters.
-    ///
-    /// Returns whether that waiter was in the queue.
-    fn remove_waiter(&mut self, matcher: &WaiterMatcher<'_>) -> bool {
-        let mut found = false;
-        self.0.retain(|w| {
-            if matcher.matches(&w.notifiable) {
-                found = true;
-                return false;
-            }
-            !w.notifiable.is_stale()
-        });
-        found
-    }
-
     fn split_for_requeue(&mut self, count: usize) -> Self {
         let count = std::cmp::min(count, self.0.len());
         let tail = self.0.split_off(count);
         let head = std::mem::replace(&mut self.0, tail);
         FutexWaiters(head)
+    }
+}
+
+/// An entry of a waiter queue, which a `WaiterMatcher` can be tested against.
+trait QueuedWaiter {
+    fn notifiable(&self) -> &FutexNotifiable;
+}
+
+impl QueuedWaiter for FutexWaiter {
+    fn notifiable(&self) -> &FutexNotifiable {
+        &self.notifiable
+    }
+}
+
+impl QueuedWaiter for RtMutexWaiter {
+    fn notifiable(&self) -> &FutexNotifiable {
+        &self.notifiable
+    }
+}
+
+impl<W: QueuedWaiter> WaiterQueue for VecDeque<W> {
+    fn remove_waiter(&mut self, matcher: &WaiterMatcher<'_>) -> bool {
+        let mut found = false;
+        self.retain(|w| {
+            if matcher.matches(w.notifiable()) {
+                found = true;
+                return false;
+            }
+            !w.notifiable().is_stale()
+        });
+        found
+    }
+
+    fn is_empty(&self) -> bool {
+        VecDeque::is_empty(self)
+    }
+}
+
+impl WaiterQueue for FutexWaiters {
+    fn remove_waiter(&mut self, matcher: &WaiterMatcher<'_>) -> bool {
+        self.0.remove_waiter(matcher)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -987,6 +1035,98 @@ mod tests {
         assert_eq!(state.rt_mutex_waiters.len(), 0);
     }
 
+    /// A PI-mutex waiter must learn whether it was still queued.
+    ///
+    /// `lock_pi` relies on that answer: a waiter that `unlock_pi` dequeued has been made the
+    /// owner of the mutex, and must report success even if its wait failed.
+    #[fuchsia::test]
+    fn test_remove_rt_mutex_waiter_reports_whether_it_was_queued() {
+        let mut state = FutexTableState::<PrivateFutexKey>::default();
+        let key = PrivateFutexKey {
+            addr: FutexAddress::try_from(UserAddress::from(
+                (RESTRICTED_ASPACE_BASE + 0x1000) as u64,
+            ))
+            .unwrap(),
+        };
+        let event = InterruptibleEvent::new();
+        let queue_waiter = |state: &mut FutexTableState<PrivateFutexKey>| {
+            state.get_rt_mutex_waiters_or_default(key.clone()).push_back(RtMutexWaiter {
+                tid: 1,
+                notifiable: FutexNotifiable::new_internal(Arc::downgrade(&event)),
+            });
+        };
+
+        queue_waiter(&mut state);
+        assert!(
+            state.remove_rt_mutex_waiter_from_queue(key.clone(), &WaiterMatcher::Event(&event))
+        );
+
+        // The handoff performed by `unlock_pi` takes the waiter out of the queue.
+        queue_waiter(&mut state);
+        assert!(state.pop_rt_mutex_waiter(key.clone()).is_some());
+
+        assert!(!state.remove_rt_mutex_waiter_from_queue(key, &WaiterMatcher::Event(&event)));
+    }
+
+    /// Collecting a dead PI-mutex waiter is not a match.
+    ///
+    /// Reporting a match would tell the caller that its own waiter was still queued, while
+    /// leaving the queue in place would leak the dead entry.
+    #[fuchsia::test]
+    fn test_remove_rt_mutex_waiter_stale_cleanup_is_not_a_match() {
+        let mut state = FutexTableState::<PrivateFutexKey>::default();
+        let key = PrivateFutexKey {
+            addr: FutexAddress::try_from(UserAddress::from(
+                (RESTRICTED_ASPACE_BASE + 0x1000) as u64,
+            ))
+            .unwrap(),
+        };
+
+        {
+            let dead_event = InterruptibleEvent::new();
+            state.get_rt_mutex_waiters_or_default(key.clone()).push_back(RtMutexWaiter {
+                tid: 1,
+                notifiable: FutexNotifiable::new_internal(Arc::downgrade(&dead_event)),
+            });
+        } // dead_event is dropped here, so its waiter becomes stale.
+
+        let event = InterruptibleEvent::new();
+        assert!(!state.remove_rt_mutex_waiter_from_queue(key, &WaiterMatcher::Event(&event)));
+        assert_eq!(state.rt_mutex_waiters.len(), 0, "the stale waiter should be collected");
+    }
+
+    /// Queues emptied by the fallback scan are collected too, not just the one holding the
+    /// waiter.
+    #[fuchsia::test]
+    fn test_remove_waiter_collects_queues_emptied_by_the_scan() {
+        let mut state = FutexTableState::<PrivateFutexKey>::default();
+        let stale_key = PrivateFutexKey {
+            addr: FutexAddress::try_from(UserAddress::from(
+                (RESTRICTED_ASPACE_BASE + 0x1000) as u64,
+            ))
+            .unwrap(),
+        };
+        let key = PrivateFutexKey {
+            addr: FutexAddress::try_from(UserAddress::from(
+                (RESTRICTED_ASPACE_BASE + 0x2000) as u64,
+            ))
+            .unwrap(),
+        };
+
+        {
+            let dead_event = InterruptibleEvent::new();
+            state.get_waiters_or_default(stale_key).add(FutexWaiter {
+                mask: u32::MAX,
+                notifiable: FutexNotifiable::new_internal(Arc::downgrade(&dead_event)),
+            });
+        } // dead_event is dropped here, so its waiter becomes stale.
+
+        // Looking for a waiter that is not there scans every queue, emptying the stale one.
+        let event = InterruptibleEvent::new();
+        assert!(!state.remove_waiter_from_queue(key, &WaiterMatcher::Event(&event)));
+        assert_eq!(state.waiters.len(), 0, "the emptied queue should be collected");
+    }
+
     #[fuchsia::test]
     fn test_split_for_requeue_fairness() {
         let mut waiters = FutexWaiters::default();
@@ -1043,6 +1183,73 @@ mod tests {
         state.remove_waiter_from_queue(key, &WaiterMatcher::Event(&dummy_event));
 
         assert_eq!(state.waiters.len(), 0, "Stale external waiter should be removed");
+    }
+
+    /// `unlock_pi` must keep handing the mutex over after skipping a dead waiter.
+    ///
+    /// Each handoff rewrites the futex word, so a second attempt has to compare against what the
+    /// first one wrote. Comparing against the value read on entry made the retry fail with
+    /// EINVAL, leaving the mutex owned by a thread that no longer exists and dropping the waiter
+    /// that should have got it.
+    #[::fuchsia::test]
+    async fn test_unlock_pi_hands_over_to_next_waiter_after_a_stale_one() {
+        use crate::mm::memory::MemoryObject;
+        use crate::mm::{DesiredAddress, MappingName, MappingOptions, PAGE_SIZE, ProtectionFlags};
+        use crate::testing::spawn_kernel_and_run;
+
+        spawn_kernel_and_run(async move |current_task| {
+            let mm = current_task.mm().unwrap();
+            let addr = mm
+                .map_memory(
+                    DesiredAddress::Any,
+                    Arc::new(MemoryObject::from(zx::Vmo::create(*PAGE_SIZE).unwrap())),
+                    0,
+                    *PAGE_SIZE as usize,
+                    ProtectionFlags::READ | ProtectionFlags::WRITE,
+                    MappingOptions::empty(),
+                    MappingName::None,
+                )
+                .expect("map failed");
+            let futex_addr = FutexAddress::try_from(addr).unwrap();
+
+            // The current task owns the mutex and has waiters queued behind it.
+            let owner_tid = current_task.get_tid() as u32;
+            assert!(matches!(
+                mm.atomic_compare_exchange_u32_acq_rel(futex_addr, 0, owner_tid | FUTEX_WAITERS),
+                CompareExchangeResult::Success
+            ));
+
+            const STALE_TID: u32 = 0x111;
+            const NEXT_OWNER_TID: u32 = 0x222;
+            let futex_table = FutexTable::<PrivateFutexKey>::default();
+            let key = PrivateFutexKey::get(current_task, futex_addr).unwrap();
+            let next_owner_event = InterruptibleEvent::new();
+            {
+                let mut state = futex_table.state.lock();
+                let queue = state.get_rt_mutex_waiters_or_default(key);
+                {
+                    let dead_event = InterruptibleEvent::new();
+                    queue.push_back(RtMutexWaiter {
+                        tid: STALE_TID,
+                        notifiable: FutexNotifiable::new_internal(Arc::downgrade(&dead_event)),
+                    });
+                } // dead_event is dropped here, so its waiter can never be notified.
+                queue.push_back(RtMutexWaiter {
+                    tid: NEXT_OWNER_TID,
+                    notifiable: FutexNotifiable::new_internal(Arc::downgrade(&next_owner_event)),
+                });
+            }
+
+            futex_table.unlock_pi(current_task, addr).expect("unlock_pi failed");
+
+            assert_eq!(
+                mm.atomic_load_u32_relaxed(futex_addr).unwrap(),
+                NEXT_OWNER_TID,
+                "the mutex should have been handed to the waiter behind the stale one"
+            );
+            assert!(futex_table.state.lock().rt_mutex_waiters.is_empty());
+        })
+        .await;
     }
 
     #[::fuchsia::test]

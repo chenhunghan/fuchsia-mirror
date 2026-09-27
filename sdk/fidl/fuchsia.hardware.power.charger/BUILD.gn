@@ -37,10 +37,8 @@ fidl("fuchsia.hardware.power.charger") {
   sources = [ "charger.fidl" ]
   sdk_area = "Power"
   sdk_category = "partner"
+  enable_rust_next = true
   stable = false
   visibility = [ "*" ]
-  public_deps = [
-    "//sdk/fidl/fuchsia.hardware.power.source",
-    "//sdk/fidl/fuchsia.power.system",
-  ]
+  public_deps = [ "//sdk/fidl/fuchsia.power.system" ]
 }

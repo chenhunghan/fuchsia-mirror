@@ -405,7 +405,7 @@ async fn serve_suite_controller(
                         Some(e) => Err(e),
                         None => {
                             let mut details = Vec::new();
-                            while let Ok(Some(detail)) = event_details_receiver.try_next() {
+                            while let Ok(detail) = event_details_receiver.try_recv() {
                                 details.push(detail);
                             }
                             if details.is_empty() {
@@ -462,9 +462,8 @@ async fn serve_batch_iterator(
                     let mut logs = Vec::new();
                     // Collect any outstanding logs.
                     loop {
-                        match receiver.try_next() {
-                            Ok(Some(msg)) => logs.push(msg),
-                            Ok(None) => break,
+                        match receiver.try_recv() {
+                            Ok(msg) => logs.push(msg),
                             Err(_) => break,
                         };
                     }

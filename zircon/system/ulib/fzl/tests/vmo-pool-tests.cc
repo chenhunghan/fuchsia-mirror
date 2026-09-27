@@ -295,4 +295,44 @@ TEST_F(VmoPoolTester, BufferSize) {
   ASSERT_EQ(kVmoTestSize, pool_.buffer_size(kNumVmos - 1));
   CheckAccounting(0);
 }
+
+TEST(VmoPoolTests, RequireLowMemBoundaryValidation) {
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(kVmoTestSize, 0, &vmo));
+  zx::unowned_vmo unowned = vmo.borrow();
+  cpp20::span<zx::unowned_vmo> vmos(&unowned, 1);
+
+  // 1. VMO within 32-bit address space. Should succeed.
+  {
+    fzl::VmoPool pool;
+    ASSERT_OK(pool.Init(vmos));
+    zx::bti bti;
+    const zx_paddr_t paddr = 0x1000ULL;
+    ASSERT_OK(fake_bti_create_with_paddrs(&paddr, 1, bti.reset_and_get_address()));
+    EXPECT_OK(
+        pool.PinVmos(bti, fzl::VmoPool::RequireContig::Yes, fzl::VmoPool::RequireLowMem::Yes));
+  }
+
+  // 2. VMO starting below 4GB boundary but straddling/crossing above 4GB. Should fail.
+  {
+    fzl::VmoPool pool;
+    ASSERT_OK(pool.Init(vmos));
+    zx::bti bti;
+    const zx_paddr_t paddr = 0xFFFFF000ULL;
+    ASSERT_OK(fake_bti_create_with_paddrs(&paddr, 1, bti.reset_and_get_address()));
+    EXPECT_EQ(pool.PinVmos(bti, fzl::VmoPool::RequireContig::Yes, fzl::VmoPool::RequireLowMem::Yes),
+              ZX_ERR_NO_MEMORY);
+  }
+
+  // 3. VMO starting above 4GB boundary. Should fail.
+  {
+    fzl::VmoPool pool;
+    ASSERT_OK(pool.Init(vmos));
+    zx::bti bti;
+    const zx_paddr_t paddr = 0x100000000ULL;
+    ASSERT_OK(fake_bti_create_with_paddrs(&paddr, 1, bti.reset_and_get_address()));
+    EXPECT_EQ(pool.PinVmos(bti, fzl::VmoPool::RequireContig::Yes, fzl::VmoPool::RequireLowMem::Yes),
+              ZX_ERR_NO_MEMORY);
+  }
+}
 }  // namespace

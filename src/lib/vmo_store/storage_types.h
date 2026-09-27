@@ -153,10 +153,10 @@ class HashTableStorage : public AbstractStorage<_Key, _Meta> {
   }
 
   std::optional<Key> Push(Item&& vmo) override {
-    Key key = rnd_distro_(rnd_);
+    Key key = static_cast<Key>(rnd_distro_(rnd_));
     auto search = table_.find(key);
     while (search != table_.end()) {
-      key = rnd_distro_(rnd_);
+      key = static_cast<Key>(rnd_distro_(rnd_));
       search = table_.find(key);
     }
     if (Insert(key, std::move(vmo)) != ZX_OK) {

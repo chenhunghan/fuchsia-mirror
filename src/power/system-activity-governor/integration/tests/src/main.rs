@@ -3204,7 +3204,7 @@ async fn test_suspend_blocker_receives_no_calls_during_shutdown_with_simple_topo
     }
     // Wait 3 seconds and assert no BeforeSuspend calls were made.
     fasync::Timer::new(std::time::Duration::from_millis(3000)).await;
-    assert!(state_rx.try_next().is_err());
+    assert!(state_rx.try_recv().is_err());
     Ok(())
 }
 
@@ -3343,7 +3343,7 @@ async fn test_suspend_blocker_receives_no_calls_during_shutdown_with_execution_s
 
     // Wait 3 seconds and assert no BeforeSuspend/AfterResume calls were made.
     fasync::Timer::new(std::time::Duration::from_secs(3)).await;
-    assert!(state_rx.try_next().is_err());
+    assert!(state_rx.try_recv().is_err());
     Ok(())
 }
 

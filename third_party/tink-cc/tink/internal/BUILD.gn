@@ -913,6 +913,8 @@ source_set("global_serialization_registry") {
     "//third_party/tink-cc/tink/prf/internal:hmac_prf_proto_serialization_impl",
     "//third_party/tink-cc/tink/signature/internal:ecdsa_proto_serialization_impl",
     "//third_party/tink-cc/tink/signature/internal:ed25519_proto_serialization_impl",
+    "//third_party/tink-cc/tink/signature/internal:ml_dsa_proto_serialization_impl",
+    "//third_party/tink-cc/tink/signature/internal:slh_dsa_proto_serialization_impl",
     "//third_party/tink-cc/tink/streamingaead/internal:aes_ctr_hmac_streaming_proto_serialization_impl",
     "//third_party/tink-cc/tink/streamingaead/internal:aes_gcm_hkdf_streaming_proto_serialization_impl",
   ]
@@ -956,16 +958,9 @@ source_set("tink_proto_structs") {
     "//third_party/tink-cc/src/tink/internal/tink_proto_structs.h",
   ]
   public_deps = [
-    ":proto_parser_enum_field",
-    ":proto_parser_fields",
-    ":proto_parser_message",
-    ":proto_parser_options",
-    ":proto_parser_secret_data_field",
     "//third_party/abseil-cpp/absl/base:core_headers",
     "//third_party/abseil-cpp/absl/base:no_destructor",
-    "//third_party/abseil-cpp/absl/strings:string_view",
-    "//third_party/tink-cc/tink:secret_data",
-    "//third_party/tink-cc/tink/util:secret_data",
+    "//third_party/tink-cc/proto:tink_cc_tinkpb",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }
@@ -975,6 +970,10 @@ source_set("common_proto_enums") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
   sources = [ "//third_party/tink-cc/src/tink/internal/common_proto_enums.h" ]
+  public_deps = [
+    "//third_party/abseil-cpp/absl/base:core_headers",
+    "//third_party/tink-cc/proto:common_cc_tinkpb",
+  ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }
 
@@ -1068,25 +1067,47 @@ source_set("mlkem_util") {
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }
 
+# CC Library : proto_parser_field
+source_set("proto_parser_field") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [ "//third_party/tink-cc/src/tink/internal/proto_parser_field.h" ]
+  public_deps = [
+    ":proto_parser_state",
+    ":proto_parsing_helpers",
+    "//third_party/abseil-cpp/absl/base:core_headers",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
+# CC Library : proto_parser_scalar_fields
+source_set("proto_parser_scalar_fields") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/internal/proto_parser_scalar_fields.cc",
+    "//third_party/tink-cc/src/tink/internal/proto_parser_scalar_fields.h",
+  ]
+  public_deps = [
+    ":proto_parser_field",
+    ":proto_parser_options",
+    ":proto_parser_state",
+    ":proto_parsing_helpers",
+    "//third_party/abseil-cpp/absl/base:no_destructor",
+    "//third_party/abseil-cpp/absl/log:absl_check",
+    "//third_party/abseil-cpp/absl/strings:string_view",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
 # CC Library : proto_parser_fields
 source_set("proto_parser_fields") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
-  sources = [
-    "//third_party/tink-cc/src/tink/internal/proto_parser_fields.cc",
-    "//third_party/tink-cc/src/tink/internal/proto_parser_fields.h",
-  ]
+  sources = [ "//third_party/tink-cc/src/tink/internal/proto_parser_fields.h" ]
   public_deps = [
-    ":proto_parser_options",
-    ":proto_parser_state",
-    ":proto_parsing_helpers",
-    "//third_party/abseil-cpp/absl/base:core_headers",
-    "//third_party/abseil-cpp/absl/base:no_destructor",
-    "//third_party/abseil-cpp/absl/log:absl_check",
-    "//third_party/abseil-cpp/absl/status",
-    "//third_party/abseil-cpp/absl/status:statusor",
-    "//third_party/abseil-cpp/absl/strings",
-    "//third_party/abseil-cpp/absl/strings:string_view",
+    ":proto_parser_field",
+    ":proto_parser_scalar_fields",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }
@@ -1191,6 +1212,26 @@ source_set("legacy_annotations") {
   public_deps = [
     "//third_party/abseil-cpp/absl/container:flat_hash_map",
     "//third_party/tink-cc/tink:annotations",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
+# CC Library : primitive_set
+source_set("primitive_set") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [ "//third_party/tink-cc/src/tink/internal/primitive_set.h" ]
+  public_deps = [
+    "//third_party/abseil-cpp/absl/base:core_headers",
+    "//third_party/abseil-cpp/absl/container:flat_hash_map",
+    "//third_party/abseil-cpp/absl/memory",
+    "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:statusor",
+    "//third_party/abseil-cpp/absl/strings:string_view",
+    "//third_party/abseil-cpp/absl/synchronization",
+    "//third_party/tink-cc/proto:tink_proto",
+    "//third_party/tink-cc/tink:crypto_format",
+    "//third_party/tink-cc/tink/util:errors",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }

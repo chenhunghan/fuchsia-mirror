@@ -21,7 +21,7 @@ class SimpleRxBufferEstimator {
 
   explicit SimpleRxBufferEstimator(double alpha = 0.2, zx::duration delay_budget = zx::msec(1),
                                    zx::duration sample_interval = zx::sec(1),
-                                   double variance_threshold = 2.0);
+                                   double variance_threshold = 2.0, uint16_t intercept = 0);
 
   SimpleRxBufferEstimator(SimpleRxBufferEstimator&&) = default;
   SimpleRxBufferEstimator& operator=(SimpleRxBufferEstimator&&) = default;
@@ -47,6 +47,7 @@ class SimpleRxBufferEstimator {
   double variance_threshold() const {
     return static_cast<double>(variance_threshold_fixed_) / static_cast<double>(1ull << kFracBits);
   }
+  uint16_t intercept() const { return intercept_; }
 
  private:
   uint64_t packets_per_second_scaled_{0};
@@ -55,6 +56,7 @@ class SimpleRxBufferEstimator {
   zx::duration delay_budget_{0};
   zx::duration sample_interval_{0};
   uint64_t variance_threshold_fixed_{512};
+  uint16_t intercept_{0};
   zx::timer timer_;
 };
 

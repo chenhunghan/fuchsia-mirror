@@ -327,6 +327,10 @@ TEST(InputTest, DevicePropertiesMatchMouseProperties) {
     GTEST_SKIP() << "Can only be run as root.";
   }
 
+  // TODO(b/564945259): Mouse device is not registered by default.
+  // Re-enable when dynamic hotplugging is supported.
+  GTEST_SKIP() << "Mouse device is not registered by default (b/564945259).";
+
   auto fd = GetInputFile(kMouseInputMinor);
   ASSERT_TRUE(fd.is_valid());
 
@@ -514,7 +518,8 @@ TEST(InputTest, CurrentStateQueriesSucceed) {
     GTEST_SKIP() << "Can only be run as root.";
   }
 
-  for (const uint32_t minor : {kTouchInputMinor, kKeyboardInputMinor, kMouseInputMinor}) {
+  // TODO(b/564945259): Re-add kMouseInputMinor once mouse device is registered dynamically.
+  for (const uint32_t minor : {kTouchInputMinor, kKeyboardInputMinor}) {
     auto fd = GetInputFile(minor);
     ASSERT_TRUE(fd.is_valid());
 

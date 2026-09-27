@@ -111,6 +111,7 @@ _BAZEL_NO_CONTENT_HASH_REPOSITORIES = (
     "fuchsia_build_info",
     "fuchsia_prebuilt_rust",
     "gn_targets",
+    "googletest_fuchsia_sdk",
 )
 
 

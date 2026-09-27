@@ -13,7 +13,7 @@ rustc_library("sampler-config") {
     "//src/connectivity/network/tests/integration/inspect/*",
     "//src/diagnostics/lib/sampler-config/*",
     "//src/diagnostics/sampler/*",
-    "//src/diagnostics/tools/merge_sampler_configs:*",
+    "//src/diagnostics/tools/generate_sampler_configs:*",
     "//src/lib/assembly/platform_configuration/*",
   ]
 

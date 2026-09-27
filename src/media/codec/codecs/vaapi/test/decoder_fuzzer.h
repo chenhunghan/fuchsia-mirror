@@ -38,7 +38,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecOutputFormatChange() override;
 
-  void onCoreCodecInputPacketDone(CodecPacket *packet) override;
+  void onCoreCodecInputPacketDone(const CodecPacket *packet) override;
 
   void onCoreCodecOutputPacket(CodecPacket *packet, bool error_detected_before,
                                bool error_detected_during) override;

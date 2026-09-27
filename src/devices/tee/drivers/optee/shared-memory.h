@@ -7,6 +7,7 @@
 
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/zx/bti.h>
+#include <cstring>
 
 #include <climits>
 #include <functional>
@@ -105,7 +106,10 @@ class SharedMemory : public SharedMemoryRangeTraits,
 
   explicit SharedMemory(zx_vaddr_t base_vaddr, zx_paddr_t base_paddr, RegionPtr region)
       : SharedMemoryRangeTraits(base_vaddr + region->base, base_paddr + region->base, region->size),
-        region_(std::move(region)) {}
+        region_(std::move(region)) {
+    // Zero out the allocated region to prevent leaking recycled shared memory.
+    std::memset(reinterpret_cast<void*>(vaddr()), 0, size());
+  }
 
   // Move only type
   SharedMemory(SharedMemory&&) = default;

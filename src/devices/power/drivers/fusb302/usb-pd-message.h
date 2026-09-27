@@ -94,7 +94,9 @@ class Header {
   // separate rolling counters for transmitted and received messages.
   //
   // usbpd3.1 6.2.1.1.3 "Message ID"
-  MessageId message_id() const { return static_cast<MessageId>(message_id_bits()); }
+  MessageId message_id() const {
+    return static_cast<MessageId>(static_cast<uint8_t>(message_id_bits()));
+  }
   Header& set_message_id(MessageId message_id) {
     return set_message_id_bits(static_cast<uint8_t>(message_id));
   }
@@ -219,8 +221,8 @@ class Message {
 
   Message(MessageType message_type, MessageId message_id, PowerRole power_role,
           SpecRevision spec_revision, DataRole data_role, cpp20::span<const uint32_t> data_objects)
-      : header_(message_type, data_objects.size(), message_id, power_role, spec_revision,
-                data_role) {
+      : header_(message_type, static_cast<uint8_t>(data_objects.size()), message_id, power_role,
+                spec_revision, data_role) {
     std::copy(data_objects.begin(), data_objects.end(), data_objects_.begin());
   }
 

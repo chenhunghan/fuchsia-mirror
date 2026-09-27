@@ -155,12 +155,6 @@ impl TestVecBuffer {
     }
 }
 
-impl Drop for TestVecBuffer {
-    fn drop(&mut self) {
-        self.receiver.0.lock().output = self.data.to_vec();
-    }
-}
-
 impl DataBuffer for TestVecBuffer {
     fn range(&self) -> Range<u64> {
         self.range.clone()
@@ -172,7 +166,9 @@ impl DataBuffer for TestVecBuffer {
     }
 
     fn commit(&mut self, size: usize) -> Result<(), ChunkedArchiveError> {
-        self.receiver.0.lock().commits.push((self.offset, size));
+        let mut inner = self.receiver.0.lock();
+        inner.commits.push((self.offset, size));
+        inner.output = self.data.to_vec();
         self.offset += size as u64;
         self.committed_len += size;
         Ok(())

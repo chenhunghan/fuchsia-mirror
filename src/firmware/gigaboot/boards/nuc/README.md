@@ -129,6 +129,13 @@ devices in `ffx target list`.
    fx flash --no-bootloader-reboot
    ```
 
+   If multiple devices are present or a different default target is configured,
+   specify the fastboot TCP address explicitly:
+
+   ```
+   fx flash -s tcp:<ip6 address> --no-bootloader-reboot
+   ```
+
 1. After flash completes and device successfully boots into Fuchsia. Unplug the
 USB disk.
 

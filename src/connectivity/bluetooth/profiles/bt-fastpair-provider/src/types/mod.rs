@@ -7,8 +7,9 @@ use aes::cipher::{BlockCipherDecrypt as _, BlockCipherEncrypt as _, KeyInit as _
 use fuchsia_inspect::{self as inspect, Property};
 use fuchsia_inspect_derive::{AttachError, Inspect};
 use log::{debug, warn};
-use lru_cache::LruCache;
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::{fs, io, path};
 
 use crate::advertisement::bloom_filter;
@@ -108,7 +109,7 @@ impl From<&SharedSecret> for AccountKey {
 /// in the LE advertisement packet.
 /// See https://developers.google.com/nearby/fast-pair/specifications/configuration#AccountKeyList
 /// for more details.
-const MAX_ACCOUNT_KEYS: usize = 5;
+const MAX_ACCOUNT_KEYS: NonZeroUsize = NonZeroUsize::new(5).unwrap();
 
 /// Manages the set of saved Account Keys.
 ///
@@ -149,9 +150,9 @@ impl AccountKeyList {
     /// from/to the same file.
     #[cfg(test)]
     pub fn with_capacity_and_keys(capacity: usize, keys: Vec<AccountKey>) -> Self {
-        let mut cache = LruCache::new(capacity);
+        let mut cache = LruCache::new(NonZeroUsize::new(capacity).unwrap());
         keys.into_iter().for_each(|k| {
-            let _ = cache.insert(k, ());
+            let _ = cache.put(k, ());
         });
 
         let val = rand::random::<u64>();
@@ -184,7 +185,7 @@ impl AccountKeyList {
     pub fn save(&mut self, key: AccountKey) {
         // If the `key` already exists, it will be updated in the LRU cache. If the cache is
         // full, the least-recently used (LRU) key will be evicted.
-        if self.keys.insert(key, ()).is_some() {
+        if self.keys.put(key, ()).is_some() {
             debug!("Account Key already saved");
         }
 
@@ -259,7 +260,7 @@ impl AccountKeyList {
                 debug!("Reading Account Keys from existing file");
                 let key_list = KeyList::load(file)?;
                 key_list.0.into_iter().for_each(|k| {
-                    let _ = self.keys.insert(k, ());
+                    let _ = self.keys.put(k, ());
                 });
                 Ok(())
             }
@@ -407,24 +408,24 @@ pub(crate) mod tests {
 
     #[test]
     fn account_key_lru_eviction() {
-        let mut list = AccountKeyList::with_capacity_and_keys(MAX_ACCOUNT_KEYS, vec![]);
-        let max: u8 = MAX_ACCOUNT_KEYS as u8;
+        let mut list = AccountKeyList::with_capacity_and_keys(MAX_ACCOUNT_KEYS.get(), vec![]);
+        let max: u8 = MAX_ACCOUNT_KEYS.get() as u8;
 
         for i in 1..max + 1 {
             let key = AccountKey::new([i; 16]);
             list.save(key.clone());
             assert_eq!(list.keys().len(), i as usize);
-            assert!(list.keys.contains_key(&key));
+            assert!(list.keys.contains(&key));
         }
         // Adding a new key results in the eviction of the LRU key.
         assert_eq!(list.keys().len(), max as usize);
         let new_key = AccountKey::new([max + 1; 16]);
         list.save(new_key.clone());
         assert_eq!(list.keys().len(), max as usize);
-        assert!(list.keys.contains_key(&new_key));
+        assert!(list.keys.contains(&new_key));
         // LRU Key is no longer stored.
         let first_key = AccountKey::new([1; 16]);
-        assert!(!list.keys.contains_key(&first_key));
+        assert!(!list.keys.contains(&first_key));
 
         // Marking a key as used should "refresh" the key's position. It is no longer the LRU key
         // that will be evicted.
@@ -434,8 +435,8 @@ pub(crate) mod tests {
         let next_key = AccountKey::new([max + 2; 16]);
         list.save(next_key.clone());
         assert_eq!(list.keys().len(), max as usize);
-        assert!(list.keys.contains_key(&next_key));
-        assert!(list.keys.contains_key(&account_key2));
+        assert!(list.keys.contains(&next_key));
+        assert!(list.keys.contains(&account_key2));
     }
 
     #[test]

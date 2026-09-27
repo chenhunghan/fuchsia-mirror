@@ -37,7 +37,7 @@ async def wait_for_state(
     Args:
         state_fn: function to call for getting current state.
         expected_state: expected state to wait for.
-        timeout: How long in sec to wait. By default, no timeout is set.
+        timeout: How long in sec to wait. By default, no timeout is set (None or 0 means wait indefinitely).
         wait_time: How long in sec to wait between the retries.
 
     Raises:
@@ -76,6 +76,61 @@ async def wait_for_state(
             # `state_fn()` raised an exception. Retry again
             _LOGGER.debug(err)
         await asyncio.sleep(wait_time)
+    else:
+        message = f"{state_fn.__qualname__} didn't return {expected_state}"
+        if timeout:
+            message += f" in {timeout} sec"
+        raise errors.HoneydewTimeoutError(message)
+
+
+@decorators.liveness_check
+def wait_for_state_sync(
+    state_fn: Callable[[], bool],
+    expected_state: bool,
+    timeout: float | None = None,
+    wait_time: float = 1,
+) -> None:
+    """Wait for specified time for state_fn to return expected_state synchronously.
+
+    Args:
+        state_fn: function to call for getting current state.
+        expected_state: expected state to wait for.
+        timeout: How long in sec to wait. By default, no timeout is set (None or 0 means wait indefinitely).
+        wait_time: How long in sec to wait between the retries.
+
+    Raises:
+        errors.HoneydewTimeoutError: If state_fn does not return the
+            expected_state with in specified timeout.
+    """
+    message: str = (
+        f"Waiting for {state_fn.__qualname__} to return {expected_state}..."
+    )
+    end_time: float | None = None
+
+    if timeout:
+        start_time: float = time.time()
+        end_time = start_time + timeout
+
+        message = (
+            f"Waiting for {timeout} sec for {state_fn.__qualname__} "
+            f"to return {expected_state}..."
+        )
+
+    _LOGGER.info(message)
+
+    while _retry_condition(end_time):
+        _LOGGER.debug("calling %s", state_fn.__qualname__)
+        try:
+            current_state = state_fn()
+            _LOGGER.debug(
+                "%s returned %s", state_fn.__qualname__, current_state
+            )
+            if current_state == expected_state:
+                return
+        except Exception as err:  # pylint: disable=broad-except
+            # `state_fn()` raised an exception. Retry again
+            _LOGGER.debug(err)
+        time.sleep(wait_time)
     else:
         message = f"{state_fn.__qualname__} didn't return {expected_state}"
         if timeout:

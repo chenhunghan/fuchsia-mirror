@@ -33,6 +33,9 @@ mod progress_reader;
 mod upload;
 use crate::process::process_trace_file;
 
+const DEFAULT_OUTPUT_FILE: &str = "trace.fxt";
+const DEFAULT_COMPRESSED_OUTPUT_FILE: &str = "trace.fxt.zst";
+
 // LineWaiter abstracts waiting for the user to press enter.  It is needed
 // to unit test interactive mode.
 trait LineWaiter<'a> {
@@ -427,28 +430,39 @@ impl TraceTool {
             opts.output.is_some(),
             opts.upload,
             opts.bucket.is_some(),
+            opts.compressed,
         ) {
-            (_, _, _, false, true) => {
+            (_, _, _, false, true, _) => {
                 ffx_bail!("The option '--bucket' can only be used with '--upload'.");
             }
-            (true, _, true, _, _) => {
+            (true, _, true, _, _, _) => {
                 ffx_bail!(
                     "The option '--output' cannot be used with background tracing. Use `ffx trace stop --output` instead."
                 );
             }
-            (true, _, _, true, _) => {
+            (true, _, _, true, _, _) => {
                 ffx_bail!(
                     "The switch '--upload' cannot be used with background tracing. Use `ffx trace stop --upload` instead."
                 );
             }
-            (_, true, _, true, _) => {
+            (_, true, _, true, _, _) => {
                 ffx_bail!(
                     "The switch '--upload' cannot be used with on-boot tracing. Use `ffx trace stop --upload` instead."
                 );
             }
-            (_, true, true, _, _) => {
+            (_, true, true, _, _, _) => {
                 ffx_bail!(
                     "The option '--output' cannot be used with on-boot tracing. Use `ffx trace stop --output` instead."
+                );
+            }
+            (true, _, _, _, _, true) => {
+                ffx_bail!(
+                    "The switch '--compressed' cannot be used with background tracing. Use `ffx trace stop --compressed` instead."
+                );
+            }
+            (_, true, _, _, _, true) => {
+                ffx_bail!(
+                    "The switch '--compressed' cannot be used with on-boot tracing. Use `ffx trace stop --compressed` instead."
                 );
             }
             _ => {}
@@ -476,16 +490,14 @@ impl TraceTool {
             defer_transfer: Some(defer_transfer),
             ..ffx_trace::map_categories_to_providers(&expanded_categories)
         };
-        let output = canonical_path(opts.output.clone().unwrap_or_else(|| "trace.fxt".to_owned()))?;
-
-        let compression =
-            if opts.nocompress { CompressionType::None } else { CompressionType::Zstd };
+        let (download_file, output) =
+            resolve_output_paths(opts.output.as_deref(), opts.compressed)?;
 
         let options = TraceOptions {
             duration_ns: opts.duration.map(|d| Duration::from_secs(d.into()).as_nanos() as i64),
             triggers,
             requested_categories: Some(opts.categories.clone()),
-            compression: Some(compression),
+            compression: Some(CompressionType::Zstd),
             ..Default::default()
         };
         writer.line(format!("Tracing categories: [{}]...", expanded_categories.join(","),))?;
@@ -541,7 +553,7 @@ impl TraceTool {
         }
 
         writer.line("Trace completed! Copying trace from device...")?;
-        let trace_data = direct::stop_tracing(&context, task, trace_proxy, &output).await?;
+        let trace_data = direct::stop_tracing(&context, task, trace_proxy, &download_file).await?;
 
         finalize_trace(
             &context,
@@ -554,6 +566,7 @@ impl TraceTool {
                 retain_raw_fidl: opts.retain_raw_fidl,
                 upload: opts.upload,
                 bucket: opts.bucket.clone(),
+                compressed: opts.compressed,
                 ..Default::default()
             },
             writer,
@@ -573,33 +586,38 @@ impl TraceTool {
             opts.no_symbolize,
             opts.no_verify_trace,
             opts.retain_raw_fidl,
+            opts.compressed,
         ) {
-            (true, true, _, _, _, _, _) => {
+            (true, true, _, _, _, _, _, _) => {
                 ffx_bail!("The switch '--upload' cannot be used with '--abort'.");
             }
-            (true, _, true, _, _, _, _) => {
+            (true, _, true, _, _, _, _, _) => {
                 ffx_bail!("The option '--output' cannot be used with '--abort'.");
             }
-            (true, _, _, true, _, _, _) => {
+            (true, _, _, true, _, _, _, _) => {
                 ffx_bail!("The option '--bucket' cannot be used with '--abort'.");
             }
-            (true, _, _, _, true, _, _) => {
+            (true, _, _, _, true, _, _, _) => {
                 ffx_bail!("The switch '--no-symbolize' cannot be used with '--abort'.");
             }
-            (true, _, _, _, _, true, _) => {
+            (true, _, _, _, _, true, _, _) => {
                 ffx_bail!("The switch '--no-verify-trace' cannot be used with '--abort'.");
             }
-            (true, _, _, _, _, _, true) => {
+            (true, _, _, _, _, _, true, _) => {
                 ffx_bail!("The switch '--retain-raw-fidl' cannot be used with '--abort'.");
             }
-            (_, false, _, true, _, _, _) => {
+            (true, _, _, _, _, _, _, true) => {
+                ffx_bail!("The switch '--compressed' cannot be used with '--abort'.");
+            }
+            (_, false, _, true, _, _, _, _) => {
                 ffx_bail!("The option '--bucket' can only be used with '--upload'.");
             }
             _ => {}
         }
 
         let trace_proxy = self.get_trace_proxy().await?;
-        let output = canonical_path(opts.output.clone().unwrap_or_else(|| "trace.fxt".to_owned()))?;
+        let (download_file, output) =
+            resolve_output_paths(opts.output.as_deref(), opts.compressed)?;
 
         let trace_data = match trace_proxy {
             SessionManagerProxyType::Provisioner(_) => {
@@ -613,16 +631,17 @@ impl TraceTool {
                     writer.line("Trace aborted.")?;
                     return Ok(());
                 } else {
-                    direct::stop_tracing(&context, None, trace_proxy, &output).await?
+                    direct::stop_tracing(&context, None, trace_proxy, &download_file).await?
                 }
             }
         };
 
-        finalize_trace(&context, trace_data, opts, writer).await.map_err(Into::into)
+        let stop_opts = Stop { output: Some(output.clone()), ..opts.clone() };
+        finalize_trace(&context, trace_data, &stop_opts, writer).await.map_err(Into::into)
     }
 
     async fn trace_upload(self, opts: &Upload, writer: Writer) -> fho::Result<()> {
-        let trace_file = opts.trace_file.as_deref().unwrap_or("trace.fxt");
+        let trace_file = opts.trace_file.as_deref().unwrap_or(DEFAULT_OUTPUT_FILE);
         trace_upload_impl(
             &self.context,
             trace_file,
@@ -733,6 +752,13 @@ where
     F: FnOnce(PathBuf, String, String) -> Fut,
     Fut: Future<Output = Result<String>>,
 {
+    let _temp_cleaner =
+        if opts.compressed && opts.output.as_deref() != Some(&trace_data.output_file) {
+            Some(TempFileGuard(PathBuf::from(&trace_data.output_file)))
+        } else {
+            None
+        };
+
     let verify_trace = !opts.no_verify_trace;
 
     for line in
@@ -751,11 +777,37 @@ where
             &mut writer,
         )?;
     }
-    writer.line(format!("Results written to {}", trace_data.output_file))?;
+
+    let final_output = if opts.compressed {
+        let final_path = opts.output.clone().unwrap_or_else(|| {
+            if trace_data.output_file.ends_with(".tmp.fxt") {
+                let p = Path::new(&trace_data.output_file);
+                let fname = p.file_name().unwrap_or_default().to_string_lossy();
+                let stripped = fname
+                    .strip_prefix('.')
+                    .unwrap_or(&fname)
+                    .strip_suffix(".tmp.fxt")
+                    .unwrap_or(&fname);
+                p.with_file_name(stripped).to_string_lossy().to_string()
+            } else {
+                DEFAULT_COMPRESSED_OUTPUT_FILE.to_string()
+            }
+        });
+        if final_path != trace_data.output_file {
+            writer.line("Compressing trace with Zstandard...")?;
+            recompress_trace(Path::new(&trace_data.output_file), Path::new(&final_path)).await?;
+            let _ = std::fs::remove_file(&trace_data.output_file);
+        }
+        final_path
+    } else {
+        trace_data.output_file
+    };
+
+    writer.line(format!("Results written to {}", final_output))?;
     if opts.upload {
         upload_and_print(
             context,
-            Path::new(&trace_data.output_file),
+            Path::new(&final_output),
             opts.bucket.as_deref(),
             &mut writer,
             uploader,
@@ -863,6 +915,47 @@ fn post_process(
         writer.line(format!("{warning}"))?;
     }
     Ok(())
+}
+
+fn resolve_output_paths(output_opt: Option<&str>, compressed: bool) -> Result<(String, String)> {
+    let default_output =
+        if compressed { DEFAULT_COMPRESSED_OUTPUT_FILE } else { DEFAULT_OUTPUT_FILE };
+    let final_output = canonical_path(output_opt.unwrap_or(default_output))?;
+    let download_file = if compressed {
+        let p = Path::new(&final_output);
+        let temp_name = format!(".{}.tmp.fxt", p.file_name().unwrap_or_default().to_string_lossy());
+        p.with_file_name(temp_name).to_string_lossy().to_string()
+    } else {
+        final_output.clone()
+    };
+    Ok((download_file, final_output))
+}
+
+struct TempFileGuard(PathBuf);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+async fn recompress_trace(uncompressed_path: &Path, compressed_path: &Path) -> Result<()> {
+    let uncompressed = uncompressed_path.to_path_buf();
+    let compressed = compressed_path.to_path_buf();
+    blocking::unblock(move || {
+        let input = std::fs::File::open(&uncompressed)
+            .with_context(|| format!("Failed to open {uncompressed:?} for compression"))?;
+        let output = std::fs::File::create(&compressed)
+            .with_context(|| format!("Failed to create {compressed:?} for compressed output"))?;
+        const BUFFER_SIZE: usize = 128 * 1024;
+        zstd::stream::copy_encode(
+            std::io::BufReader::with_capacity(BUFFER_SIZE, input),
+            std::io::BufWriter::with_capacity(BUFFER_SIZE, output),
+            0,
+        )
+        .with_context(|| format!("Failed to compress {uncompressed:?} to {compressed:?}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
 }
 
 async fn status(session_manager_proxy: SessionManagerProxy, writer: &mut Writer) -> Result<()> {
@@ -1376,7 +1469,6 @@ mod tests {
             no_verify_trace: false,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             ..Default::default()
         };
 
@@ -1546,7 +1638,6 @@ mod tests {
             no_verify_trace: true,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             ..Default::default()
         };
 
@@ -1736,6 +1827,48 @@ Triggers:
             expected_url
         );
         assert_eq!(output, expected_output);
+    }
+
+    #[fuchsia::test]
+    async fn test_finalize_trace_compressed_recompresses() {
+        let env = ffx_config::test_init().unwrap();
+        let test_buffers = TestBuffers::default();
+        let writer = Writer::new_test(None, &test_buffers);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let uncompressed_file = temp_dir.path().join(".test_trace.fxt.zst.tmp.fxt");
+        let final_file = temp_dir.path().join("test_trace.fxt.zst");
+        std::fs::write(&uncompressed_file, b"Dummy uncompressed trace contents").unwrap();
+
+        let stop_opts = Stop {
+            compressed: true,
+            output: Some(final_file.to_string_lossy().to_string()),
+            no_verify_trace: true,
+            ..Default::default()
+        };
+
+        let trace_data = TraceData {
+            output_file: uncompressed_file.to_string_lossy().to_string(),
+            categories: vec![],
+            stop_result: StopResult::default(),
+        };
+
+        finalize_trace_impl(
+            &env.context,
+            trace_data,
+            &stop_opts,
+            writer,
+            |_path, _bucket, _viewer| async { Ok("".to_string()) },
+        )
+        .await
+        .unwrap();
+
+        let output = test_buffers.into_stdout_str();
+        assert!(output.contains(&format!("Results written to {}", final_file.to_string_lossy())));
+        assert!(!uncompressed_file.exists());
+        assert!(final_file.exists());
+        let decompressed = zstd::decode_all(std::fs::File::open(&final_file).unwrap()).unwrap();
+        assert_eq!(decompressed, b"Dummy uncompressed trace contents");
     }
 
     #[fuchsia::test]
@@ -2079,7 +2212,6 @@ Triggers:
             no_verify_trace: true,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             ..Default::default()
         };
         let tool = TraceTool {
@@ -2168,7 +2300,6 @@ Triggers:
             no_verify_trace: true,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             ..Default::default()
         };
 
@@ -2206,7 +2337,6 @@ Triggers:
             no_verify_trace: true,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             ..Default::default()
         };
 
@@ -2246,7 +2376,6 @@ Triggers:
             no_verify_trace: true,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             ..Default::default()
         };
 
@@ -2287,9 +2416,9 @@ Triggers:
             no_verify_trace: true,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             upload: true,
             bucket: Some("test-upload-bucket".to_string()),
+            ..Default::default()
         };
 
         let tool = TraceTool {
@@ -2411,6 +2540,10 @@ Triggers:
                 Stop { abort: true, retain_raw_fidl: true, ..Default::default() },
                 "The switch '--retain-raw-fidl' cannot be used with '--abort'",
             ),
+            (
+                Stop { abort: true, compressed: true, ..Default::default() },
+                "The switch '--compressed' cannot be used with '--abort'",
+            ),
         ];
 
         for (opts, expected_err) in cases {
@@ -2485,6 +2618,14 @@ Triggers:
             (
                 Start { bucket: Some("bucket".to_string()), upload: false, ..Default::default() },
                 "The option '--bucket' can only be used with '--upload'",
+            ),
+            (
+                Start { background: true, compressed: true, ..Default::default() },
+                "The switch '--compressed' cannot be used with background tracing",
+            ),
+            (
+                Start { on_boot: true, compressed: true, ..Default::default() },
+                "The switch '--compressed' cannot be used with on-boot tracing",
             ),
         ];
 
@@ -2587,7 +2728,6 @@ Triggers:
             no_verify_trace: true,
             on_boot: false,
             retain_raw_fidl: false,
-            nocompress: false,
             ..Default::default()
         };
 

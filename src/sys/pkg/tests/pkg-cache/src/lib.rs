@@ -21,6 +21,7 @@ use fidl_fuchsia_pkg_ext as fpkg_ext;
 use fidl_fuchsia_pkg_garbagecollector as fpkg_gc;
 use fidl_fuchsia_pkg_http as fpkg_http;
 use fidl_fuchsia_pkg_internal as fpkg_internal;
+use fidl_fuchsia_pkg_resolution as fpkg_resolution;
 use fidl_fuchsia_update as fupdate;
 use fidl_fuchsia_update_verify as fupdate_verify;
 use fuchsia_async as fasync;
@@ -57,6 +58,7 @@ mod retained_blobs;
 mod retained_packages;
 mod space;
 mod sync;
+mod toolbox_resolver;
 mod write_blobs;
 
 static SHELL_COMMANDS_BIN_PATH: &str = "shell-commands-bin";
@@ -919,12 +921,14 @@ where
                         "{}-full",
                         fcomponent_resolution::ResolverMarker::PROTOCOL_NAME
                     )))
+                    .capability(Capability::protocol::<ffxfs::BlobReaderMarker>())
                     .capability(Capability::protocol::<fpkg::PackageCacheMarker>())
                     .capability(Capability::protocol::<fpkg::RetainedPackagesMarker>())
                     .capability(Capability::protocol::<fpkg::RetainedBlobsMarker>())
                     .capability(Capability::protocol::<fpkg::PackageResolverMarker>())
                     .capability(Capability::protocol::<fpkg_gc::ManagerMarker>())
                     .capability(Capability::protocol::<fpkg_internal::OtaDownloaderMarker>())
+                    .capability(Capability::protocol::<fpkg_resolution::PackageResolverMarker>())
                     .capability(Capability::protocol::<fcomponent_resolution::ResolverMarker>())
                     .capability(Capability::directory(SHELL_COMMANDS_BIN_PATH))
                     .capability(Capability::directory("pkgfs"))
@@ -938,6 +942,10 @@ where
         let realm_instance = builder.build().await.unwrap();
 
         let proxies = Proxies {
+            blob_reader: realm_instance
+                .root
+                .connect_to_protocol_at_exposed_dir()
+                .expect("connect to blob reader"),
             commit_status_provider: realm_instance
                 .root
                 .connect_to_protocol_at_exposed_dir()
@@ -1006,6 +1014,7 @@ where
 }
 
 struct Proxies {
+    blob_reader: ffxfs::BlobReaderProxy,
     commit_status_provider: fupdate::CommitStatusProviderProxy,
     space_manager: fpkg_gc::ManagerProxy,
     package_cache: fpkg::PackageCacheProxy,
@@ -1222,6 +1231,23 @@ impl<B: Blobfs> TestEnv<B> {
             .map_err(|i| zx::Status::try_from_raw(i).unwrap())
     }
 
+    pub async fn resolve_toolbox(
+        &self,
+        url: impl Into<String>,
+    ) -> Result<fpkg_resolution::ResolveResult, fpkg_resolution::ResolveError> {
+        self.apps
+            .realm_instance
+            .root
+            .connect_to_protocol_at_exposed_dir::<fpkg_resolution::PackageResolverProxy>()
+            .unwrap()
+            .resolve(fpkg_resolution::PackageResolverResolveRequest {
+                package_url: Some(url.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
     async fn set_upgradable_urls(
         &self,
         urls: impl IntoIterator<Item = impl std::fmt::Display>,
@@ -1334,4 +1360,29 @@ impl MockPkgAuthority {
     fn get_history_clone(&self) -> Vec<String> {
         self.lookup_call_history.lock().clone()
     }
+}
+
+#[fuchsia::test]
+async fn blob_reader_forwarding() {
+    let env = TestEnv::builder().fxblob().build().await;
+    env.block_until_started().await;
+
+    let content = "hello from blob reader forwarding".as_bytes();
+    let blob_hash = fuchsia_merkle::root_from_slice(content);
+    let () = env.blobfs.add_blob_from(blob_hash, content).await.unwrap();
+
+    let reader_vmo = env
+        .proxies
+        .blob_reader
+        .get_vmo(&blob_hash.into())
+        .await
+        .expect("get_vmo fidl failed")
+        .map_err(zx::Status::err_from_raw)
+        .expect("get_vmo failed");
+    assert_eq!(
+        reader_vmo.read_to_vec::<u8>(0, content.len() as u64).expect("read_to_vec failed"),
+        content
+    );
+
+    env.stop().await;
 }

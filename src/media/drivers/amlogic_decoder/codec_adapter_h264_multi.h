@@ -13,6 +13,7 @@
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/zx/bti.h>
+#include <zircon/compiler.h>
 
 #include <fbl/macros.h>
 
@@ -48,7 +49,7 @@ class CodecAdapterH264Multi : public AmlogicCodecAdapter,
   void CoreCodecStartStream() override;
   void CoreCodecQueueInputFormatDetails(
       const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override;
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
   void CoreCodecStopStream() override;
   void CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buffer) override;
@@ -162,9 +163,9 @@ class CodecAdapterH264Multi : public AmlogicCodecAdapter,
   std::optional<fuchsia_sysmem2::BufferCollectionInfo> output_buffer_collection_info_;
   std::optional<fuchsia_sysmem2::SingleBufferSettings> buffer_settings_[kPortCount];
 
-  std::vector<const CodecBuffer*> all_output_buffers_;
-  std::vector<CodecPacket*> all_output_packets_;
-  std::vector<uint32_t> free_output_packets_;
+  std::vector<const CodecBuffer*> all_output_buffers_ __TA_GUARDED(lock_);
+  std::vector<CodecPacket*> all_output_packets_ __TA_GUARDED(lock_);
+  std::vector<uint32_t> free_output_packets_ __TA_GUARDED(lock_);
 
   std::optional<DriverCodecDiagnostics> codec_diagnostics_;
 

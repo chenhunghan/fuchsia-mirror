@@ -78,22 +78,21 @@ mod test {
     use fidl_fuchsia_netemul_network as fnetemul_network;
     use fidl_fuchsia_posix_socket as fposix_socket;
     use net_declare::std_socket_addr;
-    use netstack_testing_common::realms::{Netstack, TestSandboxExt as _};
+    use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
     use netstack_testing_macros::netstack_test;
     use sockaddr::{IntoSockAddr as _, TryToSockaddrLl as _};
 
     #[netstack_test]
-    #[variant(N, Netstack)]
-    async fn datagram_socket_send_receive<N: Netstack>(name: &str) {
+    async fn datagram_socket_send_receive(name: &str) {
         let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
 
         let network =
             sandbox.create_network(format!("{name}-test-network")).await.expect("create network");
         let realm_a: netemul::TestRealm<'_> = sandbox
-            .create_netstack_realm::<N, _>(format!("{name}-test-realm-a"))
+            .create_netstack_realm::<Netstack3, _>(format!("{name}-test-realm-a"))
             .expect("create realm");
         let realm_b: netemul::TestRealm<'_> = sandbox
-            .create_netstack_realm::<N, _>(format!("{name}-test-realm-b"))
+            .create_netstack_realm::<Netstack3, _>(format!("{name}-test-realm-b"))
             .expect("create realm");
 
         const MAC_A: net_types::ethernet::Mac = net_declare::net_mac!("00:00:00:00:00:01");
@@ -184,17 +183,16 @@ mod test {
     }
 
     #[netstack_test]
-    #[variant(N, Netstack)]
-    async fn packet_socket_send_receive<N: Netstack>(name: &str) {
+    async fn packet_socket_send_receive(name: &str) {
         let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
 
         let network =
             sandbox.create_network(format!("{name}-test-network")).await.expect("create network");
         let realm_a: netemul::TestRealm<'_> = sandbox
-            .create_netstack_realm::<N, _>(format!("{name}-test-realm-a"))
+            .create_netstack_realm::<Netstack3, _>(format!("{name}-test-realm-a"))
             .expect("create realm");
         let realm_b: netemul::TestRealm<'_> = sandbox
-            .create_netstack_realm::<N, _>(format!("{name}-test-realm-b"))
+            .create_netstack_realm::<Netstack3, _>(format!("{name}-test-realm-b"))
             .expect("create realm");
 
         const MAC_A: net_types::ethernet::Mac = net_declare::net_mac!("00:00:00:00:00:01");

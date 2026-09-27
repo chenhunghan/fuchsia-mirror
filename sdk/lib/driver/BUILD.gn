@@ -10,6 +10,12 @@ sdk_component_manifests("driver_pdev_sdk") {
   category = "partner"
 }
 
+sdk_component_manifests("driver_debug_sdk") {
+  name = "driver"
+  manifests = [ "debug.shard.cml" ]
+  category = "partner"
+}
+
 group("tests") {
   testonly = true
 

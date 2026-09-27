@@ -191,6 +191,7 @@ zx::result<> GpioImplVisitor::ParsePinStates(fdf_devicetree::Node& node) {
   for (uint32_t controller_id : controllers) {
     auto& dev_states = controller_to_device_states[controller_id];
     dev_states.name() = GetUniqueNodeName(node);
+    dev_states.id() = pin_id_counter_++;
     for (uint32_t i = 0; i < num_states; ++i) {
       fuchsia_hardware_pinimpl::PinState state{{
           .name = state_names[i],
@@ -233,13 +234,14 @@ zx::result<> GpioImplVisitor::ParsePinStates(fdf_devicetree::Node& node) {
   uint32_t controller_index = 0;
   for (auto& [controller_id, dev_states] : controller_to_device_states) {
     std::string unique_name = dev_states.name();
+    uint32_t pin_states_id = dev_states.id();
     auto& controller = GetController(controller_id);
     if (!controller.metadata.device_pin_states()) {
       controller.metadata.device_pin_states().emplace();
     }
     controller.metadata.device_pin_states()->push_back(std::move(dev_states));
 
-    auto result = AddPinStatesNodeSpec(node, controller_id, controller_index++, unique_name);
+    auto result = AddPinStatesNodeSpec(node, pin_states_id, controller_index++, unique_name);
     if (result.is_error()) {
       return result.take_error();
     }
@@ -325,7 +327,7 @@ zx::result<> GpioImplVisitor::AddInitNodeSpec(fdf_devicetree::Node& child, uint3
 }
 
 zx::result<> GpioImplVisitor::AddPinStatesNodeSpec(fdf_devicetree::Node& child,
-                                                   uint32_t controller_id,
+                                                   uint32_t pin_states_id,
                                                    uint32_t controller_index,
                                                    const std::string& client_name) {
   auto pin_states_node = fuchsia_driver_framework::ParentSpec2{{
@@ -333,7 +335,7 @@ zx::result<> GpioImplVisitor::AddPinStatesNodeSpec(fdf_devicetree::Node& child,
           {
               fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE,
                                       "fuchsia.hardware.pin.PinStatesService"),
-              fdf::MakeAcceptBindRule(bind_fuchsia::ID, controller_id),
+              fdf::MakeAcceptBindRule(bind_fuchsia::ID, pin_states_id),
               fdf::MakeAcceptBindRule(bind_fuchsia::NAME, client_name),
           },
       .properties =

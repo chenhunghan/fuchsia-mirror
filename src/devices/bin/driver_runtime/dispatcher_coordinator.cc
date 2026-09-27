@@ -33,6 +33,36 @@ void DispatcherCoordinator::WaitUntilDispatchersIdle() {
 }
 
 // static
+void DispatcherCoordinator::DumpDispatchers(std::vector<DumpState>* out_states) {
+  std::vector<fbl::RefPtr<Dispatcher>> dispatchers;
+  {
+    fbl::AutoLock lock(&(GetDispatcherCoordinator().lock_));
+    for (auto& driver : GetDispatcherCoordinator().drivers_) {
+      driver.GetDispatchers(dispatchers);
+      driver.GetShutdownDispatchers(dispatchers);
+    }
+  }
+  out_states->clear();
+  out_states->reserve(dispatchers.size());
+  for (auto& d : dispatchers) {
+    DumpState state;
+    d->Dump(&state);
+    out_states->push_back(std::move(state));
+  }
+}
+
+// static
+void DispatcherCoordinator::DumpThreads(std::vector<ThreadPool::ThreadInfo>* out_threads) {
+  auto& coordinator = GetDispatcherCoordinator();
+  fbl::AutoLock lock(&coordinator.lock_);
+  out_threads->clear();
+  coordinator.default_thread_pool_.DumpThreads(out_threads);
+  for (const auto& pool : coordinator.role_to_thread_pool_) {
+    pool.DumpThreads(out_threads);
+  }
+}
+
+// static
 void DispatcherCoordinator::WaitUntilDispatchersDestroyed() {
   auto& coordinator = GetDispatcherCoordinator();
   fbl::AutoLock lock(&coordinator.lock_);
@@ -562,10 +592,17 @@ void DispatcherCoordinator::EnvReset() {
 }
 
 void DispatcherCoordinator::Reset() {
+  fbl::WAVLTree<std::string, std::unique_ptr<ThreadPool>> role_pools;
   {
     fbl::AutoLock al(&lock_);
     ZX_ASSERT(drivers_.is_empty());
+    role_pools = std::move(role_to_thread_pool_);
   }
+
+  for (auto& pool : role_pools) {
+    pool.Reset();
+  }
+  role_pools.clear();
 
   default_thread_pool()->Reset();
   if (unmanaged_thread_pool_.has_value()) {

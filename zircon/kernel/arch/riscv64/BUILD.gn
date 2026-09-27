@@ -335,6 +335,25 @@ if (toolchain_base_environment == "kernel") {
     expect_lints = []
   }
 
+  kernel_bindgen_crate("riscv64-aspace-bindings") {
+    headers = [
+      "include/arch/kernel_aspace.h",
+      "include/arch/riscv64/mmu.h",
+    ]
+    cpp = true
+    non_rust_deps = [ ":headers" ]
+    raw_lines = [ "#![no_std]" ]
+    var_allowlist = [
+      "KERNEL_ASPACE_BASE",
+      "KERNEL_ASPACE_SIZE",
+      "MMU_GUEST_SIZE_SHIFT",
+      "USER_ASPACE_BASE",
+      "USER_ASPACE_SIZE",
+      "USER_RESTRICTED_ASPACE_SIZE",
+    ]
+    notice_year = 2026
+  }
+
   kernel_rust_mod("arch-riscv64-rs") {
     output_name = "arch_riscv64"
     source_root = "src/mod.rs"
@@ -358,6 +377,7 @@ if (toolchain_base_environment == "kernel") {
     ]
     deps = [
       ":riscv-sbi-bindings",
+      ":riscv64-aspace-bindings",
       ":riscv64-crashlog-bindings",
       ":riscv64-mp-bindings",
       ":riscv64-regs-bindings",

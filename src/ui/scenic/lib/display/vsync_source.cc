@@ -25,7 +25,7 @@ void VsyncSource::SetVsyncEnabled(SetVsyncEnabledRequest& request,
   UpdateVsyncCallbackRegistration(request.enabled());
 }
 
-void VsyncSource::OnVsync(zx::time_monotonic timestamp,
+void VsyncSource::OnVsync(display::DisplayId display_id, zx::time_monotonic timestamp,
                           display::WireConfigStamp displayed_config_stamp) {
   TRACE_DURATION("gfx", "VsyncSource::OnVsync");
   if (!vsync_enabled())

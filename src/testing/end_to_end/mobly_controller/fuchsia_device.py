@@ -47,7 +47,6 @@ async def create(
 
     test_logs_dir: str = _get_log_directory()
     ffx_config_dict: dict[str, Any] = _get_ffx_config(configs)
-    ffx_config_dict["emu_instance_dir"] = os.path.join(test_logs_dir, "emu")
 
     device_configs = []
     ssh_private_keys = []
@@ -105,6 +104,7 @@ async def create(
         ssh_private_keys=ssh_private_keys if ssh_private_keys else None,
         ssh_auth_sock=ffx_config_dict.get("ssh_auth_sock"),
         identities_only=ffx_config_dict.get("identities_only"),
+        shared_data=ffx_config_dict.get("shared_data"),
     )
 
     fuchsia_devices = []

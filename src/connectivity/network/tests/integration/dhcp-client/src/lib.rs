@@ -26,9 +26,7 @@ use futures::{FutureExt, StreamExt, TryStreamExt, join};
 use net_declare::std_ip_v4;
 use netemul::RealmUdpSocket as _;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
-use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, Netstack3, TestSandboxExt as _,
-};
+use netstack_testing_common::realms::{KnownServiceProvider, Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{annotate, dhcpv4 as dhcpv4_helper};
 use netstack_testing_macros::netstack_test;
 use std::pin::pin;
@@ -164,14 +162,14 @@ impl<'a> DhcpTestRealm<'a> {
     }
 }
 
-async fn create_test_realm<'a, N: Netstack>(
+async fn create_test_realm<'a>(
     sandbox: &'a netemul::TestSandbox,
     name: &'a str,
 ) -> DhcpTestRealm<'a> {
     let network =
         sandbox.create_network("dhcp-test-network").await.expect("create network should succeed");
     let client_realm: netemul::TestRealm<'_> = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("client-realm-{name}"),
             &[KnownServiceProvider::DhcpClient],
         )
@@ -194,7 +192,7 @@ async fn create_test_realm<'a, N: Netstack>(
     client_iface.apply_nud_flake_workaround().await.expect("nud flake workaround");
 
     let server_realm: netemul::TestRealm<'_> = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("server-realm-{name}"),
             &[KnownServiceProvider::DhcpServer { persistent: false }],
         )
@@ -220,11 +218,10 @@ async fn create_test_realm<'a, N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_provider_two_overlapping_clients_on_same_interface<N: Netstack>(name: &str) {
+async fn client_provider_two_overlapping_clients_on_same_interface(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
     let DhcpTestRealm { client_realm, client_iface, server_realm: _, server_iface: _, _network: _ } =
-        &create_test_realm::<N>(&sandbox, name).await;
+        &create_test_realm(&sandbox, name).await;
 
     let proxy = client_realm.connect_to_protocol::<ClientProviderMarker>().unwrap();
     let client_iface = &client_iface;
@@ -277,12 +274,11 @@ async fn client_provider_two_overlapping_clients_on_same_interface<N: Netstack>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_provider_two_non_overlapping_clients_on_same_interface<N: Netstack>(name: &str) {
+async fn client_provider_two_non_overlapping_clients_on_same_interface(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
 
     let DhcpTestRealm { client_realm, client_iface, server_realm: _, server_iface: _, _network: _ } =
-        &create_test_realm::<N>(&sandbox, name).await;
+        &create_test_realm(&sandbox, name).await;
 
     let proxy = client_realm.connect_to_protocol::<ClientProviderMarker>().unwrap();
     let client_iface = &client_iface;
@@ -326,12 +322,11 @@ async fn client_provider_two_non_overlapping_clients_on_same_interface<N: Netsta
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_provider_double_watch<N: Netstack>(name: &str) {
+async fn client_provider_double_watch(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
 
     let DhcpTestRealm { client_realm, client_iface, server_realm: _, server_iface: _, _network: _ } =
-        &create_test_realm::<N>(&sandbox, name).await;
+        &create_test_realm(&sandbox, name).await;
 
     let proxy = client_realm.connect_to_protocol::<ClientProviderMarker>().unwrap();
     let client_iface = &client_iface;
@@ -370,12 +365,11 @@ async fn client_provider_double_watch<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_provider_shutdown<N: Netstack>(name: &str) {
+async fn client_provider_shutdown(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
 
     let DhcpTestRealm { client_realm, client_iface, server_realm: _, server_iface: _, _network: _ } =
-        &create_test_realm::<N>(&sandbox, name).await;
+        &create_test_realm(&sandbox, name).await;
 
     let proxy = client_realm.connect_to_protocol::<ClientProviderMarker>().unwrap();
     let client_iface = &client_iface;
@@ -492,8 +486,7 @@ async fn swallow_watch_address_assignment_state_request(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_provider_watch_configuration_acquires_lease<N: Netstack>(name: &str) {
+async fn client_provider_watch_configuration_acquires_lease(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
     let test_realm @ DhcpTestRealm {
         client_realm,
@@ -501,7 +494,7 @@ async fn client_provider_watch_configuration_acquires_lease<N: Netstack>(name: &
         server_realm: _,
         server_iface: _,
         _network: _,
-    } = &create_test_realm::<N>(&sandbox, name).await;
+    } = &create_test_realm(&sandbox, name).await;
 
     test_realm.start_dhcp_server(DhcpServerAddress::Primary).await;
 
@@ -555,8 +548,7 @@ async fn client_provider_watch_configuration_acquires_lease<N: Netstack>(name: &
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_explicitly_removes_address_when_lease_expires<N: Netstack>(name: &str) {
+async fn client_explicitly_removes_address_when_lease_expires(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
     let test_realm @ DhcpTestRealm {
         client_realm,
@@ -564,7 +556,7 @@ async fn client_explicitly_removes_address_when_lease_expires<N: Netstack>(name:
         server_realm: _,
         server_iface: _,
         _network: _,
-    } = &create_test_realm::<N>(&sandbox, name).await;
+    } = &create_test_realm(&sandbox, name).await;
 
     test_realm
         .start_dhcp_server_with_options(
@@ -648,8 +640,7 @@ async fn client_explicitly_removes_address_when_lease_expires<N: Netstack>(name:
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_rebinds_same_lease_to_other_server<N: Netstack>(name: &str) {
+async fn client_rebinds_same_lease_to_other_server(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
     let test_realm @ DhcpTestRealm {
         client_realm,
@@ -657,7 +648,7 @@ async fn client_rebinds_same_lease_to_other_server<N: Netstack>(name: &str) {
         server_realm: _,
         server_iface: _,
         _network: _,
-    } = &create_test_realm::<N>(&sandbox, name).await;
+    } = &create_test_realm(&sandbox, name).await;
 
     // Have a shorter lease length so that this test fails faster when Rebinding
     // doesn't work or is not implemented.
@@ -795,8 +786,7 @@ async fn client_rebinds_same_lease_to_other_server<N: Netstack>(name: &str) {
 const DEBUG_PRINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn watch_configuration_handles_interface_removal<N: Netstack>(name: &str) {
+async fn watch_configuration_handles_interface_removal(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
     let DhcpTestRealm {
         client_realm,
@@ -804,7 +794,7 @@ async fn watch_configuration_handles_interface_removal<N: Netstack>(name: &str) 
         server_realm,
         server_iface: _server_iface,
         _network,
-    } = create_test_realm::<N>(&sandbox, name).await;
+    } = create_test_realm(&sandbox, name).await;
 
     let provider =
         client_realm.connect_to_protocol::<ClientProviderMarker>().expect("connect should succeed");
@@ -879,7 +869,6 @@ async fn watch_configuration_handles_interface_removal<N: Netstack>(name: &str) 
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     Some(fnet_interfaces_admin::AddressRemovalReason::AlreadyAssigned),
     None;
@@ -915,13 +904,13 @@ async fn watch_configuration_handles_interface_removal<N: Netstack>(name: &str) 
     Some(fnet_dhcp::ClientExitReason::AddressStateProviderError);
     "should stop client if address removed with no terminal event"
 )]
-async fn client_handles_address_removal<N: Netstack>(
+async fn client_handles_address_removal(
     name: &str,
     removal_reason: Option<fnet_interfaces_admin::AddressRemovalReason>,
     expected_exit_reason: Option<fnet_dhcp::ClientExitReason>,
 ) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
-    let test_realm = create_test_realm::<N>(&sandbox, name).await;
+    let test_realm = create_test_realm(&sandbox, name).await;
 
     test_realm.start_dhcp_server(DhcpServerAddress::Primary).await;
 
@@ -1047,7 +1036,7 @@ async fn inspect_with_lease_acquired() {
         server_realm: _,
         server_iface: _,
         _network: _,
-    } = &create_test_realm::<Netstack3>(&sandbox, name).await;
+    } = &create_test_realm(&sandbox, name).await;
 
     test_realm.start_dhcp_server(DhcpServerAddress::Primary).await;
 
@@ -1253,11 +1242,10 @@ async fn inspect_with_lease_acquired() {
 /// option multiple times, we instead impersonate a DHCP server by writing
 /// messages directly to the network.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_gracefully_handles_duplicate_options<N: Netstack>(name: &str) {
+async fn client_gracefully_handles_duplicate_options(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
     let DhcpTestRealm { client_realm, client_iface, server_realm, server_iface, _network: _ } =
-        &create_test_realm::<N>(&sandbox, name).await;
+        &create_test_realm(&sandbox, name).await;
 
     const SERVER_ADDR: std::net::Ipv4Addr = std_ip_v4!("192.168.0.1");
     const CLIENT_ADDR: std::net::Ipv4Addr = std_ip_v4!("192.168.0.2");
@@ -1483,11 +1471,10 @@ async fn client_gracefully_handles_duplicate_options<N: Netstack>(name: &str) {
 /// options, we instead impersonate a DHCP server by writing messages directly
 /// to the network.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn client_gracefully_handles_illegal_options<N: Netstack>(name: &str) {
+async fn client_gracefully_handles_illegal_options(name: &str) {
     let sandbox: netemul::TestSandbox = netemul::TestSandbox::new().unwrap();
     let DhcpTestRealm { client_realm, client_iface, server_realm, server_iface, _network: _ } =
-        &create_test_realm::<N>(&sandbox, name).await;
+        &create_test_realm(&sandbox, name).await;
 
     const SERVER_ADDR: std::net::Ipv4Addr = std_ip_v4!("192.168.0.1");
     const CLIENT_ADDR: std::net::Ipv4Addr = std_ip_v4!("192.168.0.2");

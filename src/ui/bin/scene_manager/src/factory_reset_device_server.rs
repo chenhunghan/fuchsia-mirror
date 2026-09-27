@@ -16,8 +16,8 @@ pub(crate) struct RecoveryPolicyDeviceServer {
 ///
 /// Returns both the server, and the `mpsc::UnboundedReceiver` which can be
 /// used to receive `DeviceRequest`'s forwarded by the server.
-pub(crate) fn make_server_and_receiver(
-) -> (RecoveryPolicyDeviceServer, futures::channel::mpsc::UnboundedReceiver<DeviceRequestStream>) {
+pub(crate) fn make_server_and_receiver()
+-> (RecoveryPolicyDeviceServer, futures::channel::mpsc::UnboundedReceiver<DeviceRequestStream>) {
     let (sender, receiver) = futures::channel::mpsc::unbounded::<DeviceRequestStream>();
     (RecoveryPolicyDeviceServer { sender }, receiver)
 }
@@ -43,7 +43,7 @@ mod tests {
         let (server, mut receiver) = make_server_and_receiver();
         let (_proxy, stream) = create_proxy_and_stream::<DeviceMarker>();
         assert_matches!(server.handle_request(stream).await, Ok(()));
-        assert!(receiver.try_next().expect("should return ok").is_some());
+        assert!(receiver.try_recv().is_ok());
     }
 
     #[fuchsia::test(allow_stalls = false)]

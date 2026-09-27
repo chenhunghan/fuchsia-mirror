@@ -5,7 +5,7 @@
 //! Charger Client and Controller (supporting both
 //! fuchsia.hardware.power.charger and fuchsia.power.battery.Charger).
 
-use crate::common::{MEMBER_CHARGER, MEMBER_DEVICE, append_member_suffix, select_instance};
+use crate::common::{MEMBER_CONTROLLER, MEMBER_DEVICE, append_member_suffix, select_instance};
 use anyhow::{Context, Result, anyhow};
 use fidl::endpoints::ServiceMarker;
 use fidl_fuchsia_hardware_power_charger as fcharger;
@@ -21,16 +21,23 @@ pub async fn enable_charger(path: Option<&str>, enable: bool) -> Result<()> {
         } else {
             match set_modern_charger_enable(p, enable).await {
                 Ok(target) => target,
-                Err(_) => set_legacy_charger_enable(p, enable).await?,
+                Err(modern_err) => set_legacy_charger_enable(p, enable)
+                    .await
+                    .with_context(|| format!("modern Controller also failed: {modern_err:#}"))?,
             }
         }
     } else if let Ok(resolved) = select_instance(fcharger::ServiceMarker::SERVICE_NAME) {
         match set_modern_charger_enable(&resolved, enable).await {
             Ok(target) => target,
-            Err(_) => {
-                let legacy_resolved =
-                    select_instance(fpowerbattery::ChargerServiceMarker::SERVICE_NAME)?;
-                set_legacy_charger_enable(&legacy_resolved, enable).await?
+            Err(modern_err) => {
+                match select_instance(fpowerbattery::ChargerServiceMarker::SERVICE_NAME) {
+                    Ok(legacy_resolved) => {
+                        set_legacy_charger_enable(&legacy_resolved, enable).await.with_context(
+                            || format!("modern Controller also failed: {modern_err:#}"),
+                        )?
+                    }
+                    Err(_) => return Err(modern_err),
+                }
             }
         }
     } else {
@@ -42,19 +49,32 @@ pub async fn enable_charger(path: Option<&str>, enable: bool) -> Result<()> {
     Ok(())
 }
 
+fn build_modern_control_options(enable: bool) -> fcharger::ControlOptions {
+    fcharger::ControlOptions {
+        operating_mode: Some(if enable {
+            fcharger::OperatingMode::Charging
+        } else {
+            fcharger::OperatingMode::Passthrough
+        }),
+        ..Default::default()
+    }
+}
+
 async fn set_modern_charger_enable(path: &str, enable: bool) -> Result<String> {
-    let charger_path = append_member_suffix(path, MEMBER_CHARGER);
+    let charger_path = append_member_suffix(path, MEMBER_CONTROLLER);
     let charger_path_str = charger_path.to_str().context("invalid UTF-8 path")?;
-    let proxy = connect_to_protocol_at_path::<fcharger::ChargerMarker>(charger_path_str)
-        .with_context(|| format!("Failed to connect to Charger at {charger_path_str}"))?;
+    let proxy = connect_to_protocol_at_path::<fcharger::ControllerMarker>(charger_path_str)
+        .with_context(|| format!("Failed to connect to Controller at {charger_path_str}"))?;
+
+    let options = build_modern_control_options(enable);
 
     proxy
-        .set_charging_enabled(enable)
+        .set_control(&options)
         .await
-        .context("SetChargingEnabled call failed")?
-        .map_err(|status| anyhow!("SetChargingEnabled rejected with status: {:?}", status))?;
+        .context("SetControl call failed")?
+        .map_err(|status| anyhow!("SetControl rejected with error: {:?}", status))?;
 
-    Ok(format!("fuchsia.hardware.power.charger.Charger ({charger_path_str})"))
+    Ok(format!("fuchsia.hardware.power.charger.Controller ({charger_path_str})"))
 }
 
 async fn set_legacy_charger_enable(path: &str, enable: bool) -> Result<String> {
@@ -71,4 +91,18 @@ async fn set_legacy_charger_enable(path: &str, enable: bool) -> Result<String> {
         .context("Enable call failed")?
         .map_err(|e| anyhow!("Enable rejected with domain error: {:?}", e))?;
     Ok(format!("fuchsia.power.battery.Charger ({legacy_path_str})"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_modern_control_options_enable_and_disable() {
+        let enabled = build_modern_control_options(true);
+        assert_eq!(enabled.operating_mode, Some(fcharger::OperatingMode::Charging));
+
+        let disabled = build_modern_control_options(false);
+        assert_eq!(disabled.operating_mode, Some(fcharger::OperatingMode::Passthrough));
+    }
 }

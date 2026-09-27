@@ -107,8 +107,8 @@ platform: {
 
 During assembly, the platform dynamically includes the matching Platform Assembly
 Input Bundle (AIB) (`swd_trust_store_restricted` or `swd_trust_store_public`) and
-routes the selected certificate directory capability (`swd-root-ssl-certificates`)
-from `#core` to the update stack.
+routes the corresponding HTTP client protocols (`fuchsia.net.http.Loader` and
+`fuchsia.pkg.http.Client`) from `#network` to the update and package stack.
 
 ## Verification & Architectural Guarantees
 

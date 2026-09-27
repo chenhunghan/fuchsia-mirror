@@ -89,7 +89,6 @@ using UniformBufferPoolWeakPtr = fxl::WeakPtr<UniformBufferPool>;
 class DescriptorSetAllocator;
 class DescriptorSetAllocatorCache;
 class Framebuffer;
-class FramebufferAllocator;
 class PipelineLayoutCache;
 class RenderPass;
 class RenderPassCache;

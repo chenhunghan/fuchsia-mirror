@@ -7,66 +7,74 @@
 #ifndef ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CLOCK_DISPATCHER_H_
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CLOCK_DISPATCHER_H_
 
-#include <lib/fasttime/clock.h>
+#include <lib/object-constants.h>
 #include <lib/page/size.h>
 #include <sys/types.h>
 #include <zircon/rights.h>
 #include <zircon/syscalls/clock.h>
 #include <zircon/types.h>
 
+#include <fbl/ref_ptr.h>
+#include <kernel/ffi.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
+#include <object/opaque_storage.h>
+#include <vm/vm_object_paged.h>
 
-namespace internal {
-struct FuchsiaKernelOsal;
-}
+class ClockDispatcher;
 
-class ClockDispatcher final : public SoloDispatcher<ClockDispatcher, ZX_DEFAULT_CLOCK_RIGHTS> {
+extern "C" {
+zx_status_t cpp_clock_dispatcher_create(
+    uint64_t options, zx_time_t backstop_time, VmObjectPaged* vmo,
+    ffi::Uninitialized<KernelHandle<ClockDispatcher>>* handle_out);
+
+void rust_clock_dispatcher_state_init(void* state, const ClockDispatcher& disp, uint64_t options,
+                                      zx_time_t backstop_time, VmObjectPaged* vmo);
+void rust_clock_dispatcher_state_destroy(void* state);
+Lock<CriticalMutex>* rust_clock_dispatcher_state_get_lock(const void* state);
+zx_status_t rust_clock_dispatcher_get_name(const ClockDispatcher& disp, char* out_name);
+zx_status_t rust_clock_dispatcher_set_name(ClockDispatcher& disp, const char* name, size_t len);
+}  // extern "C"
+
+class ClockDispatcher final : public Dispatcher {
  public:
   static inline constexpr uint64_t kMappedSize = kPageSize;
 
-  static zx_status_t Create(uint64_t options, const zx_clock_create_args_v1_t& create_args,
-                            KernelHandle<ClockDispatcher>* handle, zx_rights_t* rights);
+  static constexpr zx_rights_t default_rights() { return ZX_DEFAULT_CLOCK_RIGHTS; }
 
   ~ClockDispatcher() final;
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_CLOCK; }
-  [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final;
-  [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final;
+  zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
+  bool is_waitable() const final { return true; }
 
-  zx_status_t Read(zx_time_t* out_now);
-  zx_status_t GetDetails(zx_clock_details_v1_t* out_details);
-
-  template <typename UpdateArgsType>
-  zx_status_t Update(uint64_t options, const UpdateArgsType& args);
-
-  const fbl::RefPtr<VmObjectPaged>& vmo() { return vmo_; }
-  bool is_mappable() const { return clock_transformation_->is_mappable(); }
-
- private:
-  ClockDispatcher(uint64_t options, zx_time_t backstop_time, fbl::RefPtr<VmObjectPaged> vmo);
-
-  // Supply the kernel specific implementation of ArchYield and reference timer
-  // accessors in order to use libfasttime's implementation of the
-  // ClockTransformation class.
-  struct ClockTransformationAdapter {
-    static inline void ArchYield() { arch::Yield(); }
-    static zx_instant_mono_ticks_t GetMonoTicks() { return current_mono_ticks(); }
-    static zx_instant_boot_ticks_t GetBootTicks() { return current_boot_ticks(); }
-  };
-
-  static zx_time_t GetCurrentTime(bool boot_time) {
-    return boot_time ? current_boot_time() : current_mono_time();
+  [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final {
+    return rust_clock_dispatcher_get_name(*this, out_name);
+  }
+  [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final {
+    return rust_clock_dispatcher_set_name(*this, name, len);
   }
 
-  using ClockTransformationType = ::fasttime::ClockTransformation<ClockTransformationAdapter>;
-  static_assert(sizeof(ClockTransformationType) <= kMappedSize);
-  static_assert(alignof(ClockTransformationType) <= kMappedSize);
+  zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {
+    return UserSignalSelfSolo(this, clear_mask, set_mask, 0);
+  }
+  zx_status_t user_signal_peer(uint32_t clear_mask, uint32_t set_mask) final {
+    return ZX_ERR_NOT_SUPPORTED;
+  }
 
-  alignas(ClockTransformationType) uint8_t local_storage_[sizeof(ClockTransformationType)];
-  const fbl::RefPtr<VmObjectPaged> vmo_;
-  ClockTransformationType* clock_transformation_{nullptr};
+  using Dispatcher::UpdateState;
 
-  fbl::Name<ZX_MAX_NAME_LEN> name_;
+ protected:
+  Lock<CriticalMutex>* get_lock() const final;
+
+ private:
+  friend class fbl::RefPtr<ClockDispatcher>;
+  friend zx_status_t cpp_clock_dispatcher_create(
+      uint64_t options, zx_time_t backstop_time, VmObjectPaged* vmo,
+      ffi::Uninitialized<KernelHandle<ClockDispatcher>>* handle_out);
+
+  ClockDispatcher(uint64_t options, zx_time_t backstop_time, fbl::RefPtr<VmObjectPaged> vmo);
+
+  OpaqueStorage<kClockDispatcherStateSize, kClockDispatcherStateAlign> opaque_storage_;
 };
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CLOCK_DISPATCHER_H_

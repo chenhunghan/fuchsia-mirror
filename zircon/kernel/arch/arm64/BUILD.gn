@@ -200,16 +200,40 @@ if (toolchain_environment == "kernel.phys" ||
     notice_year = 2026
   }
 
+  kernel_bindgen_crate("arch-arm64-aspace-bindings") {
+    headers = [
+      "include/arch/kernel_aspace.h",
+      "include/arch/arm64/mmu.h",
+    ]
+    cpp = true
+    non_rust_deps = [
+      ":headers",
+      "//zircon/kernel/lib/ktl:headers",
+    ]
+    raw_lines = [ "#![no_std]" ]
+    var_allowlist = [
+      "KERNEL_ASPACE_BASE",
+      "KERNEL_ASPACE_SIZE",
+      "MMU_GUEST_SIZE_SHIFT",
+      "USER_ASPACE_BASE",
+      "USER_ASPACE_SIZE",
+      "USER_RESTRICTED_ASPACE_SIZE",
+    ]
+    notice_year = 2026
+  }
+
   kernel_rust_mod("arch-arm64-rs") {
     output_name = "arch_arm64"
     source_root = "src/mod.rs"
     sources = [ "src/mod.rs" ]
     deps = [
+      ":arch-arm64-aspace-bindings",
       "//sdk/rust/zx-status",
       "//sdk/rust/zx-types",
       "//zircon/kernel/arch:arch-types-bindings",
       "//zircon/kernel/lib/debug",
     ]
+    test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
   }
 
   source_set("tests") {

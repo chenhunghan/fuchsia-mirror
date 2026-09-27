@@ -12,7 +12,6 @@ rustc_test("netstack3_udp_integration_test") {
     "src/lib.rs",
     "src/loopback.rs",
     "src/send_token.rs",
-    "src/sndbuf.rs",
   ]
 
   deps = [
@@ -23,7 +22,6 @@ rustc_test("netstack3_udp_integration_test") {
     "//src/connectivity/network/netstack3/core/base:netstack3-base-testutils",
     "//src/connectivity/network/netstack3/core/macros:netstack3-macros",
     "//src/lib/network/packet",
-    "//src/lib/test_util",
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:test-case",
   ]

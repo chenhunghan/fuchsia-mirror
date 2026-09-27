@@ -194,9 +194,6 @@ static_library("symbols") {
   # speed by default.
   configs -= [ "//build/config:default_optimize" ]
   configs += [ "//build/config:optimize_speed" ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 static_library("test_support") {
@@ -235,6 +232,7 @@ if (is_host) {
   # Copies the test libraries for zxdb tests to use when run on Linux or Mac.
   default_shared_out_dir =
       get_label_info("//anything(${default_toolchain}-shared)", "root_out_dir")
+
   host_test_data("test_so") {
     sources = [
       "$default_shared_out_dir/lib.unstripped/libzxdb_symbol_test.so",
@@ -364,9 +362,6 @@ source_set("tests") {
       ":test_so",
     ]
   }
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 source_set("perf_tests") {

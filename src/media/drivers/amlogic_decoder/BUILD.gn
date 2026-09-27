@@ -13,8 +13,15 @@ declare_args() {
   amlogic_decoder_firmware_path = ""
 }
 
+fuchsia_driver_dml("amlogic_video_decoder-dml") {
+  dml = "meta/amlogic_video_decoder.dml"
+  driver_name = "amlogic_video_decoder"
+  golden_bind = "meta/amlogic_decoder.bind"
+  golden_cml = "meta/amlogic_decoder.cml"
+}
+
 driver_bind_rules("amlogic_video_bind") {
-  rules = "meta/amlogic_decoder.bind"
+  dml_label = ":amlogic_video_decoder-dml"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -27,7 +34,7 @@ driver_bind_rules("amlogic_video_bind") {
 # Note: This target uses the same source as above, the only difference is the
 # addition of `diasable_autobind = true`, and tests are omitted.
 driver_bind_rules("amlogic_video_test_bind") {
-  rules = "meta/amlogic_decoder.bind"
+  dml_label = ":amlogic_video_decoder-dml"
   disable_autobind = true
   deps = [
     "//src/devices/bind/fuchsia",
@@ -71,7 +78,7 @@ if (target_cpu == "arm64") {
     component_name = "amlogic_video_decoder"
     deps = [ ":amlogic_video_decoder-driver" ]
     info = "meta/amlogic_video_decoder-info.json"
-    manifest = "meta/amlogic_decoder.cml"
+    dml_label = ":amlogic_video_decoder-dml"
   }
 
   config("sources_include_config") {
@@ -161,6 +168,7 @@ if (target_cpu == "arm64") {
       "//src/media/lib/internal_buffer",
       "//src/media/third_party/chromium_media",
       "//src/security/lib/tee/tee-client-api",
+      "//zircon/system/ulib/closure-queue",
       "//zircon/system/ulib/fbl",
       "//zircon/system/ulib/hwreg",
       "//zircon/system/ulib/inspect",

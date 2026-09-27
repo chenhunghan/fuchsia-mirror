@@ -12,7 +12,7 @@ use crate::filesystem::FxFilesystemBuilder;
 use crate::lsm_tree::persistent_layer::PersistentLayerWriter;
 use crate::lsm_tree::skip_list_layer::SkipListLayer;
 use crate::lsm_tree::types::{Item, ItemRef, Layer, LayerIterator, LayerWriter as _};
-use crate::lsm_tree::{LayerSet, Query, layers_from_handles};
+use crate::lsm_tree::{LayerSet, Query, layer_from_handle};
 use crate::object_store::extent_mapping_iterator::ExtentMappingIterator;
 use crate::object_store::extent_record::{ExtentMode, ExtentValue};
 use crate::object_store::object_manager::ReservationUpdate;
@@ -241,7 +241,7 @@ impl ObjectStore {
 
         let total_layer_size = new_layer.get_size();
         let new_layer_object_id = new_layer.object_id();
-        let new_layers = layers_from_handles([new_layer]).await?;
+        let new_layers = vec![layer_from_handle(new_layer, None).await?];
 
         let old_store_info = inner_volume.store_info().unwrap();
         let new_store_info = StoreInfo {

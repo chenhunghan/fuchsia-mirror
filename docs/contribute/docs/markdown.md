@@ -1000,7 +1000,7 @@ markers. The list renders the same, regardless of which marker you use.
      <li>Green</li>
      <li>Blue</li>
    </ul>
-  ```
+   ```
 
 *  {Rendered}
 

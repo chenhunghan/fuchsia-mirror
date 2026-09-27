@@ -102,7 +102,7 @@ use std::sync::Arc;
 pub struct BufferImpl<'a, H: Borrow<A>, A: ?Sized + BufferAllocator> {
     slice: MutPtrByteSlice<'a>,
     range: Range<usize>,
-    allocator: H,
+    pub(super) allocator: H,
     _phantom: PhantomData<fn() -> &'a A>,
 }
 
@@ -740,21 +740,19 @@ impl ExactSizeIterator for ChunksMut<'_> {
 
 impl std::iter::FusedIterator for ChunksMut<'_> {}
 
-// SAFETY: BufferRef is a read-only view over allocator-managed memory. It does not allow
-// mutation and behaves like `&[u8]`, which is Send and Sync.
-unsafe impl Send for BufferRef<'_> {}
-// SAFETY: See Send impl above.
-unsafe impl Sync for BufferRef<'_> {}
-
-// SAFETY: MutableBufferRef behaves like `&mut [u8]`. It enforces exclusivity (no overlapping
-// views) and does not have interior mutability, making it safe to Send and Sync.
-unsafe impl Send for MutableBufferRef<'_> {}
-// SAFETY: See Send impl above.
-unsafe impl Sync for MutableBufferRef<'_> {}
-
 #[cfg(test)]
 mod tests {
     use crate::buffer_allocator::{BufferAllocator, BufferSource};
+
+    #[test]
+    fn test_buffer_refs_are_send_and_sync() {
+        fn check<'a>() {
+            fn assert_send_sync<T: Send + Sync>() {}
+            assert_send_sync::<super::BufferRef<'a>>();
+            assert_send_sync::<super::MutableBufferRef<'a>>();
+        }
+        check();
+    }
 
     #[fuchsia::test]
     async fn test_chunks() {

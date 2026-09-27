@@ -68,26 +68,23 @@ def fuchsia_cc_driver(
     # collect any flags that the user passed in
     user_link_flags.extend(kwargs.pop("user_link_flags", []))
 
-    # If a user includes srcs then we need to create a cc_library and put all of
-    # the deps in that target. Otherwise, the user has provided their own
-    # cc_library as a dep in which case we can
-    if len(srcs) > 0:
-        cc_library(
-            name = name + "_srcs",
-            srcs = srcs,
-            deps = deps,
-            # pull out the kwargs
-            defines = kwargs.pop("defines", None),
-            **kwargs
-        )
-        deps.append(":" + name + "_srcs")
+    # Compile any provided sources.
+    # Note: This also works around an error where cc_shared_library() rejects direct
+    # dependencies of cc_import() targets (e.g. @fuchsia_sdk//pkg/driver_runtime_shared_lib).
+    cc_library(
+        name = name + "_srcs",
+        srcs = srcs,
+        deps = deps,
+        # pull out the kwargs
+        defines = kwargs.pop("defines", None),
+        **kwargs
+    )
+    deps.append(":" + name + "_srcs")
 
-        # only include the cc_library in the deps of the cc_shared_library. If
-        # we don't do this then the linker will error out with a duplicate
-        # symbols error.
-        shared_library_deps = [":" + name + "_srcs"]
-    else:
-        shared_library_deps = deps
+    # only include the cc_library in the deps of the cc_shared_library. If
+    # we don't do this then the linker will error out with a duplicate
+    # symbols error.
+    shared_library_deps = [":" + name + "_srcs"]
 
     features = kwargs.pop("features", []) + select({
         "@rules_fuchsia//fuchsia/select:dynamic_cpp_standard_library_for_drivers_enabled": [],

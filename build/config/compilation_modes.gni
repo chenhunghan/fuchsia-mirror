@@ -15,6 +15,7 @@ declare_args() {
   #  * `balanced`: some optimizations, but prioritizing compilation speed over
   #                 runtime performance.
   #  * `release`: all the optimizations, used for product releases.
+  #  * `sanitizer`: for sanitizer-instrumented builds.
   # LINT.IfChange
   compilation_mode = "balanced"
 
@@ -60,19 +61,30 @@ _default_compilation_settings = {
     kernel_optimize = "moderate_thinlto"
     user_optimize = "moderate"
   }
+
+  sanitizer = {
+    fuchsia_optimize = "sanitizer"
+    host_optimize = "sanitizer"
+    kernel_optimize = "sanitizer"
+    user_optimize = "sanitizer"
+  }
 }
 
 # Validate that the chosen compilation mode is one of the valid modes
 assert(
     defined(_default_compilation_settings[compilation_mode]),
-    "The specified compilation mode (${compilation_mode}) is not a valid option. They are: 'debug', 'balanced', and 'release'")
+    "The specified compilation mode (${compilation_mode}) is not a valid option. They are: 'debug', 'balanced', 'release', and 'sanitizer'")
 
 # Create booleans for each compilation mode, to allow binaries to fine-tune
 # configuration
 
+# LINT.IfChange(compilation_mode_predicates)
 is_debug = compilation_mode == "debug"
 is_balanced = compilation_mode == "balanced"
 is_release = compilation_mode == "release"
+is_sanitizer = compilation_mode == "sanitizer"
+
+# LINT.ThenChange(//build/bazel/config/derived/compilation_modes.bzl:compilation_mode_predicates)
 
 compilation_settings = {
   # Set the compilation settings to use based on the chosen compilation mode

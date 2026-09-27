@@ -368,4 +368,40 @@ TEST(Snapshot, FrozenMutableVmoFails) {
   EXPECT_EQ(ZX_ERR_BAD_STATE, status);
 }
 
+TEST(Snapshot, GetArraySlotBounds) {
+  Block block;
+  block.header = inspect::internal::BlockFields::Type::Make(BlockType::kArrayValue) |
+                 inspect::internal::BlockFields::Order::Make(1);
+  block.payload.u64 = inspect::internal::ArrayBlockPayload::EntryType::Make(BlockType::kIntValue);
+
+  // Capacity is (32 - 8 - 8) / 8 = 2.
+  // Index 0 and 1 are valid.
+  EXPECT_NE(nullptr, inspect::internal::GetArraySlot<int64_t>(&block, 0));
+  EXPECT_NE(nullptr, inspect::internal::GetArraySlot<int64_t>(&block, 1));
+
+  // Index 2 is equal to capacity and must be rejected for both mutable and const blocks.
+  EXPECT_EQ(nullptr, inspect::internal::GetArraySlot<int64_t>(&block, 2));
+  EXPECT_EQ(nullptr,
+            inspect::internal::GetArraySlot<const int64_t>(static_cast<const Block*>(&block), 2));
+
+  // Index 3 is greater than capacity and must be rejected.
+  EXPECT_EQ(nullptr, inspect::internal::GetArraySlot<int64_t>(&block, 3));
+}
+
+TEST(Snapshot, GetArraySlotForStringBounds) {
+  Block block;
+  block.header = inspect::internal::BlockFields::Type::Make(BlockType::kArrayValue) |
+                 inspect::internal::BlockFields::Order::Make(1);
+  block.payload.u64 =
+      inspect::internal::ArrayBlockPayload::EntryType::Make(BlockType::kStringReference);
+
+  // Capacity is (32 - 8 - 8) / 4 = 4.
+  // Index 0, 1, 2, 3 are valid.
+  EXPECT_TRUE(inspect::internal::GetArraySlotForString(&block, 0).has_value());
+  EXPECT_TRUE(inspect::internal::GetArraySlotForString(&block, 3).has_value());
+
+  // Index 4 is equal to capacity and must be rejected.
+  EXPECT_FALSE(inspect::internal::GetArraySlotForString(&block, 4).has_value());
+}
+
 }  // namespace

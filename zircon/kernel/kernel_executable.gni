@@ -130,6 +130,13 @@ template("kernel_executable") {
     forward_variables_from(_crate_vars, "*")
     deps += [ "//zircon/kernel/lib/rust:rust-custom-target" ]
 
+    # Prevent distribution_entries from dependency crates evaluated in other
+    # toolchains (such as static-checks referenced via validations) from leaking
+    # into production kernel packages during packaging metadata walks.
+    metadata = {
+      distribution_entries_barrier = []
+    }
+
     rustflags += [
       "--crate-type=$crate_type",
       "--crate-name=$crate_name",
@@ -199,6 +206,7 @@ template("kernel_executable") {
   }
 
   rspfile = "$target_gen_dir/$main_target.rsp"
+
   link_output_rspfile(rsp_target) {
     forward_variables_from(invoker,
                            [

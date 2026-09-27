@@ -22,6 +22,8 @@ pub struct Heap<T> {
     allocated_blocks: usize,
     deallocated_blocks: usize,
     failed_allocations: usize,
+    outstanding_bytes_requested: usize,
+    max_outstanding_bytes_requested: usize,
     has_header: bool,
 }
 
@@ -42,6 +44,8 @@ impl<T: ReadBytes + WriteBytes> Heap<T> {
             allocated_blocks: 0,
             deallocated_blocks: 0,
             failed_allocations: 0,
+            outstanding_bytes_requested: 0,
+            max_outstanding_bytes_requested: 0,
             has_header: false,
         };
         heap.grow_heap(constants::PAGE_SIZE_BYTES)?;
@@ -85,12 +89,22 @@ impl<T: ReadBytes + WriteBytes> Heap<T> {
         self.failed_allocations
     }
 
+    /// Returns the peak number of bytes requested to be allocated since the creation of this heap.
+    pub fn peak_bytes_requested(&self) -> usize {
+        self.max_outstanding_bytes_requested
+    }
+
     /// Allocates a new block of the given `min_size`.
     pub fn allocate_block(&mut self, min_size: usize) -> Result<BlockIndex, Error> {
         let min_fit_order = utils::fit_order(min_size);
         if min_fit_order >= constants::NUM_ORDERS as usize {
             return Err(Error::InvalidBlockOrder(min_fit_order));
         }
+        let block_size = utils::order_to_size(min_fit_order as u8);
+        self.outstanding_bytes_requested =
+            self.outstanding_bytes_requested.saturating_add(block_size);
+        self.max_outstanding_bytes_requested =
+            std::cmp::max(self.max_outstanding_bytes_requested, self.outstanding_bytes_requested);
         let min_fit_order = min_fit_order as u8;
         // Find free block with order >= min_fit_order
         let order_found = (min_fit_order..constants::NUM_ORDERS)
@@ -118,6 +132,9 @@ impl<T: ReadBytes + WriteBytes> Heap<T> {
         if block.block_type() == Some(BlockType::Free) {
             return Err(Error::BlockAlreadyFree(block_index));
         }
+        let block_size = utils::order_to_size(block.order());
+        self.outstanding_bytes_requested =
+            self.outstanding_bytes_requested.saturating_sub(block_size);
         let mut buddy_index = buddy(block_index, block.order());
 
         while self.possible_to_merge(buddy_index, block_index) {
@@ -799,5 +816,72 @@ mod tests {
             BlockDebug { index: 640.into(), order: 7, block_type: BlockType::Free },
         ];
         validate(&expected, &heap);
+    }
+
+    #[fuchsia::test]
+    fn peak_bytes_requested_counter() {
+        let (container, _storage) = Container::read_and_write(4 * 2048).unwrap();
+        let mut heap = Heap::empty(container).unwrap();
+        assert_eq!(heap.outstanding_bytes_requested, 0);
+        assert_eq!(heap.peak_bytes_requested(), 0);
+
+        // Success allocations
+        let b1 = heap.allocate_block(100).unwrap();
+        let b1_size = utils::order_to_size(utils::fit_order(100) as u8);
+        assert_eq!(heap.outstanding_bytes_requested, b1_size);
+        assert_eq!(heap.peak_bytes_requested(), b1_size);
+
+        let b2 = heap.allocate_block(200).unwrap();
+        let b2_size = utils::order_to_size(utils::fit_order(200) as u8);
+        assert_eq!(heap.outstanding_bytes_requested, b1_size + b2_size);
+        assert_eq!(heap.peak_bytes_requested(), b1_size + b2_size);
+
+        // Freeing blocks should decrease outstanding by order_to_size, but peak remains at high-water mark
+        heap.free_block(b1).unwrap();
+        assert_eq!(heap.outstanding_bytes_requested, b2_size);
+        assert_eq!(heap.peak_bytes_requested(), b1_size + b2_size);
+        heap.free_block(b2).unwrap();
+        assert_eq!(heap.outstanding_bytes_requested, 0);
+        assert_eq!(heap.peak_bytes_requested(), b1_size + b2_size);
+
+        // Re-allocating within the previous peak does NOT increase peak
+        let b_temp = heap.allocate_block(200).unwrap();
+        assert_eq!(heap.outstanding_bytes_requested, b2_size);
+        assert_eq!(heap.peak_bytes_requested(), b1_size + b2_size);
+        heap.free_block(b_temp).unwrap();
+        assert_eq!(heap.outstanding_bytes_requested, 0);
+        assert_eq!(heap.peak_bytes_requested(), b1_size + b2_size);
+
+        // A loop of allocating and freeing an int maintains a constant peak (no explosion!)
+        let current_peak = heap.peak_bytes_requested();
+        for _ in 0..100 {
+            let b = heap.allocate_block(16).unwrap();
+            heap.free_block(b).unwrap();
+        }
+        assert_eq!(heap.peak_bytes_requested(), current_peak);
+        assert_eq!(heap.outstanding_bytes_requested, 0);
+
+        // Fill heap completely: 4 * 2048 = 8192 bytes
+        let b1 = heap.allocate_block(2048).unwrap();
+        let _b2 = heap.allocate_block(2048).unwrap();
+        let _b3 = heap.allocate_block(2048).unwrap();
+        let _b4 = heap.allocate_block(2048).unwrap();
+        assert_eq!(heap.outstanding_bytes_requested, 4 * 2048);
+        assert_eq!(heap.peak_bytes_requested(), 4 * 2048);
+
+        // Allocation failure (VMO full) should still increment outstanding and peak by order_to_size(min_fit_order)
+        assert!(heap.allocate_block(2048).is_err());
+        assert_eq!(heap.outstanding_bytes_requested, 5 * 2048);
+        assert_eq!(heap.peak_bytes_requested(), 5 * 2048);
+
+        // Freeing a block and checking peak_bytes_requested again
+        heap.free_block(b1).unwrap();
+        assert_eq!(heap.outstanding_bytes_requested, 4 * 2048);
+        assert_eq!(heap.peak_bytes_requested(), 5 * 2048);
+
+        // Invalid order allocation should fail and NOT increment outstanding or peak
+        assert!(heap.allocate_block(constants::MAX_ORDER_SIZE * 2).is_err());
+        assert_eq!(heap.outstanding_bytes_requested, 4 * 2048);
+        assert_eq!(heap.peak_bytes_requested(), 5 * 2048);
     }
 }

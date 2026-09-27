@@ -27,6 +27,7 @@ group("tests") {
     ":linker_test($host_toolchain)",
     ":output_leak_scanner_test($host_toolchain)",
     ":prebuilt_tool_remote_wrapper_test($host_toolchain)",
+    ":rbe_diagnose_test($host_toolchain)",
     ":relativize_args_test($host_toolchain)",
     ":remote_action_test($host_toolchain)",
     ":remotetool_test($host_toolchain)",
@@ -38,204 +39,253 @@ group("tests") {
 }
 
 if (is_host) {
-  # TODO: python_library() doesn't work with the current source structure.
-  # It wants one __init__.py per library with one library per directory.
-  # As a workaround, we expand lists of sources instead of a proper
-  # dependency tree of libraries.  :(
-  _fuchsia_sources = [ "fuchsia.py" ]
-  _cl_utils_sources = [ "cl_utils.py" ]
-  _depfile_sources = [ "depfile.py" ]
-  _output_leak_scanner_sources =
-      [ "output_leak_scanner.py" ] + _fuchsia_sources + _cl_utils_sources
-  _linker_sources = [ "linker.py" ] + _cl_utils_sources + _depfile_sources
-  _tablefmt_sources = [ "tablefmt.py" ]
-  _textpb_sources = [ "textpb.py" ]
-
-  _cas_sources = [ "cas.py" ] + _cl_utils_sources + _fuchsia_sources
-  _bbtool_sources =
-      [ "bbtool.py" ] + _fuchsia_sources + _cl_utils_sources + _cas_sources
-  _build_summary_sources =
-      [ "build_summary.py" ] + _tablefmt_sources + _textpb_sources
-  _remotetool_sources =
-      [ "remotetool.py" ] + _fuchsia_sources + _cl_utils_sources
-  _remote_action_sources =
-      [ "remote_action.py" ] + _fuchsia_sources + _cl_utils_sources +
-      [ "output_leak_scanner.py" ] + _depfile_sources + _textpb_sources +
-      [ "remotetool.py" ]
-  _dlwrap_sources = [ "dlwrap.py" ] + _remote_action_sources
-  _cxx_sources = [ "cxx.py" ] + _cl_utils_sources
-  _cxx_link_remote_wrapper_sources =
-      [ "cxx_link_remote_wrapper.py" ] + _cxx_sources + _fuchsia_sources +
-      _linker_sources + _remote_action_sources
-  _cxx_remote_wrapper_sources =
-      [ "cxx_remote_wrapper.py" ] + _cxx_sources + _fuchsia_sources +
-      _cl_utils_sources + _remote_action_sources
-  _rustc_sources = [ "rustc.py" ] + _cl_utils_sources
-  _rustc_remote_wrapper_sources =
-      [ "rustc_remote_wrapper.py" ] + _rustc_sources + _remote_action_sources +
-      _fuchsia_sources + _cl_utils_sources + _linker_sources
-  _prebuilt_tool_remote_wrapper_sources =
-      [ "prebuilt_tool_remote_wrapper.py" ] + _fuchsia_sources +
-      _cl_utils_sources + _remote_action_sources
-
-  python_library("bbtool") {
-    sources = _bbtool_sources
-  }
-  python_build_time_tests("bbtool_test") {
-    tests = [ "bbtool_test.py" ]
-    inputs = _bbtool_sources
+  python_library("fuchsia") {
+    sources = [ "fuchsia.py" ]
   }
 
-  python_library("build_summary") {
-    sources = _build_summary_sources
-  }
-  python_build_time_tests("build_summary_test") {
-    tests = [ "build_summary_test.py" ]
-    inputs = _build_summary_sources
-  }
-
-  python_library("cas") {
-    sources = _cas_sources
-  }
-  python_build_time_tests("cas_test") {
-    tests = [ "cas_test.py" ]
-    inputs = _cas_sources
+  python_build_time_tests("fuchsia_test") {
+    tests = [ "fuchsia_test.py" ]
+    deps = [ ":fuchsia" ]
   }
 
   python_library("cl_utils") {
-    sources = _cl_utils_sources
+    sources = [ "cl_utils.py" ]
   }
+
   python_build_time_tests("cl_utils_test") {
     tests = [ "cl_utils_test.py" ]
-    inputs = _cl_utils_sources
-  }
-
-  python_library("cxx") {
-    sources = _cxx_sources
-  }
-  python_build_time_tests("cxx_test") {
-    tests = [ "cxx_test.py" ]
-    inputs = _cxx_sources
-  }
-
-  python_library("cxx_link_remote_wrapper") {
-    sources = _cxx_link_remote_wrapper_sources
-  }
-  python_build_time_tests("cxx_link_remote_wrapper_test") {
-    tests = [ "cxx_link_remote_wrapper_test.py" ]
-    inputs = _cxx_link_remote_wrapper_sources
-  }
-
-  python_library("cxx_remote_wrapper") {
-    sources = _cxx_remote_wrapper_sources
-  }
-  python_build_time_tests("cxx_remote_wrapper_test") {
-    tests = [ "cxx_remote_wrapper_test.py" ]
-    inputs = _cxx_remote_wrapper_sources
+    deps = [ ":cl_utils" ]
   }
 
   python_library("depfile") {
-    sources = _depfile_sources
+    sources = [ "depfile.py" ]
   }
+
   python_build_time_tests("depfile_test") {
     tests = [ "depfile_test.py" ]
-    inputs = _depfile_sources
-  }
-
-  python_library("dlwrap") {
-    sources = _dlwrap_sources
-  }
-  python_build_time_tests("dlwrap_test") {
-    tests = [ "dlwrap_test.py" ]
-    inputs = _dlwrap_sources
-  }
-
-  python_library("fuchsia") {
-    sources = _fuchsia_sources
-  }
-  python_build_time_tests("fuchsia_test") {
-    tests = [ "fuchsia_test.py" ]
-    inputs = _fuchsia_sources
-  }
-
-  python_library("linker") {
-    sources = _linker_sources
-  }
-  python_build_time_tests("linker_test") {
-    tests = [ "linker_test.py" ]
-    inputs = _linker_sources
+    deps = [ ":depfile" ]
   }
 
   python_library("output_leak_scanner") {
-    sources = _output_leak_scanner_sources
+    sources = [ "output_leak_scanner.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":fuchsia",
+    ]
   }
+
   python_build_time_tests("output_leak_scanner_test") {
     tests = [ "output_leak_scanner_test.py" ]
-    inputs = _output_leak_scanner_sources
+    deps = [ ":output_leak_scanner" ]
+  }
+
+  python_library("linker") {
+    sources = [ "linker.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":depfile",
+    ]
+  }
+
+  python_build_time_tests("linker_test") {
+    tests = [ "linker_test.py" ]
+    deps = [ ":linker" ]
+  }
+
+  python_library("tablefmt") {
+    sources = [ "tablefmt.py" ]
+  }
+
+  python_build_time_tests("tablefmt_test") {
+    tests = [ "tablefmt_test.py" ]
+    deps = [ ":tablefmt" ]
+  }
+
+  python_library("textpb") {
+    sources = [ "textpb.py" ]
+  }
+
+  python_build_time_tests("textpb_test") {
+    tests = [ "textpb_test.py" ]
+    deps = [ ":textpb" ]
+  }
+
+  python_library("rbe_diagnose") {
+    sources = [ "rbe_diagnose.py" ]
+  }
+
+  python_build_time_tests("rbe_diagnose_test") {
+    tests = [ "rbe_diagnose_test.py" ]
+    deps = [ ":rbe_diagnose" ]
+  }
+
+  python_library("cas") {
+    sources = [ "cas.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":fuchsia",
+    ]
+  }
+
+  python_build_time_tests("cas_test") {
+    tests = [ "cas_test.py" ]
+    deps = [ ":cas" ]
+  }
+
+  python_library("bbtool") {
+    sources = [ "bbtool.py" ]
+    library_deps = [
+      ":cas",
+      ":cl_utils",
+      ":fuchsia",
+    ]
+  }
+
+  python_build_time_tests("bbtool_test") {
+    tests = [ "bbtool_test.py" ]
+    deps = [ ":bbtool" ]
+  }
+
+  python_library("build_summary") {
+    sources = [ "build_summary.py" ]
+    library_deps = [
+      ":tablefmt",
+      ":textpb",
+    ]
+  }
+
+  python_build_time_tests("build_summary_test") {
+    tests = [ "build_summary_test.py" ]
+    deps = [ ":build_summary" ]
+  }
+
+  python_library("remotetool") {
+    sources = [ "remotetool.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":fuchsia",
+    ]
+  }
+
+  python_build_time_tests("remotetool_test") {
+    tests = [ "remotetool_test.py" ]
+    deps = [ ":remotetool" ]
+  }
+
+  python_library("remote_action") {
+    sources = [ "remote_action.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":depfile",
+      ":fuchsia",
+      ":output_leak_scanner",
+      ":remotetool",
+      ":textpb",
+    ]
+  }
+
+  python_build_time_tests("remote_action_test") {
+    tests = [ "remote_action_test.py" ]
+    deps = [ ":remote_action" ]
+  }
+
+  python_library("dlwrap") {
+    sources = [ "dlwrap.py" ]
+    library_deps = [ ":remote_action" ]
+  }
+
+  python_build_time_tests("dlwrap_test") {
+    tests = [ "dlwrap_test.py" ]
+    deps = [ ":dlwrap" ]
+  }
+
+  python_library("cxx") {
+    sources = [ "cxx.py" ]
+    library_deps = [ ":cl_utils" ]
+  }
+
+  python_build_time_tests("cxx_test") {
+    tests = [ "cxx_test.py" ]
+    deps = [ ":cxx" ]
+  }
+
+  python_library("cxx_link_remote_wrapper") {
+    sources = [ "cxx_link_remote_wrapper.py" ]
+    library_deps = [
+      ":cxx",
+      ":fuchsia",
+      ":linker",
+      ":remote_action",
+    ]
+  }
+
+  python_build_time_tests("cxx_link_remote_wrapper_test") {
+    tests = [ "cxx_link_remote_wrapper_test.py" ]
+    deps = [ ":cxx_link_remote_wrapper" ]
+  }
+
+  python_library("cxx_remote_wrapper") {
+    sources = [ "cxx_remote_wrapper.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":cxx",
+      ":fuchsia",
+      ":remote_action",
+    ]
+  }
+
+  python_build_time_tests("cxx_remote_wrapper_test") {
+    tests = [ "cxx_remote_wrapper_test.py" ]
+    deps = [ ":cxx_remote_wrapper" ]
+  }
+
+  python_library("rustc") {
+    sources = [ "rustc.py" ]
+    library_deps = [ ":cl_utils" ]
+  }
+
+  python_build_time_tests("rustc_test") {
+    tests = [ "rustc_test.py" ]
+    deps = [ ":rustc" ]
+  }
+
+  python_library("rustc_remote_wrapper") {
+    sources = [ "rustc_remote_wrapper.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":fuchsia",
+      ":linker",
+      ":remote_action",
+      ":rustc",
+    ]
+  }
+
+  python_build_time_tests("rustc_remote_wrapper_test") {
+    tests = [ "rustc_remote_wrapper_test.py" ]
+    deps = [ ":rustc_remote_wrapper" ]
   }
 
   python_library("prebuilt_tool_remote_wrapper") {
-    sources = _prebuilt_tool_remote_wrapper_sources
+    sources = [ "prebuilt_tool_remote_wrapper.py" ]
+    library_deps = [
+      ":cl_utils",
+      ":fuchsia",
+      ":remote_action",
+    ]
   }
+
   python_build_time_tests("prebuilt_tool_remote_wrapper_test") {
     tests = [ "prebuilt_tool_remote_wrapper_test.py" ]
-    inputs = _prebuilt_tool_remote_wrapper_sources
+    deps = [ ":prebuilt_tool_remote_wrapper" ]
   }
 
   python_library("relativize_args") {
     sources = [ "relativize_args.py" ]
   }
+
   python_build_time_tests("relativize_args_test") {
     tests = [ "relativize_args_test.py" ]
-    inputs = [ "relativize_args.py" ]
-  }
-
-  python_library("remote_action") {
-    sources = _remote_action_sources
-  }
-  python_build_time_tests("remote_action_test") {
-    tests = [ "remote_action_test.py" ]
-    inputs = _remote_action_sources
-  }
-
-  python_library("remotetool") {
-    sources = _remotetool_sources
-  }
-  python_build_time_tests("remotetool_test") {
-    tests = [ "remotetool_test.py" ]
-    inputs = _remotetool_sources
-  }
-
-  python_library("rustc") {
-    sources = _rustc_sources
-  }
-  python_build_time_tests("rustc_test") {
-    tests = [ "rustc_test.py" ]
-    inputs = _rustc_sources
-  }
-
-  python_library("rustc_remote_wrapper") {
-    sources = _rustc_remote_wrapper_sources
-  }
-  python_build_time_tests("rustc_remote_wrapper_test") {
-    tests = [ "rustc_remote_wrapper_test.py" ]
-    inputs = _rustc_remote_wrapper_sources
-  }
-
-  python_library("tablefmt") {
-    sources = _tablefmt_sources
-  }
-  python_build_time_tests("tablefmt_test") {
-    tests = [ "tablefmt_test.py" ]
-    inputs = _tablefmt_sources
-  }
-
-  python_library("textpb") {
-    sources = _textpb_sources
-  }
-  python_build_time_tests("textpb_test") {
-    tests = [ "textpb_test.py" ]
-    inputs = _textpb_sources
+    deps = [ ":relativize_args" ]
   }
 }
 

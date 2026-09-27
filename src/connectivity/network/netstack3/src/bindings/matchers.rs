@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::convert::Infallible as Never;
-
 use crate::bindings::util::{IntoCore, TryFromFidl};
 use crate::bindings::{BindingsCtx, MatcherBindingsTypes};
 use fidl_fuchsia_net_ext::IntoExt as _;
@@ -17,7 +15,7 @@ use netstack3_core::socket::{
 impl TryFromFidl<fnet_matchers_ext::Interface>
     for netstack3_core::device::InterfaceMatcher<<BindingsCtx as MatcherBindingsTypes>::DeviceClass>
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::Interface) -> Result<Self, Self::Error> {
         Ok(match fidl {
@@ -33,7 +31,7 @@ impl TryFromFidl<fnet_matchers_ext::BoundInterface>
         <BindingsCtx as MatcherBindingsTypes>::DeviceClass,
     >
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::BoundInterface) -> Result<Self, Self::Error> {
         match fidl {
@@ -48,7 +46,7 @@ impl TryFromFidl<fnet_matchers_ext::BoundInterface>
 }
 
 impl TryFromFidl<fnet_matchers_ext::Mark> for netstack3_core::ip::MarkMatcher {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::Mark) -> Result<Self, Self::Error> {
         Ok(match fidl {
@@ -66,7 +64,7 @@ impl TryFromFidl<fnet_matchers_ext::Mark> for netstack3_core::ip::MarkMatcher {
 }
 
 impl TryFromFidl<fnet_matchers_ext::MarkInDomain> for netstack3_core::ip::MarkInDomainMatcher {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::MarkInDomain) -> Result<Self, Self::Error> {
         let fnet_matchers_ext::MarkInDomain { domain, mark } = fidl;
@@ -78,7 +76,7 @@ impl TryFromFidl<fnet_matchers_ext::MarkInDomain> for netstack3_core::ip::MarkIn
 }
 
 impl TryFromFidl<fnet_matchers_ext::Port> for netstack3_core::ip::PortMatcher {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::Port) -> Result<Self, Self::Error> {
         Ok(netstack3_core::ip::PortMatcher { range: fidl.range().clone(), invert: fidl.invert() })
@@ -86,7 +84,7 @@ impl TryFromFidl<fnet_matchers_ext::Port> for netstack3_core::ip::PortMatcher {
 }
 
 impl TryFromFidl<fnet_matchers_ext::BoundPort> for netstack3_core::ip::BoundPortMatcher {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::BoundPort) -> Result<Self, Self::Error> {
         Ok(match fidl {
@@ -99,7 +97,7 @@ impl TryFromFidl<fnet_matchers_ext::BoundPort> for netstack3_core::ip::BoundPort
 }
 
 impl TryFromFidl<fnet_matchers_ext::Address> for netstack3_core::ip::AddressMatcherEither {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::Address) -> Result<Self, Self::Error> {
         let fnet_matchers_ext::Address { matcher, invert } = fidl;
@@ -154,7 +152,7 @@ impl TryFromFidl<fnet_matchers_ext::Address> for netstack3_core::ip::AddressMatc
 impl TryFromFidl<fnet_matchers_ext::BoundAddress>
     for netstack3_core::ip::BoundAddressMatcherEither
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers_ext::BoundAddress) -> Result<Self, Self::Error> {
         Ok(match fidl {
@@ -169,7 +167,7 @@ impl TryFromFidl<fnet_matchers_ext::BoundAddress>
 }
 
 impl TryFromFidl<fnet_matchers_ext::SocketTransportProtocol> for SocketTransportProtocolMatcher {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(
         fidl: fnet_matchers_ext::SocketTransportProtocol,
@@ -210,7 +208,7 @@ impl TryFromFidl<fnet_matchers_ext::SocketTransportProtocol> for SocketTransport
 }
 
 impl TryFromFidl<fnet_matchers::SocketCookie> for SocketCookieMatcher {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_matchers::SocketCookie) -> Result<Self, Self::Error> {
         let fnet_matchers::SocketCookie { cookie, invert } = fidl;

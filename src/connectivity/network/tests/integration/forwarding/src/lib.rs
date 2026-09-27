@@ -20,7 +20,7 @@ use net_declare::{fidl_ip, fidl_subnet};
 use net_types::ip::{Ip, IpVersion, Ipv4, Ipv6};
 use netemul::{RealmTcpListener as _, RealmTcpStream as _, RealmUdpSocket};
 use netstack_testing_common::interfaces::TestInterfaceExt;
-use netstack_testing_common::realms::{Netstack, Netstack3, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
 };
@@ -149,11 +149,7 @@ impl SetupConfig {
     }
 
     // Set up two networks, connected by a router.
-    async fn build<'a, N: Netstack>(
-        self,
-        name: &str,
-        sandbox: &'a netemul::TestSandbox,
-    ) -> Setup<'a> {
+    async fn build<'a>(self, name: &str, sandbox: &'a netemul::TestSandbox) -> Setup<'a> {
         let SetupConfig {
             client_subnet,
             client_gateway,
@@ -170,13 +166,13 @@ impl SetupConfig {
         let client_net = sandbox.create_network("client").await.expect("create network");
         let server_net = sandbox.create_network("server").await.expect("create network");
         let client = sandbox
-            .create_netstack_realm::<N, _>(format!("{}_client", name))
+            .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
             .expect("create realm");
         let server = sandbox
-            .create_netstack_realm::<N, _>(format!("{}_server", name))
+            .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
             .expect("create realm");
         let router = sandbox
-            .create_netstack_realm::<N, _>(format!("{}_router", name))
+            .create_netstack_realm::<Netstack3, _>(format!("{}_router", name))
             .expect("create realm");
 
         let client_iface = client
@@ -267,15 +263,14 @@ const REQUEST: &str = "hello from client";
 const RESPONSE: &str = "hello from server";
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(SetupConfig::ipv4(ForwardingConfig::BothEnabled); "ipv4")]
 #[test_case(SetupConfig::ipv6(ForwardingConfig::BothEnabled); "ipv6")]
-async fn forwarding<N: Netstack>(name: &str, setup_config: SetupConfig) {
+async fn forwarding(name: &str, setup_config: SetupConfig) {
     let server_ip = fidl_fuchsia_net_ext::IpAddress::from(setup_config.server_subnet.addr).0;
     let client_ip = fidl_fuchsia_net_ext::IpAddress::from(setup_config.client_subnet.addr).0;
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let setup = setup_config.build::<N>(name, &sandbox).await;
+    let setup = setup_config.build(name, &sandbox).await;
 
     let sockaddr = std::net::SocketAddr::from((server_ip, PORT));
 
@@ -377,21 +372,16 @@ async fn expect_failed_ping(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(SetupConfig::ipv4(ForwardingConfig::BothEnabled), true; "ipv4_with_forwarding")]
 #[test_case(SetupConfig::ipv4(ForwardingConfig::BothDisabled), false; "ipv4_without_forwarding")]
 #[test_case(SetupConfig::ipv6(ForwardingConfig::BothEnabled), true; "ipv6_with_forwarding")]
 #[test_case(SetupConfig::ipv6(ForwardingConfig::BothDisabled), false; "ipv6_without_forwarding")]
-async fn ping_other_router_addr<N: Netstack>(
-    name: &str,
-    setup_config: SetupConfig,
-    expect_success: bool,
-) {
+async fn ping_other_router_addr(name: &str, setup_config: SetupConfig, expect_success: bool) {
     let router_client_ip = setup_config.router_client_ip;
     let router_server_ip = setup_config.router_server_ip;
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let setup = setup_config.build::<N>(name, &sandbox).await;
+    let setup = setup_config.build(name, &sandbox).await;
 
     // Each side should be able to ping the router IP in its own network,
     // regardless of if forwarding is enabled.
@@ -564,7 +554,7 @@ async fn internal_forwarding_ingress(setup_config: SetupConfig) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     // NB: This test relies on fuchsia.net.filter, which is only implemented
     // for Netstack3.
-    let setup = setup_config.build::<Netstack3>("internal_forwarding_ingress", &sandbox).await;
+    let setup = setup_config.build("internal_forwarding_ingress", &sandbox).await;
 
     // The client should be able to send traffic to the router's server side IP
     // but the server should not be able to send traffic to the router's client
@@ -656,7 +646,7 @@ async fn internal_forwarding_egress(setup_config: SetupConfig) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     // NB: This test relies on fuchsia.net.filter, which is only implemented
     // for Netstack3.
-    let setup = setup_config.build::<Netstack3>("internal_forwarding_egress", &sandbox).await;
+    let setup = setup_config.build("internal_forwarding_egress", &sandbox).await;
 
     // The router should be able to send traffic from its server side IP to the
     // client, but the router should not be able to send traffic from its
@@ -804,7 +794,7 @@ async fn forwarding_packet_too_big(name: &str) {
     };
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let setup = setup_config.build::<Netstack3>(name, &sandbox).await;
+    let setup = setup_config.build(name, &sandbox).await;
 
     let recv_socket = create_icmpv6_raw_socket(&setup.client).await;
     let send_socket = fuchsia_async::net::UdpSocket::bind_in_realm(&setup.client, client_sockaddr)
@@ -826,10 +816,9 @@ async fn forwarding_packet_too_big(name: &str) {
 
 // Verify that UDP datagrams requiring fragmentation can be forwarded successfully.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(SetupConfig::ipv4(ForwardingConfig::BothEnabled); "ipv4")]
 #[test_case(SetupConfig::ipv6(ForwardingConfig::BothEnabled); "ipv6")]
-async fn forwarding_fragmented_udp_datagram<N: Netstack>(name: &str, setup_config: SetupConfig) {
+async fn forwarding_fragmented_udp_datagram(name: &str, setup_config: SetupConfig) {
     let client_sockaddr = std::net::SocketAddr::from((
         fidl_fuchsia_net_ext::IpAddress::from(setup_config.client_subnet.addr).0,
         PORT,
@@ -840,7 +829,7 @@ async fn forwarding_fragmented_udp_datagram<N: Netstack>(name: &str, setup_confi
     ));
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let setup = setup_config.build::<N>(name, &sandbox).await;
+    let setup = setup_config.build(name, &sandbox).await;
 
     let send_socket = fuchsia_async::net::UdpSocket::bind_in_realm(&setup.client, client_sockaddr)
         .await
@@ -913,7 +902,7 @@ async fn ipv4_will_refragment(name: &str) {
     };
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let setup = setup_config.build::<Netstack3>(name, &sandbox).await;
+    let setup = setup_config.build(name, &sandbox).await;
 
     let router_client_mac = setup.router_client_iface.mac().await;
     let client_send_to_addr = libc::sockaddr_ll::from(EthernetSockaddr {
@@ -1045,7 +1034,7 @@ async fn ipv6_will_not_refragment(name: &str) {
     };
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let setup = setup_config.build::<Netstack3>(name, &sandbox).await;
+    let setup = setup_config.build(name, &sandbox).await;
 
     let router_client_mac = setup.router_client_iface.mac().await;
     let client_send_to_addr = libc::sockaddr_ll::from(EthernetSockaddr {

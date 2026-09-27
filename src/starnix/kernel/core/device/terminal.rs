@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::fs::devpts::{DEVPTS_COUNT, get_device_type_for_pts};
 use crate::mutable_state::{state_accessor, state_implementation};
 use crate::task::{EventHandler, ProcessGroup, Session, WaitCanceler, WaitQueue, Waiter};
 use crate::vfs::buffers::{InputBuffer, InputBufferExt as _, OutputBuffer};
@@ -18,6 +17,15 @@ use starnix_uapi::vfs::FdEvents;
 use starnix_uapi::{errno, error, uapi};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Weak};
+
+const DEVPTS_FIRST_MAJOR: u32 = 136;
+const DEVPTS_MAJOR_COUNT: u32 = 4;
+pub const DEVPTS_COUNT: u32 = DEVPTS_MAJOR_COUNT * 256;
+
+// Construct the DeviceId associated with the given pts replicas.
+pub fn get_device_type_for_pts(id: u32) -> DeviceId {
+    DeviceId::new(DEVPTS_FIRST_MAJOR + id / 256, id % 256)
+}
 
 /// Global state of the devpts filesystem.
 pub struct TtyState {

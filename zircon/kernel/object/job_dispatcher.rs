@@ -16,7 +16,8 @@ use zx_types::{
 
 use super::handle::KernelHandle;
 use super::job_dispatcher_ffi::{
-    cpp_job_dispatcher_create, cpp_job_dispatcher_enumerate_children, cpp_job_dispatcher_get_info,
+    cpp_job_dispatcher_create, cpp_job_dispatcher_create_root_job,
+    cpp_job_dispatcher_enumerate_children, cpp_job_dispatcher_get_info,
     cpp_job_dispatcher_get_kill_on_oom, cpp_job_dispatcher_get_root_job,
     cpp_job_dispatcher_get_runtime_stats, cpp_job_dispatcher_is_root, cpp_job_dispatcher_kill,
     cpp_job_dispatcher_kill_job_with_kill_on_oom, cpp_job_dispatcher_max_height,
@@ -152,6 +153,12 @@ impl JobDispatcher {
     pub fn get_root_job() -> fbl::RefPtr<JobDispatcher> {
         // SAFETY: `cpp_job_dispatcher_get_root_job` returns a raw pointer carrying an acquired refcount.
         unsafe { fbl::RefPtr::from_raw(cpp_job_dispatcher_get_root_job()) }
+    }
+
+    /// Creates and returns a new root job dispatcher.
+    pub fn create_root_job() -> fbl::RefPtr<JobDispatcher> {
+        // SAFETY: `cpp_job_dispatcher_create_root_job` returns a raw pointer carrying an acquired refcount.
+        unsafe { fbl::RefPtr::from_raw(cpp_job_dispatcher_create_root_job()) }
     }
 
     /// Returns the parent job dispatcher, or `None` if this is the root job.

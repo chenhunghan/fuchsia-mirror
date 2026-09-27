@@ -48,7 +48,9 @@ except ImportError:
 import argparse
 import functools
 import json
+import os
 import platform
+import shutil
 import subprocess
 import tempfile
 import time
@@ -64,18 +66,20 @@ from tools.integration.fint.proto import (
     static_pb2,
 )
 
-JSONObject = dict[str, Any]
-JSONArray = list[Any]
+_JSONPrimitive = str | int | float | bool | None
+JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
+JSONObject = dict[str, JSONValue]
+JSONArray = list[JSONValue]
 
 # Module-scope constants for file names
 BUILD_ARTIFACTS_JSON = "build_artifacts.json"
 NINJA_ERRORS_JSON = "ninja_errors.json"
 TOOL_PATHS_JSON = "tool_paths.json"
-TESTS_JSON = "tests.json"
 GENERATED_SOURCES_JSON = "generated_sources.json"
-PREBUILT_BINARY_SETS_JSON = "prebuilt_binary_sets.json"
+PREBUILT_BINARY_SETS_JSON = "prebuilt_binaries.json"
 FORCE_NONHERMETIC_REBUILD_SENTINEL = "force_nonhermetic_rebuild"
 LAST_NINJA_BUILD_SUCCESS_STAMP = "last_ninja_build_success.stamp"
+RUST_TARGET_MAPPING_JSON = "rust_target_mapping.json"
 
 
 @dataclass
@@ -177,9 +181,9 @@ class HostProperties:
             / "ninja"
         )
 
-    def matches_tool(self, tool: JSONObject) -> bool:
+    def matches_tool(self, tool: "ToolPathSpec") -> bool:
         """Returns True if the tool's OS and CPU match this host."""
-        return tool.get("os") == self.os and tool.get("cpu") == self.cpu
+        return tool.os == self.os and tool.cpu == self.cpu
 
 
 def load_static_spec(path: pathlib.Path) -> static_pb2.Static:
@@ -210,26 +214,6 @@ def load_json_list(path: pathlib.Path) -> JSONArray:
     return data
 
 
-def produce_build_artifacts(
-    artifact_dir: pathlib.Path,
-    duration_seconds: int,
-    failure_summary: str | None = None,
-) -> None:
-    """Serializes and writes the build_artifacts.json manifest to the artifact directory."""
-    artifacts = build_artifacts_pb2.BuildArtifacts()
-    artifacts.ninja_duration_seconds = duration_seconds
-    if failure_summary:
-        artifacts.failure_summary = failure_summary
-
-    json_manifest_path = artifact_dir / BUILD_ARTIFACTS_JSON
-    # MessageToJson formats with nice spacing/indentation
-    json_data = json_format.MessageToJson(
-        artifacts, always_print_fields_with_no_presence=True
-    )
-    json_manifest_path.write_text(json_data)
-    msg(f"Successfully wrote build artifacts manifest to {json_manifest_path}")
-
-
 @dataclass(frozen=True)
 class NinjaFailure:
     """Represents a single action failure recorded in ninja_errors.json."""
@@ -249,8 +233,15 @@ class NinjaFailure:
         if not isinstance(artifacts, list):
             artifacts = [str(artifacts)] if artifacts is not None else []
         try:
-            exit_code_int = int(exit_code) if exit_code is not None else -1
+            # Ensure we only pass numeric/string types to int() to keep Mypy completely happy.
+            exit_code_int = (
+                int(exit_code)
+                if isinstance(exit_code, (int, float, str))
+                else -1
+            )
         except (ValueError, TypeError):
+            # If the exit code cannot be cast to an integer (e.g. if it is malformed,
+            # non-numeric, or absent), gracefully fallback to a sentinel value of -1.
             exit_code_int = -1
 
         return cls(
@@ -271,6 +262,104 @@ class NinjaFailure:
         if include_output and self.output:
             return f"{header}\n\n{self.output}"
         return header
+
+
+@dataclass(frozen=True)
+class TestSpec:
+    """Represents a parsed and statically typed test specification from tests.json."""
+
+    label: str
+    os: str
+    cpu: str
+    path: str
+
+    @classmethod
+    def from_dict(cls, data: JSONObject) -> "TestSpec":
+        """Constructs a TestSpec safely from a JSONObject."""
+        test_dict = data.get("test")
+        if not isinstance(test_dict, dict):
+            raise ValueError(
+                f"Expected 'test' object inside test spec, but got: {test_dict}"
+            )
+
+        label = test_dict.get("label", "")
+        os_val = test_dict.get("os", "")
+        cpu_val = test_dict.get("cpu", "")
+        path_val = test_dict.get("path", "")
+
+        if not (
+            isinstance(label, str)
+            and isinstance(os_val, str)
+            and isinstance(cpu_val, str)
+            and isinstance(path_val, str)
+        ):
+            raise ValueError(
+                f"TestSpec has invalid field types: label={type(label).__name__}, "
+                f"os={type(os_val).__name__}, cpu={type(cpu_val).__name__}, path={type(path_val).__name__}"
+            )
+        return cls(label=label, os=os_val, cpu=cpu_val, path=path_val)
+
+
+@dataclass(frozen=True)
+class ToolPathSpec:
+    """Represents a parsed and statically typed host tool path from tool_paths.json."""
+
+    name: str
+    path: str
+    os: str
+    cpu: str
+
+    @classmethod
+    def from_dict(cls, data: JSONObject) -> "ToolPathSpec":
+        """Constructs a ToolPathSpec safely from a JSONObject."""
+        name = data.get("name")
+        path_val = data.get("path")
+        os_val = data.get("os")
+        cpu_val = data.get("cpu")
+
+        if not (
+            isinstance(name, str)
+            and isinstance(path_val, str)
+            and isinstance(os_val, str)
+            and isinstance(cpu_val, str)
+        ):
+            raise ValueError(
+                f"ToolPathSpec has invalid field types: name={type(name).__name__}, "
+                f"path={type(path_val).__name__}, os={type(os_val).__name__}, cpu={type(cpu_val).__name__}"
+            )
+        return cls(name=name, path=path_val, os=os_val, cpu=cpu_val)
+
+
+@dataclass(frozen=True)
+class ClippyTargetSpec:
+    """Represents a parsed and statically typed clippy target specification."""
+
+    output: pathlib.Path
+    sources: list[pathlib.Path]
+    disable_clippy: bool
+
+    @classmethod
+    def from_dict(cls, data: JSONObject) -> "ClippyTargetSpec":
+        """Constructs a ClippyTargetSpec safely from a JSONObject."""
+        output_val = data.get("clippy_output")
+        sources_val = data.get("src", data.get("sources", []))
+        disable_clippy = data.get("disable_clippy", False)
+
+        if not (
+            isinstance(output_val, str)
+            and isinstance(sources_val, list)
+            and all(isinstance(s, str) for s in sources_val)
+            and isinstance(disable_clippy, bool)
+        ):
+            raise ValueError(
+                f"ClippyTargetSpec has invalid field types: output={type(output_val).__name__}, "
+                f"sources={type(sources_val).__name__}, disable_clippy={type(disable_clippy).__name__}"
+            )
+        return cls(
+            output=pathlib.Path(output_val),
+            sources=[pathlib.Path(s) for s in sources_val],
+            disable_clippy=disable_clippy,
+        )
 
 
 def parse_ninja_failures(errors_json_path: pathlib.Path) -> str | None:
@@ -467,18 +556,106 @@ class BuildContext:
         """Returns the path to the checkout directory."""
         return pathlib.Path(self.context_spec.checkout_dir)
 
-    @functools.cached_property
-    def tool_paths(self) -> JSONArray:
-        """Loads and returns the tool paths config list."""
-        return load_json_list(self.build_dir / TOOL_PATHS_JSON)
+    @property
+    def api_client_path(self) -> pathlib.Path:
+        """Returns the absolute path to the build API client executable."""
+        return self.checkout_dir / "build" / "api" / "client"
+
+    @property
+    def debug_symbols_dir(self) -> pathlib.Path:
+        """Returns the path to the debug symbols export directory."""
+        return self.build_dir / "debug_symbols"
+
+    @property
+    def debug_symbols_manifest(self) -> pathlib.Path:
+        """Returns the path to the debug symbols JSON manifest file."""
+        return self.debug_symbols_dir / "debug_symbols.json"
+
+    @property
+    def last_ninja_build_targets_path(self) -> pathlib.Path:
+        """Returns the absolute path to the last ninja build targets file."""
+        return self.build_dir / "last_ninja_build_targets.txt"
+
+    @property
+    def rust_target_mapping_json_path(self) -> pathlib.Path:
+        """Returns the absolute path to the Rust target mapping JSON file."""
+        return self.build_dir / RUST_TARGET_MAPPING_JSON
+
+    @property
+    def artifact_dir(self) -> pathlib.Path | None:
+        """Returns the path to the artifact directory if specified in the context spec."""
+        return (
+            pathlib.Path(self.context_spec.artifact_dir)
+            if self.context_spec.artifact_dir
+            else None
+        )
+
+    @property
+    def artifact_debug_symbols_manifest(self) -> pathlib.Path | None:
+        """Returns the path to the debug symbols JSON manifest inside the artifact directory."""
+        if self.artifact_dir:
+            return self.artifact_dir / "debug_symbols.json"
+        return None
+
+    @property
+    def should_export_breakpad_symbols(self) -> bool:
+        """Returns True if output_breakpad_syms is set to true in the static spec's GN args."""
+        # TODO: Use a centralized, shared GN parsing utility module here in the future
+        # to parse GN arguments robustly across different build tools and integrators.
+        for arg in self.static_spec.gn_args:
+            key, eq, value = arg.partition("=")
+            if (
+                eq
+                and key.strip() == "output_breakpad_syms"
+                and value.strip().lower() == "true"
+            ):
+                return True
+        return False
 
     @functools.cached_property
-    def test_specs(self) -> JSONArray:
-        """Loads and returns the test specs list."""
-        path = self.build_dir / TESTS_JSON
+    def tool_paths(self) -> list[ToolPathSpec]:
+        """Loads and returns the tool paths config list."""
+        path = self.build_dir / TOOL_PATHS_JSON
         if not path.exists():
             return []
-        return load_json_list(path)
+        try:
+            # Narrow the try clause strictly to loading/decoding the JSON file.
+            paths_data = load_json_list(path)
+        except ValueError as e:
+            raise ValueError(f"Failed to decode {TOOL_PATHS_JSON}: {e}")
+
+        # Process the decoded data list with strict validation.
+        paths = []
+        for item in paths_data:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Expected dict entry inside {TOOL_PATHS_JSON}, but got: {type(item).__name__}"
+                )
+            paths.append(ToolPathSpec.from_dict(item))
+        return paths
+
+    @functools.cached_property
+    def clippy_targets(self) -> list[ClippyTargetSpec]:
+        """Loads and returns the clippy/rust target mapping list."""
+        if not self.rust_target_mapping_json_path.exists():
+            return []
+        try:
+            # Narrow the try clause strictly to loading/decoding the JSON file.
+            targets_data = load_json_list(self.rust_target_mapping_json_path)
+        except ValueError as e:
+            raise ValueError(
+                f"Failed to decode {RUST_TARGET_MAPPING_JSON}: {e}"
+            )
+
+        # Process the decoded data list with strict validation.
+        targets = []
+        for item in targets_data:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Expected dict entry inside {RUST_TARGET_MAPPING_JSON}, but got: {type(item).__name__}"
+                )
+            targets.append(ClippyTargetSpec.from_dict(item))
+        return targets
 
     @functools.cached_property
     def generated_sources(self) -> JSONArray:
@@ -500,28 +677,30 @@ class BuildContext:
         """Yields default targets or host test targets if configured."""
         if self.static_spec.include_default_ninja_target:
             yield ":default"
-        elif self.static_spec.include_host_tests:
-            for spec in self.test_specs:
-                test_spec = spec.get("test", {})
-                if test_spec.get("os") != "fuchsia":
-                    path = test_spec.get("path")
-                    if path:
-                        yield path
 
     def _generated_source_targets(self) -> Iterable[str]:
         """Yields generated C++ source targets if configured."""
         if self.static_spec.include_generated_sources:
             for f in self.generated_sources:
-                if f.endswith(".cc") or f.endswith(".h"):
+                if isinstance(f, str) and (
+                    f.endswith(".cc") or f.endswith(".h")
+                ):
                     yield f
 
     def _prebuilt_binary_manifests(self) -> Iterable[str]:
         """Yields prebuilt binary manifest targets if configured."""
         if self.static_spec.include_prebuilt_binary_manifests:
             for item in self.prebuilt_binary_sets:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"Expected dict entry inside {PREBUILT_BINARY_SETS_JSON}, but got: {type(item).__name__}"
+                    )
                 manifest = item.get("manifest")
-                if manifest:
-                    yield manifest
+                if not isinstance(manifest, str):
+                    raise ValueError(
+                        f"Prebuilt binary set entry has invalid 'manifest' field type: {type(manifest).__name__}"
+                    )
+                yield manifest
 
     def _tool_targets(self) -> Iterable[str]:
         """Yields prebuilt host tool targets if configured."""
@@ -536,6 +715,45 @@ class BuildContext:
         if self.static_spec.ninja_targets:
             yield from self.static_spec.ninja_targets
 
+    def _clippy_targets(self) -> Iterable[str]:
+        """Yields clippy target output files to build based on static spec configuration."""
+        include_lint_targets = self.static_spec.include_lint_targets
+        if include_lint_targets == static_pb2.Static.NO_LINT_TARGETS:
+            return
+
+        # Build lookup set of changed files paths for O(1) checks
+        changed_files = {f.path for f in self.context_spec.changed_files}
+
+        for clippy in self.clippy_targets:
+            if clippy.disable_clippy:
+                continue
+
+            # Filter clippy targets based on include_lint_targets setting
+            if include_lint_targets == static_pb2.Static.ALL_LINT_TARGETS:
+                yield str(clippy.output)
+            elif (
+                include_lint_targets == static_pb2.Static.AFFECTED_LINT_TARGETS
+            ):
+                # Check if any clippy source file has been modified in the changed_files set
+                for source in clippy.sources:
+                    # Purely lexical path computation avoids expensive filesystem lookups
+                    # and correctly matches Go fint filepath.Rel/Clean behavior.
+                    checkout_path_str = os.path.relpath(
+                        os.path.normpath(self.build_dir / source),
+                        self.checkout_dir,
+                    )
+                    checkout_path_posix = pathlib.Path(
+                        checkout_path_str
+                    ).as_posix()
+
+                    if checkout_path_posix in changed_files:
+                        yield str(clippy.output)
+                        break
+            else:
+                raise ValueError(
+                    f"Unknown include_lint_targets value: {include_lint_targets}"
+                )
+
     def _stream_all_targets(self) -> Iterable[str]:
         """Streams all configured and resolved targets from all sources."""
         yield from self._default_and_host_test_targets()
@@ -543,39 +761,11 @@ class BuildContext:
         yield from self._prebuilt_binary_manifests()
         yield from self._tool_targets()
         yield from self._custom_ninja_targets()
+        yield from self._clippy_targets()
 
     def _get_targets(self) -> list[str]:
         """Resolves Ninja build targets based on specifications and build API JSON files."""
         return sorted(list(set(self._stream_all_targets())))
-
-    def _build_bazel_host_tests(self) -> None:
-        """Builds Bazel host tests if any are present in tests.json."""
-        bazel_labels = []
-        for spec in self.test_specs:
-            test_spec = spec.get("test", {})
-            label = test_spec.get("label", "")
-            if label.startswith("@"):
-                bazel_labels.append(label)
-
-        if not bazel_labels:
-            return
-
-        top_dir_config_path = (
-            self.checkout_dir / "build" / "bazel" / "config" / "bazel_top_dir"
-        )
-        bazel_top_dir = top_dir_config_path.read_text().strip()
-        bazel_launcher = self.build_dir / bazel_top_dir / "bazel"
-
-        cmd = [
-            str(bazel_launcher),
-            "build",
-            "--config=host",
-            "--build_runfile_links=true",
-            "--enable_runfiles=true",
-        ] + bazel_labels
-
-        msg(f"Building Bazel host tests: {bazel_labels}")
-        subprocess.run(cmd, check=True)
 
     @contextmanager
     def wrap_ninja(
@@ -625,7 +815,13 @@ class BuildContext:
         success_stamp_path: pathlib.Path,
     ) -> None:
         """Runs post-build tests and validation checks for Ninja, modifying result.exit_code if any fail."""
-        self._build_bazel_host_tests()
+        # Update last_ninja_build_targets.txt cleanly to prevent unnecessary Ninja artifacts invalidations.
+        targets_str = " ".join(targets)
+        if (
+            not self.last_ninja_build_targets_path.exists()
+            or self.last_ninja_build_targets_path.read_text() != targets_str
+        ):
+            self.last_ninja_build_targets_path.write_text(targets_str)
 
         # Post-build success stamp
         success_stamp_path.write_text("")
@@ -653,6 +849,15 @@ class BuildContext:
                 result.exit_code = noop_status
                 return
 
+        # Export debug symbols at the very end to avoid spending time on symbols
+        # dumping/exporting if the gn_check or ninja_noop verifications fail.
+        try:
+            self._export_debug_symbols()
+        except RuntimeError as e:
+            msg(f"Error: {e}", file=sys.stderr)
+            result.exit_code = 1
+            return
+
     @contextmanager
     def wrap_bazel(
         self,
@@ -677,14 +882,84 @@ class BuildContext:
                 # TODO: Implement Bazel-specific post-build failure/diagnostic collections
                 pass
 
+    def _export_debug_symbols(self) -> None:
+        """Invokes the build API to export last build's debug symbols."""
+        if self.debug_symbols_dir.exists():
+            shutil.rmtree(self.debug_symbols_dir)
+        self.debug_symbols_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            str(self.api_client_path),
+            "--build-dir",
+            str(self.build_dir),
+            "export_last_build_debug_symbols",
+            f"--output-dir={self.debug_symbols_dir}",
+        ]
+        if self.should_export_breakpad_symbols:
+            cmd.append("--with-breakpad-symbols")
+
+        msg("Exporting last build debug symbols...")
+        if self.verbose:
+            msg(f"Command: {shlex.join(cmd)}")
+
+        res = subprocess.run(cmd)
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"export_last_build_debug_symbols failed with exit code {res.returncode}"
+            )
+
+    def produce_build_artifacts(
+        self,
+        duration_seconds: int,
+        failure_summary: str | None = None,
+    ) -> None:
+        """Serializes and writes the build_artifacts.json manifest to the artifact directory."""
+        if not self.artifact_dir:
+            return
+
+        artifacts = build_artifacts_pb2.BuildArtifacts()
+        artifacts.ninja_duration_seconds = duration_seconds
+        if failure_summary:
+            artifacts.failure_summary = failure_summary
+
+        # Copy debug_symbols.json from build_dir/debug_symbols to artifact_dir if present,
+        # and register it in log_files.
+        if (
+            self.debug_symbols_manifest.is_file()
+            and self.artifact_debug_symbols_manifest
+        ):
+            try:
+                shutil.copy2(
+                    self.debug_symbols_manifest,
+                    self.artifact_debug_symbols_manifest,
+                )
+                artifacts.log_files["debug_symbols.json"] = str(
+                    self.artifact_debug_symbols_manifest
+                )
+            except OSError as e:
+                msg(
+                    f"Warning: Failed to copy debug_symbols.json: {e}",
+                    file=sys.stderr,
+                )
+
+        # MessageToJson formats with nice spacing/indentation
+        json_data = json_format.MessageToJson(
+            artifacts, always_print_fields_with_no_presence=True
+        )
+        json_manifest_path = self.artifact_dir / BUILD_ARTIFACTS_JSON
+        json_manifest_path.write_text(json_data)
+        msg(
+            f"Successfully wrote build artifacts manifest to {json_manifest_path}"
+        )
+
 
 def lookup_tool_path(
-    tool_paths: list[JSONObject], tool_name: str, host: HostProperties
+    tool_paths: list[ToolPathSpec], tool_name: str, host: HostProperties
 ) -> str | None:
     """Looks up the relative path of a host tool in tool_paths."""
     for tool in tool_paths:
-        if tool.get("name") == tool_name and host.matches_tool(tool):
-            return tool.get("path")
+        if tool.name == tool_name and host.matches_tool(tool):
+            return tool.path
     return None
 
 
@@ -853,8 +1128,7 @@ def main(argv: list[str]) -> int:
                         f"Fuchsia build failed: delegated command "
                         f"'{shlex.join(run.command)}' exited with status {run.exit_code}"
                     )
-            produce_build_artifacts(
-                pathlib.Path(ctx.context_spec.artifact_dir),
+            ctx.produce_build_artifacts(
                 duration_seconds,
                 failure_summary=failure_summary,
             )

@@ -914,7 +914,6 @@ mod tests {
         AddressMatcher, AddressMatcherType, AssignedAddrIpExt, InterfaceMatcher, MarkDomain, Marks,
         PortMatcher, SegmentHeader,
     };
-    use netstack3_hashmap::HashMap;
     use test_case::test_case;
 
     use super::*;
@@ -1674,10 +1673,10 @@ mod tests {
                 },
                 ..Default::default()
             },
-            HashMap::from([(
+            [(
                 FakeMatcherDeviceId::ethernet_interface(),
                 AddrSubnet::new(I::SRC_IP, I::SUBNET.prefix()).unwrap(),
-            )]),
+            )],
         );
 
         // Simulate a forwarded packet, originally from I::SRC_IP_2, that is masqueraded
@@ -1797,10 +1796,10 @@ mod tests {
                 },
                 ..Default::default()
             },
-            HashMap::from([(
+            [(
                 FakeMatcherDeviceId::ethernet_interface(),
                 AddrSubnet::new(I::SRC_IP_2, I::SUBNET.prefix()).unwrap(),
-            )]),
+            )],
         );
 
         // Even though the packet is modified after the first hook, where DNAT is

@@ -1129,6 +1129,11 @@ impl<B: SplitByteSliceMut> Ipv6PacketRaw<B> {
     pub fn set_dst_ip(&mut self, addr: Ipv6Addr) {
         self.fixed_hdr.dst_ip = addr;
     }
+
+    /// Set the payload length of the IPv6 packet.
+    pub fn set_payload_len(&mut self, payload_len: u16) {
+        self.fixed_hdr.payload_len = U16::new(payload_len);
+    }
 }
 
 /// A next header that may be either a next layer header or an IPv6 extension

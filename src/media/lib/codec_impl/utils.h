@@ -5,6 +5,8 @@
 #ifndef SRC_MEDIA_LIB_CODEC_IMPL_UTILS_H_
 #define SRC_MEDIA_LIB_CODEC_IMPL_UTILS_H_
 
+#include <zircon/assert.h>
+
 #include <optional>
 
 // Leaves the source optional with has_value() false instead of leaving source.has_value() true with

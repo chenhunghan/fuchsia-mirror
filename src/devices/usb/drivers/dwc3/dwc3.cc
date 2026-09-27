@@ -1729,7 +1729,7 @@ void Dwc3::EpServer::QueueRequests(QueueRequestsRequest& request,
 void Dwc3::EpServer::CancelAll(CancelAllCompleter::Sync& completer) {
   TRACE_DURATION("dwc3", "Dwc3::EpServer::CancelAll");
   CancelAll(ZX_ERR_CANCELED);
-  if (!dwc3_->controller_started_ ||
+  if (!dwc3_->is_active() ||
       (uep_->ep.transfer_state == Endpoint::TransferState::kIdle && active_reqs.empty())) {
     completer.Reply(zx::ok());
   } else {

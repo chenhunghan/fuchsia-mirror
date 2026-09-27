@@ -592,7 +592,7 @@ mod tests {
         // the two calls to get_merkle_at_path should only have caused /timestamp.json
         // to be fetched once
         assert_eq!(ts_metadata_fetched.next().await, Some(()));
-        assert_matches!(ts_metadata_fetched.try_next(), Err(_));
+        assert_matches!(ts_metadata_fetched.try_recv(), Err(_));
     }
 
     #[fuchsia::test]

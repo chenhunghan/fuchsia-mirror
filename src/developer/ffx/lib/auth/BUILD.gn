@@ -33,6 +33,7 @@ rustc_test("auth_test") {
     "//src/developer/ffx/lib/fho:lib",
     "//src/developer/ffx/lib/pbms:lib",
     "//src/developer/lib/credentials:lib",
+    "//src/lib/fuchsia",
     "//src/lib/gcs",
     "//src/lib/structured_ui",
     "//third_party/rust_crates:anyhow",

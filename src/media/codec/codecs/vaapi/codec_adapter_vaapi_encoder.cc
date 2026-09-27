@@ -115,28 +115,65 @@ bool CodecAdapterVaApiEncoder::HandleInputFormatChange(
   bool reset_encoder = initial;
 
   gfx::Size display_size(checked_width.ValueOrDie(), checked_height.ValueOrDie());
+  gfx::Size coded_size(checked_coded_width.ValueOrDie(), checked_coded_height.ValueOrDie());
 
-  if (display_size_ != display_size) {
+  if (!display_size.GetCheckedArea().IsValid() || !coded_size.GetCheckedArea().IsValid()) {
+    events_->onCoreCodecFailCodec(
+        "HandleInputFormatChange(): Area overflow for display %s or coded %s",
+        display_size.ToString().c_str(), coded_size.ToString().c_str());
+    return false;
+  }
+
+  if (display_size.width() > coded_size.width() || display_size.height() > coded_size.height()) {
+    events_->onCoreCodecFailCodec(
+        "HandleInputFormatChange(): Display dimensions %s larger than coded dimensions %s",
+        display_size.ToString().c_str(), coded_size.ToString().c_str());
+    return false;
+  }
+
+  if (coded_size.width() > static_cast<int>(kMaxInputWidth) ||
+      coded_size.height() > static_cast<int>(kMaxInputHeight) ||
+      coded_size.Area64() > kMaxInputWidthTimesHeight) {
+    events_->onCoreCodecFailCodec(
+        "HandleInputFormatChange(): Coded dimensions %s exceed maximum supported limits (%ux%u, max area %u)",
+        coded_size.ToString().c_str(), kMaxInputWidth, kMaxInputHeight, kMaxInputWidthTimesHeight);
+    return false;
+  }
+
+  if (!safemath::IsValueInRangeForNumericType<uint32_t>(
+          media::GetEncodeBitstreamBufferSize(coded_size))) {
+    events_->onCoreCodecFailCodec(
+        "HandleInputFormatChange(): Encode bitstream buffer size for %s exceeds uint32_t",
+        coded_size.ToString().c_str());
+    return false;
+  }
+
+  // Trigger encoder reconfiguration if either display_size or coded_size
+  // changes. When reset_encoder is set, context_id_ is cleared below, which
+  // causes the next ProcessPacket() to signal
+  // onCoreCodecMidStreamOutputConstraintsChange(true) so output buffers are
+  // resized if GetEncodeBitstreamBufferSize(coded_size_) changed. Note that
+  // mid-stream input sysmem buffers are not renegotiated (input constraints
+  // specify max_size up to 3840x3840 upfront, and UploadVideoFrameToSurface
+  // verifies that each input packet buffer is large enough for coded_size and
+  // stride).
+  // Mid-stream resize is unit-tested with VA-API stubs in
+  // H264EncoderTestFixture.Resize, though not yet covered by real-HW tests in
+  // stream_processors/test/h264_encoder_test.
+  if (display_size_ != display_size || coded_size_ != coded_size) {
     reset_encoder = true;
     input_surface_.reset();
 
     std::lock_guard lock(surfaces_lock_);
     // Increment surface generation so all existing surfaces will be freed
     // when they're released instead of being returned to the pool.
-    surface_size_ = display_size_;
+    surface_size_ = display_size;
     surface_generation_++;
     surfaces_.clear();
   }
 
   display_size_ = display_size;
-  coded_size_ = gfx::Size(checked_coded_width.ValueOrDie(), checked_coded_height.ValueOrDie());
-  if (display_size_.width() > coded_size_.width() ||
-      display_size_.height() > coded_size_.height()) {
-    events_->onCoreCodecFailCodec(
-        "HandleInputFormatChange(): Display dimensions %s larger than coded dimensions %s",
-        display_size_.ToString().c_str(), coded_size_.ToString().c_str());
-    return false;
-  }
+  coded_size_ = coded_size;
 
   auto accelerator_config = media::VideoEncodeAccelerator::Config();
   accelerator_config.input_visible_size = display_size_;
@@ -263,7 +300,11 @@ void CodecAdapterVaApiEncoder::ProcessInputLoop() {
   }
 }
 
-bool CodecAdapterVaApiEncoder::ProcessPacket(CodecPacket* packet) {
+bool CodecAdapterVaApiEncoder::ProcessPacket(const CodecPacket* packet) {
+  if (coded_size_.IsEmpty() || display_size_.IsEmpty()) {
+    events_->onCoreCodecFailCodec("ProcessPacket(): Frame dimensions not initialized");
+    return false;
+  }
   VADisplay va_dpy = VADisplayWrapper::GetSingleton()->display();
   if (!context_id_) {
     // We intentionally delay triggering the output buffer allocation until some input has arrived,
@@ -305,17 +346,41 @@ bool CodecAdapterVaApiEncoder::ProcessPacket(CodecPacket* packet) {
   video_frame->coded_size = coded_size_;
   video_frame->base = packet->buffer()->base();
   video_frame->size_bytes = packet->buffer()->size();
-  video_frame->stride = fbl::round_up(
-      static_cast<uint32_t>(display_size_.width()),
-      *buffer_settings_[kInputPort]->image_format_constraints()->bytes_per_row_divisor());
+  const auto& image_constraints = *buffer_settings_[kInputPort]->image_format_constraints();
+  uint32_t min_bytes_per_row = image_constraints.min_bytes_per_row().value_or(0);
+  uint32_t divisor = image_constraints.bytes_per_row_divisor().value_or(1);
+  // The only supported input format (NV12) has 1 luma byte per pixel, so
+  // coded_size_.width() in pixels equals the unaligned luma row width in bytes.
+  uint32_t base_row_bytes =
+      std::max(safemath::checked_cast<uint32_t>(coded_size_.width()), min_bytes_per_row);
+  uint32_t stride = 0;
+  if (!CheckedRoundUp(base_row_bytes, divisor).AssignIfValid(&stride)) {
+    events_->onCoreCodecFailCodec("ProcessPacket(): Stride calculation overflowed");
+    return false;
+  }
+  video_frame->stride = stride;
 
   scoped_refptr<VASurface> va_surface = GetVASurface();
   VABufferID coded_buffer;
-  // The VA-API driver can efficiently reuse deleted buffers, so we create a enw buffer every frame.
-  VAStatus va_res =
-      vaCreateBuffer(va_dpy, context_id_->id(), VAEncCodedBufferType,
-                     static_cast<uint32_t>(media::GetEncodeBitstreamBufferSize(coded_size_)), 1,
-                     nullptr, &coded_buffer);
+  // The Intel iHD VA-API driver caches freed buffer objects in size-bucketed
+  // free lists (mos_bufmgr_gem / drm_intel_bufmgr_gem cache_bucket) and
+  // recycles them on subsequent vaCreateBuffer calls without kernel
+  // reallocation (see commit 128b0e8dc0b3 / fxr/674308). We intentionally use
+  // the 1-arg GetEncodeBitstreamBufferSize(coded_size_) (the maximum buffer
+  // size for this resolution: 2 MB, 4 MB, or 8 MB) rather than scaling by
+  // bitrate/framerate so that:
+  // 1. The buffer size matches the output sysmem buffer collection constraint
+  //    (bmc.min_size_bytes()), which is negotiated before mid-stream bitrate
+  //    changes.
+  // 2. Every frame for a given coded_size_ requests the exact same BO cache
+  //    bucket size across dynamic bitrate updates, guaranteeing 100% driver BO
+  //    cache reuse.
+  // HandleInputFormatChange() validates that coded_size_ produces an encode
+  // bitstream buffer size that fits in uint32_t before coded_size_ is set.
+  VAStatus va_res = vaCreateBuffer(
+      va_dpy, context_id_->id(), VAEncCodedBufferType,
+      safemath::checked_cast<uint32_t>(media::GetEncodeBitstreamBufferSize(coded_size_)), 1,
+      nullptr, &coded_buffer);
   if (va_res != VA_STATUS_SUCCESS) {
     events_->onCoreCodecFailCodec("vaCreateBuffer failed: %d", va_res);
     return false;

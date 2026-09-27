@@ -6,7 +6,6 @@ use std::fmt;
 
 use addr::TargetAddr;
 use discovery::query::TargetInfoQuery;
-use fidl_fuchsia_developer_ffx as ffx;
 use serde::{Deserialize, Serialize};
 
 #[derive(Hash, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -32,38 +31,6 @@ impl fmt::Display for TargetState {
             TargetState::Fastboot => write!(f, "fastboot"),
             TargetState::Zedboot => write!(f, "zedboot"),
         }
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub enum VSockNamespace {
-    Vsock,
-    Usb,
-}
-
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct VSockCtx {
-    pub cid: u32,
-    pub namespace: VSockNamespace,
-}
-
-impl From<VSockCtx> for ffx::TargetVSockCtx {
-    fn from(value: VSockCtx) -> Self {
-        let namespace = match value.namespace {
-            VSockNamespace::Vsock => ffx::TargetVSockNamespace::Vsock,
-            VSockNamespace::Usb => ffx::TargetVSockNamespace::Usb,
-        };
-        ffx::TargetVSockCtx { cid: value.cid, namespace }
-    }
-}
-
-impl From<ffx::TargetVSockCtx> for VSockCtx {
-    fn from(value: ffx::TargetVSockCtx) -> Self {
-        let namespace = match value.namespace {
-            ffx::TargetVSockNamespace::Vsock => VSockNamespace::Vsock,
-            ffx::TargetVSockNamespace::Usb => VSockNamespace::Usb,
-        };
-        VSockCtx { cid: value.cid, namespace }
     }
 }
 
@@ -114,69 +81,53 @@ impl Default for TargetInfo {
     }
 }
 
-impl From<TargetInfo> for ffx::TargetInfo {
-    fn from(info: TargetInfo) -> Self {
-        let nodename = info.nodename;
-        let rcs_state = match info.rcs_state {
-            RemoteControlState::Up => ffx::RemoteControlState::Up,
-            RemoteControlState::Down => ffx::RemoteControlState::Down,
-            RemoteControlState::Unknown => ffx::RemoteControlState::Unknown,
-        };
-        let target_state = match info.target_state {
-            TargetState::Unknown => ffx::TargetState::Unknown,
-            TargetState::Product => ffx::TargetState::Product,
-            TargetState::Fastboot => ffx::TargetState::Fastboot,
-            TargetState::Zedboot => ffx::TargetState::Zedboot,
-        };
-        Self {
-            nodename,
-            addresses: Some(info.addresses.into_iter().map(|a| a.into()).collect()),
-            rcs_state: Some(rcs_state),
-            target_state: Some(target_state),
-            product_config: info.product_config,
-            board_config: info.board_config,
-            serial_number: info.serial_number,
-            is_manual: Some(info.is_manual),
-            ..Default::default()
-        }
-    }
-}
+use netext::IsLocalAddr;
+use std::cmp::Ordering;
 
-impl From<ffx::TargetInfo> for TargetInfo {
-    fn from(info: ffx::TargetInfo) -> Self {
-        let addresses = match info.addresses {
-            None => vec![],
-            Some(addrs) => addrs.into_iter().map(|a| a.into()).collect(),
-        };
-        let rcs_state = info.rcs_state.map_or(RemoteControlState::Unknown, |s| match s {
-            ffx::RemoteControlState::Up => RemoteControlState::Up,
-            ffx::RemoteControlState::Down => RemoteControlState::Down,
-            ffx::RemoteControlState::Unknown => RemoteControlState::Unknown,
-        });
-        let target_state = info.target_state.map_or(TargetState::Unknown, |s| match s {
-            ffx::TargetState::Unknown | ffx::TargetState::Disconnected => TargetState::Unknown,
-            ffx::TargetState::Product => TargetState::Product,
-            ffx::TargetState::Fastboot => TargetState::Fastboot,
-            ffx::TargetState::Zedboot => TargetState::Zedboot,
-        });
-        Self {
-            nodename: info.nodename,
-            addresses,
-            rcs_state,
-            target_state,
-            product_config: info.product_config,
-            board_config: info.board_config,
-            serial_number: info.serial_number,
-            is_manual: info.is_manual.unwrap_or(false),
-            ..Default::default()
-        }
+// For ipv6 addresses, prefer link-local to non-local
+fn prefer_local(a: &TargetAddr, b: &TargetAddr) -> Ordering {
+    let a_is_local = a.ip().map(|x| x.is_link_local_addr()).unwrap_or(false);
+    let b_is_local = b.ip().map(|x| x.is_link_local_addr()).unwrap_or(false);
+    match (a_is_local, b_is_local) {
+        (true, true) | (false, false) => a.cmp(b),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
     }
 }
 
 impl From<discovery::TargetHandle> for TargetInfo {
     fn from(handle: discovery::TargetHandle) -> Self {
-        let fidl_th: ffx::TargetInfo = handle.into();
-        fidl_th.into()
+        let (target_state, addresses, serial_number) = match handle.state {
+            discovery::TargetState::Unknown => (TargetState::Unknown, vec![], None),
+            discovery::TargetState::Product { addrs, serial } => {
+                (TargetState::Product, addrs, serial)
+            }
+            discovery::TargetState::Fastboot(fts) => {
+                let addresses = match fts.connection_state {
+                    discovery::FastbootConnectionState::Usb => vec![],
+                    discovery::FastbootConnectionState::Tcp(addrs)
+                    | discovery::FastbootConnectionState::Udp(addrs) => {
+                        addrs.into_iter().map(Into::into).collect()
+                    }
+                };
+                (TargetState::Fastboot, addresses, Some(fts.serial_number))
+            }
+            discovery::TargetState::Zedboot => (TargetState::Zedboot, vec![], None),
+        };
+        let mut addresses = addresses;
+        addresses.sort_by(prefer_local);
+        TargetInfo {
+            nodename: handle.node_name,
+            addresses,
+            rcs_state: RemoteControlState::Unknown,
+            target_state,
+            product_config: None,
+            board_config: None,
+            serial_number,
+            is_manual: handle.manual,
+            boot_id: None,
+            is_default: None,
+        }
     }
 }
 
@@ -189,5 +140,31 @@ impl From<TargetInfo> for discovery::Description {
             ssh_port: None,
             fastboot_interface: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_target_info_from_target_handle() {
+        let socket: SocketAddr = "192.168.1.10:22".parse().unwrap();
+        let addr = TargetAddr::from(socket);
+        let handle = discovery::TargetHandle {
+            node_name: Some("test-device".to_string()),
+            state: discovery::TargetState::Product {
+                addrs: vec![addr.clone()],
+                serial: Some("sn12345".to_string()),
+            },
+            manual: false,
+        };
+
+        let info = TargetInfo::from(handle);
+        assert_eq!(info.nodename.as_deref(), Some("test-device"));
+        assert_eq!(info.target_state, TargetState::Product);
+        assert_eq!(info.addresses, vec![addr]);
+        assert_eq!(info.serial_number.as_deref(), Some("sn12345"));
     }
 }

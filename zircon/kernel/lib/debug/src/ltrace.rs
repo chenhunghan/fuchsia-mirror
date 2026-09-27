@@ -103,7 +103,7 @@ pub fn print_trace_args(module_path: &str, line: u32, args: core::fmt::Arguments
 pub fn print_trace_location(module_path: &str, line: u32) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;
-    let _ = write!(writer, "{}:{}\n", module_path, line);
+    let _ = writeln!(writer, "{}:{}", module_path, line);
 }
 
 #[doc(hidden)]
@@ -111,7 +111,7 @@ pub fn print_trace_location(module_path: &str, line: u32) {
 pub fn print_trace_action(module_path: &str, line: u32, action: &str) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;
-    let _ = write!(writer, "{}:{}: {}\n", module_path, line, action);
+    let _ = writeln!(writer, "{}:{}: {}", module_path, line, action);
 }
 
 #[doc(hidden)]
@@ -119,7 +119,7 @@ pub fn print_trace_action(module_path: &str, line: u32, action: &str) {
 pub fn print_trace_action_named(name: &str, action: &str) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;
-    let _ = write!(writer, "{}: {}\n", name, action);
+    let _ = writeln!(writer, "{}: {}", name, action);
 }
 
 #[doc(hidden)]
@@ -128,7 +128,7 @@ pub fn print_trace_obj<T: ?Sized>(module_path: &str, line: u32, obj: &T, action:
     use core::fmt::Write;
     let ptr = obj as *const T as *const ();
     let mut writer = KernelConsoleWriter;
-    let _ = write!(writer, "{}:{}: {} {:p}\n", module_path, line, action, ptr);
+    let _ = writeln!(writer, "{}:{}: {} {:p}", module_path, line, action, ptr);
 }
 
 #[doc(hidden)]
@@ -137,7 +137,7 @@ pub fn print_trace_obj_named<T: ?Sized>(name: &str, obj: &T, action: &str) {
     use core::fmt::Write;
     let ptr = obj as *const T as *const ();
     let mut writer = KernelConsoleWriter;
-    let _ = write!(writer, "{}: {} {:p}\n", name, action, ptr);
+    let _ = writeln!(writer, "{}: {} {:p}", name, action, ptr);
 }
 
 /// Prints function/module entry information (`{module}:{line}: entry` or `{name}: entry`).

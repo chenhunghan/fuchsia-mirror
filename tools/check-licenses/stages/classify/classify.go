@@ -79,7 +79,10 @@ func (c *Classifier) Run(ctx context.Context, in <-chan pipeline.FilteredProject
 			go func() {
 				defer wg.Done()
 				for proj := range in {
-					hasReadme := proj.Readme != nil
+					readmePath := ""
+					if proj.Readme != nil {
+						readmePath = proj.Readme.Path
+					}
 					isFirstParty := proj.IsFirstParty()
 
 					for _, fileInfo := range proj.Files {
@@ -96,7 +99,7 @@ func (c *Classifier) Run(ctx context.Context, in <-chan pipeline.FilteredProject
 							select {
 							case <-ctx.Done():
 								return
-							case out <- pipeline.ClassifiedFile{Path: path, ProjectRoot: proj.RootPath, IsLicenseFile: false, HasReadme: hasReadme, IsFirstParty: isFirstParty}:
+							case out <- pipeline.ClassifiedFile{Path: path, ProjectRoot: proj.RootPath, IsLicenseFile: false, ReadmePath: readmePath, IsFirstParty: isFirstParty}:
 							}
 							continue
 						}
@@ -113,7 +116,7 @@ func (c *Classifier) Run(ctx context.Context, in <-chan pipeline.FilteredProject
 								select {
 								case <-ctx.Done():
 									return
-								case out <- pipeline.ClassifiedFile{Path: path, ProjectRoot: proj.RootPath, IsLicenseFile: isLicense, HasReadme: hasReadme, IsFirstParty: isFirstParty}:
+								case out <- pipeline.ClassifiedFile{Path: path, ProjectRoot: proj.RootPath, IsLicenseFile: isLicense, ReadmePath: readmePath, IsFirstParty: isFirstParty}:
 								}
 								continue
 							}
@@ -124,7 +127,7 @@ func (c *Classifier) Run(ctx context.Context, in <-chan pipeline.FilteredProject
 							log.Printf("Failed to read/classify file %s: %v\n", path, err)
 							continue
 						}
-						classified.HasReadme = hasReadme
+						classified.ReadmePath = readmePath
 						classified.IsFirstParty = isFirstParty
 
 						metrics.FilesProcessed.Inc("classified")

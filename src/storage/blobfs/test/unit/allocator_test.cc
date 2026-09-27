@@ -4,7 +4,6 @@
 
 #include "src/storage/blobfs/allocator/allocator.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/fzl/resizeable-vmo-mapper.h>
 #include <lib/zx/result.h>
 #include <lib/zx/time.h>

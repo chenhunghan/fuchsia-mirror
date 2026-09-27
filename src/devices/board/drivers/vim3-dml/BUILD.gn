@@ -90,7 +90,6 @@ fuchsia_rust_driver("vim3-dml-driver") {
     "//sdk/fidl/fuchsia.hardware.clockimpl:fuchsia.hardware.clockimpl_rust",
     "//sdk/fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_rust",
     "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_next",
-    "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust",
     "//sdk/fidl/fuchsia.hardware.pwm:fuchsia.hardware.pwm_rust",
     "//sdk/fidl/fuchsia.hardware.sdmmc:fuchsia.hardware.sdmmc_rust",
     "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",

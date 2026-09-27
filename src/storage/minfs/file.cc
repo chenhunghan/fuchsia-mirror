@@ -105,7 +105,8 @@ void File::AllocateAndCommitData(std::unique_ptr<Transaction> transaction) {
       storage::Operation operation = {
           .type = storage::OperationType::kWrite,
           .vmo_offset = bno_start + i,
-          .dev_offset = allocated_blocks[i] + Vfs()->Info().dat_block,
+          .dev_offset =
+              safemath::CheckAdd(allocated_blocks[i], Vfs()->Info().dat_block).ValueOrDie(),
           .length = 1,
       };
       transaction->EnqueueData(operation, &buffer);

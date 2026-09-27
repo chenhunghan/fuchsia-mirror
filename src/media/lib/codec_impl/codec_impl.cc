@@ -31,8 +31,7 @@
 #include "lib/media/codec_impl/codec_port.h"
 #include "src/media/lib/codec_impl/dispatcher.h"
 #include "src/media/lib/codec_impl/utils.h"
-
-#include <src/media/lib/metrics/metrics.cb.h>
+#include "src/media/lib/metrics/metrics.cb.h"
 
 // "is_bound_checks" - In several places that send a message, we check is_bound() first, only
 // because of ZX_POL_BAD_HANDLE ZX_POL_ACTION_EXCEPTION which typically only applies in a driver
@@ -220,7 +219,7 @@ CodecImpl::~CodecImpl() {
   // We need ~binding_ to run on fidl_thread() else it's not safe to
   // un-bind unilaterally.  We could potentially relax this if BindAsync() was
   // never called, but for now we just require this always.
-  ZX_DEBUG_ASSERT(IsFidl());
+  ZX_ASSERT(IsFidl());
 
   // See UnbindAsync() and the BindAsync() error handler. The non-legacy way
   // never allows ~CodecImpl until after the client error handler has run.
@@ -729,10 +728,6 @@ void CodecImpl::FlushEndOfStreamAndCloseStream_StreamControl(uint64_t stream_lif
     // nothing more that the stream is permitted to do).
     ZX_DEBUG_ASSERT(IsStreamActiveLocked());
     ZX_DEBUG_ASSERT(stream_->stream_lifetime_ordinal() == stream_lifetime_ordinal);
-    if (stream_->failure_seen()) {
-      // Already reported to client.
-      return;
-    }
     if (!stream_->input_end_of_stream()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -750,7 +745,11 @@ void CodecImpl::FlushEndOfStreamAndCloseStream_StreamControl(uint64_t stream_lif
     zx::time wait_for_output_eos_start = zx::clock::get_monotonic();
     zx::time last_warn_time = wait_for_output_eos_start;
     while (!stream_->output_end_of_stream()) {
-      if (stream_->failure_seen()) {
+      stream_->AssertHeld(this);
+      if (stream_->future_discarded()) {
+        // This happens if onCoreCodecFailStream() ran, not due to the client moving to a new
+        // stream since the client already indicated they want to wait for EOS before moving to the
+        // next stream.
         return;
       }
       // While waiting, we'll continue to send OnOutputPacket(),
@@ -1000,7 +999,7 @@ void CodecImpl::RecycleOutputPacket(fuchsia::media::PacketHeader available_outpu
 
     uint32_t protocol_packet_index = available_output_packet.packet_index();
     uint32_t allocated_packet_index;
-    if (*is_dynamic_buffers_[kOutputPort]) {
+    if (IsDynamicBuffersLocked(kOutputPort)) {
       auto& protocol_packets_by_ordinal = protocol_packets_by_protocol_packet_index_[kOutputPort];
       auto protocol_packets_by_ordinal_iter =
           protocol_packets_by_ordinal.find(buffer_lifetime_ordinal);
@@ -1025,7 +1024,6 @@ void CodecImpl::RecycleOutputPacket(fuchsia::media::PacketHeader available_outpu
         return;
       }
       allocated_packet_index = protocol_packets_by_index_iter->second->allocated_packet_index();
-      protocol_packets_by_index.erase(protocol_packet_index);
     } else {
       allocated_packet_index = protocol_packet_index;
     }
@@ -1048,34 +1046,23 @@ void CodecImpl::RecycleOutputPacket(fuchsia::media::PacketHeader available_outpu
       return;
     }
     packet = packets_at_ordinal[allocated_packet_index].get();
-    if (packet->is_free()) {
+    if (packet->is_free() || packet->is_queued()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
       FailLocked(
-          "packet_index already free at protocol level - invalid client "
+          "packet_index already free or still queued at protocol level - invalid client "
           "message");
       return;
     }
 
     ZX_ASSERT(packet);
-    VLOGF("RecycleOutputPacket ptr: %p index: %u", packet, packet->packet_index());
-    ZX_ASSERT(packet->buffer());
-    --packet->buffer()->output_in_flight_count_;
-
-    // Mark free at protocol level.
-    packet->SetFree(true);
-
-    // Before handing the packet to the core codec, clear some fields that the
-    // core codec is expected to set (or optionally set in the case of
-    // timestamp_ish).  In addition to these parameters, a core codec can emit
-    // output config changes via onCoreCodecMidStreamOutputConstraintsChange().
-    packet->ClearStartOffset();
-    packet->ClearValidLengthBytes();
-    packet->ClearTimestampIsh();
+    VLOGF("RecycleOutputPacket ptr: %p index: %u", packet, packet->allocated_packet_index());
+    MarkOutputPacketFreeLocked(packet);
   }  // ~lock
 
   VLOGF("calling CoreCodecRecycleOutputPacket packet ptr: %p index: %u buffer: %p index: %u",
-        packet, packet->packet_index(), packet->buffer(), packet->buffer()->index());
+        packet, packet->allocated_packet_index(), packet->buffer(),
+        packet->buffer() ? packet->buffer()->index() : 0);
 
   // Recycle to core codec. This is the output ordering domain (fidl thread) so
   // CoreCodecCloseBufferLifetimeOrdinal can't happen between releasing the lock above and this
@@ -1142,10 +1129,6 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
     }
   }
   ZX_DEBUG_ASSERT(stream_lifetime_ordinal == stream_lifetime_ordinal_);
-  if (stream_->failure_seen()) {
-    // Already reported to client.
-    return;
-  }
   if (stream_->input_end_of_stream()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     FailLocked("QueueInputFormatDetails() after QueueInputEndOfStream() unexpected");
@@ -1153,7 +1136,7 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
   }
   stream_->AssertHeld(this);
   if (stream_->future_discarded()) {
-    // No reason to handle since the stream is future-discarded.
+    // No reason to handle since the stream is future-discarded (or failed).
     return;
   }
   stream_->SetInputFormatDetails(
@@ -1407,7 +1390,7 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
             media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
         FailLocked(
             "QueueInputPacket with packet_index out of range - "
-            "packet_index: %u size: %u",
+            "packet_index: %u size: %zu",
             packet.header().packet_index(), input_packets.size());
         return;
       }
@@ -1523,8 +1506,11 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
       return;
     }
 
-    if (stream_->failure_seen()) {
-      // Already reported to client.
+    if (static_cast<uint64_t>(packet.start_offset()) + packet.valid_length_bytes() >
+        buffer->size()) {
+      LogEvent(
+          media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
+      FailLocked("client QueueInputPacket() with packet end > buffer size");
       return;
     }
 
@@ -1572,18 +1558,9 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
     stream_->SetOobConfigPending(false);
   }
 
-  if (codec_packet->start_offset() + codec_packet->valid_length_bytes() >
-      codec_packet->buffer()->size()) {
-    LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
-    Fail("client QueueInputPacket() with packet end > buffer size");
-    return;
-  }
-
-  ZX_ASSERT(port_settings_[kInputPort]);
-
   // Flush the data out to RAM if needed.
   if (IsCoreCodecHwBased(kInputPort) &&
-      port_settings_[kInputPort]->coherency_domain() == fuchsia_sysmem2::CoherencyDomain::kCpu) {
+      codec_packet->buffer()->coherency_domain() == fuchsia_sysmem2::CoherencyDomain::kCpu) {
     // This flushes only the portion of the buffer that the packet is
     // referencing.
     codec_packet->CacheFlush();
@@ -1642,7 +1619,8 @@ void CodecImpl::ParticipateInBufferAllocation(
     default:
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
-      Fail("ParticipateInBufferAllocation unrecognized port value - port: %u", request.port());
+      Fail("ParticipateInBufferAllocation unrecognized port value - port: %u",
+           static_cast<uint32_t>(request.port()));
       return;
   }
   if (!request.has_buffer_constraints_version_ordinal()) {
@@ -2201,7 +2179,7 @@ void CodecImpl::RemoveBuffer(fuchsia::media::StreamProcessorRemoveBufferRequest 
 void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_ordinal,
                                      uint32_t buffer_index, RemoveBufferCallback callback) {
   ZX_DEBUG_ASSERT(port == kInputPort && IsStreamControl() || port == kOutputPort && IsFidl());
-  std::shared_ptr<zx::vmo> buffer_keep_alive;
+  CodecBuffer::KeepAlive buffer_keep_alive;
   CodecBuffer* buffer_to_remove = nullptr;
   {  // scope lock
     ScopedLock lock(lock_);
@@ -2218,7 +2196,11 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
     // because AddBuffer can choose to not add a buffer (after AddBuffer updates
     // protocol_buffer_lifetime_ordinal_[port]) and not update buffer_lifetime_ordinal_[port], and
     // RemoveBuffer of that same buffer needs to just complete.
-    if (is_dynamic_buffers_[port].has_value() && !is_dynamic_buffers_[port] &&
+    // Because RemoveBuffer requires an odd buffer_lifetime_ordinal (>= 1) and we checked
+    // buffer_lifetime_ordinal <= protocol_buffer_lifetime_ordinal_[port] above, at least one
+    // Set*BufferPartialSettings or AddBuffer call has already set is_dynamic_buffers_[port].
+    ZX_DEBUG_ASSERT(is_dynamic_buffers_[port].has_value());
+    if (!IsDynamicBuffersLocked(port) &&
         (buffer_lifetime_ordinal == buffer_lifetime_ordinal_[port])) {
       // At least so far, when not using dynamic buffers, RemoveBuffer is only allowed after the
       // StreamProcessor is moved to a new buffer_lifetime_ordinal (whether an even value due to
@@ -2273,8 +2255,8 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
           LogEvent(media_metrics::
                        StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
           FailLocked(
-              "redundant RemoveBuffer not allowed (adding case) - port: %lu buffer_lifetime_ordinal: %" PRId64
-              " buffer_index: %" PRId64,
+              "redundant RemoveBuffer not allowed (adding case) - port: %u "
+              "buffer_lifetime_ordinal: %" PRIu64 " buffer_index: %u",
               port, buffer_lifetime_ordinal, buffer_index);
           return;
         }
@@ -2297,8 +2279,8 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
           LogEvent(media_metrics::
                        StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
           FailLocked(
-              "redundant RemoveBuffer not allowed (active case) - port: %lu buffer_lifetime_ordinal: %" PRId64
-              " buffer_index: %" PRId64,
+              "redundant RemoveBuffer not allowed (active case) - port: %u "
+              "buffer_lifetime_ordinal: %" PRIu64 " buffer_index: %u",
               port, buffer_lifetime_ordinal, buffer_index);
           return;
         }
@@ -2325,24 +2307,35 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
       // already pending removal at CodecAdapter layer; pending_remove_completion_ set (the first
       // and only time) above which will inform client when removal done
       ZX_DEBUG_ASSERT(buffer_to_remove->pending_remove_completion_);
-      ZX_DEBUG_ASSERT(!buffer_to_remove->until_remove_started_child_vmo_);
+      ZX_DEBUG_ASSERT(!buffer_to_remove->HasUntilRemoveStartedChildVmoForDebug());
       return;
     }
 
     ZX_DEBUG_ASSERT(!buffer_to_remove->is_remove_pending_);
     buffer_to_remove->is_remove_pending_ = true;
-    ZX_DEBUG_ASSERT(buffer_to_remove->until_remove_started_child_vmo_);
-    buffer_keep_alive = std::move(buffer_to_remove->until_remove_started_child_vmo_);
-    ZX_DEBUG_ASSERT(!buffer_to_remove->until_remove_started_child_vmo_);
+    ZX_DEBUG_ASSERT(buffer_to_remove->HasUntilRemoveStartedChildVmoForDebug());
+    buffer_keep_alive = buffer_to_remove->GetKeepAlive();
   }  // ~lock
   ZX_DEBUG_ASSERT(buffer_to_remove);
   if (buffer_to_remove->was_ever_added_to_core_codec()) {
     CoreCodecRemoveBuffer(port, buffer_to_remove);
   }
+  // We wait until after CoreCodecRemoveBuffer completes before resetting
+  // until_remove_started_child_vmo_ (matching EnsureBuffersNotConfigured and the comment on
+  // until_remove_started_child_vmo_ in codec_buffer.h), so that if the CodecAdapter calls
+  // GetChildVmo() or CodecPacket::SetBuffer() / GetKeepAlive() during CoreCodecRemoveBuffer, it
+  // can still use the lower-overhead until_remove_started_child_vmo_ (zx::vmo::duplicate() or
+  // shared_ptr copy) instead of falling back to parent_vmo_.create_child(). Because
+  // RemoveBufferInternal and EnsureBuffersNotConfigured for a given port only run on that port's
+  // single ordering domain (StreamControl for input, FIDL thread for output) and invoke
+  // CoreCodecRemoveBuffer synchronously on that thread, no other removal call for this port can
+  // run during CoreCodecRemoveBuffer and observe is_remove_pending_ before this reset runs.
+  buffer_to_remove->ResetUntilRemoveStartedChildVmo();
   // ~buffer_keep_alive, which allows ZX_VMO_ZERO_CHILDREN on buffer_to_remove.parent_vmo_, once the
   // CodecAdapter has closed all its handles to the buffer previously obtained using
-  // buffer_to_remove.GetChildVmo, and previously queued output packets using the buffer have been
-  // sent. After those things have occurred, we complete the RemoveBuffer.
+  // buffer_to_remove.GetChildVmo(), and any CodecPacket(s) with this buffer set have cleared
+  // SetBuffer(nullptr) (releasing their CodecBuffer::KeepAlive). After those things have occurred,
+  // we complete the RemoveBuffer.
 }
 
 void CodecImpl::EnableOldOutputBuffers() {
@@ -2478,11 +2471,6 @@ void CodecImpl::QueueInputEndOfStream_StreamControl(uint64_t stream_lifetime_ord
       }
     }
 
-    if (stream_->failure_seen()) {
-      // Already reported to client.
-      return;
-    }
-
     if (stream_->input_end_of_stream()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -2584,8 +2572,8 @@ bool CodecImpl::CheckWaitEnsureInputConfigured(ScopedLock& lock) {
               FailLocked(
                   "Probably client did QueueInput* before the client "
                   "determined that sysmem was done successfully allocating "
-                  "buffers after most recent SetInputBufferPartialSettings(): %d",
-                  result.error_value());
+                  "buffers after most recent SetInputBufferPartialSettings(): %s",
+                  result.error_value().FormatDescription().c_str());
               return;
             }
           });
@@ -3217,7 +3205,7 @@ void CodecImpl::SetBufferSettingsCommon(
     partial_settings->clear_sysmem_token();
   }
 
-  if (is_dynamic_buffers_[port].has_value() && *is_dynamic_buffers_[port]) {
+  if (IsDynamicBuffersLocked(port)) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     // Once dynamic buffers are used on a port, that port can't use non-dynamic buffers for rest of
     // CodecImpl instance lifetime. The client can use a new StreamProcessor instance instead.
@@ -3225,7 +3213,7 @@ void CodecImpl::SetBufferSettingsCommon(
         "client used SetInputBufferPartialSettings / SetOutputBufferPartialSettings after dynamic");
     return;
   }
-  ZX_DEBUG_ASSERT(!is_dynamic_buffers_[port].has_value() || !*is_dynamic_buffers_[port]);
+  ZX_DEBUG_ASSERT(!IsDynamicBuffersLocked(port));
   is_dynamic_buffers_[port] = false;
 
   ZX_DEBUG_ASSERT(
@@ -3584,7 +3572,7 @@ void CodecImpl::OnBufferCollectionInfoInternal(
     if (IsCoreCodecMappedBufferUseful(port)) {
       std::optional<FakeMapRange> new_fake_map_range;
       zx_status_t status =
-          FakeMapRange::Create(port_settings_[port]->vmo_usable_size(), &new_fake_map_range);
+          FakeMapRange::Create(port_settings_[port]->raw_vmo_size(), &new_fake_map_range);
       if (status != ZX_OK) {
         LogEvent(
             media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_InitializationError);
@@ -3601,11 +3589,29 @@ void CodecImpl::OnBufferCollectionInfoInternal(
   // and AddOutputBufferInternal() calls, almost as if the client were adding
   // the buffers itself (but without the check that the client isn't adding
   // buffers itself while using sysmem).
+  uint64_t vmo_usable_size = 0;
+  bool is_secure = false;
+  fuchsia_sysmem2::CoherencyDomain coherency_domain = fuchsia_sysmem2::CoherencyDomain::kCpu;
+  {  // scope lock
+    std::scoped_lock lock(lock_);
+
+    ZX_DEBUG_ASSERT(buffer_lifetime_ordinal == buffer_lifetime_ordinal_[port]);
+    ZX_DEBUG_ASSERT(port_settings_[port]);
+
+    // OnBufferCollectionInfoInternal is only used for non-dynamic buffer collections
+    // (SetInputBufferPartialSettings / SetOutputBufferPartialSettings), where all buffers come from
+    // a single sysmem BufferCollectionInfo and share a single collection-wide
+    // settings().buffer_settings().size_bytes() (port_settings_[port]->vmo_usable_size() does not
+    // depend on buffer index). Dynamic buffers (which allow varying input buffer sizes via
+    // StreamProcessor.AddBuffer) use OnGetVmoInfoCompletion instead of this method.
+    vmo_usable_size = port_settings_[port]->vmo_usable_size();
+    is_secure = port_settings_[port]->is_secure();
+    coherency_domain = port_settings_[port]->coherency_domain();
+  }  // ~lock
+
   for (uint32_t i = 0; i < buffer_count; i++) {
     // While under the lock we'll move out the stuff we need into locals
     uint64_t vmo_usable_start = 0;
-    uint64_t vmo_usable_size = 0;
-    bool is_secure = false;
     {  // scope lock
       std::lock_guard<std::mutex> lock(lock_);
 
@@ -3613,14 +3619,14 @@ void CodecImpl::OnBufferCollectionInfoInternal(
       ZX_DEBUG_ASSERT(port_settings_[port]);
 
       vmo_usable_start = port_settings_[port]->vmo_usable_start(i);
-      vmo_usable_size = port_settings_[port]->vmo_usable_size();
-      is_secure = port_settings_[port]->is_secure();
     }  // ~lock
 
     CodecBuffer::Info buffer_info{.port = port,
+                                  .coherency_domain = coherency_domain,
                                   .lifetime_ordinal = buffer_lifetime_ordinal,
                                   .index = i,
                                   .is_secure = is_secure};
+    // CodecBuffer will query raw_vmo_size from Zircon based on the VMO.
     CodecVmoRange vmo_range(std::move(vmos[i]), vmo_usable_start, vmo_usable_size);
     if (port == kInputPort) {
       AddInputBuffer_StreamControl(std::move(buffer_info), std::move(vmo_range));
@@ -3813,17 +3819,10 @@ void CodecImpl::EnsureBuffersNotConfigured(ScopedLock& lock, CodecPort port, boo
       auto& buffer = *buffers_by_index_entry.second;
       ZX_DEBUG_ASSERT(buffer.is_remove_pending_);
       // Drop the keep-alive child handle under parent_vmo_ - this allows ZX_VMO_ZERO_CHILDREN to
-      // trigger as soon as there are no more handles to child VMOs held by the CodecAdapter.
-      if (buffer.until_remove_started_child_vmo_) {
-        zx_info_handle_count_t handle_count;
-        zx_status_t status = buffer.until_remove_started_child_vmo_->get_info(
-            ZX_INFO_HANDLE_COUNT, &handle_count, sizeof(handle_count), nullptr, nullptr);
-        ZX_ASSERT(status == ZX_OK);
-
-        VLOGF("until_remove_started_child_vmo_.reset() - port: %u buffer: %p", buffer.port(),
-              &buffer);
-        buffer.until_remove_started_child_vmo_.reset();
-      }
+      // trigger as soon as there are no more handles to child VMOs held by the CodecAdapter (via
+      // GetChildVmo()) and no more CodecBuffer::KeepAlive instances held by CodecPacket(s) while
+      // the buffer is set on a packet (cleared via CodecPacket::SetBuffer(nullptr)).
+      buffer.ResetUntilRemoveStartedChildVmo();
     }
   }
 
@@ -3833,8 +3832,7 @@ void CodecImpl::EnsureBuffersNotConfigured(ScopedLock& lock, CodecPort port, boo
   // even packets of old buffer_lifetime_ordinal(s). It works this way to prevent a client that
   // can handle packets of old buffer_lifetime_ordinal from seeing colliding packet_index(s) emitted
   // on output, while still being able to recycle all packets when the client is gone.
-  if (port == kOutputPort && is_supports_dynamic_buffers() &&
-      (is_client_gone || !is_enable_old_output_buffers_)) {
+  if (port == kOutputPort && (is_client_gone || !is_enable_old_output_buffers_)) {
     ZX_DEBUG_ASSERT(port == kOutputPort && IsFidl());
     std::vector<CodecPacket*> recycle_outside_lock;
     auto& port_packets = active_packets_[port];
@@ -3844,10 +3842,49 @@ void CodecImpl::EnsureBuffersNotConfigured(ScopedLock& lock, CodecPort port, boo
       for (auto& packet_ptr : packets_by_index) {
         auto* packet = packet_ptr.get();
         ZX_DEBUG_ASSERT(buffer_lifetime_ordinal == packet->buffer_lifetime_ordinal());
-        if (!packet->is_free()) {
-          --packet->buffer()->output_in_flight_count_;
-          packet->SetFree(true);
-          recycle_outside_lock.push_back(packet);
+        // Under IsLegacyUnbind() (which will eventually be removed once all CodecImpl owners use
+        // async unbind), if the owner destroys ~CodecImpl directly on shared_fidl_thread_,
+        // EnsureUnbindCompleted() calls shared_fidl_queue_.StopAndClear() before calling
+        // EnsureBuffersNotConfigured(lock, kOutputPort, /*is_client_gone=*/true). That
+        // StopAndClear() deletes any queued output packet closures without running them, so any
+        // such packets still have packet->is_queued() true here and their queued closures will
+        // never run. Clearing SetQueued(false) in that case allows the cleanup below to release the
+        // packet/buffer state while preserving the ZX_DEBUG_ASSERT(!is_client_gone ||
+        // !packet->is_queued()) check.
+        bool was_queued_when_stopped = false;
+        if (IsLegacyUnbind() && shared_fidl_queue_.is_stopped() && packet->is_queued()) {
+          packet->SetQueued(false);
+          was_queued_when_stopped = true;
+        }
+        // When is_client_gone is true, EnsureStreamClosed() on StreamControl has already destroyed
+        // any PausedOutput (draining output_queue_ into shared_fidl_queue_) before posting
+        // AsyncShutdownStepWaitForZeroInputBuffersAndEnsureZeroOutputBuffers to shared_fidl_queue_,
+        // so all previously-queued output closures on shared_fidl_queue_ have already run and
+        // cleared is_queued() (or, under IsLegacyUnbind(), were cleared immediately above).
+        ZX_DEBUG_ASSERT(!is_client_gone || !packet->is_queued());
+        if (!packet->is_queued()) {
+          if (!packet->is_free()) {
+            MarkOutputPacketFreeLocked(packet);
+            if (is_supports_dynamic_buffers()) {
+              recycle_outside_lock.push_back(packet);
+            }
+          } else {
+            ClearOutputPacketFieldsLocked(packet);
+            if (was_queued_when_stopped && is_supports_dynamic_buffers()) {
+              recycle_outside_lock.push_back(packet);
+            }
+          }
+          if (!is_supports_dynamic_buffers()) {
+            // When !is_supports_dynamic_buffers(), CoreCodecEnsureBuffersNotConfigured(kOutputPort)
+            // has already been called above, so CoreCodecRecycleOutputPacket won't be called for
+            // any packets of old buffer_lifetime_ordinal(s). For queued packets,
+            // short_circuit_packet will call SetBuffer(nullptr) when the queued task runs. For
+            // non-queued packets, clear SetBuffer(nullptr) here (including on free packets in case
+            // a CodecAdapter such as OutputSink associated a buffer with a free packet before
+            // emitting it) to release buffer_keep_alive_ and allow parent_vmo_ to reach
+            // ZX_VMO_ZERO_CHILDREN.
+            packet->SetBuffer(nullptr);
+          }
         }
       }
     }
@@ -3874,8 +3911,10 @@ void CodecImpl::EnsureBuffersNotConfigured(ScopedLock& lock, CodecPort port, boo
         // is_supports_dynamic_buffers_.
         ZX_DEBUG_ASSERT(is_supports_dynamic_buffers());
         VLOGF(
-            "EnsureBuffersNotConfigured calling CoreCodecRecycleOutputPacket port: %u packet ptr: %p index: %u buffer ptr: %p index: %u",
-            port, packet, packet->packet_index(), packet->buffer(), packet->buffer()->index());
+            "EnsureBuffersNotConfigured calling CoreCodecRecycleOutputPacket port: %u "
+            "packet ptr: %p index: %u buffer ptr: %p index: %u",
+            port, packet, packet->allocated_packet_index(), packet->buffer(),
+            packet->buffer() ? packet->buffer()->index() : 0);
         CoreCodecRecycleOutputPacket(packet);
       }
     }
@@ -3947,7 +3986,7 @@ void CodecImpl::AddBuffer(fuchsia::media::StreamProcessorAddBufferRequest reques
   if (!maybe_codec_port.has_value()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
-    Fail("AddBuffer port unrecognized - port: %u", request.port());
+    Fail("AddBuffer port unrecognized - port: %u", static_cast<uint32_t>(request.port()));
     return;
   }
   CodecPort port = *maybe_codec_port;
@@ -4063,7 +4102,11 @@ void CodecImpl::AddBufferInternal(CodecPort port, uint64_t buffer_constraints_ve
         (buffer_lifetime_ordinal_[port] >= port_settings_[port]->buffer_lifetime_ordinal() &&
          buffer_lifetime_ordinal_[port] <= port_settings_[port]->buffer_lifetime_ordinal() + 1));
 
-    if (is_dynamic_buffers_[port].has_value() && !*is_dynamic_buffers_[port]) {
+    // On the first AddBuffer call for a port, is_dynamic_buffers_[port] is still std::nullopt
+    // (until set to true below), for which IsDynamicBuffersLocked(port) returns false. We check
+    // has_value() here so we only reject when non-dynamic buffers were previously configured
+    // (is_dynamic_buffers_[port] == false).
+    if (is_dynamic_buffers_[port].has_value() && !IsDynamicBuffersLocked(port)) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
       FailLocked(
@@ -4071,7 +4114,7 @@ void CodecImpl::AddBufferInternal(CodecPort port, uint64_t buffer_constraints_ve
           port);
       return;
     }
-    ZX_DEBUG_ASSERT(!is_dynamic_buffers_[port].has_value() || *is_dynamic_buffers_[port]);
+    ZX_DEBUG_ASSERT(!is_dynamic_buffers_[port].has_value() || IsDynamicBuffersLocked(port));
     is_dynamic_buffers_[port] = true;
 
     if (buffer_constraints_version_ordinal > sent_buffer_constraints_version_ordinal_[port]) {
@@ -4239,8 +4282,8 @@ void CodecImpl::AddBufferInternal(CodecPort port, uint64_t buffer_constraints_ve
     if (buffer_count >= dynamic_buffers_max_[port]) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
-      FailLocked("AddBuffer when already at max - port: %u current_buffer_count: %" PRId64
-                 " max: %" PRId64,
+      FailLocked("AddBuffer when already at max - port: %u current_buffer_count: %" PRIu64
+                 " max: %u",
                  port, buffer_count, dynamic_buffers_max_[port]);
       return;
     }
@@ -4254,7 +4297,7 @@ void CodecImpl::AddBufferInternal(CodecPort port, uint64_t buffer_constraints_ve
         LogEvent(
             media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
         FailLocked(
-            "AddBuffer found already-adding buffer - port: %lu buffer_lifetime_ordinal: %" PRId64
+            "AddBuffer found already-adding buffer - port: %u buffer_lifetime_ordinal: %" PRIu64
             " buffer_index: %u",
             port, buffer_lifetime_ordinal, buffer_index);
         return;
@@ -4270,7 +4313,7 @@ void CodecImpl::AddBufferInternal(CodecPort port, uint64_t buffer_constraints_ve
         LogEvent(
             media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
         FailLocked(
-            "AddBuffer found already-active buffer - port: %lu buffer_lifetime_ordinal: %" PRId64
+            "AddBuffer found already-active buffer - port: %u buffer_lifetime_ordinal: %" PRIu64
             " buffer_index: %u",
             port, buffer_lifetime_ordinal, buffer_index);
         return;
@@ -4319,6 +4362,7 @@ void CodecImpl::AddBufferInternal(CodecPort port, uint64_t buffer_constraints_ve
                              .emplace_back(std::unique_ptr<CodecPacket>(
                                  new CodecPacket(buffer_lifetime_ordinal, packet_index)))
                              .get();
+      new_packet->SetParent(this);
       // For input we just need to have sufficient free packets to allow the client to have as many
       // packets in flight as there are buffers (per port and buffer_lifetime_ordinal). The new
       // input packet starts with the client implicitly.
@@ -4621,20 +4665,34 @@ void CodecImpl::OnGetVmoInfoCompletion(
       return;
     }
 
+    // At this point GetVmoInfo has succeeded on a duplicate handle of
+    // adding_buffer->unverified_vmo_ (same koid) with need_single_buffer_settings set to true. Any
+    // non-sysmem VMO (or client-created child slice of a sysmem VMO) has a koid unknown to sysmem
+    // and already failed GetVmoInfo with NOT_FOUND, which was handled cleanly via FailLocked() in
+    // the result.is_error() check above. Because we trust sysmem and sysmem VMOs are non-resizable
+    // slices of size raw_vmo_size, these asserts are checking sysmem/kernel invariants rather than
+    // client-controlled inputs.
     CodecBuffer::Info buffer_info;
     buffer_info.port = port;
     buffer_info.lifetime_ordinal = buffer_lifetime_ordinal;
     buffer_info.index = buffer_index;
     ZX_ASSERT(response.single_buffer_settings().has_value());
-    ZX_ASSERT(response.single_buffer_settings()->buffer_settings().has_value());
-    ZX_ASSERT(response.single_buffer_settings()->buffer_settings()->is_secure().has_value());
-    buffer_info.is_secure =
-        response.single_buffer_settings()->buffer_settings()->is_secure().value();
+    const auto& single_buffer_settings = response.single_buffer_settings().value();
+    ZX_ASSERT(single_buffer_settings.buffer_settings().has_value());
+    const auto& buffer_settings = single_buffer_settings.buffer_settings().value();
+    ZX_ASSERT(buffer_settings.is_secure().has_value());
+    buffer_info.is_secure = buffer_settings.is_secure().value();
+    ZX_ASSERT(buffer_settings.coherency_domain().has_value());
+    buffer_info.coherency_domain = buffer_settings.coherency_domain().value();
     uint64_t vmo_size;
     zx_status_t get_size_status = adding_buffer->unverified_vmo_.get_size(&vmo_size);
     ZX_ASSERT(get_size_status == ZX_OK);
-    // buffer VMO is now verified
-    auto vmo_range = CodecVmoRange(std::move(adding_buffer->unverified_vmo_), 0, vmo_size);
+    ZX_ASSERT(buffer_settings.raw_vmo_size().has_value());
+    ZX_ASSERT(vmo_size == buffer_settings.raw_vmo_size().value());
+    ZX_ASSERT(buffer_settings.size_bytes().has_value());
+    uint64_t content_size = buffer_settings.size_bytes().value();
+    // CodecBuffer will query raw_vmo_size from Zircon based on the VMO.
+    auto vmo_range = CodecVmoRange(std::move(adding_buffer->unverified_vmo_), 0, content_size);
 
     auto buffer = std::unique_ptr<CodecBuffer>(
         new CodecBuffer(this, std::move(buffer_info), std::move(vmo_range)));
@@ -4683,7 +4741,7 @@ void CodecImpl::OnGetVmoInfoCompletion(
       if (port_settings_[port]->is_secure() && IsCoreCodecMappedBufferUseful(port)) {
         std::optional<FakeMapRange> new_fake_map_range;
         zx_status_t status =
-            FakeMapRange::Create(port_settings_[port]->vmo_usable_size(), &new_fake_map_range);
+            FakeMapRange::Create(port_settings_[port]->raw_vmo_size(), &new_fake_map_range);
         if (status != ZX_OK) {
           LogEvent(media_metrics::
                        StreamProcessorEvents2MigratedMetricDimensionEvent_InitializationError);
@@ -5143,7 +5201,8 @@ bool CodecImpl::StartNewStream(ScopedLock& lock, uint64_t stream_lifetime_ordina
   // The statement below could obviously be re-written as a giant boolean
   // expression, but this way seems easier to comment.
   if (last_provided_buffer_constraints_version_ordinal_[kOutputPort] <
-      last_required_buffer_constraints_version_ordinal_[kOutputPort]) {
+          last_required_buffer_constraints_version_ordinal_[kOutputPort] ||
+      (IsPortAtLeastPartiallyConfiguredLocked(kOutputPort) && !IsOutputConfiguredLocked())) {
     // The client _might_ still be trying to catch up, so to disambiguate,
     // require an even fresher config with respect to this new stream to
     // unambiguously force the client to catch up to the even newer config.
@@ -5169,24 +5228,30 @@ bool CodecImpl::StartNewStream(ScopedLock& lock, uint64_t stream_lifetime_ordina
   }
 
   if (is_new_config_needed) {
+    // Capture paused_output by value (copy) into the lambda so the outer
+    // std::shared_ptr<PausedOutput> keeps output paused on StreamControl until
+    // IsOutputConfiguredLocked() becomes true below.
     auto paused_output = std::make_shared<PausedOutput>(*this);
-    if (!RunSyncOnSharedFidlForStream(
-            lock, [this, paused_output = std::move(paused_output)]() mutable {
-              ScopedLock lock(lock_);
-              if (IsStoppingLocked()) {
-                return;
-              }
-              StartIgnoringClientOldOutputConfig(lock);
-              EnsureBuffersNotConfigured(lock, kOutputPort, false);
-              GenerateAndSendNewOutputConstraints(lock, std::move(paused_output));
-            })) {
+    if (!RunSyncOnSharedFidlForStream(lock, [this, paused_output] mutable {
+          ScopedLock lock(lock_);
+          if (IsStoppingLocked()) {
+            return;
+          }
+          StartIgnoringClientOldOutputConfig(lock);
+          EnsureBuffersNotConfigured(lock, kOutputPort, false);
+          GenerateAndSendNewOutputConstraints(lock, std::move(paused_output));
+        })) {
       ZX_DEBUG_ASSERT(IsStoppingLocked());
       return false;
     }
 
+    stream_->AssertHeld(this);
+    if (stream_->future_discarded()) {
+      return true;
+    }
+
     // Now we can wait for the client to catch up to the current output config or for the client to
     // tell the server to discard the current stream.
-    stream_->AssertHeld(this);
     while (!IsStoppingLocked() && !stream_->future_discarded() && !IsOutputConfiguredLocked()) {
       RunAnySysmemCompletionsOrWait(lock);
     }
@@ -5196,7 +5261,7 @@ bool CodecImpl::StartNewStream(ScopedLock& lock, uint64_t stream_lifetime_ordina
     }
 
     if (stream_->future_discarded()) {
-      // A discarded stream isn't an error for the CodecImpl instance.
+      // A discarded or failed stream isn't an error for the CodecImpl instance.
       return true;
     }
 
@@ -5458,6 +5523,7 @@ bool CodecImpl::EnsureFutureStreamCloseSeenLocked(uint64_t stream_lifetime_ordin
   closing_stream->AssertHeld(this);
   if (!closing_stream->future_flush_end_of_stream()) {
     closing_stream->SetFutureDiscarded();
+    wake_stream_control_condition_.notify_all();
   }
 
   future_stream_lifetime_ordinal_++;
@@ -5487,9 +5553,10 @@ bool CodecImpl::EnsureFutureStreamFlushSeenLocked(uint64_t stream_lifetime_ordin
   ZX_DEBUG_ASSERT(!stream_queue_.empty());
   Stream* flushing_stream = stream_queue_.back().get();
   // Thanks to the above future_stream_lifetime_ordinal_ check, we know the
-  // future stream is not discarded yet.
+  // future stream is not discarded by the client yet (though it may have been
+  // marked future_discarded by onCoreCodecFailStream).
   flushing_stream->AssertHeld(this);
-  ZX_DEBUG_ASSERT(!flushing_stream->future_discarded());
+  ZX_DEBUG_ASSERT(!flushing_stream->future_discarded() || flushing_stream->failure_seen());
   flushing_stream->AssertHeld(this);
   if (flushing_stream->future_flush_end_of_stream()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -5771,16 +5838,18 @@ void CodecImpl::MidStreamOutputConstraintsChange(uint64_t stream_lifetime_ordina
     // maybe_weak_paused_output_. In the success path, this occurs just after OnOutputConstraints is
     // sent, as that message must be ordered after output so far, but we can't send any further
     // output until output is configured again via client setting up new output buffers.
+    // Capture paused_output by value (copy) into the lambda so the outer
+    // std::shared_ptr<PausedOutput> keeps output paused on StreamControl until
+    // IsOutputConfiguredLocked() becomes true below.
     auto paused_output = std::make_shared<PausedOutput>(*this);
 
-    if (!RunSyncOnSharedFidlForStream(
-            lock, [this, paused_output = std::move(paused_output)]() mutable {
-              ScopedLock lock(lock_);
-              VLOGF("EnsureBuffersNotConfigured()...");
-              EnsureBuffersNotConfigured(lock, kOutputPort, false);
-              VLOGF("GenerateAndSendNewOutputConstraints()...");
-              GenerateAndSendNewOutputConstraints(lock, std::move(paused_output));
-            })) {
+    if (!RunSyncOnSharedFidlForStream(lock, [this, paused_output] mutable {
+          ScopedLock lock(lock_);
+          VLOGF("EnsureBuffersNotConfigured()...");
+          EnsureBuffersNotConfigured(lock, kOutputPort, false);
+          VLOGF("GenerateAndSendNewOutputConstraints()...");
+          GenerateAndSendNewOutputConstraints(lock, std::move(paused_output));
+        })) {
       ZX_DEBUG_ASSERT(IsStoppingLocked());
       VLOGF("CodecImpl::MidStreamOutputConstraintsChange IsStoppingLocked() (2)");
       return;
@@ -6069,10 +6138,24 @@ bool CodecImpl::IsPortConfiguredCommonLocked(CodecPort port) {
   // is_port_configured_[port], the CodecAdapter also has the port
   // configured.
 #if ZX_DEBUG_ASSERT_IMPLEMENTED
-  auto* buffers = all_buffers(port);
-  ZX_DEBUG_ASSERT(!is_port_configured_[port] || is_dynamic_buffers_[port] ||
-                  (buffer_lifetime_ordinal_[port] % 2 == 1) && port_settings_[port] && buffers &&
-                      buffers->size() >= port_settings_[port]->min_buffer_count());
+  if (is_port_configured_[port] && !IsDynamicBuffersLocked(port)) {
+    ZX_DEBUG_ASSERT(port_settings_[port]);
+    // A configured port's settings always correspond to a client-initiated odd
+    // buffer_lifetime_ordinal. Normally buffer_lifetime_ordinal_[port] matches
+    // settings_ordinal, except on kOutputPort between
+    // StartIgnoringClientOldOutputConfig() (which increments
+    // buffer_lifetime_ordinal_[kOutputPort] to settings_ordinal + 1) and
+    // EnsureBuffersNotConfigured() (which clears is_port_configured_[kOutputPort]
+    // and port_settings_[kOutputPort]).
+    uint64_t settings_ordinal = port_settings_[port]->buffer_lifetime_ordinal();
+    ZX_DEBUG_ASSERT(settings_ordinal % 2 == 1);
+    ZX_DEBUG_ASSERT(
+        buffer_lifetime_ordinal_[port] == settings_ordinal ||
+        (port == kOutputPort && buffer_lifetime_ordinal_[port] == settings_ordinal + 1));
+    auto buffers_iter = active_buffers_[port].find(settings_ordinal);
+    ZX_DEBUG_ASSERT(buffers_iter != active_buffers_[port].end());
+    ZX_DEBUG_ASSERT(buffers_iter->second.size() >= port_settings_[port]->min_buffer_count());
+  }
 #endif
   return is_port_configured_[port];
 }
@@ -6085,7 +6168,15 @@ bool CodecImpl::IsPortAtLeastPartiallyConfiguredLocked(CodecPort port) {
     return false;
   }
   ZX_DEBUG_ASSERT(port_settings_[port]);
-  ZX_DEBUG_ASSERT(buffer_lifetime_ordinal_[port] % 2 == 1);
+  // When port_settings_[port] is present, its buffer_lifetime_ordinal is odd.
+  // Normally buffer_lifetime_ordinal_[port] matches settings_ordinal, except on
+  // kOutputPort between StartIgnoringClientOldOutputConfig() (which increments
+  // buffer_lifetime_ordinal_[kOutputPort] to settings_ordinal + 1) and
+  // EnsureBuffersNotConfigured() (which clears port_settings_[kOutputPort]).
+  uint64_t settings_ordinal = port_settings_[port]->buffer_lifetime_ordinal();
+  ZX_DEBUG_ASSERT(settings_ordinal % 2 == 1);
+  ZX_DEBUG_ASSERT(buffer_lifetime_ordinal_[port] == settings_ordinal ||
+                  (port == kOutputPort && buffer_lifetime_ordinal_[port] == settings_ordinal + 1));
   return true;
 }
 
@@ -6111,12 +6202,22 @@ void CodecImpl::FailLocked(const char* format, ...) {
   // domain.
 }
 
+void CodecImpl::FailFatalLocked(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  // This doesn't return.
+  vFailLocked(true, format, args);
+  va_end(args);
+  abort();
+}
+
 void CodecImpl::FailFatal(const char* format, ...) {
   va_list args;
   va_start(args, format);
   // This doesn't return.
   vFail(true, format, args);
   va_end(args);
+  abort();
 }
 
 void CodecImpl::vFail(bool is_fatal, const char* format, va_list args) {
@@ -6245,6 +6346,10 @@ bool CodecImpl::RunSyncOnSharedFidlForStream(ScopedLock& lock, fit::closure to_r
       wake_stream_control_condition_.notify_all();
     }
   });
+  ++shared_fidl_for_stream_wait_count_for_testing_;
+  if (shared_fidl_for_stream_waiters_for_testing_ > 0) {
+    wake_stream_control_condition_.notify_all();
+  }
   while (!IsStoppingLocked() && ds.load() != DecisionStatus::kDone) {
     wake_stream_control_condition_.wait(lock.unique_lock());
   }
@@ -6272,6 +6377,21 @@ bool CodecImpl::RunSyncOnSharedFidlForStream(ScopedLock& lock, fit::closure to_r
   }
   ZX_DEBUG_ASSERT(ds.load() == DecisionStatus::kDone);
   return true;
+}
+
+uint64_t CodecImpl::GetSharedFidlForStreamWaitCountForTesting() {
+  ScopedLock lock(lock_);
+  return shared_fidl_for_stream_wait_count_for_testing_;
+}
+
+void CodecImpl::WaitForSharedFidlForStreamWaitCountForTesting(uint64_t expected_count) {
+  ZX_DEBUG_ASSERT(!IsStreamControl());
+  ScopedLock lock(lock_);
+  while (!IsStoppingLocked() && shared_fidl_for_stream_wait_count_for_testing_ < expected_count) {
+    ++shared_fidl_for_stream_waiters_for_testing_;
+    wake_stream_control_condition_.wait(lock.unique_lock());
+    --shared_fidl_for_stream_waiters_for_testing_;
+  }
 }
 
 // The implementation of PostToStreamControl() doesn't strongly need to guard
@@ -6552,8 +6672,12 @@ void CodecImpl::onCoreCodecFailStream(fuchsia::media::StreamError error) {
       // redundant stream failure to avoid sending OnStreamFailed() again.
       return;
     }
+    stream_->AssertHeld(this);
+    bool was_future_discarded = stream_->future_discarded();
     stream_->SetFailureSeen();
-    // Make sure FlushEndOfStreamAndCloseStream_StreamControl doesn't get stuck.
+    stream_->SetFutureDiscarded();
+    // Make sure FlushEndOfStreamAndCloseStream_StreamControl, StartNewStream, and
+    // MidStreamOutputConstraintsChange don't get stuck.
     wake_stream_control_condition_.notify_all();
 
     if (IsStreamErrorRecoverable(error)) {
@@ -6622,8 +6746,7 @@ void CodecImpl::onCoreCodecFailStream(fuchsia::media::StreamError error) {
     // input data, and the core codec is expected to just hold onto those
     // packets until the client has moved on from this stream.
 
-    stream_->AssertHeld(this);
-    if (stream_->future_discarded()) {
+    if (was_future_discarded) {
       // No reason to report a stream failure to the client for an obsolete stream.  The client has
       // already moved on from the current stream anyway.  This path won't be taken if the client
       // flushed the stream before moving on.  This permits core codecs to indicate
@@ -6684,11 +6807,7 @@ void CodecImpl::onCoreCodecResetStreamAfterCurrentFrame() {
         ZX_DEBUG_ASSERT(stream_->stream_lifetime_ordinal() == stream_lifetime_ordinal);
         stream_->AssertHeld(this);
         if (stream_->future_discarded()) {
-          // Ignore since this stream will be gone soon anyway.
-          return;
-        }
-        if (stream_->failure_seen()) {
-          // Ignore since this stream has already failed anyway.
+          // Ignore since this stream will be gone soon or has already failed anyway.
           return;
         }
         ZX_DEBUG_ASSERT(is_core_codec_stream_started_);
@@ -6840,7 +6959,7 @@ void CodecImpl::onCoreCodecOutputFormatChange() {
   stream_->SetOutputFormatPending();
 }
 
-void CodecImpl::onCoreCodecInputPacketDone(CodecPacket* packet_param) {
+void CodecImpl::onCoreCodecInputPacketDone(const CodecPacket* packet_param) {
   CodecPacket* packet = const_cast<CodecPacket*>(packet_param);
   uint64_t buffer_lifetime_ordinal = packet->buffer_lifetime_ordinal();
   uint32_t allocated_packet_index = packet->allocated_packet_index();
@@ -6850,11 +6969,6 @@ void CodecImpl::onCoreCodecInputPacketDone(CodecPacket* packet_param) {
     // The CodecAdapter says the buffer-referencing in-flight lifetime of this
     // packet is over. We'll set the buffer again when this packet gets used by
     // the client again to deliver more input data.
-    //
-    // This SetBuffer(nullptr) is permitted to be redundant with a
-    // SetBuffer(nullptr) already performed by the calling CodecAdapter. This
-    // onCoreCodecInputPacketDone isn't allowed to assume that the buffer is still
-    // set on the packet at this point.
     packet->SetBuffer(nullptr);
     // We have to insist that the CodecAdapter not call
     // onCoreCodecInputPacketDone() arbitrarily late because we need to know
@@ -6891,6 +7005,97 @@ void CodecImpl::onCoreCodecInputPacketDone(CodecPacket* packet_param) {
   }  // ~lock
 }
 
+void CodecImpl::AssertActiveOutputPacketLocked(const CodecPacket* packet) const {
+  ZX_DEBUG_ASSERT(packet);
+#if ZX_DEBUG_ASSERT_IMPLEMENTED
+  uint64_t buffer_lifetime_ordinal = packet->buffer_lifetime_ordinal();
+  uint32_t allocated_packet_index = packet->allocated_packet_index();
+  auto packets_by_ordinal_iter = active_packets_[kOutputPort].find(buffer_lifetime_ordinal);
+  ZX_DEBUG_ASSERT(packets_by_ordinal_iter != active_packets_[kOutputPort].end());
+  // The number of packets for a given port and buffer_lifetime_ordinal only increases, and the
+  // CodecPacket pointers remain the same, until they're all deleted at once, which hasn't happened
+  // yet (per above check).
+  ZX_DEBUG_ASSERT(allocated_packet_index < packets_by_ordinal_iter->second.size());
+  ZX_DEBUG_ASSERT(packets_by_ordinal_iter->second[allocated_packet_index].get() == packet);
+#endif
+}
+
+void CodecImpl::ClearOutputPacketFieldsLocked(CodecPacket* packet) {
+  ZX_DEBUG_ASSERT(packet);
+  // Before handing the packet to the core codec, clear some fields that the
+  // core codec is expected to set (or optionally set in the case of
+  // timestamp_ish and key_frame). In addition to these parameters, a core codec
+  // can emit output config changes via
+  // onCoreCodecMidStreamOutputConstraintsChange().
+  packet->ClearStartOffset();
+  packet->ClearValidLengthBytes();
+  packet->ClearTimestampIsh();
+  packet->ClearKeyFrame();
+}
+
+void CodecImpl::MarkOutputPacketFreeLocked(CodecPacket* packet) {
+  ZX_DEBUG_ASSERT(packet);
+  ZX_DEBUG_ASSERT(!packet->is_free());
+  ZX_ASSERT(packet->buffer());
+  --packet->buffer()->output_in_flight_count_;
+  packet->SetFree(true);
+  ClearOutputPacketFieldsLocked(packet);
+  if (IsDynamicBuffersLocked(kOutputPort)) {
+    auto protocol_packets_iter = protocol_packets_by_protocol_packet_index_[kOutputPort].find(
+        packet->buffer_lifetime_ordinal());
+    if (protocol_packets_iter != protocol_packets_by_protocol_packet_index_[kOutputPort].end()) {
+      protocol_packets_iter->second.erase(packet->protocol_packet_index());
+    }
+  }
+}
+
+void CodecImpl::ShortCircuitOutputPacketLocked(ScopedLock& lock, CodecPacket* packet) {
+  VLOGF("output ShortCircuitOutputPacketLocked");
+  ZX_DEBUG_ASSERT(IsFidl());
+  lock.AssertHeld(lock_);
+  // Because packet->is_queued() is true while ShortCircuitOutputPacketLocked is pending and
+  // EnsureBuffersNotConfigured preserves packet->buffer() (and its CodecBuffer::KeepAlive) while
+  // packet->is_queued() is true, parent_vmo_ cannot reach ZX_VMO_ZERO_CHILDREN and
+  // MaybeDeleteBufferLifetimeOrdinal cannot erase buffer_lifetime_ordinal before
+  // ShortCircuitOutputPacketLocked runs.
+  AssertActiveOutputPacketLocked(packet);
+  uint64_t buffer_lifetime_ordinal = packet->buffer_lifetime_ordinal();
+  ZX_DEBUG_ASSERT(packet->is_queued());
+  packet->SetQueued(false);
+  if (!packet->is_free()) {
+    MarkOutputPacketFreeLocked(packet);
+  } else {
+    ClearOutputPacketFieldsLocked(packet);
+  }
+  if (!is_supports_dynamic_buffers() &&
+      (buffer_lifetime_ordinal < buffer_lifetime_ordinal_[kOutputPort])) {
+    // CoreCodecEnsureBuffersNotConfigured(kOutputPort) has already run for this old
+    // buffer_lifetime_ordinal, so do not call CoreCodecRecycleOutputPacket(packet). Instead,
+    // release the packet's buffer_keep_alive_ now that it is no longer queued.
+    VLOGF(
+        "ShortCircuitOutputPacketLocked clearing packet buffer for old ordinal without "
+        "CoreCodecRecycleOutputPacket - packet ptr: %p index: %u buffer: %p index: %u",
+        packet, packet->allocated_packet_index(), packet->buffer(),
+        packet->buffer() ? packet->buffer()->index() : 0);
+    packet->SetBuffer(nullptr);
+    return;
+  }
+  // We're ok making this call outside the lock because we're on the output ordering domain (aka
+  // fidl thread), so we know the packet remains valid here (now that we've verified it still exists
+  // above, and we're still on the same thread that would potentially be deleting it since we
+  // checked above).
+  {  // scope unlock
+    ScopedUnlock unlock(*this);
+    VLOGF(
+        "short circuiting after onCoreCodecOutputPacket to recycle output packet ptr: %p index: "
+        "%u buffer: %p index: %u",
+        packet, packet->allocated_packet_index(), packet->buffer(),
+        packet->buffer() ? packet->buffer()->index() : 0);
+    CoreCodecRecycleOutputPacket(packet);
+  }  // ~unlock
+  lock.AssertHeld(lock_);
+}
+
 void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected_before,
                                         bool error_detected_during) {
   ZX_DEBUG_ASSERT(IsCoreCodec());
@@ -6898,25 +7103,56 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
   {  // scope lock
     ScopedLock lock(lock_);
 
-    // The core codec shouldn't output a packet until after
-    // CoreCodecStartStream() and input data availability in the case that
-    // output buffer config was already suitable, or until after
+    if (!packet || !packet->buffer()) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket called with null packet or packet->buffer(). packet: %p",
+          packet);
+    }
+
+    // A core codec that doesn't support dynamic buffers shouldn't output a
+    // packet until after CoreCodecStartStream() and input data availability in
+    // the case that output buffer config was already suitable, or until after
     // CoreCodecMidStreamOutputBufferReConfigFinish() in the case that output
     // buffer config wasn't suitable (not configured or not suitable) or
     // changed mid-stream.  See also comments in codec_adapter.h.
-    ZX_DEBUG_ASSERT(IsOutputConfiguredLocked());
-    if (!IsOutputConfiguredLocked()) {
-      FailLocked("onCoreCodecOutputPacket called when output is not configured.");
-      return;
+    //
+    // Note that a correctly-behaving !is_supports_dynamic_buffers()
+    // CodecAdapter also cannot land here during AddNonDynamicBufferCommon()'s
+    // ScopedUnlock (before is_port_configured_[kOutputPort] = true) or if a
+    // client sends another SetOutputBufferPartialSettings() (which calls
+    // EnsureBuffersNotConfigured(kOutputPort)) prior to
+    // CompleteOutputBufferPartialSettings(): in both cases StreamControl has
+    // not yet called CoreCodecStartStream() (when in StartNewStream) or is
+    // between CoreCodecMidStreamOutputBufferReConfigPrepare() and
+    // CoreCodecMidStreamOutputBufferReConfigFinish() (when in
+    // MidStreamOutputConstraintsChange), and a !is_supports_dynamic_buffers()
+    // CodecAdapter is not permitted to call onCoreCodecOutputPacket during
+    // either window (StreamControl only calls CoreCodecStartStream() or
+    // CoreCodecMidStreamOutputBufferReConfigFinish() after
+    // IsOutputConfiguredLocked() becomes true).
+    //
+    // A core codec that does support dynamic buffers is allowed to output a
+    // packet with an older buffer_lifetime_ordinal while output is not
+    // configured, or with the new buffer_lifetime_ordinal as soon as it has
+    // received an output buffer (even if CompleteOutputBufferPartialSettings
+    // has not yet been received).
+    if (!is_supports_dynamic_buffers() && !IsPortConfiguredCommonLocked(kOutputPort)) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket called when output is not configured. buffer_lifetime_ordinal: "
+          "%" PRIu64 " current buffer_lifetime_ordinal_[kOutputPort]: %" PRIu64
+          " is_port_configured_[kOutputPort]: %d allocated_packet_index: %u",
+          packet->buffer_lifetime_ordinal(), buffer_lifetime_ordinal_[kOutputPort],
+          is_port_configured_[kOutputPort], packet->allocated_packet_index());
     }
 
-    // Before we send the packet, we check whether the stream has output format
-    // pending, which means we need to send the output format before the output
-    // packet (and clear the pending state).
-    ZX_DEBUG_ASSERT(IsStreamActiveLocked());
     if (!IsStreamActiveLocked()) {
-      FailLocked("onCoreCodecOutputPacket called when stream is not active.");
-      return;
+      FailFatalLocked(
+          "onCoreCodecOutputPacket called when stream is not active. "
+          "buffer_lifetime_ordinal: %" PRIu64
+          " current buffer_lifetime_ordinal_[kOutputPort]: "
+          "%" PRIu64 " allocated_packet_index: %u",
+          packet->buffer_lifetime_ordinal(), buffer_lifetime_ordinal_[kOutputPort],
+          packet->allocated_packet_index());
     }
 
     // The CodecAdapter is only allowed to send a packet referencing a buffer_lifetime_ordinal if
@@ -6924,64 +7160,75 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
     // delete all the packets too soon. If the CodecAdapter is behaving badly here, we may crash
     // before the assert fires.
     uint64_t buffer_lifetime_ordinal = packet->buffer_lifetime_ordinal();
-    ZX_DEBUG_ASSERT(active_packets_[kOutputPort].find(buffer_lifetime_ordinal) !=
-                    active_packets_[kOutputPort].end());
+    auto active_packets_iter = active_packets_[kOutputPort].find(buffer_lifetime_ordinal);
+    if (active_packets_iter == active_packets_[kOutputPort].end()) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket buffer_lifetime_ordinal not in active_packets_. "
+          "buffer_lifetime_ordinal: %" PRIu64
+          " current buffer_lifetime_ordinal_[kOutputPort]: "
+          "%" PRIu64,
+          buffer_lifetime_ordinal, buffer_lifetime_ordinal_[kOutputPort]);
+    }
+    auto& packets_for_ordinal = active_packets_iter->second;
     // The number of packets for a given port and buffer_lifetime_ordinal only increases, until
     // they're all deleted at once, which hasn't happened yet.
-    ZX_DEBUG_ASSERT(packet->allocated_packet_index() <
-                    active_packets_[kOutputPort][buffer_lifetime_ordinal].size());
     uint32_t allocated_packet_index = packet->allocated_packet_index();
+    if (allocated_packet_index >= packets_for_ordinal.size() ||
+        packets_for_ordinal[allocated_packet_index].get() != packet) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket allocated_packet_index out of range or packet pointer mismatch: "
+          "%u vs %zu",
+          allocated_packet_index, packets_for_ordinal.size());
+    }
+    if (!packet->is_free() || packet->is_queued()) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket called with packet already busy or queued. "
+          "buffer_lifetime_ordinal: %" PRIu64
+          " allocated_packet_index: %u is_free: %d "
+          "is_queued: %d",
+          buffer_lifetime_ordinal, allocated_packet_index, packet->is_free(), packet->is_queued());
+    }
+    auto active_buffers_iter = active_buffers_[kOutputPort].find(buffer_lifetime_ordinal);
+    if (packet->buffer()->lifetime_ordinal() != buffer_lifetime_ordinal ||
+        active_buffers_iter == active_buffers_[kOutputPort].end()) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket buffer_lifetime_ordinal not in active_buffers_ or mismatched. "
+          "packet ordinal: %" PRIu64 " buffer ordinal: %" PRIu64
+          " current buffer_lifetime_ordinal_[kOutputPort]: %" PRIu64,
+          buffer_lifetime_ordinal, packet->buffer()->lifetime_ordinal(),
+          buffer_lifetime_ordinal_[kOutputPort]);
+    }
+    auto& buffers_for_ordinal = active_buffers_iter->second;
+    auto buffer_iter = buffers_for_ordinal.find(packet->buffer()->index());
+    if (buffer_iter == buffers_for_ordinal.end() || buffer_iter->second.get() != packet->buffer()) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket packet->buffer() not in active_buffers_ for ordinal. "
+          "packet ordinal: %" PRIu64 " buffer index: %u",
+          buffer_lifetime_ordinal, packet->buffer()->index());
+    }
+    if (!packet->has_start_offset() || !packet->has_valid_length_bytes() ||
+        static_cast<uint64_t>(packet->start_offset()) + packet->valid_length_bytes() >
+            packet->buffer()->size()) {
+      FailFatalLocked(
+          "onCoreCodecOutputPacket invalid start_offset or valid_length_bytes. "
+          "has_start_offset: %d start_offset: %u has_valid_length_bytes: %d "
+          "valid_length_bytes: %u buffer_size: %zu",
+          packet->has_start_offset(), packet->has_start_offset() ? packet->start_offset() : 0,
+          packet->has_valid_length_bytes(),
+          packet->has_valid_length_bytes() ? packet->valid_length_bytes() : 0,
+          packet->buffer()->size());
+    }
 
     // If we end up deciding not to send the packet to the client, we still need to recycle the
-    // allocated_packet_index back to the CodecAdapter. This can happen due to the client not
-    // wanting to receive output with an old buffer_lifetime_ordinal after receiving output with a
-    // new buffer_lifetime_ordinal. Alternately this can happen if the stream is future_discarded
-    // by the time this packet is popped from output_queue_; in this case, we must ensure that the
-    // packet is not sent after a mid-stream constraints change for which the client never achieved
-    // IsOutputConfiguredLocked() true, due to the client just moving on to a new stream instead.
-    // This is accomplished by not un-pausing output until after marking the stream
-    // future_discarded.
-    auto short_circuit_packet = [this, buffer_lifetime_ordinal, allocated_packet_index](
-                                    bool dec_in_flight_count, bool set_is_free) {
-      VLOGF("output short_circuit_packet");
-      ZX_DEBUG_ASSERT(IsFidl());
-      CodecPacket* packet;
-      {  // scope lock
-        ScopedLock lock(lock_);
-        auto& packets_by_ordinal = active_packets_[kOutputPort];
-        auto packets_by_ordinal_iter = packets_by_ordinal.find(buffer_lifetime_ordinal);
-        if (packets_by_ordinal_iter == packets_by_ordinal.end()) {
-          // This is not an error. It just means the CodecAdapter dropped all its handles to all
-          // buffers of the old buffer_lifetime_ordinal before we got here on the output ordering
-          // domain (aka fidl thread), so at this point there's no packet to recycle.
-          //
-          // This is analogous to ignoring a StreamProcessor.RecycleOutputPacket that specifies a
-          // no-longer-allocated CodecPacket.
-          VLOGF("packets_by_ordinal_iter == packets_by_ordinal.end()");
-          return;
-        }
-        // The number of packets for a given port and buffer_lifetime_ordinal only increases, and
-        // the CodecPacket pointers remain the same, until they're all deleted at once, which
-        // hasn't happened yet (per above check).
-        ZX_DEBUG_ASSERT(allocated_packet_index < packets_by_ordinal_iter->second.size());
-        packet = packets_by_ordinal_iter->second[allocated_packet_index].get();
-        if (set_is_free) {
-          packet->SetFree(true);
-        }
-        if (dec_in_flight_count) {
-          --packet->buffer()->output_in_flight_count_;
-        }
-      }
-      // We're ok making this call outside the lock because we're on the output ordering domain
-      // (aka fidl thread), so we know the packet remains valid here (now that we've verified it
-      // still exists above, and we're still on the same thread that would potentially be deleting
-      // it since we checked above).
-      VLOGF(
-          "short circuiting onCoreCodecOutputPacket to recycle output packet ptr: %p index: %u buffer: %p index: %u",
-          packet, packet->packet_index(), packet->buffer(), packet->buffer()->index());
-      CoreCodecRecycleOutputPacket(packet);
-    };
-
+    // allocated_packet_index back to the CodecAdapter via ShortCircuitOutputPacketLocked. This can
+    // happen due to the client not wanting to receive output with an old buffer_lifetime_ordinal
+    // after receiving output with a new buffer_lifetime_ordinal. Alternately this can happen if the
+    // stream is future_discarded by the time this packet is popped from output_queue_; in this
+    // case, we must ensure that the packet is not sent after a mid-stream constraints change for
+    // which the client never achieved IsOutputConfiguredLocked() true, due to the client just
+    // moving on to a new stream instead. This is accomplished by not un-pausing output until after
+    // marking the stream future_discarded.
+    //
     // This check relies on the buffer_lifetime_ordinal_ being the next even value when there's a
     // server-driven mid-stream output constraints change. For client-driven buffer reallocation,
     // the client has to tolerate receiving some old output that crosses on the wire, but this
@@ -6992,8 +7239,10 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
       VLOGF(
           "!is_enable_old_output_buffers_ && (buffer_lifetime_ordinal < buffer_lifetime_ordinal_[kOutputPort]");
       // Recycle the output packet without the client ever being aware of it.
-      PostToSharedFidl([short_circuit_packet = std::move(short_circuit_packet)] {
-        std::move(short_circuit_packet)(false, false);
+      packet->SetQueued(true);
+      PostToSharedFidl([this, packet] {
+        ScopedLock lock(lock_);
+        ShortCircuitOutputPacketLocked(lock, packet);
       });
       // We're not sending the packet to the client; just recycling it back to the CodecAdapter. We
       // intentionally never mark the packet used from a protocol point of view, since it's not.
@@ -7004,19 +7253,65 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
         packet->buffer()->output_in_flight_count_ > 0) {
       VLOGF(
           "!is_enable_same_output_buffer_concurrently_in_flight_ && packet->buffer()->output_in_flight_count_ > 0");
-      PostToSharedFidl([short_circuit_packet = std::move(short_circuit_packet)] {
-        std::move(short_circuit_packet)(false, false);
+      packet->SetQueued(true);
+      PostToSharedFidl([this, packet] {
+        ScopedLock lock(lock_);
+        ShortCircuitOutputPacketLocked(lock, packet);
       });
       return;
     }
 
-    ++packet->buffer()->output_in_flight_count_;
-
     // At this point we know we will be queuing the output packet (still may not get sent if stream
-    // future_discarded).
+    // future_discarded or if output buffers are reconfigured before output_queue_ drains and
+    // !is_enable_old_output_buffers_).
+    ZX_DEBUG_ASSERT(is_dynamic_buffers_[kOutputPort].has_value());
+    uint32_t protocol_packet_index;
+    if (!IsDynamicBuffersLocked(kOutputPort)) {
+      protocol_packet_index = allocated_packet_index;
+      ZX_DEBUG_ASSERT(packet->protocol_packet_index() == allocated_packet_index);
+    } else {
+      ZX_DEBUG_ASSERT(IsDynamicBuffersLocked(kOutputPort));
+      auto& packets_by_protocol_packet_index =
+          protocol_packets_by_protocol_packet_index_[kOutputPort][buffer_lifetime_ordinal];
+      // Every other packet, replace the protocol packet_index with a random value. Otherwise,
+      // use/reuse the existing protocol packet_index value.
+      //
+      // This ensures the client tolerates but doesn't require low values, and tolerates reuse, and
+      // tolerates non-reuse, and doesn't require 0 to be the first emitted protocol packet_index.
+      //
+      // We avoid collisions. Maybe with an LFSR instead we wouldn't care to check, but we still
+      // technically should even if we used an LFSR.
+      while (true) {
+        protocol_packet_index = packet->protocol_packet_index();
+        auto val = ++output_protocol_packet_index_counter_;
+        if (val % 2 != 0) {
+          protocol_packet_index = uniform_uint32_(prng_);
+        }
+        auto [iter, inserted] =
+            packets_by_protocol_packet_index.try_emplace(protocol_packet_index, packet);
+        if (!inserted) {
+          // In very rare cases, if the existing protocol_packet_index collides, and a random index
+          // collides, then we'll be trying the existing protocol_packet_index again which will
+          // again collide, but then we'll move on to trying a different random index so the
+          // situation will resolve itself.
+          continue;
+        }
+        packet->ClearProtocolPacketIndex();
+        packet->SetProtocolPacketIndex(protocol_packet_index);
+        break;
+      }
+    }
+
+    ++packet->buffer()->output_in_flight_count_;
+    packet->SetFree(false);
+    packet->SetQueued(true);
+
     lock.AssertHeld(stream_->parent_->lock_);
     auto stream_shared_future_discarded = stream_->shared_future_discarded();
 
+    // Before we send the packet, we check whether the stream has output format
+    // pending, which means we need to send the output format before the output
+    // packet (and clear the pending state).
     if (stream_->output_format_pending()) {
       VLOGF("stream_->output_format_pending()");
       stream_->ClearOutputFormatPending();
@@ -7025,6 +7320,20 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
           next_output_format_details_version_ordinal_++;
       fuchsia::media::StreamOutputFormat output_format;
       {  // scope unlock
+        // packets_for_ordinal is a reference to the std::vector<std::unique_ptr<CodecPacket>>
+        // container object itself (the mapped value inside the std::unordered_map node of
+        // active_packets_[kOutputPort]), not an iterator or reference to an element inside the
+        // vector. Because std::unordered_map guarantees reference stability to mapped values even
+        // if rehashing occurs, and the map entry for buffer_lifetime_ordinal cannot be erased while
+        // packet->buffer() is kept alive (by CodecPacket's buffer_keep_alive_ and by the
+        // CodecAdapter while emitting the packet), the reference packets_for_ordinal to the
+        // std::vector object remains valid across this unlock. If new packets are added to
+        // packets_for_ordinal while unlocked, the vector's backing array may reallocate (which
+        // would invalidate iterators/references to the std::unique_ptr elements inside the vector,
+        // none of which are held across this unlock), moving the std::unique_ptr<CodecPacket>
+        // elements without moving the heap-allocated CodecPacket pointed to by `packet`, and
+        // packets_for_ordinal is only indexed again via operator[] after lock_ is re-acquired
+        // below.
         ScopedUnlock unlock(*this);
         VLOGF("calling CoreCodecGetOutputFormat");
         output_format = CoreCodecGetOutputFormat(stream_lifetime_ordinal,
@@ -7042,78 +7351,36 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
       sent_format_details_version_ordinal_[kOutputPort] = new_output_format_details_version_ordinal;
       VLOGF("posting to call OnOutputFormat");
       // This must order correctly wrt output packets, so use same queue as output packets.
-      PostStreamOutputLocked([this, output_format = std::move(output_format),
-                              stream_shared_future_discarded]() mutable {
-        VLOGF("posted OnOutputFormat task running");
-        if (IsStopping()) {
-          VLOGF("IsStopping()");
-          return;
-        }
-        if (stream_shared_future_discarded->load(std::memory_order_seq_cst)) {
-          VLOGF("stream_shared_future_discarded->load(std::memory_order_seq_cst)");
-          return;
-        }
-        // See "is_bound_checks" comment up top.
-        if (binding_.is_bound()) {
-          VLOGF("calling OnOutputFormat");
-          binding_.events().OnOutputFormat(std::move(output_format));
-        }
-      });
+      PostStreamOutputLocked(
+          [this, output_format = std::move(output_format), stream_shared_future_discarded] mutable {
+            VLOGF("posted OnOutputFormat task running");
+            if (IsStopping()) {
+              VLOGF("IsStopping()");
+              return;
+            }
+            if (stream_shared_future_discarded->load(std::memory_order_seq_cst)) {
+              VLOGF("stream_shared_future_discarded->load(std::memory_order_seq_cst)");
+              return;
+            }
+            // See "is_bound_checks" comment up top.
+            if (binding_.is_bound()) {
+              VLOGF("calling OnOutputFormat");
+              binding_.events().OnOutputFormat(std::move(output_format));
+            }
+          });
     }
 
     // This helps verify that packet lifetimes are coherent, but we don't do this for buffer_index
     // because VP9 has show_existing_frame which is allowed to output the same buffer repeatedly
     // using separate packets in flight concurrently referencing the same buffer.
-    ZX_DEBUG_ASSERT(
-        packet ==
-        active_packets_[kOutputPort][buffer_lifetime_ordinal][packet->allocated_packet_index()]
-            .get());
-
-    ZX_DEBUG_ASSERT(is_dynamic_buffers_[kOutputPort].has_value());
-    uint32_t protocol_packet_index;
-    if (!*is_dynamic_buffers_[kOutputPort]) {
-      protocol_packet_index = allocated_packet_index;
-      ZX_DEBUG_ASSERT(packet->protocol_packet_index() == allocated_packet_index);
-    } else {
-      ZX_DEBUG_ASSERT(*is_dynamic_buffers_[kOutputPort]);
-      auto& packets_by_protocol_packet_index =
-          protocol_packets_by_protocol_packet_index_[kOutputPort][buffer_lifetime_ordinal];
-      // Every other packet, replace the protocol packet_index with a random value. Otherwise,
-      // use/reuse the existing protocol packet_index value.
-      //
-      // This ensures the client tolerates but doesn't require low values, and tolerates reuse, and
-      // tolerates non-reuse, and doesn't require 0 to be the first emitted protocol packet_index.
-      //
-      // We avoid collisions. Maybe with an LFSR instead we wouldn't care to check, but we still
-      // technically should even if we used an LFSR.
-      while (true) {
-        protocol_packet_index = packet->protocol_packet_index();
-        auto val = ++output_protocol_packet_index_counter_;
-        if (val % 2 != 0 || packets_by_protocol_packet_index.find(protocol_packet_index) !=
-                                packets_by_protocol_packet_index.end()) {
-          protocol_packet_index = uniform_uint32_(prng_);
-        }
-        if (packets_by_protocol_packet_index.find(protocol_packet_index) !=
-            packets_by_protocol_packet_index.end()) {
-          continue;
-        }
-        packet->ClearProtocolPacketIndex();
-        packet->SetProtocolPacketIndex(protocol_packet_index);
-        packets_by_protocol_packet_index.insert(std::make_pair(protocol_packet_index, packet));
-        break;
-      }
-    }
-
-    packet->SetFree(false);
+    ZX_DEBUG_ASSERT(packet == packets_for_ordinal[allocated_packet_index].get());
 
     if (IsCoreCodecHwBased(kOutputPort) &&
-        port_settings_[kOutputPort]->coherency_domain() == fuchsia_sysmem2::CoherencyDomain::kCpu) {
+        packet->buffer()->coherency_domain() == fuchsia_sysmem2::CoherencyDomain::kCpu) {
       // This invalidates only the portion of the buffer that the packet is referencing.
       packet->CacheFlushAndInvalidate();
     }
 
-    ZX_DEBUG_ASSERT(packet->has_start_offset());
-    ZX_DEBUG_ASSERT(packet->has_valid_length_bytes());
     // packet->has_timestamp_ish() is optional even if
     // promise_separate_access_units_on_input is true.  We do want to enforce
     // that the client gets no set timestamp_ish values if the client didn't
@@ -7138,39 +7405,53 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
     p.set_start_access_unit(true);
     p.set_known_end_access_unit(true);
     VLOGF("posting to call OnOutputPacket - packet ptr: %p index: %u", packet,
-          packet->packet_index());
+          packet->allocated_packet_index());
     // This same queue is used for OnOutputFormat and RemoveBuffer completions, so those will order
     // correctly wrt output packets.
     PostStreamOutputLocked([this, p = std::move(p), error_detected_before, error_detected_during,
-                            stream_shared_future_discarded,
-                            short_circuit_packet = std::move(short_circuit_packet)]() mutable {
+                            packet, stream_shared_future_discarded] mutable {
       VLOGF("posted OnOutputPacket task running");
-      if (IsStopping()) {
-        VLOGF("IsStopping()");
-        // Despite CodecImpl and CodecAdapter going away soon, it's important to
-        // short_circuit_packet here when dynamic buffers are supported by the CodecAdapter, because
-        // the CodecAdapter's CoreCodecStopStream can depend on it.
-        //
-        // recycling of packets is not per-stream, so recycle the packet here
-        std::move(short_circuit_packet)(true, true);
-        return;
-      }
-      if (stream_shared_future_discarded->load(std::memory_order_seq_cst)) {
-        VLOGF("stream_shared_future_discarded->load(std::memory_order_seq_cst)");
-        // recycling of packets is not per-stream, so recycle the packet here
-        std::move(short_circuit_packet)(true, true);
-        return;
-      }
-      // See "is_bound_checks" comment up top.
-      if (!binding_.is_bound()) {
-        VLOGF("!binding_.is_bound()");
-        // Despite CodecImpl and CodecAdapter going away soon, it's important to
-        // short_circuit_packet here when dynamic buffers are supported by the CodecAdapter, because
-        // the CodecAdapter's CoreCodecStopStream can depend on it.
-        //
-        // recycling of packets is not per-stream, so recycle the packet here
-        std::move(short_circuit_packet)(true, true);
-        return;
+      {
+        ScopedLock lock(lock_);
+        if (IsStoppingLocked()) {
+          VLOGF("IsStoppingLocked()");
+          // Despite CodecImpl and CodecAdapter going away soon, it's important to
+          // ShortCircuitOutputPacketLocked here when dynamic buffers are supported by the
+          // CodecAdapter, because the CodecAdapter's CoreCodecStopStream can depend on it.
+          //
+          // recycling of packets is not per-stream, so recycle the packet here
+          ShortCircuitOutputPacketLocked(lock, packet);
+          return;
+        }
+        if (stream_shared_future_discarded->load(std::memory_order_seq_cst)) {
+          VLOGF("stream_shared_future_discarded->load(std::memory_order_seq_cst)");
+          // recycling of packets is not per-stream, so recycle the packet here
+          ShortCircuitOutputPacketLocked(lock, packet);
+          return;
+        }
+        // See "is_bound_checks" comment up top.
+        if (!binding_.is_bound()) {
+          VLOGF("!binding_.is_bound()");
+          // Despite CodecImpl and CodecAdapter going away soon, it's important to
+          // ShortCircuitOutputPacketLocked here when dynamic buffers are supported by the
+          // CodecAdapter, because the CodecAdapter's CoreCodecStopStream can depend on it.
+          //
+          // recycling of packets is not per-stream, so recycle the packet here
+          ShortCircuitOutputPacketLocked(lock, packet);
+          return;
+        }
+        if (!is_enable_old_output_buffers_ &&
+            (packet->buffer_lifetime_ordinal() < buffer_lifetime_ordinal_[kOutputPort])) {
+          VLOGF(
+              "output_queue_ short-circuiting old buffer_lifetime_ordinal packet when "
+              "!is_enable_old_output_buffers_");
+          ShortCircuitOutputPacketLocked(lock, packet);
+          return;
+        }
+        AssertActiveOutputPacketLocked(packet);
+        ZX_DEBUG_ASSERT(packet->is_queued());
+        ZX_DEBUG_ASSERT(!packet->is_free());
+        packet->SetQueued(false);
       }
 
       ZX_DEBUG_ASSERT(binding_.is_bound());
@@ -7280,7 +7561,6 @@ void CodecImpl::Stream::AssertHeld(const CodecImpl* const parent) {
 uint64_t CodecImpl::Stream::stream_lifetime_ordinal() { return stream_lifetime_ordinal_; }
 
 void CodecImpl::Stream::SetFutureDiscarded() {
-  ZX_DEBUG_ASSERT(!future_discarded_->load());
   // This store is both under lock_ and seq_cst. This allows loads under lock_ to be relaxed, and
   // allows loads outside lock_ to see this write if this write occurred previously, despite the
   // lack of lock_ acquire.
@@ -7372,27 +7652,22 @@ CodecImpl::PortSettings::PortSettings(CodecImpl* parent, CodecPort port,
       buffer_lifetime_ordinal_(buffer_lifetime_ordinal) {}
 
 CodecImpl::PortSettings::~PortSettings() {
-  // To be safe, the unbind needs to occur on the FIDL thread.  In addition, we want to send a clean
-  // Close() to avoid causing the LogicalBufferCollection to fail.  Since we're not a crashing
-  // process, this is a clean close by definition.
-  //
-  // TODO(https://fxbug.dev/42112876): Consider _not_ sending Close() for unexpected failures
-  // initiated by the server. Consider whether to have a Close() on StreamProcessor to disambiguate
-  // clean vs. unexpected StreamProcessor channel close.
-  if (!parent_->IsFidl()) {
-    parent_->PostToSharedFidl([buffer_collection = std::move(buffer_collection_)] {
-      // Sysmem will notice the Close() before the PEER_CLOSED.
-      if (!!buffer_collection && buffer_collection->is_valid()) {
-        // ignore potential one-way send failure
-        (void)(*buffer_collection)->Release();
+  if (buffer_collection_.has_value()) {
+    if (!parent_->IsFidl()) {
+      // This disables the buffer_collection_ Client fidl error callback.
+      buffer_collection_->EnsurePreparedForAsyncDelete();
+      parent_->PostToSharedFidl([buffer_collection = TakeOptional(buffer_collection_)]() mutable {
+        ZX_DEBUG_ASSERT(buffer_collection.has_value());
+        if (buffer_collection.has_value() && buffer_collection->held() &&
+            buffer_collection->held()->is_valid()) {
+          std::ignore = (*buffer_collection->held())->Release();
+        }
+      });
+    } else {
+      if (buffer_collection_->held() && buffer_collection_->held()->is_valid()) {
+        std::ignore = (*buffer_collection_->held())->Release();
       }
-      // ~buffer_collection on FIDL thread
-    });
-    ZX_DEBUG_ASSERT(!buffer_collection_);
-  } else {
-    if (!!buffer_collection_) {
-      // ignore potential one-way send failure
-      (void)(*buffer_collection_)->Release();
+      buffer_collection_.reset();
     }
   }
 }
@@ -7494,16 +7769,17 @@ CodecImpl::PortSettings::NewBufferCollectionRequest(
   ZX_DEBUG_ASSERT(!buffer_collection_);
   auto collection_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollection>();
   ZX_ASSERT(collection_endpoints.is_ok());
-  buffer_collection_ = std::make_unique<Client<fuchsia_sysmem2::BufferCollection>>();
-  buffer_collection_->Bind(std::move(collection_endpoints->client), dispatcher,
-                           std::move(on_error));
+  auto client = std::make_unique<Client<fuchsia_sysmem2::BufferCollection>>();
+  client->Bind(std::move(collection_endpoints->client), dispatcher, std::move(on_error));
+  buffer_collection_.emplace(&parent_->shared_fidl_queue_, std::move(client));
   return std::move(collection_endpoints->server);
 }
 
 std::unique_ptr<CodecImpl::Client<fuchsia_sysmem2::BufferCollection>>&
 CodecImpl::PortSettings::buffer_collection() {
   ZX_DEBUG_ASSERT(parent_->IsFidl());
-  return buffer_collection_;
+  ZX_DEBUG_ASSERT(buffer_collection_.has_value());
+  return buffer_collection_->held();
 }
 
 void CodecImpl::PortSettings::UnbindBufferCollection() {
@@ -7541,6 +7817,15 @@ uint64_t CodecImpl::PortSettings::vmo_usable_start(uint32_t buffer_index) {
 uint64_t CodecImpl::PortSettings::vmo_usable_size() {
   ZX_DEBUG_ASSERT(buffer_collection_info_);
   return buffer_collection_info_->settings()->buffer_settings()->size_bytes().value();
+}
+
+uint64_t CodecImpl::PortSettings::raw_vmo_size() {
+  ZX_DEBUG_ASSERT(buffer_collection_info_);
+  const auto& info = *buffer_collection_info_;
+  ZX_DEBUG_ASSERT(info.settings().has_value());
+  ZX_DEBUG_ASSERT(info.settings()->buffer_settings().has_value());
+  ZX_DEBUG_ASSERT(info.settings()->buffer_settings()->raw_vmo_size().has_value());
+  return info.settings()->buffer_settings()->raw_vmo_size().value();
 }
 
 bool CodecImpl::PortSettings::is_secure() {
@@ -7657,7 +7942,7 @@ void CodecImpl::CoreCodecQueueInputFormatDetails(
   codec_adapter_->CoreCodecQueueInputFormatDetails(per_stream_override_format_details);
 }
 
-void CodecImpl::CoreCodecQueueInputPacket(CodecPacket* packet) {
+void CodecImpl::CoreCodecQueueInputPacket(const CodecPacket* packet) {
   ZX_DEBUG_ASSERT(IsStreamControl());
   codec_adapter_->CoreCodecQueueInputPacket(packet);
 }

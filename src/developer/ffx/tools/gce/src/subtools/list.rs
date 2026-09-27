@@ -13,7 +13,7 @@ use prettytable::format::FormatBuilder;
 use prettytable::{Table, row};
 use std::io::Write;
 
-#[derive(FfxTool)]
+#[derive(Debug, FfxTool)]
 pub struct ListTool {
     #[command]
     cmd: ListCommand,

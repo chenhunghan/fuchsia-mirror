@@ -613,7 +613,7 @@ class DebugSymbolExporter(object):
                 self._symlink_map[breakpad_dst_path] = (
                     self._build_dir / breakpad_file
                 )
-            elif entry["os"] == "fuchsia":
+            elif entry["os"] == "fuchsia" and self._dump_syms_tool:
                 self._breakpad_map[breakpad_dst_path] = entry
 
             # Same for GSYM symbols.
@@ -621,7 +621,7 @@ class DebugSymbolExporter(object):
             gsym_file = entry.get("gsym")
             if gsym_file:
                 self._symlink_map[gsym_dst_path] = self._build_dir / gsym_file
-            elif entry["os"] == "fuchsia":
+            elif entry["os"] == "fuchsia" and self._gsymutil_tool:
                 self._gsym_map[gsym_dst_path] = entry
 
             debug_symbol = entry.copy()
@@ -633,7 +633,11 @@ class DebugSymbolExporter(object):
                 debug_symbol["stripped"] = ".build-id/{}/{}".format(
                     build_id[:2], build_id[2:]
                 )
-            debug_symbol["breakpad"] = str(breakpad_dst_path)
+            debug_symbol.pop("breakpad", None)
+            if breakpad_file or (
+                entry["os"] == "fuchsia" and self._dump_syms_tool
+            ):
+                debug_symbol["breakpad"] = str(breakpad_dst_path)
             debug_symbol.pop("elf_build_id_file", None)
             self._debug_symbols.append(debug_symbol)
 

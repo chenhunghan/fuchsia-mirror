@@ -553,9 +553,26 @@ open protocol Mapper {
     }) -> () error zx.Status;
 };
 
+/// Options for `MapperSession.CreateVmo`.
+type CreateVmoOptions = strict bits : uint32 {
+    /// If set, I/O errors during page faults supply zero-filled pages and assert
+    /// `ZX_USER_SIGNAL_0` on the VMO instead of failing the page request with `ZX_ERR_IO`.
+    SUPPLY_ZEROES_ON_ERROR = 0x00000001;
+};
+
 /// Represents an active driver mapping session.
 open protocol MapperSession {
     compose fuchsia.unknown.Closeable;
+
+    /// Creates a pager-backed VMO of `size` bytes associated with `key`.
+    /// Page faults on this VMO are handled directly by the driver mapper.
+    flexible CreateVmo(struct {
+        key uint64;
+        size uint64;
+        options CreateVmoOptions;
+    }) -> (resource struct {
+        vmo zx.Handle:VMO;
+    }) error zx.Status;
 
     /// Opens a child mapper session whose reads map through `parent_key` in the parent session.
     /// When a parent session is closed, all child sessions opened from it are closed as well.

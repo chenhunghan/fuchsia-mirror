@@ -97,6 +97,7 @@ template("kernel_rust_mod") {
   if (defined(invoker.test_deps)) {
     test_deps_target = "kernel_rust_mod.${target_name}.test_deps"
     test_deps += [ ":$test_deps_target" ]
+
     kernel_test_deps(test_deps_target) {
       visibility = [ ":*" ]
       public_deps = invoker.test_deps
@@ -215,6 +216,7 @@ template("kernel_rust_mod_crate_root") {
   foreach(gen, gen_rsp_files) {
     gen.target = "${targets.main}.${gen.key}.rsp"
     gen.label = ":${gen.target}"
+
     generated_file(gen.target) {
       visibility = [ ":*" ]
       forward_variables_from(invoker, [ "testonly" ])

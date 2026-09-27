@@ -155,6 +155,7 @@ rustc_library("fidl_next_protocol_internal") {
     "//third_party/rust_crates:futures",
   ]
   visibility = [
+    ":*",
     "//sdk/lib/driver/component/rust/*",
     "//src/lib/fdomain/client/*",
     "//src/lib/fidl/rust_next/*",

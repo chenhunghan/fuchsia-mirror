@@ -4279,10 +4279,14 @@ mod tests {
                     fdio::create_fd(root.into_channel().unwrap().into_zx_channel().into())
                         .expect("create_fd failed");
 
-                let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
                 let name = std::ffi::CString::new("symlink").expect("CString::new failed");
                 assert_eq!(
-                    unsafe { libc::fstatat(root.as_raw_fd(), name.as_ptr(), &mut stat, 0) },
+                    // SAFETY: The owned fd and NUL-terminated name remain valid for the call.
+                    // `stat` supplies aligned, exclusive storage for the output. Fuchsia's
+                    // fstatat does not read its prior contents or retain either pointer; the
+                    // test checks only the return code and never reads the output.
+                    unsafe { libc::fstatat(root.as_raw_fd(), name.as_ptr(), stat.as_mut_ptr(), 0) },
                     0
                 );
             })

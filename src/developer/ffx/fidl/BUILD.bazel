@@ -9,14 +9,9 @@ package(default_applicable_licenses = ["//:license"])
 fidl_library(
     name = "fuchsia.developer.ffx",
     srcs = [
-        "daemon.fidl",
         "echo.fidl",
-        "fastboot.fidl",
-        "mdns.fidl",
         "overview.fidl",
         "target.fidl",
-        "testing.fidl",
-        "tracing.fidl",
         "tunnel.fidl",
     ],
     visibility = [
@@ -29,12 +24,9 @@ fidl_library(
     ],
     deps = [
         "//sdk/fidl/fuchsia.buildinfo",
-        "//sdk/fidl/fuchsia.developer.ffxdaemonlifecycle",
         "//sdk/fidl/fuchsia.developer.remotecontrol",
         "//sdk/fidl/fuchsia.io",
         "//sdk/fidl/fuchsia.net",
-        "//sdk/fidl/fuchsia.tracing.controller",
-        "//sdk/fidl/fuchsia.version",
         "//zircon/vdso/zx",
     ],
 )

@@ -39,6 +39,7 @@ class Test(unittest.TestCase):
         )
 
     def test_host_and_fuchsia_docs_are_separate(self) -> None:
+        self.assert_is_dir("basic_hierarchy_a")
         self.assert_is_dir("b")
         self.assert_is_dir("c")
         self.assert_doesnt_exist("d")
@@ -51,6 +52,7 @@ class Test(unittest.TestCase):
         self.assert_is_file("host/src/d/lib.rs.html")
 
     def test_fuchsia_docs_contain_correct_items(self) -> None:
+        self.assert_is_file("basic_hierarchy_a/index.html")
         self.assert_is_file("b/index.html")
         self.assert_is_file("b/struct.RequiredB.html")
         self.assert_doesnt_exist("b/fn.blah.html")

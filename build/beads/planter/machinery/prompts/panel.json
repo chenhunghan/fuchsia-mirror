@@ -1,0 +1,25 @@
+{
+  "version": 8,
+  "seats": [
+    {
+      "seat_id": "target_parity",
+      "name": "Target \u0026 Attribute Parity Reviewer",
+      "responsibility": "Verifies 1:1 semantic alignment of targets, deps, sources, flags, complete migration of all convertible libraries (including reference/bitrot-prevention targets without # @bazel2gn:skip), 3-tier idiomatic Bazel visibility scoping, that the change modifies only build-definition files (no source edits), and shared lint config reuse: lint_config points at the defining rust_lint_config (no new alias/wrapper targets) and default lint dicts are loaded from the //build/config/rust/lints .bzl instead of copied.",
+      "prompt_file": "target_parity.md",
+      "allowed_tools": [
+        "inspect_target",
+        "find_rdeps"
+      ]
+    },
+    {
+      "seat_id": "dual_build_sentinel",
+      "name": "Dual-Build \u0026 Sentinel Reviewer",
+      "responsibility": "Verifies BAZEL2GN SENTINEL synchronization, rejects target-level # @bazel2gn:skip on convertible or reference libraries and rejects duplicate/unmigrated convertible targets above the sentinel in BUILD.gn, verifies verify_bazel2gn registration in //build/bazel2gn_verification_targets.gni, 3-tier visibility parity, build-only change scope, and lint_config label parity (same-named GN config() next to the Bazel rust_lint_config, no new alias + forwarding-config wrapper pairs).",
+      "prompt_file": "dual_build_sentinel.md",
+      "allowed_tools": [
+        "inspect_target",
+        "find_rdeps"
+      ]
+    }
+  ]
+}

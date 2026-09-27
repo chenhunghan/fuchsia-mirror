@@ -4,7 +4,8 @@ description: >
   Guide for using the `fx gh` command-line interface to interact with Fuchsia
   Gerrit changes (CLs). Use when reading open changes, posting inline
   comments, replying to reviewer threads, managing draft comments, checking CI
-  status with `pr checks`, or updating CQ labels from the terminal.
+  status with `pr checks`, or updating CQ labels from the terminal. Do NOT use
+  for performing automated code reviews (use /review instead).
 ---
 
 # Fuchsia Gerrit CLI (fx gh)
@@ -95,6 +96,32 @@ key mappings and differences you need to know:
   ```
   If you need to post multiple comments, you must use the `--draft` flag for
   each comment, and then publish them all at once.
+- **Draft Behavior & Accumulation**:
+  - Gerrit treats each `fx gh pr comment ... --draft` invocation as creating a
+    new draft comment entity. It does not overwrite previous drafts on that
+    thread.
+  - **Never post placeholder text** (e.g., `-m "test"`) with `--draft`, as it
+    creates a real draft on the reviewer's thread that persists until manually
+    deleted in the Gerrit Web UI.
+
+- **Patchset Targeting When Replying (CRITICAL)**:
+  - By default, `--patchset current` is assumed.
+  - If a reviewer commented on an earlier patchset (e.g., comments left on
+    Patchset 16, but the CL has advanced to Patchset 19), attempting to create
+    an in-thread draft with `--patchset current` will fail with **`400 Bad
+    Request`** because the thread exists on the earlier revision.
+  - **Always pass `--patchset <N>`** matching the patchset where the reviewer's
+    comment was posted when replying:
+    ```bash
+    fx gh pr comment 1822933 --patchset 16 --path src/tests/foo.py --line 97 -F /tmp/reply.txt --draft --resolved
+    ```
+
+- **Multiline & Formatted Comments (`-F`)**:
+  - For comments containing markdown formatting, code snippets, backticks, or
+    newlines, always write the response to a temporary file and pass `-F
+    <body_file_path>` instead of `-m "..."` to prevent shell quoting bugs and
+    argument truncation.
+
 - **CRITICAL**: When responding to comments on a Gerrit code review, you MUST
   reply within the specific comment thread using the `--path` and `--line` flags
   of `fx gh pr comment`. Do NOT leave a top-level unthreaded comment unless

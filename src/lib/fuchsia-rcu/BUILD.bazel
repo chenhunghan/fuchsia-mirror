@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_proc_macro")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+_COMMON_SRCS = [
+    "src/atomic_stack.rs",
+    "src/lib.rs",
+    "src/rcu_arc.rs",
+    "src/rcu_box.rs",
+    "src/rcu_droppable.rs",
+    "src/rcu_droppable_arc.rs",
+    "src/rcu_option_arc.rs",
+    "src/rcu_option_box.rs",
+    "src/rcu_ptr.rs",
+    "src/rcu_read_scope.rs",
+    "src/rcu_weak.rs",
+    "src/read_counters.rs",
+    "src/state_machine.rs",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
+    "//src/lib/shared-buffer",
+    "//src/lib/trace/rust:trace",
+    "//third_party/rust_crates/vendor:bstr",
+    "//third_party/rust_crates/vendor:futures",
+]
+
+rustc_proc_macro(
+    name = "fuchsia-rcu-derive",
+    srcs = ["macro/src/lib.rs"],
+    crate_root = "macro/src/lib.rs",
+    edition = "2024",
+    deps = [
+        "//third_party/rust_crates/vendor:proc-macro2",
+        "//third_party/rust_crates/vendor:quote",
+        "//third_party/rust_crates/vendor:syn",
+    ],
+)
+
+rustc_library(
+    name = "fuchsia-rcu",
+    srcs = _COMMON_SRCS,
+    edition = "2024",
+    proc_macro_deps = [
+        ":fuchsia-rcu-derive",
+    ],
+    version = "0.1.0",
+    with_unit_tests = True,
+    deps = _COMMON_DEPS,
+)
+
+rustc_library(
+    name = "fuchsia-rcu-rseq",
+    testonly = True,
+    srcs = _COMMON_SRCS,
+    crate_features = ["rseq_backend"],
+    crate_name = "fuchsia_rcu",
+    edition = "2024",
+    proc_macro_deps = [
+        ":fuchsia-rcu-derive",
+    ],
+    version = "0.1.0",
+    deps = _COMMON_DEPS + [
+        "//src/lib/fuchsia-rseq",
+    ],
+)

@@ -4,7 +4,6 @@
 
 #include "src/storage/lib/vfs/cpp/journal/journal.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/cksum.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>

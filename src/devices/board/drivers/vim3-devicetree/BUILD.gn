@@ -15,6 +15,7 @@ group("tests") {
     ":vim3-devicetree-test",
   ]
 }
+
 bazel_fuchsia_test_package("vim3-devicetree-test") {
   bazel_target = ":vim3-devicetree-test-package"
   test_component_names = [ "vim3-devicetree-test" ]

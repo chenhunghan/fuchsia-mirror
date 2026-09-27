@@ -200,13 +200,13 @@ class Environment : public fdf_testing::Environment {
       const auto& node = clock_nodes[i];
       if (node.clock_id().has_value()) {
         entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
-            std::format("clock_nodes.{}.id", i),
+            std::format("clock_nodes.{}.clock_id", i),
             fuchsia_driver_metadata::DictionaryValue::WithInt64(
                 static_cast<int64_t>(node.clock_id().value()))));
       }
       if (node.node_id().has_value()) {
         entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
-            std::format("clock_nodes.{}.node_id", i),
+            std::format("clock_nodes.{}.id", i),
             fuchsia_driver_metadata::DictionaryValue::WithInt64(
                 static_cast<int64_t>(node.node_id().value()))));
       }

@@ -14,7 +14,9 @@ pub const FAKE_SERIAL_PID: u32 = 0x1234;
 pub struct FakeSerialState {
     pub info_result: Result<serial::SerialPortInfo, zx::Status>,
     pub enable_result: Result<(), zx::Status>,
+    pub config_result: Result<(), zx::Status>,
     pub enabled: bool,
+    pub last_config: Option<(u32, u32)>,
     pub cancel_all_count: usize,
 }
 
@@ -27,7 +29,9 @@ impl Default for FakeSerialState {
                 serial_pid: FAKE_SERIAL_PID,
             }),
             enable_result: Ok(()),
+            config_result: Ok(()),
             enabled: false,
+            last_config: None,
             cancel_all_count: 0,
         }
     }
@@ -56,10 +60,23 @@ impl serialimpl::DeviceServerHandler<fdf_fidl::DriverChannel> for FakeSerialServ
 
     async fn config(
         &mut self,
-        _request: fidl_next::Request<serialimpl::device::Config, fdf_fidl::DriverChannel>,
+        request: fidl_next::Request<serialimpl::device::Config, fdf_fidl::DriverChannel>,
         responder: fidl_next::Responder<serialimpl::device::Config, fdf_fidl::DriverChannel>,
     ) {
-        let _ = responder.respond(()).await;
+        let config_result = {
+            let mut state = self.state.lock();
+            let payload = request.payload();
+            state.last_config = Some((payload.baud_rate, payload.flags));
+            state.config_result
+        };
+        match config_result {
+            Ok(()) => {
+                let _ = responder.respond(()).await;
+            }
+            Err(status) => {
+                let _ = responder.respond_err(status).await;
+            }
+        }
     }
 
     async fn enable(

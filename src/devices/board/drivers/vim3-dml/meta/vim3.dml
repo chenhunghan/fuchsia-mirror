@@ -71,7 +71,6 @@
                 {
                     service: "fuchsia.hardware.clock.Service",
                     field: "clock_nodes",
-                    auto_increment: "node_id",
                 },
             ],
         },

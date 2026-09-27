@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/device-watcher/cpp/device-watcher.h>

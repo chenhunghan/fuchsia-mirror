@@ -18,9 +18,6 @@ cc_test_executable("extend_bits_tests") {
     "//third_party/googletest:gtest",
   ]
   public_deps = [ "//src/media/lib/extend_bits" ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_unittest_package("extend-bits-tests") {

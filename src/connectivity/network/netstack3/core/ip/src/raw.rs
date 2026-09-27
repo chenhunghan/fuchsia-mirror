@@ -873,7 +873,6 @@ mod test {
     use alloc::vec::Vec;
     use assert_matches::assert_matches;
     use core::cell::RefCell;
-    use core::convert::Infallible as Never;
     use core::marker::PhantomData;
     use core::ops::DerefMut;
     use ip_test_macro::ip_test;
@@ -1071,9 +1070,9 @@ mod test {
     }
 
     impl<D> ReferenceNotifiers for FakeBindingsCtx<D> {
-        type ReferenceReceiver<T: 'static> = Never;
+        type ReferenceReceiver<T: 'static> = !;
 
-        type ReferenceNotifier<T: Send + 'static> = Never;
+        type ReferenceNotifier<T: Send + 'static> = !;
 
         fn new_reference_notifier<T: Send + 'static>(
             _debug_references: DynDebugReferences,

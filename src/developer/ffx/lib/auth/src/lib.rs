@@ -29,6 +29,9 @@ impl From<AuthError> for fho::Error {
     fn from(auth_error: AuthError) -> Self {
         match auth_error {
             AuthError::AuthFlow => fho::Error::User(AuthError::AuthFlow.into()),
+            AuthError::AccessToken(GcsError::AuthRequired) => {
+                fho::Error::User(AuthError::AuthFlow.into())
+            }
             e => fho::Error::Unexpected(e.into()),
         }
     }
@@ -100,8 +103,11 @@ where
     I: structured_ui::Interface,
 {
     let refresh_token = match auth_flow {
-        AuthFlowChoice::Pkce => {
+        AuthFlowChoice::Default | AuthFlowChoice::Pkce => {
             auth::pkce::new_refresh_token(ui).await.map_err(|e| AuthError::UpdateRefreshToken(e))
+        }
+        AuthFlowChoice::Device => {
+            auth::device::new_refresh_token(ui).await.map_err(|e| AuthError::UpdateRefreshToken(e))
         }
         _ => Err(AuthError::AuthFlow),
     };
@@ -114,5 +120,40 @@ where
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[fuchsia::test]
+    async fn test_mint_new_access_token_no_auth() {
+        let ui = structured_ui::MockUi::new();
+        let result = mint_new_access_token(&AuthFlowChoice::NoAuth, &ui).await;
+        assert!(matches!(result, Err(AuthError::AccessToken(GcsError::AuthRequired))));
+    }
+
+    #[fuchsia::test]
+    async fn test_update_refresh_token_no_auth() {
+        let ui = structured_ui::MockUi::new();
+        let result = update_refresh_token(&AuthFlowChoice::NoAuth, &ui).await;
+        assert!(matches!(result, Err(AuthError::AuthFlow)));
+    }
+    #[fuchsia::test]
+    async fn test_auth_error_into_fho_error() {
+        let err1 = AuthError::AccessToken(GcsError::AuthRequired);
+        let fho_err1: fho::Error = err1.into();
+        assert!(matches!(fho_err1, fho::Error::User(_)));
+        if let fho::Error::User(inner) = fho_err1 {
+            assert_eq!(inner.to_string(), "Unsupported authentication scheme");
+        }
+
+        let err2 = AuthError::AuthFlow;
+        let fho_err2: fho::Error = err2.into();
+        assert!(matches!(fho_err2, fho::Error::User(_)));
+        if let fho::Error::User(inner) = fho_err2 {
+            assert_eq!(inner.to_string(), "Unsupported authentication scheme");
+        }
     }
 }

@@ -5,11 +5,11 @@
 //! Module for IP level paths' maximum transmission unit (PMTU) size
 //! cache support.
 
-use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 use core::time::Duration;
 
 use log::trace;
-use lru_cache::LruCache;
+use lru::LruCache;
 use net_types::ip::{GenericOverIp, Ip, IpAddress, IpVersionMarker, Mtu};
 use netstack3_base::{
     CoreTimerContext, HandleableTimer, Instant, InstantBindingsTypes, TimerBindingsTypes,
@@ -31,7 +31,7 @@ const MAINTENANCE_PERIOD: Duration = Duration::from_secs(3600);
 // TODO(ghanan): Make this value configurable by runtime options.
 const PMTU_STALE_TIMEOUT: Duration = Duration::from_secs(10800);
 
-const MAX_ENTRIES: usize = 256;
+const MAX_ENTRIES: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
 /// The timer ID for the path MTU cache.
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, GenericOverIp)]
@@ -329,7 +329,7 @@ impl<I: Ip, BT: PmtuBindingsTypes> PmtuCache<I, BT> {
             return UpdateResult::NotUpdated(self.get_pmtu(src_ip, dst_ip));
         }
         let _previous =
-            self.cache.insert(PmtuCacheKey::new(src_ip, dst_ip), PmtuCacheData::new(new_mtu, now));
+            self.cache.put(PmtuCacheKey::new(src_ip, dst_ip), PmtuCacheData::new(new_mtu, now));
 
         log::debug!("updated PMTU for path {src_ip} -> {dst_ip} to {new_mtu:?}");
 
@@ -362,19 +362,8 @@ impl<I: Ip, BT: PmtuBindingsTypes> PmtuCache<I, BT> {
         // used entries rather than, or in addition to, entries that have been
         // in the cache for a long time.
         //
-        // TODO(https://fxbug.dev/406779050): use `LruCache::retain` when such a
-        // method is available to avoid allocating a separate `Vec` of entries
-        // to remove.
-        let to_remove: Vec<_> = self
-            .cache
-            .iter()
-            .filter_map(|(k, v)| {
-                (now.saturating_duration_since(v.last_updated) >= PMTU_STALE_TIMEOUT).then_some(*k)
-            })
-            .collect();
-        for key in to_remove {
-            let _: Option<_> = self.cache.remove(&key);
-        }
+        self.cache
+            .retain(|_k, v| now.saturating_duration_since(v.last_updated) < PMTU_STALE_TIMEOUT);
     }
 
     fn is_empty(&self) -> bool {
@@ -977,8 +966,8 @@ mod tests {
         // If this assertion trips because we've increased `MAX_ENTRIES`, we'll need to
         // update this test to use a different method than `get_other_ip_address` since
         // it only allows us to choose a single byte of the address.
-        assert!(MAX_ENTRIES <= usize::from(u8::MAX) + 1);
-        for i in 0..MAX_ENTRIES {
+        assert!(MAX_ENTRIES.get() <= usize::from(u8::MAX) + 1);
+        for i in 0..MAX_ENTRIES.get() {
             let i = u8::try_from(i).unwrap();
             assert_eq!(
                 PmtuHandler::update_pmtu_if_less(
@@ -991,7 +980,7 @@ mod tests {
                 Some(Mtu::max())
             );
         }
-        assert_eq!(core_ctx.state.cache.cache.len(), MAX_ENTRIES);
+        assert_eq!(core_ctx.state.cache.cache.len(), MAX_ENTRIES.get());
 
         // The next insertion should cause the LRU entry to be discarded.
         assert_eq!(
@@ -1004,7 +993,7 @@ mod tests {
             ),
             Some(Mtu::max())
         );
-        assert_eq!(core_ctx.state.cache.cache.len(), MAX_ENTRIES);
+        assert_eq!(core_ctx.state.cache.cache.len(), MAX_ENTRIES.get());
         assert_eq!(
             core_ctx.state.cache.get_pmtu(*I::TEST_ADDRS.local_ip, *I::get_other_ip_address(0)),
             None

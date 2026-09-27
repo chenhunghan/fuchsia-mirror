@@ -111,7 +111,7 @@ impl KernelCgroups {
     ///
     /// Note: Mutex dependency graph:
     ///
-    /// `KernelPidTable` -> `CgroupRootPidTable` -> `CgroupState` -> `ThreadGroupState`
+    /// `PidTableLock` -> `CgroupPidTableLock` -> `CgroupStateLock` -> `ThreadGroupMutableStateLock`
     pub fn lock_cgroup2_pid_table(&self) -> LockDepGuard<'_, CgroupPidTable> {
         self.cgroup2.pid_table.lock()
     }

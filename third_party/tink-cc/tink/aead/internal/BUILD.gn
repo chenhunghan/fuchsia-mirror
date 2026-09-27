@@ -135,8 +135,12 @@ source_set("zero_copy_aes_gcm_boringssl") {
     "//third_party/abseil-cpp/absl/status",
     "//third_party/abseil-cpp/absl/status:statusor",
     "//third_party/abseil-cpp/absl/strings",
+    "//third_party/abseil-cpp/absl/strings:str_format",
     "//third_party/abseil-cpp/absl/types:span",
+    "//third_party/tink-cc/tink:insecure_secret_key_access",
+    "//third_party/tink-cc/tink:partial_key_access",
     "//third_party/tink-cc/tink:secret_data",
+    "//third_party/tink-cc/tink/aead:aes_gcm_key",
     "//third_party/tink-cc/tink/internal:util",
     "//third_party/tink-cc/tink/subtle:random",
     "//third_party/tink-cc/tink/util:secret_data",
@@ -624,6 +628,40 @@ source_set("aes_ctr_hmac_proto_structs") {
     "//third_party/tink-cc/tink/internal:proto_parser_message",
     "//third_party/tink-cc/tink/mac/internal:hmac_proto_structs",
     "//third_party/tink-cc/tink/util:secret_data",
+  ]
+  public_configs = [ "//third_party/tink-cc:tink_config" ]
+}
+
+# CC Library : cord_aes_gcm_siv_boringssl
+source_set("cord_aes_gcm_siv_boringssl") {
+  configs += [ "//build/config:no_rtti" ]
+  configs -= [ "//build/config:no_rtti" ]
+  sources = [
+    "//third_party/tink-cc/src/tink/aead/internal/cord_aes_gcm_siv_boringssl.cc",
+    "//third_party/tink-cc/src/tink/aead/internal/cord_aes_gcm_siv_boringssl.h",
+  ]
+  public_deps = [
+    ":aead_util",
+    ":cord_utils",
+    "//third_party/abseil-cpp/absl/status",
+    "//third_party/abseil-cpp/absl/status:statusor",
+    "//third_party/abseil-cpp/absl/strings",
+    "//third_party/abseil-cpp/absl/strings:cord",
+    "//third_party/abseil-cpp/absl/strings:string_view",
+    "//third_party/abseil-cpp/absl/types:span",
+    "//third_party/boringssl:crypto",
+    "//third_party/tink-cc/tink:insecure_secret_key_access",
+    "//third_party/tink-cc/tink:partial_key_access",
+    "//third_party/tink-cc/tink:restricted_data",
+    "//third_party/tink-cc/tink:secret_data",
+    "//third_party/tink-cc/tink/aead:aes_gcm_siv_key",
+    "//third_party/tink-cc/tink/aead:cord_aead",
+    "//third_party/tink-cc/tink/internal:call_with_core_dump_protection",
+    "//third_party/tink-cc/tink/internal:err_util",
+    "//third_party/tink-cc/tink/internal:fips_utils",
+    "//third_party/tink-cc/tink/internal:ssl_unique_ptr",
+    "//third_party/tink-cc/tink/internal:ssl_util",
+    "//third_party/tink-cc/tink/subtle:random",
   ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }

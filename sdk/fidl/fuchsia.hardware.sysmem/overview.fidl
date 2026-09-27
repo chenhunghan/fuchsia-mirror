@@ -1,5 +1,23 @@
 // Copyright 2024 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+/// NOTE: Most readers (including authors of hardware drivers that allocate or
+/// use buffers) are likely looking for [`fuchsia.sysmem2/Allocator`], NOT this
+/// library.
+///
+/// This library (`fuchsia.hardware.sysmem`) defines privileged backend
+/// registration protocols used ONLY by:
+///   1. Drivers that implement and register a custom external sysmem heap
+///      (via [`fuchsia.hardware.sysmem/Sysmem.RegisterHeap`]).
+///   2. The platform secure memory (TEE) driver that registers physical secure
+///      heaps (via [`fuchsia.hardware.sysmem/Sysmem.RegisterSecureMem`]).
+///
+/// Security model:
+/// [`fuchsia.hardware.sysmem/Sysmem`] is a high-privilege protocol. Sysmem
+/// trusts any client connected to this protocol. Access is restricted via
+/// Component Framework capability routing: ONLY components that specifically
+/// and legitimately need to call `RegisterHeap` or `RegisterSecureMem` should
+/// be routed / permitted to `use` `fuchsia.hardware.sysmem.Sysmem`.
 @available(added=HEAD)
 library fuchsia.hardware.sysmem;

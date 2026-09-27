@@ -37,6 +37,7 @@ fidl("fuchsia.memory.attribution.plugin") {
   sources = [ "plugin.fidl" ]
   sdk_area = "Diagnostics"
   visibility = [
+    ":*",
     "//sdk/fidl:*",
     "//src/developer/ffx/plugins/profile/memory/*",
     "//src/performance/memory/*",

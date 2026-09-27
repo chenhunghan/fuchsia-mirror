@@ -1081,8 +1081,8 @@ mod tests {
 
         // Verify that a failure notification is send to listeners.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Failed);
         });
@@ -1169,15 +1169,15 @@ mod tests {
         // An empty update should be sent after stopping.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert!(updates.access_points.is_empty());
         });
 
         // The empty update should be quickly followed by a starting update.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Starting);
         });
@@ -1198,8 +1198,8 @@ mod tests {
 
         // There should be a pending active state notification
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Active);
         });
@@ -1252,7 +1252,7 @@ mod tests {
         let mut fut = pin!(fut);
 
         // Verify that no state update is ready yet.
-        assert_matches!(&mut test_values.update_receiver.try_next(), Err(_));
+        assert_matches!(&mut test_values.update_receiver.try_recv(), Err(_));
 
         // Issue a stop request.
         let mut ap = AccessPoint::new(test_values.ap_req_sender);
@@ -1278,8 +1278,8 @@ mod tests {
 
         // There should be a new update indicating that no AP's are active.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert!(updates.access_points.is_empty());
         });
     }
@@ -1374,8 +1374,8 @@ mod tests {
 
         // There should be a new update indicating that no AP's are active.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert!(updates.access_points.is_empty());
         });
     }
@@ -1392,7 +1392,7 @@ mod tests {
         let mut fut = pin!(fut);
 
         // Verify that no state update is ready yet.
-        assert_matches!(&mut test_values.update_receiver.try_next(), Err(_));
+        assert_matches!(&mut test_values.update_receiver.try_recv(), Err(_));
 
         // Expect the stop request from the SME proxy
         let sme_fut = test_values.sme_req_stream.into_future();
@@ -1412,8 +1412,8 @@ mod tests {
 
         // There should be a new update indicating that no AP's are active.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert!(updates.access_points.is_empty());
         });
     }
@@ -1491,8 +1491,8 @@ mod tests {
 
         // The successful AP start should be logged.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::StartApResult(Ok(()))))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Ok(())))
         );
     }
 
@@ -1594,8 +1594,8 @@ mod tests {
 
         // The successful AP start event should be logged.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::StartApResult(Ok(()))))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Ok(())))
         );
     }
 
@@ -1663,8 +1663,8 @@ mod tests {
 
         // The AP start success event should be logged to telemetry.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::StartApResult(Ok(()))))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Ok(())))
         );
     }
 
@@ -1695,7 +1695,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
 
         // No metric should be logged in this case and the sender should have been dropped.
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(None));
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Err(e) if e.is_closed());
     }
 
     #[fuchsia::test]
@@ -1739,14 +1739,14 @@ mod tests {
 
         // There should also be a failed state update.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Failed);
         });
 
         // No metric should be logged in this case and the sender should have been dropped.
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(None));
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Err(e) if e.is_closed());
     }
 
     #[fuchsia::test]
@@ -1788,21 +1788,21 @@ mod tests {
             // There should also be a stopped state update.
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
             assert_matches!(
-                test_values.update_receiver.try_next(),
-                Ok(Some(listener::Message::NotifyListeners(_)))
+                test_values.update_receiver.try_recv(),
+                Ok(listener::Message::NotifyListeners(_))
             );
 
             // If this is the first attempt, there should be a starting notification, otherwise
             // there should be no update.
             if retry_number == 0 {
                 assert_matches!(
-                    test_values.update_receiver.try_next(),
-                    Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+                    test_values.update_receiver.try_recv(),
+                    Ok(listener::Message::NotifyListeners(mut updates)) => {
                     let update = updates.access_points.pop().expect("no new updates available.");
                     assert_eq!(update.state, types::OperatingState::Starting);
                 });
             } else {
-                assert_matches!(test_values.update_receiver.try_next(), Err(_));
+                assert_matches!(test_values.update_receiver.try_recv(), Err(_));
             }
 
             // Wait for a start request and send back a timeout.
@@ -1835,22 +1835,22 @@ mod tests {
 
         // There should be a failure notification at the end of the retries.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Failed);
         });
 
         // A metric should be logged for the failure to start the AP.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::StartApResult(Err(()))))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Err(())))
         );
 
         // A defect should be sent as well.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ApStartFailure { .. })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ApStartFailure { .. }))
         );
     }
 
@@ -1899,14 +1899,14 @@ mod tests {
         // There should also be a stopped state update.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(_)))
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(_))
         );
 
         // Followed by a starting update.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Starting);
         });
@@ -1928,14 +1928,14 @@ mod tests {
 
         // A metric should be logged for the failure to start the AP.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::StartApResult(Err(()))))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Err(())))
         );
 
         // A defect should be sent as well.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ApStartFailure { .. })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ApStartFailure { .. }))
         );
 
         // The start sender will be dropped in this transition.
@@ -1960,8 +1960,8 @@ mod tests {
 
         // There should be a new update indicating that no AP's are active.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert!(updates.access_points.is_empty());
         });
     }
@@ -2022,14 +2022,14 @@ mod tests {
         // There should also be a stopped state update.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(_)))
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(_))
         );
 
         // Followed by a starting update.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Starting);
         });
@@ -2051,14 +2051,14 @@ mod tests {
 
         // A metric should be logged for the failure to start the AP.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::StartApResult(Err(()))))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Err(())))
         );
 
         // A defect should be sent as well.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ApStartFailure { .. })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ApStartFailure { .. }))
         );
 
         // The original start sender will be dropped in this transition.
@@ -2130,14 +2130,14 @@ mod tests {
         // There should also be a stopped state update.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(_)))
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(_))
         );
 
         // Followed by a starting update.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Starting);
         });
@@ -2160,14 +2160,14 @@ mod tests {
 
         // A metric should be logged for the failure to start the AP.
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::StartApResult(Err(()))))
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Err(())))
         );
 
         // A defect should be sent as well.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ApStartFailure { .. })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ApStartFailure { .. }))
         );
     }
 
@@ -2211,14 +2211,14 @@ mod tests {
         // notification.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
                 assert!(updates.access_points.is_empty());
         });
 
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(mut updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
             let update = updates.access_points.pop().expect("no new updates available.");
             assert_eq!(update.state, types::OperatingState::Starting);
         });
@@ -2336,14 +2336,14 @@ mod tests {
         // At this point, the state machine will have sent an empty notification and a starting
         // notification.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(update))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(update)) => {
                 assert!(update.access_points.is_empty());
             }
         );
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(update))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(update)) => {
                 assert_eq!(update.access_points.len(), 1);
                 assert_eq!(update.access_points[0].state, types::OperatingState::Starting);
             }
@@ -2357,8 +2357,8 @@ mod tests {
 
         // There should be a failure notification.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(update))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(update)) => {
                 assert_eq!(update.access_points.len(), 1);
                 assert_eq!(update.access_points[0].state, types::OperatingState::Failed);
             }
@@ -2377,7 +2377,7 @@ mod tests {
         }
 
         // And there should be no updates.
-        assert_matches!(receiver.try_next(), Err(_));
+        assert_matches!(receiver.try_recv(), Err(_));
 
         // Reset the state to starting and verify that the internal state has been updated.
         let new_state = ApStateUpdate::new(
@@ -2404,8 +2404,8 @@ mod tests {
 
         // Resetting the state should result in an update.
         assert_matches!(
-            receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ApStatesUpdate { access_points }))) => {
+            receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ApStatesUpdate { access_points })) => {
             assert_eq!(access_points.len(), 1);
 
             let expected_id = types::NetworkIdentifier {
@@ -2439,8 +2439,8 @@ mod tests {
 
         // The update should note that the AP is active.
         assert_matches!(
-            receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ApStatesUpdate { access_points }))
+            receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ApStatesUpdate { access_points })
         ) => {
             assert_eq!(access_points.len(), 1);
 
@@ -2471,8 +2471,8 @@ mod tests {
             .expect("failure while updating SME status");
 
         assert_matches!(
-            receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ApStatesUpdate { access_points }))
+            receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ApStatesUpdate { access_points })
         ) => {
             assert_eq!(access_points.len(), 1);
 
@@ -2506,8 +2506,8 @@ mod tests {
 
         // The update should note that the AP is starting.
         assert_matches!(
-            receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ApStatesUpdate { access_points }))
+            receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ApStatesUpdate { access_points })
         ) => {
             assert_eq!(access_points.len(), 1);
 
@@ -2528,8 +2528,8 @@ mod tests {
             .update_operating_state(types::OperatingState::Starting)
             .expect("failed to send duplicate update.");
         assert_matches!(
-            receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ApStatesUpdate { access_points }))
+            receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ApStatesUpdate { access_points })
         ) => {
             assert_eq!(access_points.len(), 1);
 
@@ -2550,8 +2550,8 @@ mod tests {
             .update_operating_state(types::OperatingState::Active)
             .expect("failed to send active update.");
         assert_matches!(
-            receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ApStatesUpdate { access_points }))
+            receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ApStatesUpdate { access_points })
         ) => {
             assert_eq!(access_points.len(), 1);
 
@@ -2594,8 +2594,8 @@ mod tests {
 
         // Verify that an empty update has arrived.
         assert_matches!(
-            receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ApStatesUpdate { access_points }))
+            receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ApStatesUpdate { access_points })
         ) => {
             assert!(access_points.is_empty());
         });

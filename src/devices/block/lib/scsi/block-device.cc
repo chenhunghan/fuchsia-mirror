@@ -28,6 +28,7 @@ ScsiRequest::ScsiRequest(ScsiRequest&& other) {
   immediate_data_ = other.immediate_data_;
   immediate_data_length_ = other.immediate_data_length_;
   is_write_ = other.is_write_;
+  inline_crypto_ = other.inline_crypto_;
   completed_ = other.completed_;
   parent_ = other.parent_;
 
@@ -50,6 +51,7 @@ ScsiRequest& ScsiRequest::operator=(ScsiRequest&& other) {
     immediate_data_ = other.immediate_data_;
     immediate_data_length_ = other.immediate_data_length_;
     is_write_ = other.is_write_;
+    inline_crypto_ = other.inline_crypto_;
     completed_ = other.completed_;
     parent_ = other.parent_;
 
@@ -286,6 +288,13 @@ zx_status_t BlockDevice::AddDevice(uint32_t max_transfer_bytes) {
                              std::move(server_end), this);
           },
   });
+  if (controller_->SupportsInlineEncryption()) {
+    auto result = handlers.add_inline_encryption(
+        [this](fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) {
+          controller_->ServeInlineEncryption(std::move(server_end));
+        });
+    ZX_ASSERT(result.is_ok());
+  }
 
   auto add_svc_result =
       controller_->driver_outgoing()->AddService<fuchsia_hardware_block_volume::Service>(
@@ -363,6 +372,13 @@ void BlockDevice::OnRequests(std::span<block_server::Request> requests) {
         scsi_req.vmo_offset_ =
             is_write ? req.operation.write.vmo_offset : req.operation.read.vmo_offset;
         scsi_req.is_write_ = is_write;
+        scsi_req.inline_crypto_ = is_write ? req.operation.write.options.inline_crypto
+                                           : req.operation.read.options.inline_crypto;
+        if (!controller_->SupportsInlineEncryption() && scsi_req.inline_crypto_.is_enabled) {
+          scsi_req.Complete(ZX_ERR_NOT_SUPPORTED);
+          count--;
+          continue;
+        }
 
         uint64_t dev_off = is_write ? req.operation.write.device_block_offset
                                     : req.operation.read.device_block_offset;

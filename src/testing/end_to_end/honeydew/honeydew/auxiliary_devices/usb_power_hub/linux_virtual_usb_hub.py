@@ -24,26 +24,19 @@ class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
     and virtual/emulated testbeds where physical power hubs are not available.
 
     Note on permissions:
-        Writing to the authorized file requires root privileges by default.
-        To run this without sudo (e.g. in automated tests or local development
-        without prompting for password), you can set up a udev rule on the host:
-
-        ```udev
-        SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="18d1", ATTR{idProduct}=="a02b", RUN+="/bin/chmod a+w /sys/bus/usb/devices/$kernel/authorized"
-        ```
-        Replace the vendor/product IDs if your device uses different ones.
+        Writing to the authorized file requires write access that a regular
+        user does not have by default. Install the required udev rules with
+        //src/tests/end_to_end/usb/lib/disconnect/udev.sh, which grants
+        access without needing `sudo` at test time.
 
     Args:
         target_serial: The serial number of the Fuchsia device. Used for
             discovery to match against connected USB devices.
-        use_sudo: Whether to use `sudo` to write to the authorized file.
-            Defaults to False.
     """
 
     def __init__(
         self,
         target_serial: str | None = None,
-        use_sudo: bool = False,
     ) -> None:
         super().__init__()
         if platform.system() != "Linux":
@@ -51,7 +44,6 @@ class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
                 "LinuxVirtualUsbPowerHub is only supported on Linux hosts."
             )
 
-        self._use_sudo = use_sudo
         self._target_serial = target_serial
         self._usb_bus_id: str = self._find_usb_bus_id()
 
@@ -65,16 +57,11 @@ class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
             port: None. Not used by this implementation.
         """
         _LOGGER.info("Virtually unplugging USB device %s...", self._usb_bus_id)
-        cmd: list[str] = []
-        if self._use_sudo:
-            cmd.append("sudo")
-        cmd.extend(
-            [
-                "sh",
-                "-c",
-                f"echo 0 > /sys/bus/usb/devices/{self._usb_bus_id}/authorized",
-            ]
-        )
+        cmd: list[str] = [
+            "sh",
+            "-c",
+            f"echo 0 > /sys/bus/usb/devices/{self._usb_bus_id}/authorized",
+        ]
         try:
             host_shell.run(cmd=cmd)
         except errors.HostCmdError as err:
@@ -90,16 +77,11 @@ class LinuxVirtualUsbPowerHub(usb_power_hub.UsbPowerHub):
             port: None. Not used by this implementation.
         """
         _LOGGER.info("Virtually plugging in USB device %s...", self._usb_bus_id)
-        cmd: list[str] = []
-        if self._use_sudo:
-            cmd.append("sudo")
-        cmd.extend(
-            [
-                "sh",
-                "-c",
-                f"echo 1 > /sys/bus/usb/devices/{self._usb_bus_id}/authorized",
-            ]
-        )
+        cmd: list[str] = [
+            "sh",
+            "-c",
+            f"echo 1 > /sys/bus/usb/devices/{self._usb_bus_id}/authorized",
+        ]
         try:
             host_shell.run(cmd=cmd)
         except errors.HostCmdError as err:

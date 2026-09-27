@@ -109,8 +109,7 @@ int CreateIcmp6Socket(void) {
   int sock;
   int rval;
   struct icmp6_filter filter;
-  // const int kEnable = 1;
-  // const int kIpv6ChecksumOffset = 2;
+  const int kEnable = 1;
   const int kHopLimit = 255;
 
   // Initializes the ICMPv6 socket.
@@ -135,12 +134,10 @@ int CreateIcmp6Socket(void) {
   // ret_val:%lld, errno:%s", rval, strerror(errno)); VERIFY_OR_ASSERT(rval == 0,
   // OT_EXIT_ERROR_ERRNO);
 
-  // TODO(https://fxbug.dev/42163112): re-enable once we have IPV6_RECVHOPLIMIT
-  // We need to be able to reject RAs arriving from off-link.
-  // rval = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &kEnable, sizeof(kEnable));
-  // otPlatLog(OT_LOG_LEVEL_WARN, OT_LOG_REGION_PLATFORM, "IPPROTO_IPV6, IPV6_RECVHOPLIMIT
-  // ret_val:%lld, errno:%s", rval, strerror(errno)); VERIFY_OR_ASSERT(rval == 0,
-  // OT_EXIT_ERROR_ERRNO);
+  rval = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &kEnable, sizeof(kEnable));
+  otPlatLog(OT_LOG_LEVEL_WARN, OT_LOG_REGION_PLATFORM,
+            "IPPROTO_IPV6, IPV6_RECVHOPLIMIT ret_val:%d, errno:%s", rval, strerror(errno));
+  VERIFY_OR_ASSERT(rval == 0, "OT_EXIT_ERROR_ERRNO");
 
   rval = setsockopt(sock, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &kHopLimit, sizeof(kHopLimit));
   otPlatLog(OT_LOG_LEVEL_WARN, OT_LOG_REGION_PLATFORM,
@@ -312,7 +309,7 @@ void InfraNetif::ReceiveIcmp6Message(otInstance *a_instance) {
   char cmsgbuf[128];
   struct cmsghdr *cmh;
   // uint32_t ifIndex = 0;
-  // int hopLimit = -1;
+  int hopLimit = -1;
 
   struct sockaddr_in6 srcAddr;
   struct in6_addr dstAddr;
@@ -342,8 +339,8 @@ void InfraNetif::ReceiveIcmp6Message(otInstance *a_instance) {
   }
   bufferLength = static_cast<uint16_t>(rval);
 
-  // TODO(https://fxbug.dev/42129881): Re-enable once we have IPV6_RECVPKTINFO
   for (cmh = CMSG_FIRSTHDR(&msg); cmh; cmh = CMSG_NXTHDR(&msg, cmh)) {
+    // TODO(https://fxbug.dev/42129881): Re-enable once we have IPV6_RECVPKTINFO
     // if (cmh->cmsg_level == IPPROTO_IPV6 && cmh->cmsg_type == IPV6_PKTINFO &&
     //     cmh->cmsg_len == CMSG_LEN(sizeof(struct in6_pktinfo))) {
     //   struct in6_pktinfo pktinfo;
@@ -352,18 +349,17 @@ void InfraNetif::ReceiveIcmp6Message(otInstance *a_instance) {
     //   ifIndex = pktinfo.ipi6_ifindex;
     //   dstAddr = pktinfo.ipi6_addr;
     // } else
-    // if (cmh->cmsg_level == IPPROTO_IPV6 && cmh->cmsg_type == IPV6_HOPLIMIT &&
-    //            cmh->cmsg_len == CMSG_LEN(sizeof(int))) {
-    //   hopLimit = *(int *)CMSG_DATA(cmh);
-    // }
+    if (cmh->cmsg_level == IPPROTO_IPV6 && cmh->cmsg_type == IPV6_HOPLIMIT &&
+        cmh->cmsg_len == CMSG_LEN(sizeof(int))) {
+      hopLimit = *(int *)CMSG_DATA(cmh);
+    }
   }
 
   // VerifyOrExit(ifIndex == infra_if_idx_, error = OT_ERROR_DROP);
 
   // We currently accept only RA & RS messages for the Border Router and it requires that
   // the hoplimit must be 255 and the source address must be a link-local address.
-  // VerifyOrExit(hopLimit == 255 && IN6_IS_ADDR_LINKLOCAL(&srcAddr.sin6_addr), error =
-  // OT_ERROR_DROP);
+  VerifyOrExit(hopLimit == 255 && IN6_IS_ADDR_LINKLOCAL(&srcAddr.sin6_addr), error = OT_ERROR_DROP);
 
   if (!IN6_IS_ADDR_LINKLOCAL(&srcAddr.sin6_addr)) {
     otPlatLog(OT_LOG_LEVEL_CRIT, OT_LOG_REGION_PLATFORM,

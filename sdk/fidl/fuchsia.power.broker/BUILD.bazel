@@ -35,6 +35,7 @@ fidl_library(
         "//src/connectivity/network/netstack3:__pkg__",
         "//src/connectivity/network/tests/integration/power:__subpackages__",
         "//src/connectivity/wlan/lib/power_manager:__subpackages__",
+        "//src/connectivity/wlan/wlancfg:__subpackages__",
         "//src/connectivity/wlan/wlandevicemonitor:__subpackages__",
         "//src/connectivity/wlan/wlanix:__subpackages__",
         "//src/developer/forensics:__subpackages__",

@@ -35,6 +35,11 @@ impl<T: Send + Sync> AtomicStack<T> {
         Self { head: AtomicPtr::new(ptr::null_mut()) }
     }
 
+    /// Returns true if the stack is empty.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.head.load(Ordering::Acquire).is_null()
+    }
+
     /// Push an element onto the front of the stack.
     pub(crate) fn push_front(&self, data: T) {
         let node = Box::new(Node { next: ptr::null_mut(), data });
@@ -98,6 +103,11 @@ impl<T: Send + Sync> AtomicListIterator<T> {
     /// Returns an empty iterator.
     pub const fn empty() -> Self {
         Self { head: std::ptr::null_mut() }
+    }
+
+    /// Returns true if the iterator is empty.
+    pub fn is_empty(&self) -> bool {
+        self.head.is_null()
     }
 }
 
@@ -201,5 +211,22 @@ mod tests {
         assert_eq!(drop_counter.load(Ordering::Relaxed), 0);
         drop(iter);
         assert_eq!(drop_counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let list = AtomicStack::new();
+        assert!(list.is_empty());
+        list.push_front(1);
+        assert!(!list.is_empty());
+        let mut iter = list.take();
+        assert!(list.is_empty());
+        assert!(!iter.is_empty());
+        assert_eq!(iter.next(), Some(1));
+        assert!(iter.is_empty());
+        assert_eq!(iter.next(), None);
+
+        let empty_iter = AtomicListIterator::<i32>::empty();
+        assert!(empty_iter.is_empty());
     }
 }

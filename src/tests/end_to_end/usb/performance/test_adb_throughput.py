@@ -32,13 +32,11 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
     """Measures ADB push and pull throughput over USB using both storage-isolated and storage-backed transfers."""
 
     async def setup_class(self) -> None:
-        """Reads build-time test parameters for transfer sizes and checks ADB support."""
+        """Reads build-time test parameters for transfer sizes."""
         await super().setup_class()
-
-        if not await self.dut.adb.is_supported():
-            raise signals.TestAbortClass("ADB is not supported on this device")
-
-        _LOGGER.debug(f"Device serial number: {await self.dut.serial_number()}")
+        # Ensure ADB is supported and enabled on this device before starting the test
+        # (raises NotSupportedError or NotEnabledError otherwise).
+        _ = self.dut.adb
 
         # Configurable transfer sizes from test parameters in BUILD.gn
         self._ram_file_size_bytes = int(
@@ -93,9 +91,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
             directory=self.test_case_path,
             trace_file=trace_file,
         ):
-            output = await self.dut.adb.run(
-                [command, "-Z", source_path, dest_path]
-            )
+            output = self.dut.adb.run([command, "-Z", source_path, dest_path])
             _LOGGER.info(
                 f"Output from `adb {command}` ({metric_suite}): {output}"
             )
@@ -174,7 +170,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
             self._ram_file_size_bytes
         ) as local_ram_f:
             try:
-                await self.dut.adb.run(
+                self.dut.adb.run(
                     ["push", "-Z", local_ram_f.name, _DEVICE_TMP_FILE_PATH]
                 )
                 await self._run_transfer_benchmark(
@@ -184,9 +180,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
                     metric_suite="fuchsia.usb.adb.pull",
                 )
             finally:
-                await self.dut.adb.run(
-                    ["shell", "rm", "-f", _DEVICE_TMP_FILE_PATH]
-                )
+                self.dut.adb.run(["shell", "rm", "-f", _DEVICE_TMP_FILE_PATH])
 
     async def test_adb_push_storage(self) -> None:
         """Pushes an uncompressed file from host disk to device flash storage."""
@@ -201,7 +195,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
                     metric_suite="fuchsia.usb.adb.push_storage",
                 )
             finally:
-                await self.dut.adb.run(
+                self.dut.adb.run(
                     [
                         "shell",
                         "rm",
@@ -219,7 +213,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
             local_disk_f.truncate(self._storage_file_size_bytes)
             local_disk_f.flush()
             try:
-                await self.dut.adb.run(
+                self.dut.adb.run(
                     [
                         "push",
                         "-Z",
@@ -234,7 +228,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
                     metric_suite="fuchsia.usb.adb.pull_storage",
                 )
             finally:
-                await self.dut.adb.run(
+                self.dut.adb.run(
                     [
                         "shell",
                         "rm",

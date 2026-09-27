@@ -99,9 +99,8 @@ zx_status_t Nelson::BluetoothInit() {
   };
 
   auto builder =
-      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena)
-          .name("bluetooth-composite-spec")
-          .parents2(fidl::VectorView<fuchsia_driver_framework::wire::ParentSpec2>(arena, parents));
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("bt-uart").parents2(
+          fidl::VectorView<fuchsia_driver_framework::wire::ParentSpec2>(arena, parents));
 
   fit::result encoded = fidl::Persist(bt_uart_serial_info);
   if (encoded.is_error()) {

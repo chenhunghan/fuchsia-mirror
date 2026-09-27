@@ -8,7 +8,7 @@ BT_FILE_DEPS=(
     # "prebuilt/third_party/jq/${HOST_PLATFORM}/bin/jq"
     "scripts/fx"
     # "scripts/fuchsia-vendored-python"
-    # "scripts/fuchsia-vendored-python3.11"
+    # "scripts/fuchsia-vendored-python3.13"
     "build/bazel/wrapper.bazel.sh"
     "scripts/hermetic-env"
     "tools/devshell/bazel"

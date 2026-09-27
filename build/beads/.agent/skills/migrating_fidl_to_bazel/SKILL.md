@@ -16,8 +16,7 @@ GN to Bazel.
 1.  Identify the requested `BUILD.gn` files and their `fidl` GN targets based
     on the user request.
 2.  Create a `BUILD.bazel` file in the same directory as the `BUILD.gn` file.
-    See `assets/copyright_header_template.md` for the copyright header template.
-    Add the copyright header to the top of the file.
+    Refer to [`build_bazel_header_template.md`](../../../../bazel/references/build_bazel_header_template.md) for the copyright header and `package(default_applicable_licenses = ["//:license"])` declaration.
 
 3.  Define the equivalent Bazel target for the FIDL library. Use `fidl_library`
     loaded from `//build/bazel/rules/fidl:fidl_library.bzl`.
@@ -30,7 +29,8 @@ GN to Bazel.
     *(Example: If a comment is above `excluded_checks = [`, it should sit directly
     above `excluded_checks = [` in the `BUILD.bazel` file).*
 
-    Map the attributes according to the attributes mapping in `references/gn_to_bazel_attributes_mapping.md`
+    Map the attributes according to the attributes mapping in `references/gn_to_bazel_attributes_mapping.md`.
+    For setting proper target visibility, see the [`determining-bazel-visibility`](../determining_bazel_visibility/SKILL.md) skill.
 
 4.  If dependencies are missing Bazel targets, migrate those dependencies first.
 5.  Verify the Bazel target builds successfully:

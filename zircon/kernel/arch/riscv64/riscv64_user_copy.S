@@ -9,20 +9,9 @@
 #include <zircon/errors.h>
 
 // Riscv64UserCopyRet _riscv64_user_copy(void *dst, const void *src, size_t len, uint64_t *fault_return, uint64_t capture_faults_mask)
-// Align to cache line.  This code fits in one cache line.
+// Align hot code to cache line.
 .function _riscv64_user_copy, global, align=64
-  add.sp -8*6
-  .llvm.stack_size 8*6
-
-  .macro on_user_copy_regs macro
-    \macro s0, 8*0
-    \macro s1, 8*1
-    \macro gp, 8*2
-    \macro s3, 8*3
-    \macro ra, 8*4
-  .endm
-
-  on_user_copy_regs sd.spill
+  .llvm.stack_size 0
 
   // Allow supervisor accesses to user memory by setting the SUM bit
   li a5, RISCV64_CSR_SSTATUS_SUM
@@ -34,51 +23,88 @@
   or a5, a5, a4
   sd a5, (a3)
 
-  // Save fault_return into a saved reg
-  mv s1, a3
+  // Short-circuit for zero-length.  TODO: impossible at higher level?
+  beqz a2, .Luser_copy_done
 
-  // Save a copy of the stack pointer
-  mv s3, sp
+  // If len < 8, skip straight to the byte-by-byte tail loop.
+  li a4, 8
+  bltu a2, a4, .Luser_copy_tail
 
-  // Just call our normal memcpy.  The caller has ensured that the
-  // address range is in the user portion of the address space.
-  // While fault_return_ptr is set, userspace data faults will be
-  // redirected to .Lfault_from_user, below.
-  //
-  // Note makes serious assumptions about the implementation of memcpy.
-  // Notably the memcpy implementation will not save or modify anything other
-  // than s0, gp and sp as per normal frame pointer and shadow call stack
-  // usage. We save these registers above as a result in case the fault path is
-  // taken and we're effectively pulled out of the guts of the memcpy so that
-  // we can restore them below.  TODO-rvbringup: either implement copy inline
-  // or acquire/write a memset/memcpy routine in assembly that can guarantee
-  // the above tighter.
-  call memcpy
+  // If the dst and src alignments aren't congruent modulo word size, then just
+  // copy byte-by-byte rather than doing aligned word stores after unaligned
+  // word loads or vice versa.
+  xor a4, a0, a1
+  and a4, a4, 7
+  bnez a4, .Luser_copy_tail
 
+  // Copy single bytes until dst is word-aligned.
+.Luser_copy_leading_bytes:
+  and a4, a0, 7
+  beqz a4, .Luser_copy_words
+  lbu a4, (a1)
+  sb a4, (a0)
+  add a0, a0, 1
+  add a1, a1, 1
+  add a2, a2, -1
+  // a2 can never reach zero from >= 8 before a0 reaches 0 mod 8.
+  j .Luser_copy_leading_bytes
+
+  // Copy aligned whole words.
+.Luser_copy_words:
+  // Bulk copy multiples of 4 words with the unrolled loop.
+  li t0, 4*8
+  bltu a2, t0, .Luser_copy_single_words
+
+.Luser_copy_4words:
+  ld a4, 0*8(a1)
+  ld a5, 1*8(a1)
+  sd a4, 0*8(a0)
+  sd a5, 1*8(a0)
+  ld a4, 2*8(a1)
+  ld a5, 3*8(a1)
+  sd a4, 2*8(a0)
+  sd a5, 3*8(a0)
+
+  add a1, a1, 4*8
+  add a0, a0, 4*8
+  add a2, a2, -4*8
+  bgeu a2, t0, .Luser_copy_4words
+
+  // Copy remaining whole words individually.
+.Luser_copy_single_words:
+  li a4, 8
+  bltu a2, a4, .Luser_copy_tail
+0:ld a5, (a1)
+  add a2, a2, -8
+  add a1, a1, 8
+  sd a5, (a0)
+  add a0, a0, 8
+  bgeu a2, a4, 0b
+
+  // Copy remaining bytes individually.
+.Luser_copy_tail:
+  beqz a2, .Luser_copy_done
+0:lbu a4, (a1)
+  add a2, a2, -1
+  add a1, a1, 1
+  sb a4, (a0)
+  add a0, a0, 1
+  bnez a2, 0b
+
+.Luser_copy_done:
   // Store a successful status for the return.
   // Zero out the top word of the structure to be clean about it.
   li a0, ZX_OK
   li a1, 0
 
 .Luser_copy_return:
-  // This code may be reached via .Lfault_from_user, when sp may be different.
-  .cfi_def_cfa_register s3
-  .cfi_remember_state
-
-  // Restore *fault_return and the ra register
-  sd zero, (s1)
+  // Restore *fault_return.
+  sd zero, (a3)
 
   // Disable supervisor accesses to user memory
   li a5, RISCV64_CSR_SSTATUS_SUM
   csrc sstatus, a5
 
-  // Recover the old stack pointer
-  mv sp, s3
-  .cfi_def_cfa_register sp
-
-  on_user_copy_regs ld.reload
-
-  add.sp 8*6
   ret
 
 // If we are capturing faults the exception handler will have placed the
@@ -87,7 +113,6 @@
 // whether it specified fault capture or not, we just need to construct a valid
 // a0 before jmping to user_copy_return.
 .Lfault_from_user:
-  .cfi_restore_state  // Use what was remembered at .Luser_copy_return, above.
   li a0, (ZX_ERR_INVALID_ARGS & 0xffffffff)
 
   // If we are capturing faults the flags will have been placed in a2 and we

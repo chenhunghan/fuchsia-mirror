@@ -1,0 +1,27 @@
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load(
+    "@rules_fuchsia//fuchsia:defs.bzl",
+    "fuchsia_unstripped_binary",
+    "variant_select",
+)
+load("@rules_fuchsia//fuchsia/constraints:target_compatibility.bzl", "COMPATIBILITY")
+
+cc_import(
+    name = "{{name}}",
+    hdrs = [
+        {{headers}}
+    ],
+    strip_include_prefix = "{{relative_include_dir}}",
+    interface_library = variant_select({{interface_lib_select}}),
+    shared_library = variant_select({{unstripped_lib_select}}),
+    target_compatible_with = COMPATIBILITY.FUCHSIA_CONDITION,
+    deps = [ {{deps}} ],
+)
+
+fuchsia_unstripped_binary(
+    name = "dist",
+    dest = variant_select({{dist_path_select}}),
+    stripped_file = variant_select({{stripped_lib_select}}),
+    unstripped_file = variant_select({{unstripped_lib_select}}),
+    target_compatible_with = COMPATIBILITY.FUCHSIA_CONDITION,
+)

@@ -5,6 +5,7 @@
 library fuchsia.wlan.wlanix;
 
 using fuchsia.wlan.ieee80211;
+using fuchsia.wlan.stats;
 using zx;
 
 type WlanixError = flexible enum {
@@ -185,6 +186,15 @@ open protocol WifiStaIface {
     flexible ReadApfPacketFilterData() -> (table {
         1: memory vector<uint8>:MAX;
     }) error zx.Status;
+    /// Fetches Link Layer Stats for this interface.
+    flexible GetLinkLayerStats() -> (table {
+        1: stats LinkLayerStats;
+    }) error zx.Status;
+};
+
+type LinkLayerStats = table {
+    1: wme fuchsia.wlan.stats.WmePacketStats;
+    2: rssi_dbm int32;
 };
 
 open protocol Supplicant {

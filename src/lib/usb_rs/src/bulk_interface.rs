@@ -16,13 +16,20 @@ use tokio::sync::RwLock;
 /// while remaining safely under kernel memory limits.
 const MAX_USBFS_BULK_WRITE_SIZE: usize = 512 * 1024;
 
+/// Minimum bulk URB write size when downscaling due to memory pressure (16 KiB).
+/// Matches Android fastboot standards.
+const MIN_USBFS_BULK_WRITE_SIZE: usize = 16 * 1024;
+
 /// Maximum number of bulk URBs queued in flight concurrently (16 URBs = 8 MiB).
 ///
 /// This heuristic keeps the host controller's DMA hardware ring continuously saturated
 /// without stalling between chunks, while remaining well within the Linux usbfs memory
 /// budget (`usbfs_memory_mb`, default 16 MiB) and the interface URB pool limit (32).
 const MAX_IN_FLIGHT_URBS: usize = 16;
-const MAX_WRITE_BUFFER_SIZE: usize = MAX_USBFS_BULK_WRITE_SIZE * MAX_IN_FLIGHT_URBS;
+
+/// Maximum number of retries when kernel usbfs memory is exhausted (`ENOMEM`)
+/// at the minimum chunk size before failing the transfer.
+const MAX_ENOMEM_RETRIES: usize = 10;
 
 fn is_out_of_memory(err: &crate::Error) -> bool {
     match err {
@@ -41,6 +48,8 @@ pub struct BulkInterface {
     guard: Arc<RwLock<()>>,
     read_future: Option<Pin<Box<dyn Future<Output = std::io::Result<Box<[u8]>>> + Send>>>,
     write_future: Option<Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send>>>,
+    max_chunk_size: usize,
+    enomem_retries: usize,
 }
 
 impl std::fmt::Debug for BulkInterface {
@@ -48,8 +57,19 @@ impl std::fmt::Debug for BulkInterface {
         f.debug_struct("BulkInterface")
             .field("read_future", &self.read_future.is_some())
             .field("write_future", &self.write_future.is_some())
+            .field("max_chunk_size", &self.max_chunk_size)
+            .field("enomem_retries", &self.enomem_retries)
             .finish()
     }
+}
+
+enum SubmissionErrorAction {
+    /// In-flight URBs must be drained before submitting more.
+    DrainInFlight,
+    /// Chunk size was downscaled or bounded retry was triggered; wake and re-poll.
+    Retry,
+    /// Memory exhaustion retries were exceeded or error is unrecoverable.
+    Fatal(std::io::Error),
 }
 
 impl BulkInterface {
@@ -59,7 +79,65 @@ impl BulkInterface {
             guard: Arc::new(RwLock::new(())),
             read_future: None,
             write_future: None,
+            max_chunk_size: MAX_USBFS_BULK_WRITE_SIZE,
+            enomem_retries: 0,
         }
+    }
+
+    /// Handles an error returned by `try_write_defer_wait`.
+    ///
+    /// Manages dynamic downscaling of chunk sizes under `ENOMEM`, draining of in-flight
+    /// buffers, and bounded retry backoff at minimum chunk size.
+    fn handle_submission_error(
+        &mut self,
+        err: crate::Error,
+        in_flight_len: usize,
+        bytes_submitted: usize,
+        current_chunk_size: usize,
+        cx: &mut std::task::Context<'_>,
+    ) -> SubmissionErrorAction {
+        if is_out_of_memory(&err) {
+            if in_flight_len > 0 {
+                log::debug!(
+                    "Kernel usbfs memory saturated after submitting {} bytes across {} in-flight URBs; draining before submitting more",
+                    bytes_submitted,
+                    in_flight_len
+                );
+                return SubmissionErrorAction::DrainInFlight;
+            }
+            if current_chunk_size > MIN_USBFS_BULK_WRITE_SIZE {
+                let new_chunk_size =
+                    std::cmp::max(MIN_USBFS_BULK_WRITE_SIZE, current_chunk_size / 2);
+                log::info!(
+                    "Downscaling bulk URB chunk size from {} to {} due to ENOMEM",
+                    current_chunk_size,
+                    new_chunk_size
+                );
+                self.max_chunk_size = new_chunk_size;
+                cx.waker().wake_by_ref();
+                return SubmissionErrorAction::Retry;
+            }
+            let retries = self.enomem_retries;
+            self.enomem_retries += 1;
+            if retries < MAX_ENOMEM_RETRIES {
+                log::warn!(
+                    "Kernel usbfs memory saturated at minimum chunk size ({} bytes); waiting 50ms before retry ({}/{})",
+                    MIN_USBFS_BULK_WRITE_SIZE,
+                    retries + 1,
+                    MAX_ENOMEM_RETRIES
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cx.waker().wake_by_ref();
+                return SubmissionErrorAction::Retry;
+            }
+        }
+        log::warn!("Error submitting bulk URB: {}", err);
+        let err_msg = if is_out_of_memory(&err) {
+            format!("Error submitting to bulk endpoint: {err} Linux usbfs_memory_mb exhausted")
+        } else {
+            format!("Error submitting to bulk endpoint: {err}")
+        };
+        SubmissionErrorAction::Fatal(std::io::Error::new(std::io::ErrorKind::Other, err_msg))
     }
 }
 
@@ -154,7 +232,8 @@ impl AsyncWrite for BulkInterface {
                 )));
             };
 
-            let to_write = std::cmp::min(buf.len(), MAX_WRITE_BUFFER_SIZE);
+            let current_chunk_size = self.max_chunk_size;
+            let to_write = std::cmp::min(buf.len(), current_chunk_size * MAX_IN_FLIGHT_URBS);
             let mut in_flight = std::collections::VecDeque::new();
             let mut bytes_submitted = 0;
 
@@ -164,7 +243,7 @@ impl AsyncWrite for BulkInterface {
             // submitting and await the in-flight requests. Returning `Poll::Ready(Ok(bytes_submitted))`
             // fulfills standard `AsyncWrite::poll_write` partial-write semantics, allowing
             // the caller (e.g. `write_all`) to re-invoke `poll_write` for subsequent chunks.
-            for chunk in buf[..to_write].chunks(MAX_USBFS_BULK_WRITE_SIZE) {
+            for chunk in buf[..to_write].chunks(current_chunk_size) {
                 match boe.try_write_defer_wait(chunk, ZeroPacket::DoNotSend) {
                     Ok(Some(wait_fut)) => {
                         in_flight.push_back(wait_fut);
@@ -178,30 +257,25 @@ impl AsyncWrite for BulkInterface {
                         break;
                     }
                     Err(e) => {
-                        if !in_flight.is_empty() && is_out_of_memory(&e) {
-                            log::debug!(
-                                "Kernel usbfs memory saturated after submitting {} bytes across {} in-flight URBs; draining before submitting more",
-                                bytes_submitted,
-                                in_flight.len()
-                            );
-                            break;
+                        match self.handle_submission_error(
+                            e,
+                            in_flight.len(),
+                            bytes_submitted,
+                            current_chunk_size,
+                            cx,
+                        ) {
+                            SubmissionErrorAction::DrainInFlight => break,
+                            SubmissionErrorAction::Retry => return Poll::Pending,
+                            SubmissionErrorAction::Fatal(io_err) => {
+                                return Poll::Ready(Err(io_err));
+                            }
                         }
-                        log::warn!("Error submitting bulk URB: {}", e);
-                        let err_msg = if is_out_of_memory(&e) {
-                            // In this scenario we should consider increasing
-                            // with: echo 16 | sudo tee /sys/module/usbcore/parameters/usbfs_memory_mb)
-                            format!(
-                                "Error submitting to bulk endpoint: {e} Linux usbfs_memory_mb exhausted"
-                            )
-                        } else {
-                            format!("Error submitting to bulk endpoint: {e}")
-                        };
-                        return Poll::Ready(Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            err_msg,
-                        )));
                     }
                 }
+            }
+
+            if bytes_submitted > 0 {
+                self.enomem_retries = 0;
             }
 
             if in_flight.is_empty() {

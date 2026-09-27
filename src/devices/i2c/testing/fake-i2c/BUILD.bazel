@@ -15,7 +15,13 @@ cc_library(
     ],
     includes = ["include"],
     visibility = ["//visibility:public"],
-    deps = [
-        "//sdk/lib/async-default",
-    ],
+    # TODO(https://fxbug.dev/563548659): Find a permanent solution for handling the correct dependencies.
+    deps = select({
+        "//build/bazel/platforms:fuchsia_artifacts_build_with_sdk_rules": [
+            "@fuchsia_sdk//pkg/async-default",
+        ],
+        "//build/bazel/platforms:fuchsia_artifacts_build_without_sdk_rules": [
+            "//sdk/lib/async-default",
+        ],
+    }),
 )

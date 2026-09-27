@@ -54,9 +54,6 @@ static_library("debug_adapter") {
     "//src/developer/debug/zxdb/console",
     "//third_party/github.com/google/cppdap",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 source_set("tests") {
@@ -92,7 +89,4 @@ source_set("tests") {
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }

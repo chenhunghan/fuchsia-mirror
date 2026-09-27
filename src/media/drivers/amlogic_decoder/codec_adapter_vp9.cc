@@ -162,14 +162,14 @@ CodecAdapterVp9::CodecAdapterVp9(std::mutex& lock, CodecAdapterEvents* codec_ada
 }
 
 CodecAdapterVp9::~CodecAdapterVp9() {
-  // We need to delete the shared_fidl_thread_closure_queue_ on its dispatcher thread, per the
+  // We need to delete the shared_fidl_thread_closure_queue_ on its dispatcher sequence, per the
   // rules of ~ClosureQueue.
   sync_completion_t shared_fidl_finished;
   auto run_on_shared_fidl = [this, &shared_fidl_finished] {
     shared_fidl_thread_closure_queue_.reset();
     sync_completion_signal(&shared_fidl_finished);
   };
-  if (thrd_current() == device_->driver()->shared_fidl_thread()) {
+  if (shared_fidl_thread_closure_queue_->IsSynchronized()) {
     run_on_shared_fidl();
   } else {
     shared_fidl_thread_closure_queue_->Enqueue(run_on_shared_fidl);
@@ -598,7 +598,7 @@ void CodecAdapterVp9::CoreCodecQueueInputFormatDetails(
   QueueInputItem(CodecInputItem::FormatDetails(per_stream_override_format_details));
 }
 
-void CodecAdapterVp9::CoreCodecQueueInputPacket(CodecPacket* packet) {
+void CodecAdapterVp9::CoreCodecQueueInputPacket(const CodecPacket* packet) {
   DLOG("packet ts: %" PRId64, packet->has_timestamp_ish() ? packet->timestamp_ish() : -1);
   QueueInputItem(CodecInputItem::Packet(packet));
 }
@@ -742,16 +742,20 @@ void CodecAdapterVp9::CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buff
   if (port != kOutputPort) {
     return;
   }
+  std::lock_guard<std::mutex> lock(lock_);
   all_output_buffers_.push_back(buffer);
 }
 
 void CodecAdapterVp9::CoreCodecConfigureBuffers(
     CodecPort port, const std::vector<std::unique_ptr<CodecPacket>>& packets) {
   if (port == kOutputPort) {
+    std::lock_guard<std::mutex> lock(lock_);
     ZX_DEBUG_ASSERT(all_output_packets_.empty());
     ZX_DEBUG_ASSERT(free_output_packets_.empty());
     ZX_DEBUG_ASSERT(!all_output_buffers_.empty());
     ZX_DEBUG_ASSERT(all_output_buffers_.size() == packets.size());
+    all_output_packets_.reserve(packets.size());
+    free_output_packets_.reserve(packets.size());
     for (auto& packet : packets) {
       all_output_packets_.push_back(packet.get());
       free_output_packets_.push_back(packet.get()->packet_index());
@@ -1575,6 +1579,7 @@ zx_status_t CodecAdapterVp9::InitializeFrames(uint32_t min_frame_count, uint32_t
   // before triggering mid-stream format change.  Later, frames satisfying these
   // stashed parameters will be handed to the decoder via InitializedFrames(),
   // unless CoreCodecStopStream() happens first.
+  uint32_t output_buffer_count = 0;
   {  // scope lock
     std::lock_guard<std::mutex> lock(lock_);
 
@@ -1589,6 +1594,7 @@ zx_status_t CodecAdapterVp9::InitializeFrames(uint32_t min_frame_count, uint32_t
     stride_ = stride;
     display_width_ = display_width;
     display_height_ = display_height;
+    output_buffer_count = static_cast<uint32_t>(all_output_buffers_.size());
   }  // ~lock
 
   // After a stream switch, the new Vp9Decoder won't have any frames, and needs InitializedFrames()
@@ -1598,10 +1604,8 @@ zx_status_t CodecAdapterVp9::InitializeFrames(uint32_t min_frame_count, uint32_t
   // that was (before the stream switch) used with a previous Vp9Decoder instance, can still
   // be used with the new Vp9Decoder instance.  This does require that we be able to indicate
   // via InitializedFrames() the downstream usage count of each frame (0 if initially free).
-  if (IsCurrentOutputBufferCollectionUsable(static_cast<uint32_t>(all_output_buffers_.size()),
-                                            static_cast<uint32_t>(all_output_buffers_.size()),
-                                            coded_width, coded_height, stride, display_width,
-                                            display_height)) {
+  if (IsCurrentOutputBufferCollectionUsable(output_buffer_count, output_buffer_count, coded_width,
+                                            coded_height, stride, display_width, display_height)) {
     DLOG("IsCurrentOutputBufferCollectionUsable() true");
     // The core codec won't output any more packets until we call InitializedFrames(), but when the
     // core codec does output more packets, we need to send updated format info first.

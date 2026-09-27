@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/lib.rs",
+        "src/target_addr.rs",
+    ],
+    crate_name = "addr",
+    edition = "2024",
+    target_compatible_with = HOST_CONSTRAINTS,
+    test_deps = [
+        "//src/connectivity/lib/net-declare",
+        "//src/lib/fuchsia",
+    ],
+    version = "0.1.0",
+    visibility = [
+        "//src/developer/ffx:__subpackages__",
+        "//tools/funnel:__subpackages__",
+    ],
+    with_host_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//src/developer/ffx/fidl:fuchsia.developer.ffx_rust",
+        "//src/developer/ffx/lib/netext:lib",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

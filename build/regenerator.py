@@ -685,10 +685,13 @@ def main() -> int:
             "Find Python modules imported from this script",
         )
 
+        # Some modules (e.g. namespace packages, frozen modules, or compiled libs)
+        # can have their __file__ attribute set to None. Filter those out to avoid
+        # TypeError when instantiating pathlib.Path.
         extra_ninja_build_inputs |= {
-            Path(m.__file__)  # type: ignore
+            Path(m.__file__)
             for m in sys.modules.values()
-            if hasattr(m, "__file__")
+            if hasattr(m, "__file__") and m.__file__ is not None
         }
 
         sorted_extra_ninja_build_inputs = sorted(

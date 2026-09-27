@@ -52,7 +52,7 @@ enum RegisterMap {
   kUICCMDARG3 = 0x9c,
   // Crypto
   kCCAP = 0x100,
-  kRegisterSize = 0x104,
+  kRegisterSize = 0x2000,
 };
 
 // UFSHCI Specification Version 3.0, section 5.2.1

@@ -139,8 +139,8 @@ zx_status_t Nelson::MaliInit() {
     auto parents = std::vector<fuchsia_driver_framework::ParentSpec2>{aml_gpu_register_reset_node,
                                                                       aml_gpu_clock_node};
 
-    auto composite_node_spec = fuchsia_driver_framework::CompositeNodeSpec(
-        {.name = "aml-gpu-composite", .parents2 = parents});
+    auto composite_node_spec =
+        fuchsia_driver_framework::CompositeNodeSpec({.name = "aml_gpu", .parents2 = parents});
 
     auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
         fidl::ToWire(fidl_arena, aml_gpu_dev), fidl::ToWire(fidl_arena, composite_node_spec));
@@ -158,7 +158,7 @@ zx_status_t Nelson::MaliInit() {
 
   {
     fpbus::Node mali_dev;
-    mali_dev.name() = "mali";
+    mali_dev.name() = "mali-composite";
     mali_dev.vid() = PDEV_VID_ARM;
     mali_dev.pid() = PDEV_PID_GENERIC;
     mali_dev.did() = PDEV_DID_ARM_MAGMA_MALI;

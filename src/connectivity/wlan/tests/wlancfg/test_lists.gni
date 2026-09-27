@@ -36,10 +36,12 @@ wlancfg_tests_for_wlan_presubmit = [
 # These tests run in blocking CI (~once per hour).
 wlancfg_tests_for_postsubmit = [
   "//src/connectivity/wlan/tests/wlancfg:beacon_loss_test",
+  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_duplicate_address_test",
   "//src/connectivity/wlan/tests/wlancfg:hidden_networks_test",
   "//src/connectivity/wlan/tests/wlancfg:ping_test",
   "//src/connectivity/wlan/tests/wlancfg:policy_scan_test",
   "//src/connectivity/wlan/tests/wlancfg:regulatory_recovery_test",
+  "//src/connectivity/wlan/tests/wlancfg:vape_interop_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_misc_scenario_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_wireless_network_management_test",
   "//src/testing/end_to_end/antlion/tests/wlan/compliance:wlan_security_type_test",
@@ -51,11 +53,9 @@ wlancfg_tests_for_postsubmit = [
 # provide much of a safety net. Consider moving it to one of the blocking groups
 # above.
 wlancfg_tests_for_fyi = [
-  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_duplicate_address_test",
   "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_basic_test",
   "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_combinatorial_options_test",
   "//src/connectivity/wlan/tests/wlancfg:saved_networks_test",
-  "//src/connectivity/wlan/tests/wlancfg:vape_interop_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_bss_transition_management_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_target_security_test",
   "//src/connectivity/wlan/tests/wlancfg:reboot_soft_test",

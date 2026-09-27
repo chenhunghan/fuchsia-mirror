@@ -7,6 +7,7 @@ use crate::task::dynamic_thread_spawner::DynamicThreadSpawner;
 use crate::task::{CurrentTask, DelayedReleaser, Kernel, Task, ThreadGroup};
 use fragile::Fragile;
 use fuchsia_async as fasync;
+use fuchsia_sync::Completion;
 use pin_project::pin_project;
 use scopeguard::ScopeGuard;
 
@@ -41,6 +42,28 @@ pub struct KernelThreads {
 
     /// A weak reference to the kernel owning this struct.
     kernel: Weak<Kernel>,
+
+    /// The RCU advancer thread running callbacks in the background.
+    rcu_advancer: OnceLock<RcuAdvancer>,
+}
+
+/// The minimum time between running rcu callbacks. This allows us to limit wake ups and batch
+/// callbacks together.
+const RCU_RATE_LIMIT: std::time::Duration = std::time::Duration::from_millis(10);
+
+struct RcuAdvancer {
+    stop: Arc<Completion>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for RcuAdvancer {
+    fn drop(&mut self) {
+        self.stop.signal();
+        fuchsia_rcu::rcu_advancer_wake();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl KernelThreads {
@@ -59,6 +82,7 @@ impl KernelThreads {
             spawner: Default::default(),
             system_task: Default::default(),
             kernel,
+            rcu_advancer: Default::default(),
         }
     }
 
@@ -70,6 +94,38 @@ impl KernelThreads {
         self.spawner
             .set(DynamicThreadSpawner::new(2, self.system_task().weak_task(), "kthreadd/init"))
             .map_err(|_| errno!(EEXIST))?;
+
+        let stop = Arc::new(Completion::new());
+        let stop_clone = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("starnix-rcu".to_string())
+            .spawn(move || {
+                let _rcu_registration = fuchsia_rcu::register_thread();
+
+                while !stop_clone.is_signaled() {
+                    fuchsia_rcu::rcu_advancer_wait_for_work();
+                    while !stop_clone.is_signaled() {
+                        let start = std::time::Instant::now();
+                        if !fuchsia_rcu::rcu_run_callbacks() {
+                            break;
+                        }
+                        let elapsed = start.elapsed();
+                        if elapsed < RCU_RATE_LIMIT {
+                            if stop_clone.wait_for(RCU_RATE_LIMIT - elapsed) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Run remaining ready callbacks before exiting.
+                fuchsia_rcu::rcu_run_callbacks();
+            })
+            .expect("failed to spawn rcu advancer thread");
+
+        self.rcu_advancer
+            .set(RcuAdvancer { stop, thread: Some(thread) })
+            .map_err(|_| errno!(EEXIST))?;
+
         Ok(())
     }
 

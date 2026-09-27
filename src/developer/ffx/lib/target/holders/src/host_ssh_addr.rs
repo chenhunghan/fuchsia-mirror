@@ -8,7 +8,6 @@ use async_trait::async_trait;
 
 use ffx_ssh::parse::HostAddr;
 use fho::{FhoEnvironment, TryFromEnv};
-use fidl_fuchsia_developer_ffx as ffx_fidl;
 use target_behavior::{ConnectionBehavior, target_interface};
 
 #[derive(Clone, Debug)]
@@ -37,12 +36,6 @@ impl From<Option<HostAddr>> for HostAddrHolder {
 impl From<HostAddrHolder> for Option<HostAddr> {
     fn from(value: HostAddrHolder) -> Self {
         value.0
-    }
-}
-
-impl From<Option<ffx_fidl::SshHostAddrInfo>> for HostAddrHolder {
-    fn from(value: Option<ffx_fidl::SshHostAddrInfo>) -> Self {
-        HostAddrHolder::from(value.map(|x| HostAddr::from(x.address)))
     }
 }
 

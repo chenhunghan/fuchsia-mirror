@@ -308,7 +308,7 @@ zx_status_t Nelson::ThermalInit() {
   auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, node),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "aml_thermal_pll", .parents2 = parents}}));
+                                   {.name = "aml-thermal-pll", .parents2 = parents}}));
   if (!result.ok()) {
     zxlogf(ERROR, "AddCompositeNodeSpec Thermal(thermal_dev) request failed: %s",
            result.FormatDescription().data());

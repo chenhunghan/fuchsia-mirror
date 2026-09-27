@@ -64,7 +64,7 @@ TEST_F(LoggerInspectTest, MemoryBuckets) {
                          &GetDigest,   &config,      inspector.GetRoot().CreateChild("logger")};
 
   // Trigger pressure change to capture a log.
-  logger.SetPressureLevel(pressure_signaler::kWarning);
+  logger.SetPressureLevel(monitor::kWarning);
   // Let the logger drain its internal task queue.
   RunLoopUntilIdle();
 

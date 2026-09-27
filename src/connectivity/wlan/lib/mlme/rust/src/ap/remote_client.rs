@@ -1256,8 +1256,7 @@ mod tests {
             50, 2, 9, 10, // Extended rates
             90, 3, 90, 0, 0, // BSS max idle period
         ][..]);
-        let (_, timed_event, _) =
-            time_stream.try_next().unwrap().expect("Should have scheduled a timeout");
+        let (_, timed_event, _) = time_stream.try_recv().expect("Should have scheduled a timeout");
         assert_eq!(timed_event.id, active_timeout.id());
 
         assert!(fake_device_state.lock().assocs.contains_key(&CLIENT_ADDR));

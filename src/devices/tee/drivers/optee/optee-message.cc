@@ -381,6 +381,7 @@ fpromise::result<OpenSessionMessage, zx_status_t> OpenSessionMessage::TryCreate(
   OpenSessionMessage message(std::move(memory));
 
   message.header()->command = Command::kOpenSession;
+  message.header()->session_id = 0;
   message.header()->cancel_id = 0;
   message.header()->num_params = static_cast<uint32_t>(num_params);
 

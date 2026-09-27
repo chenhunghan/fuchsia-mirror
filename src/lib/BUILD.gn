@@ -55,6 +55,7 @@ group("tests") {
     "fuchsia-component:tests",
     "fuchsia-component-test:tests",
     "fuchsia-cprng:tests",
+    "fuchsia-emulated-handle:tests",
     "fuchsia-fs:tests",
     "fuchsia-hyper:tests",
     "fuchsia-image-format:tests",

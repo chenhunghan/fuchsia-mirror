@@ -336,72 +336,42 @@ zx::vmo FlatlandScreenshot::HandleFrameRender() {
   uint32_t bytes_per_row = pixels_per_row * kBytesPerPixel;
   uint32_t valid_bytes_per_row = display_size_.width() * kBytesPerPixel;
 
-  // SL4Fs requires vmo to be readable for transfer, so we need to copy into a new one.
-  std::vector<uint8_t> buf(4, 0);
-  const bool vmo_is_readable =
-      (buffer_collection_info_[raw_format_].buffers().value()[kBufferIndex].vmo()->read(
-           buf.data(), 0, 1) == ZX_OK);
   zx::vmo response_vmo;
-  if (vmo_is_readable && bytes_per_row == valid_bytes_per_row) {
-    // Do not need to map the buffer in this case so cannot use zx_cache_flush on the mapping.
-    // Attempt to use the ZX_VMO_OP_CACHE_CLEAN_INVALIDATE, falling back to creating a temporary
-    // mapping if the operation fails due to being a physical vmo.
-    zx_status_t status =
-        buffer_collection_info_[raw_format_].buffers().value()[kBufferIndex].vmo()->op_range(
-            ZX_VMO_OP_CACHE_CLEAN_INVALIDATE, 0,
-            buffer_collection_info_[raw_format_]
-                .settings()
-                .value()
-                .buffer_settings()
-                .value()
-                .size_bytes()
-                .value(),
-            nullptr, 0);
-    if (status == ZX_ERR_NOT_SUPPORTED) {
-      // Receiving ZX_ERR_NOT_SUPPORTED from ZX_VMO_OP_CACHE_CLEAN_INVALIDATE indicates it is a
-      // physical VMO that does not support cache operations. In this case map it in to use
-      // zx_cache_flush.
-      flatland::MapHostPointer(
-          buffer_collection_info_[raw_format_], kBufferIndex,
-          flatland::HostPointerAccessMode::kReadOnly, [](uint8_t* vmo_host, uint32_t num_bytes) {
-            FX_DCHECK(ZX_OK == zx_cache_flush(vmo_host, num_bytes,
-                                              ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE));
-          });
-    } else {
-      FX_DCHECK(status == ZX_OK);
-    }
-    status = buffer_collection_info_[raw_format_].buffers().value()[kBufferIndex].vmo()->duplicate(
-        ZX_RIGHT_READ | ZX_RIGHT_MAP | ZX_RIGHT_TRANSFER | ZX_RIGHT_GET_PROPERTY, &response_vmo);
-    FX_DCHECK(status == ZX_OK);
-  } else {
-    const auto response_vmo_size = static_cast<uint64_t>(display_size_.width()) *
-                                   static_cast<uint64_t>(display_size_.height()) * kBytesPerPixel;
-    FX_CHECK(ZX_OK == zx::vmo::create(response_vmo_size, 0, &response_vmo));
-    uint8_t* response_vmo_base;
-    FX_CHECK(ZX_OK == zx::vmar::root_self()->map(ZX_VM_PERM_WRITE | ZX_VM_PERM_READ, 0,
-                                                 response_vmo, 0, response_vmo_size,
-                                                 reinterpret_cast<uintptr_t*>(&response_vmo_base)));
-    flatland::MapHostPointer(
-        buffer_collection_info_[raw_format_], kBufferIndex,
-        flatland::HostPointerAccessMode::kReadOnly,
-        [&response_vmo_base, bytes_per_row, display_size = display_size_, valid_bytes_per_row,
-         response_vmo_size](uint8_t* vmo_host, uint32_t num_bytes) {
-          FX_CHECK(ZX_OK ==
-                   zx_cache_flush(vmo_host,
-                                  static_cast<size_t>(display_size.height()) * bytes_per_row,
-                                  ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE));
+  const auto response_vmo_size = static_cast<uint64_t>(display_size_.width()) *
+                                 static_cast<uint64_t>(display_size_.height()) * kBytesPerPixel;
+  FX_CHECK(ZX_OK == zx::vmo::create(response_vmo_size, 0, &response_vmo));
+  uint8_t* response_vmo_base;
+  FX_CHECK(ZX_OK == zx::vmar::root_self()->map(ZX_VM_PERM_WRITE | ZX_VM_PERM_READ, 0, response_vmo,
+                                               0, response_vmo_size,
+                                               reinterpret_cast<uintptr_t*>(&response_vmo_base)));
+  // Map the pointer as ReadWrite. On RISC-V platforms, cache management instructions
+  // (e.g. `cbo.flush` used by `zx_cache_flush`) perform store-type checks during virtual
+  // address translation. If the mapping is read-only, this triggers a store page fault on first
+  // access (when the page is not yet committed/present), which Zircon's page fault handler
+  // rejects as a write permission violation (ZX_ERR_ACCESS_DENIED) instead of populating the page.
+  flatland::MapHostPointer(
+      buffer_collection_info_[raw_format_], kBufferIndex,
+      flatland::HostPointerAccessMode::kReadWrite,
+      [&response_vmo_base, bytes_per_row, display_size = display_size_, valid_bytes_per_row,
+       response_vmo_size](uint8_t* vmo_host, uint32_t num_bytes) {
+        FX_CHECK(ZX_OK == zx_cache_flush(vmo_host,
+                                         static_cast<size_t>(display_size.height()) * bytes_per_row,
+                                         ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE));
+        if (bytes_per_row == valid_bytes_per_row) {
+          memcpy(response_vmo_base, vmo_host, response_vmo_size);
+        } else {
           for (size_t i = 0; i < display_size.height(); ++i) {
             FX_DCHECK(i * display_size.width() * kBytesPerPixel < response_vmo_size);
             memcpy(&response_vmo_base[i * display_size.width() * kBytesPerPixel],
                    &vmo_host[i * bytes_per_row], valid_bytes_per_row);
           }
-        });
+        }
+      });
 
-    FX_CHECK(ZX_OK == zx_cache_flush(response_vmo_base, response_vmo_size,
-                                     ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE));
-    FX_CHECK(ZX_OK == zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(response_vmo_base),
-                                                   response_vmo_size));
-  }
+  FX_CHECK(ZX_OK == zx_cache_flush(response_vmo_base, response_vmo_size,
+                                   ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE));
+  FX_CHECK(ZX_OK == zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(response_vmo_base),
+                                                 response_vmo_size));
 
   return response_vmo;
 }

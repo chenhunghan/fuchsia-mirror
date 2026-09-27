@@ -33,6 +33,7 @@ rustc_library(
     visibility = [
         ":__pkg__",
         "//src/developer/ffx/frontends:__subpackages__",
+        "//src/developer/ffx/tools/uart_driver:__pkg__",
         "//src/developer/ffx/tools/usb_driver:__pkg__",
 
         # TODO(b/386792198) Move ToolSuite to internal crate.
@@ -77,6 +78,7 @@ rustc_library(
         "//src/lib/agents:lib",
         "//src/lib/analytics/rust:lib",
         "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-emulated-handle",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:argh",
         "//third_party/rust_crates/vendor:camino",

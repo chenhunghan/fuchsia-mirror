@@ -34,7 +34,6 @@ source_set("impl") {
   visibility = [ ":*" ]
   sources = [
     "channel.cc",
-    "clock.cc",
     "driver.cc",
     "exceptions.cc",
     "futex.cc",

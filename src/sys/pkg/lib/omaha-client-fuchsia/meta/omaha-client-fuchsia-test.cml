@@ -17,6 +17,10 @@
             url: "fuchsia-pkg://fuchsia.com/omaha-client-fuchsia-tests#meta/stash2.cm",
         },
         {
+            name: "http-client",
+            url: "fuchsia-pkg://fuchsia.com/omaha-client-fuchsia-tests#meta/http-client.cm",
+        },
+        {
             name: "shutdown_shim",
             url: "fuchsia-pkg://fuchsia.com/omaha-client-fuchsia-tests#meta/shutdown-shim.cm",
         },
@@ -31,6 +35,15 @@
             from: "parent",
             to: "#stash2",
         },
+        {
+            config: [
+                "fuchsia.http-client.StopOnIdleTimeoutMillis",
+                "fuchsia.http-client.TcpReceiveBufferSizeBytes",
+            ],
+            from: "void",
+            to: "#http-client",
+            availability: "optional",
+        },
 
         // fuchsia_hyper::new_https_client fails if there isn't a file at /config/ssl/cert.pem, but
         // the tests don't actually make https connections and so don't need any certs, so we can
@@ -40,7 +53,7 @@
             directory: "pkg",
             from: "framework",
             as: "root-ssl-certificates",
-            to: "#test_driver",
+            to: "#http-client",
             rights: [ "r*" ],
             subdir: "fake-ssl-certs",
         },
@@ -73,7 +86,7 @@
             to: "#test_driver",
         },
         {
-            protocol: "fuchsia.power.internalCollaborativeRebootScheduler",
+            protocol: "fuchsia.power.internal.CollaborativeRebootScheduler",
             from: "#shutdown_shim",
             to: "#test_driver",
         },
@@ -88,10 +101,7 @@
             to: "#test_driver",
         },
         {
-            protocol: [
-                "fuchsia.net.routes.State",
-                "fuchsia.posix.socket.Provider",
-            ],
+            protocol: [ "fuchsia.net.routes.State" ],
             from: "#netstack",
             to: "#test_driver",
         },
@@ -101,8 +111,21 @@
             to: "#test_driver",
         },
         {
+            protocol: [ "fuchsia.posix.socket.Provider" ],
+            from: "#netstack",
+            to: [
+                "#http-client",
+                "#test_driver",
+            ],
+        },
+        {
             protocol: [ "fuchsia.net.name.Lookup" ],
             from: "#dns_resolver",
+            to: "#http-client",
+        },
+        {
+            protocol: [ "fuchsia.net.http.Loader" ],
+            from: "#http-client",
             to: "#test_driver",
         },
     ],

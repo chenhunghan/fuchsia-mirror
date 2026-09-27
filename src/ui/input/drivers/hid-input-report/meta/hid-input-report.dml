@@ -1,0 +1,43 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "hid-input-report",
+    include: [ "driver_component/driver.shard.cml" ],
+    program: {
+        colocate: "true",
+        bind: {
+            service: "fuchsia.hardware.input.Service",
+            one_of: [
+                {
+                    rules: { "fuchsia.hid.CONSUMER__CONSUMER_CONTROL": true },
+                },
+                {
+                    rules: { "fuchsia.hid.DIGITIZER__TOUCH_PAD": true },
+                },
+                {
+                    rules: { "fuchsia.hid.DIGITIZER__TOUCH_SCREEN": true },
+                },
+                {
+                    rules: { "fuchsia.hid.DIGITIZER__TOUCH_SCREEN_CONFIGURATION": true },
+                },
+                {
+                    rules: { "fuchsia.hid.GENERIC_DESKTOP__KEYBOARD": true },
+                },
+                {
+                    rules: { "fuchsia.hid.GENERIC_DESKTOP__MOUSE": true },
+                },
+                {
+                    rules: { "fuchsia.hid.SENSOR": true },
+                },
+            ],
+        },
+    },
+    use: [
+        {
+            name: "default",
+            service: "fuchsia.hardware.input.Service",
+            generate_bind_rule: false,
+        },
+    ],
+}

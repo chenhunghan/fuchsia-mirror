@@ -137,6 +137,7 @@ library_headers("inception") {
   ]
   include_dir = "include"
   visibility = [
+    ":*",
     "//sdk/lib/fdio/*",
     "//sdk/lib/zxio/*",
   ]
@@ -149,6 +150,7 @@ library_headers("udp_socket_private") {
   public = [ "include/lib/zxio/cpp/udp_socket_private.h" ]
   include_dir = "include"
   visibility = [
+    ":*",
     "//sdk/lib/zxio/*",
     "//src/connectivity/network/netstack/udp_serde:*",
   ]
@@ -160,7 +162,10 @@ source_set("zxio_private_headers") {
     "private.h",
     "socket_address.h",
   ]
-  visibility = [ "//sdk/lib/zxio/*" ]
+  visibility = [
+    ":*",
+    "//sdk/lib/zxio/*",
+  ]
 }
 source_set("zxio") {
   sources = [

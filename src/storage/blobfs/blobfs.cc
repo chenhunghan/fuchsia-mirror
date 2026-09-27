@@ -802,6 +802,35 @@ zx::result<fs::FilesystemInfo> Blobfs::GetFilesystemInfo() {
   return zx::ok(info);
 }
 
+zx_status_t Blobfs::VerifyHealth() {
+  constexpr size_t kMaxBytesToVerify{static_cast<size_t>(1024) * 1024};
+  size_t bytes_verified = 0;
+  return GetCache().ForAllOpenNodes([&](fbl::RefPtr<CacheNode> node) {
+    auto blob = fbl::RefPtr<Blob>::Downcast(std::move(node));
+    if (blob->DeletionQueued()) {
+      // Skip blobs that are scheduled for deletion.
+      return ZX_OK;
+    }
+    if (blob->FileSize() == 0) {
+      // Skip the null blob, or blobs which aren't in the readable state.
+      return ZX_OK;
+    }
+    // If we run multithreaded, the blob could transition to deleted between the above
+    // DeletionQueued() check and this Verify() call. That should be OK as it only means we check a
+    // blob that we didn't need to. If we need 100% correctness, we'll need to add a
+    // Blob::VerifyIfNotDeleted() function that can atomically check and verify.
+    if (zx_status_t status = blob->Verify(); status != ZX_OK) {
+      FX_LOGS(ERROR) << "Detected corrupted blob " << blob->digest();
+      return ZX_ERR_IO_DATA_INTEGRITY;
+    }
+    bytes_verified += blob->FileSize();
+    if (bytes_verified >= kMaxBytesToVerify) {
+      return ZX_ERR_STOP;
+    }
+    return ZX_OK;
+  });
+}
+
 zx::result<BlockIterator> Blobfs::BlockIteratorByNodeIndex(uint32_t node_index) {
   auto extent_iter = AllocatedExtentIterator::Create(GetAllocator(), node_index);
   if (extent_iter.is_error()) {

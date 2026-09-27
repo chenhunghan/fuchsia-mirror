@@ -6,7 +6,6 @@
 //! in the loopback module.
 
 use alloc::vec::Vec;
-use core::convert::Infallible as Never;
 
 use lock_order::lock::LockLevelFor;
 use lock_order::relation::LockBefore;
@@ -84,7 +83,7 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::LoopbackTxQueue>>
     TransmitQueueCommon<LoopbackDevice, BC> for CoreCtx<'_, BC, L>
 {
     type Meta = LoopbackTxQueueMeta<WeakDeviceId<BC>, BC>;
-    type DequeueContext = Never;
+    type DequeueContext = !;
 
     fn parse_outgoing_frame<'a, 'b>(
         buf: &'a [u8],
@@ -127,7 +126,7 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::LoopbackTxQueue>>
         &mut self,
         bindings_ctx: &mut BC,
         device_id: &Self::DeviceId,
-        dequeue_context: Option<&mut Never>,
+        dequeue_context: Option<&mut !>,
         meta: Self::Meta,
         buf: Buf<Vec<u8>>,
     ) -> Result<(), DeviceSendFrameError> {

@@ -204,6 +204,7 @@ PARTNER_IDK_UNSTABLE_FIDL_LIBRARY_ATOMS_LIST = [
     # buildifier: keep sorted
     "//sdk/fidl/fuchsia.boot.metadata:fuchsia.boot.metadata_idk",
     "//sdk/fidl/fuchsia.buttons:fuchsia.buttons_idk",
+    "//sdk/fidl/fuchsia.driver.debug:fuchsia.driver.debug_idk",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_idk",
     "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_idk",
     "//sdk/fidl/fuchsia.hardware.adcimpl:fuchsia.hardware.adcimpl_idk",

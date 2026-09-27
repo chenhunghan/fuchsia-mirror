@@ -160,7 +160,7 @@ zx_status_t AddUsbPhyComposite(fdf::WireSyncClient<fpbus::PlatformBus>& pbus,
   auto result = pbus.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, usb_phy_dev),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "aml_usb_phy", .parents2 = parents}}));
+                                   {.name = "aml-usb-phy", .parents2 = parents}}));
   if (!result.ok()) {
     zxlogf(ERROR, "AddCompositeNodeSpec Usb(usb_phy_dev) request failed: %s",
            result.FormatDescription().data());
@@ -179,7 +179,7 @@ zx_status_t AddDwc2Composite(fdf::WireSyncClient<fpbus::PlatformBus>& pbus,
                              std::vector<fpbus::Metadata> usb_metadata) {
   const fpbus::Node dwc2_dev = [&]() {
     fpbus::Node dev = {};
-    dev.name() = "dwc2";
+    dev.name() = "dwc2_phy";
     dev.vid() = bind_fuchsia_platform::BIND_PLATFORM_DEV_VID_GENERIC;
     dev.pid() = bind_fuchsia_platform::BIND_PLATFORM_DEV_PID_GENERIC;
     dev.did() = bind_fuchsia_platform::BIND_PLATFORM_DEV_DID_USB_DWC2;

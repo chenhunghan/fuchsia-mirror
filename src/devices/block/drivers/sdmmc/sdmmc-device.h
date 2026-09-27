@@ -30,6 +30,9 @@ class SdmmcRootDevice;
 class SdmmcDevice {
  public:
   static constexpr uint32_t kTryAttempts = 10;  // 1 initial + 9 retries.
+  static constexpr zx::duration kInitialRetryWaitDuration = zx::msec(50);
+  static constexpr uint32_t kRetryWaitMultiplier = 2;
+  static constexpr zx::duration kMaxRetryWaitDuration = zx::sec(1);
 
   explicit SdmmcDevice(SdmmcRootDevice* root_device,
                        const fuchsia_hardware_sdmmc::SdmmcMetadata& metadata)

@@ -2,11 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::errors::FxfsError;
 use crate::log::*;
 use crate::object_handle::{ObjectHandle, ReadObjectHandle};
 use crate::object_store::journal::JournalHandle;
 use crate::range::RangeExt;
-use anyhow::Error;
+use anyhow::{Error, ensure};
 use async_trait::async_trait;
 use std::cmp::min;
 use std::ops::Range;
@@ -96,7 +97,14 @@ impl ObjectHandle for BootstrapObjectHandle {
 
 #[async_trait]
 impl ReadObjectHandle for BootstrapObjectHandle {
-    async fn read(&self, mut offset: u64, mut buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+    async fn read_aligned(
+        &self,
+        mut offset: u64,
+        mut buf: MutableBufferRef<'_>,
+    ) -> Result<usize, Error> {
+        let block_size = self.block_size();
+        ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
+        ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
         assert!(offset >= self.start_offset);
         let trace = self.trace.load(Ordering::Relaxed);
         if trace {
@@ -199,14 +207,14 @@ mod tests {
 
         let handle = BootstrapObjectHandle::new(1, device.clone(), 0..0);
         assert_eq!(handle.get_size(), 0);
-        assert_eq!(handle.read(0, buffer.as_mut()).await.expect("no initial data"), 0);
+        assert_eq!(handle.read_aligned(0, buffer.as_mut()).await.expect("no initial data"), 0);
 
         let mut handle = BootstrapObjectHandle::new(1, device.clone(), 1024..2048);
         assert_eq!(handle.get_size(), 1024);
-        handle.read(0, buffer.as_mut()).await.expect("read implicit extent");
+        handle.read_aligned(0, buffer.as_mut()).await.expect("read implicit extent");
         assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
         handle.push_extent(0, 0..1024);
-        handle.read(0, buffer.as_mut()).await.expect("read first explicit extent");
+        handle.read_aligned(0, buffer.as_mut()).await.expect("read first explicit extent");
         assert_eq!(buffer.to_vec(), vec![1u8; 1024]);
     }
 
@@ -226,26 +234,26 @@ mod tests {
         handle.push_extent(131072, 0..1024);
 
         assert_eq!(handle.get_size(), 2048);
-        handle.read(0, buffer.as_mut()).await.unwrap();
+        handle.read_aligned(0, buffer.as_mut()).await.unwrap();
         assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
-        handle.read(1024, buffer.as_mut()).await.unwrap();
+        handle.read_aligned(1024, buffer.as_mut()).await.unwrap();
         assert_eq!(buffer.to_vec(), vec![1u8; 1024]);
 
         // Discard at an offset greater than any extent was added, which should be a NOP.
         handle.discard_extents(131073);
 
         assert_eq!(handle.get_size(), 2048);
-        assert_eq!(handle.read(0, buffer.as_mut()).await.unwrap(), 1024);
+        assert_eq!(handle.read_aligned(0, buffer.as_mut()).await.unwrap(), 1024);
         assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
-        assert_eq!(handle.read(1024, buffer.as_mut()).await.unwrap(), 1024);
+        assert_eq!(handle.read_aligned(1024, buffer.as_mut()).await.unwrap(), 1024);
         assert_eq!(buffer.to_vec(), vec![1u8; 1024]);
 
         // Discard the second extent.
         handle.discard_extents(131072);
 
         assert_eq!(handle.get_size(), 1024);
-        assert_eq!(handle.read(0, buffer.as_mut()).await.unwrap(), 1024);
+        assert_eq!(handle.read_aligned(0, buffer.as_mut()).await.unwrap(), 1024);
         assert_eq!(buffer.to_vec(), vec![2u8; 1024]);
-        assert_eq!(handle.read(1024, buffer.as_mut()).await.unwrap(), 0);
+        assert_eq!(handle.read_aligned(1024, buffer.as_mut()).await.unwrap(), 0);
     }
 }

@@ -9,10 +9,7 @@
 //! Remnants of a full i8042 keyboard driver, now just used to reboot the system as a fallback.
 
 use crate::arch_rs::x86::x86::{inp, outp};
-
-unsafe extern "C" {
-    fn spin(usecs: u32);
-}
+use crate::top::debug::spin_usecs;
 
 // i8042 keyboard controller registers
 
@@ -93,8 +90,7 @@ fn i8042_write_command(val: u8) {
 fn i8042_wait_write() -> Result<(), ()> {
     let mut i = 0;
     while (i8042_read_status() & I8042_STR_IBF) != 0 && (i < I8042_CTL_TIMEOUT) {
-        // SAFETY: Spin delay is safe to call for busy waiting in kernel mode.
-        unsafe { spin(10) };
+        spin_usecs(10);
         i += 1;
     }
     if i == I8042_CTL_TIMEOUT { Err(()) } else { Ok(()) }
@@ -108,7 +104,6 @@ pub extern "C" fn pc_keyboard_reboot() {
     }
 
     i8042_write_command(I8042_CMD_PULSE_RESET as u8);
-    // Wait a second for the command to process before declaring failure
-    // SAFETY: Spin delay is safe to call for busy waiting in kernel mode.
-    unsafe { spin(1_000_000) };
+    // Wait a second for the command to process before declaring failure.
+    spin_usecs(1_000_000);
 }

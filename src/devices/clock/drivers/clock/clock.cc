@@ -80,8 +80,8 @@ fuchsia_hardware_clockimpl::ClockIdsMetadata ConvertMetadata(
   std::vector<fuchsia_hardware_clockimpl::ClockNodeDescriptor> clock_nodes;
   for (auto& c : generic.clock_nodes) {
     fuchsia_hardware_clockimpl::ClockNodeDescriptor node;
-    node.clock_id(c.id);
-    node.node_id(c.node_id);
+    node.clock_id(c.clock_id);
+    node.node_id(c.id);
     if (c.name) {
       node.name(std::move(*c.name));
     }
@@ -301,7 +301,7 @@ zx_status_t ClockDevice::Init(const std::shared_ptr<fdf::Namespace>& incoming,
   if (!node_id.has_value()) {
     child_name_ = std::format("clock-{}", id_);
   } else {
-    child_name_ = std::format("clock-{}_{}", id_, node_id.value());
+    child_name_ = std::format("clock-{}_{}", id_, static_cast<uint32_t>(node_id.value()));
   }
 
   auto node_offers = std::vector{

@@ -57,7 +57,10 @@ if (is_host) {
     crate_name = "ffx_diagnostics"
     edition = "2024"
     test_deps = [ "//src/lib/fuchsia" ]
-    visibility = [ "//src/developer/ffx/*" ]
+    visibility = [
+      ":*",
+      "//src/developer/ffx/*",
+    ]
     with_unit_tests = true
     deps = [
       "//third_party/rust_crates:anyhow",

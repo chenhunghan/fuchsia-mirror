@@ -90,7 +90,7 @@ these device types will be used for tests.
 
 **Current value (from the default):** `[]`
 
-From //build/testing/test_spec.gni:14
+From //build/testing/device_types.gni:11
 
 ### allowed_test_host_device_types
 
@@ -99,7 +99,7 @@ only these host device types will be used for tests.
 
 **Current value (from the default):** `[]`
 
-From //build/testing/test_spec.gni:18
+From //build/testing/device_types.gni:15
 
 ### amlogic_decoder_firmware_path
 
@@ -640,11 +640,10 @@ From //build/tracer/tracer.gni:12
 
 Whether to emit a call graph section in the output file
 https://clang.llvm.org/docs/ClangCommandLineReference.html#cmdoption-clang-fexperimental-call-graph-section
-TODO(https://issues.fuchsia.dev/497876388): Enable call graph section by default after the next toolchain roll.
 
-**Current value (from the default):** `false`
+**Current value (from the default):** `true`
 
-From //build/config/clang/call_graph_section.gni:9
+From //build/config/clang/call_graph_section.gni:8
 
 ### camera_debug
 
@@ -946,7 +945,7 @@ This should never be set as a build argument.
 }
   static = {
   clang_rt = "lib/clang/24/lib/armv7-unknown-linux-gnueabihf/libclang_rt.lsan.a"
-  clang_rt_cxx = "../../../../out/not-default/libclang_rt.lsan_cxx.a"
+  clang_rt_cxx = ""
 }
 }
   tsan = {
@@ -954,7 +953,7 @@ This should never be set as a build argument.
   clang_rt = "../../../../out/not-default/libclang_rt.tsan.so"
 }
   static = {
-  clang_rt = ""
+  clang_rt = "../../../../out/not-default/libclang_rt.tsan.a"
   clang_rt_cxx = "../../../../out/not-default/libclang_rt.tsan_cxx.a"
 }
 }
@@ -1769,6 +1768,7 @@ The overall compilation mode to use.  The valid values are:
  * `balanced`: some optimizations, but prioritizing compilation speed over
                 runtime performance.
  * `release`: all the optimizations, used for product releases.
+ * `sanitizer`: for sanitizer-instrumented builds.
 LINT.IfChange
 
 **Current value for `target_cpu = "arm64"`:** `"release"`
@@ -1777,7 +1777,7 @@ From //out/not-default/args.gn:5
 
 **Overridden from the default:** `"balanced"`
 
-From //build/config/compilation_modes.gni:19
+From //build/config/compilation_modes.gni:20
 
 **Current value for `target_cpu = "riscv64"`:** `"release"`
 
@@ -1785,7 +1785,7 @@ From //out/not-default/args.gn:5
 
 **Overridden from the default:** `"balanced"`
 
-From //build/config/compilation_modes.gni:19
+From //build/config/compilation_modes.gni:20
 
 **Current value for `target_cpu = "x64"`:** `"release"`
 
@@ -1793,7 +1793,7 @@ From //out/not-default/args.gn:5
 
 **Overridden from the default:** `"balanced"`
 
-From //build/config/compilation_modes.gni:19
+From //build/config/compilation_modes.gni:20
 
 ### compilation_settings_overrides
 
@@ -1815,7 +1815,7 @@ mode (above).
 
 **Current value (from the default):** `{ }`
 
-From //build/config/compilation_modes.gni:38
+From //build/config/compilation_modes.gni:39
 
 ### compress_debuginfo
 
@@ -3880,14 +3880,6 @@ From //third_party/perfetto/gn/perfetto.gni:404
 
 From //src/power/power-manager/BUILD.gn:130
 
-### enable_rseq_backend_for_rcu
-
-The RSEQ backend is not yet implemented.
-
-**Current value (from the default):** `false`
-
-From //src/lib/fuchsia-rcu/BUILD.gn:11
-
 ### enable_sestarnix_userspace_tests_on_linux
 
 Enable SEStarnix userspace tests on Linux. On CI/CQ this requires internal
@@ -3978,7 +3970,7 @@ will be able to load any ELF binaries produced by this build.
 
 **Current value (from the default):** `4096`
 
-From //build/config/fuchsia/BUILD.gn:35
+From //build/config/fuchsia/BUILD.gn:34
 
 ### experimental_force_enable_new_wakeup_accounting
 
@@ -3992,6 +3984,16 @@ when unblocking once we solve races higher in the stack.
 **Current value (from the default):** `false`
 
 From //zircon/kernel/params.gni:120
+
+### experimental_kernel_abi
+
+**NOTE: _For experimental use only._** This gives a list of
+compiler_config() labels to include first in the kernel's compilation
+configuration / Rust custom target definition.
+
+**Current value (from the default):** `["//build/config:cpu_baseline"]`
+
+From //zircon/kernel/switch/BUILD.gn:34
 
 ### experimental_mem_enabled
 
@@ -4480,6 +4482,12 @@ Fully hermetic tests (both by packaging and at runtime)
 **Current value (from the default):** `[]`
 
 From //BUILD.gn:68
+
+### honeydew_adb_keys_dir
+
+**Current value (from the default):** `"//third_party/android/platform/vendor/google/security/adb"`
+
+From //src/testing/end_to_end/honeydew/BUILD.gn:20
 
 ### host_byteorder
 
@@ -8377,7 +8385,7 @@ Supported modes are:
 
 **Current value (from the default):** `"hard-link"`
 
-From //src/sys/pkg/bin/package-tool/package-tool.gni:140
+From //src/sys/pkg/bin/package-tool/package-tool.gni:141
 
 ### restat_cc
 
@@ -9613,9 +9621,9 @@ Toggles between the C++ and Rust driver implementations.
 TODO(https://fxbug.dev/504722357): Remove the toggle after the Rust port is completed.
 Valid values: "cpp", "rust"
 
-**Current value (from the default):** `"cpp"`
+**Current value (from the default):** `"rust"`
 
-From //src/graphics/display/drivers/virtio-gpu-display/BUILD.gn:14
+From //src/graphics/display/drivers/virtio-gpu-display/BUILD.gn:15
 
 ### virtmagma_debug
 
@@ -9762,20 +9770,6 @@ doesn't require the FVM or SSH keys.
 **Current value (from the default):** `""`
 
 From //build/images/args.gni:24
-
-### zircon_asserts
-
-Used internally to enable ZX_ASSERT_XXX macros provided by
-<zircon/assert.h>. This should not be set in args.gn.
-
-To override the default value, GN targets should use the config label
-//build/config/fuchsia:enable_zircon_asserts, while Bazel target should use
-the feature name "enable_zircon_asserts".
-
-
-**Current value (from the default):** `false`
-
-From //build/config/fuchsia/zircon_asserts.gni:13
 
 ### zircon_b_partition
 

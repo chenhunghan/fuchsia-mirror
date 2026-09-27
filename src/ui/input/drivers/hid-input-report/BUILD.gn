@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("hid-input-report-dml") {
+  dml = "meta/hid-input-report.dml"
+  driver_name = "hid-input-report"
+}
+
 driver_bind_rules("hid_input_report_bind") {
-  rules = "meta/hid-input-report.bind"
+  dml_label = ":hid-input-report-dml"
   bind_output = "hid-input-report.bindbc"
   tests = "meta/bind_tests.json"
   deps = [
@@ -74,8 +79,11 @@ fuchsia_cc_driver("hid-input-report-driver") {
 
 fuchsia_driver_component("hid-input-report") {
   component_name = "hid-input-report"
-  manifest = "meta/hid-input-report.cml"
-  deps = [ ":hid-input-report-driver" ]
+  dml_label = ":hid-input-report-dml"
+  deps = [
+    ":hid-input-report-driver",
+    ":hid_input_report_bind",
+  ]
   info = "meta/hid-input-report-info.json"
 }
 

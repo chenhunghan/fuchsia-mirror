@@ -1,5 +1,5 @@
 #![no_std]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/RustCrypto/media/6ee8e381/logo.svg",
     html_favicon_url = "https://raw.githubusercontent.com/RustCrypto/media/6ee8e381/logo.svg"
@@ -250,16 +250,21 @@ mod aarch64;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod x86;
 
+mod barrier;
+pub use barrier::optimization_barrier;
+
+mod stack;
+pub use stack::zeroize_stack;
+
 use core::{
     marker::{PhantomData, PhantomPinned},
-    mem::{self, MaybeUninit},
+    mem::MaybeUninit,
     num::{
-        self, NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize,
-        NonZeroU128, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize,
+        self, NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroIsize, NonZeroU8,
+        NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU128, NonZeroUsize,
     },
-    ops, ptr,
+    ops,
     slice::IterMut,
-    sync::atomic,
 };
 
 #[cfg(feature = "alloc")]
@@ -494,10 +499,14 @@ impl Zeroize for CString {
     fn zeroize(&mut self) {}
 }
 
-/// `Zeroizing` is a a wrapper for any `Z: Zeroize` type which implements a
+/// `Zeroizing` is a wrapper for any `Z: Zeroize` type which implements a
 /// `Drop` handler which zeroizes dropped values.
+///
+/// `Zeroizing<T>` is defined with `repr(transparent)`, which means it is
+/// guaranteed to have the same physical representation as the underlying type.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub struct Zeroizing<Z: Zeroize>(Z);
+#[repr(transparent)]
+pub struct Zeroizing<Z: Zeroize + ?Sized>(Z);
 
 impl<Z> Zeroizing<Z>
 where
@@ -536,7 +545,7 @@ where
 
 impl<Z> ops::Deref for Zeroizing<Z>
 where
-    Z: Zeroize,
+    Z: Zeroize + ?Sized,
 {
     type Target = Z;
 
@@ -548,7 +557,7 @@ where
 
 impl<Z> ops::DerefMut for Zeroizing<Z>
 where
-    Z: Zeroize,
+    Z: Zeroize + ?Sized,
 {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Z {
@@ -559,7 +568,7 @@ where
 impl<T, Z> AsRef<T> for Zeroizing<Z>
 where
     T: ?Sized,
-    Z: AsRef<T> + Zeroize,
+    Z: AsRef<T> + Zeroize + ?Sized,
 {
     #[inline(always)]
     fn as_ref(&self) -> &T {
@@ -570,7 +579,7 @@ where
 impl<T, Z> AsMut<T> for Zeroizing<Z>
 where
     T: ?Sized,
-    Z: AsMut<T> + Zeroize,
+    Z: AsMut<T> + Zeroize + ?Sized,
 {
     #[inline(always)]
     fn as_mut(&mut self) -> &mut T {
@@ -580,26 +589,26 @@ where
 
 impl<Z> Zeroize for Zeroizing<Z>
 where
-    Z: Zeroize,
+    Z: Zeroize + ?Sized,
 {
     fn zeroize(&mut self) {}
 }
 
-impl<Z> ZeroizeOnDrop for Zeroizing<Z> where Z: Zeroize {}
+impl<Z> ZeroizeOnDrop for Zeroizing<Z> where Z: Zeroize + ?Sized {}
 
 impl<Z> Drop for Zeroizing<Z>
 where
-    Z: Zeroize,
+    Z: Zeroize + ?Sized,
 {
     fn drop(&mut self) {
-        self.0.zeroize()
+        self.0.zeroize();
     }
 }
 
 #[cfg(feature = "serde")]
 impl<Z> serde::Serialize for Zeroizing<Z>
 where
-    Z: Zeroize + serde::Serialize,
+    Z: Zeroize + serde::Serialize + ?Sized,
 {
     #[inline(always)]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -624,47 +633,6 @@ where
     }
 }
 
-/// Use fences to prevent accesses from being reordered before this
-/// point, which should hopefully help ensure that all accessors
-/// see zeroes after this point.
-#[inline(always)]
-fn atomic_fence() {
-    atomic::compiler_fence(atomic::Ordering::SeqCst);
-}
-
-/// Perform a volatile write to the destination
-#[inline(always)]
-fn volatile_write<T: Copy + Sized>(dst: &mut T, src: T) {
-    unsafe { ptr::write_volatile(dst, src) }
-}
-
-/// Perform a volatile `memset` operation which fills a slice with a value
-///
-/// Safety:
-/// The memory pointed to by `dst` must be a single allocated object that is valid for `count`
-/// contiguous elements of `T`.
-/// `count` must not be larger than an `isize`.
-/// `dst` being offset by `mem::size_of::<T> * count` bytes must not wrap around the address space.
-/// Also `dst` must be properly aligned.
-#[inline(always)]
-unsafe fn volatile_set<T: Copy + Sized>(dst: *mut T, src: T, count: usize) {
-    // TODO(tarcieri): use `volatile_set_memory` when stabilized
-    for i in 0..count {
-        // Safety:
-        //
-        // This is safe because there is room for at least `count` objects of type `T` in the
-        // allocation pointed to by `dst`, because `count <= isize::MAX` and because
-        // `dst.add(count)` must not wrap around the address space.
-        let ptr = dst.add(i);
-
-        // Safety:
-        //
-        // This is safe, because the pointer is valid and because `dst` is well aligned for `T` and
-        // `ptr` is an offset of `dst` by a multiple of `mem::size_of::<T>()` bytes.
-        ptr::write_volatile(ptr, src);
-    }
-}
-
 /// Zeroizes a flat type/struct. Only zeroizes the values that it owns, and it does not work on
 /// dynamically sized values or trait objects. It would be inefficient to use this function on a
 /// type that already implements `ZeroizeOnDrop`.
@@ -677,43 +645,8 @@ unsafe fn volatile_set<T: Copy + Sized>(dst: *mut T, src: T, count: usize) {
 ///   It is advisable to call this function only in `impl Drop`.
 /// - The bit pattern of all zeroes must be valid for the data being zeroized. This may not be
 ///   true for enums and pointers.
-///
-/// # Incompatible data types
-/// Some data types that cannot be safely zeroized using `zeroize_flat_type` include,
-/// but are not limited to:
-/// - References: `&T` and `&mut T`
-/// - Non-nullable types: `NonNull<T>`, `NonZeroU32`, etc.
-/// - Enums with explicit non-zero tags.
-/// - Smart pointers and collections: `Arc<T>`, `Box<T>`, `Vec<T>`, `HashMap<K, V>`, `String`, etc.
-///
-/// # Examples
-/// Safe usage for a struct containing strictly flat data:
-/// ```
-/// use zeroize::{ZeroizeOnDrop, zeroize_flat_type};
-///
-/// struct DataToZeroize {
-///     flat_data_1: [u8; 32],
-///     flat_data_2: SomeMoreFlatData,
-/// }
-///
-/// struct SomeMoreFlatData(u64);
-///
-/// impl Drop for DataToZeroize {
-///     fn drop(&mut self) {
-///         unsafe { zeroize_flat_type(self as *mut Self) }
-///     }
-/// }
-/// impl ZeroizeOnDrop for DataToZeroize {}
-///
-/// let mut data = DataToZeroize {
-///     flat_data_1: [3u8; 32],
-///     flat_data_2: SomeMoreFlatData(123u64)
-/// };
-///
-/// // data gets zeroized when dropped
-/// ```
 #[inline(always)]
-pub unsafe fn zeroize_flat_type<F: Sized>(data: *mut F) {}
+pub unsafe fn zeroize_flat_type<F: Sized>(_data: *mut F) {}
 
 /// Internal module used as support for `AssertZeroizeOnDrop`.
 #[doc(hidden)]
@@ -736,7 +669,7 @@ pub mod __internal {
 
     impl<T: Zeroize + ?Sized> AssertZeroize for T {
         fn zeroize_or_on_drop(&mut self) {
-            self.zeroize()
+            self.zeroize();
         }
     }
 }

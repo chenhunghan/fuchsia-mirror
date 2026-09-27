@@ -16,13 +16,17 @@
 namespace {
 
 const size_t kPageSize = zx_system_get_page_size();
+constexpr uint64_t kBusMapperStart = 0x0000100000000000;
+constexpr uint64_t kBusMapperSize = 0x0FFFFFFFFFFFFFFF;
 
 }  // namespace
 
 class FakeAddressSpaceOwner : public std::enable_shared_from_this<FakeAddressSpaceOwner>,
                               public AddressSpace::Owner {
  public:
-  FakeAddressSpaceOwner() : address_manager_(nullptr, 8) {}
+  FakeAddressSpaceOwner(uint64_t mock_bus_mapper_size = kBusMapperSize)
+      : address_manager_(nullptr, 8),
+        bus_mapper_(kBusMapperStart, kBusMapperStart + mock_bus_mapper_size) {}
   AddressSpaceObserver* GetAddressSpaceObserver() override { return &address_manager_; }
   std::shared_ptr<AddressSpace::Owner> GetSharedPtr() override { return shared_from_this(); }
   magma::PlatformBusMapper* GetBusMapper() override { return &bus_mapper_; }
@@ -218,6 +222,51 @@ class TestAddressSpace {
       EXPECT_EQ(nullptr, address_space->root_page_directory_->next_levels_[i]);
     }
   }
+
+  static void InsertRollback() {
+    auto owner = std::make_shared<FakeAddressSpaceOwner>(7 * kPageSize);
+    auto address_space = AddressSpace::Create(owner.get(), false);
+    ASSERT_NE(address_space, nullptr);
+
+    auto buffer0 = magma::PlatformBuffer::Create(kPageSize, "test0");
+    auto bus_mapping0 = owner->GetBusMapper()->MapPageRangeBus(buffer0.get(), 0, 1);
+
+    auto buffer1 = magma::PlatformBuffer::Create(kPageSize * 2, "test1");
+    auto bus_mapping1 = owner->GetBusMapper()->MapPageRangeBus(buffer1.get(), 0, 2);
+
+    gpu_addr_t addr0 = kPageSize * 510;
+    EXPECT_TRUE(address_space->Insert(addr0, bus_mapping0.get(), 0, kPageSize, kAccessFlagRead));
+
+    gpu_addr_t addr1 = kPageSize * 511;
+    EXPECT_FALSE(
+        address_space->Insert(addr1, bus_mapping1.get(), 0, kPageSize * 2, kAccessFlagRead));
+
+    mali_pte_t pte;
+    EXPECT_TRUE(address_space->ReadPteForTesting(addr0, &pte));
+    EXPECT_EQ(1u, pte & 3);
+
+    EXPECT_TRUE(address_space->ReadPteForTesting(addr1, &pte));
+    EXPECT_EQ(2u, pte & 3);
+
+    EXPECT_FALSE(address_space->ReadPteForTesting(addr1 + kPageSize, &pte));
+  }
+
+  static void InsertRollbackGC() {
+    auto owner = std::make_shared<FakeAddressSpaceOwner>(6 * kPageSize);
+    auto address_space = AddressSpace::Create(owner.get(), false);
+    ASSERT_NE(address_space, nullptr);
+
+    auto buffer = magma::PlatformBuffer::Create(kPageSize * 2, "test");
+    auto bus_mapping = owner->GetBusMapper()->MapPageRangeBus(buffer.get(), 0, 2);
+
+    gpu_addr_t addr = kPageSize * 511;
+    EXPECT_FALSE(address_space->Insert(addr, bus_mapping.get(), 0, kPageSize * 2, kAccessFlagRead));
+
+    for (uint32_t i = 0; i < AddressSpace::kPageTableEntries; ++i) {
+      EXPECT_EQ(2u, address_space->root_page_directory_->gpu()->entry[i]);
+      EXPECT_EQ(nullptr, address_space->root_page_directory_->next_levels_[i]);
+    }
+  }
 };
 
 class AddressSpaceTest : public testing::Test {
@@ -234,3 +283,7 @@ TEST_F(AddressSpaceTest, Insert) { TestAddressSpace::Insert(); }
 TEST_F(AddressSpaceTest, InsertOffset) { TestAddressSpace::InsertOffset(); }
 
 TEST_F(AddressSpaceTest, GarbageCollect) { TestAddressSpace::GarbageCollect(); }
+
+TEST_F(AddressSpaceTest, InsertRollback) { TestAddressSpace::InsertRollback(); }
+
+TEST_F(AddressSpaceTest, InsertRollbackGC) { TestAddressSpace::InsertRollbackGC(); }

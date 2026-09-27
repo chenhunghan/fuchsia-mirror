@@ -781,7 +781,7 @@ bool linear_is_single_plane(fuchsia_images2::PixelFormat pixel_format) {
     case fuchsia_images2::PixelFormat::kR8G8:
     case fuchsia_images2::PixelFormat::kA2R10G10B10:
     case fuchsia_images2::PixelFormat::kA2B10G10R10:
-    case fuchsia_images2::PixelFormat::kP010:
+    case fuchsia_images2::PixelFormat::kYuy2:
     case fuchsia_images2::PixelFormat::kR8G8B8:
       return true;
     case fuchsia_images2::PixelFormat::kInvalid:
@@ -789,7 +789,7 @@ bool linear_is_single_plane(fuchsia_images2::PixelFormat pixel_format) {
     case fuchsia_images2::PixelFormat::kI420:
     case fuchsia_images2::PixelFormat::kM420:
     case fuchsia_images2::PixelFormat::kNv12:
-    case fuchsia_images2::PixelFormat::kYuy2:
+    case fuchsia_images2::PixelFormat::kP010:
     case fuchsia_images2::PixelFormat::kMjpeg:
     case fuchsia_images2::PixelFormat::kYv12:
     default:
@@ -1307,7 +1307,11 @@ safemath::CheckedNumeric<uint64_t> ImageFormatImageSizeChecked(
 safemath::CheckedNumeric<uint64_t> ImageFormatImageSizeChecked(
     const fuchsia_sysmem::wire::ImageFormat2& wire_image_format_v1) {
   auto image_format_v1 = fidl::ToNatural(wire_image_format_v1);
-  auto image_format_v2 = sysmem::V2CopyFromV1ImageFormat(image_format_v1).take_value();
+  auto image_format_v2_result = sysmem::V2CopyFromV1ImageFormat(image_format_v1);
+  if (!image_format_v2_result.is_ok()) {
+    return kInvalidCheckedNumeric64;
+  }
+  auto image_format_v2 = image_format_v2_result.take_value();
   return ImageFormatImageSizeChecked(image_format_v2);
 }
 
@@ -1544,8 +1548,12 @@ safemath::CheckedNumeric<uint32_t> ImageFormatMinimumRowBytesChecked(
     const fuchsia_sysmem::wire::ImageFormatConstraints& constraints,
     safemath::CheckedNumeric<uint32_t> width) {
   auto image_format_constraints_v1 = fidl::ToNatural(constraints);
-  auto image_format_constraints_v2 =
-      sysmem::V2CopyFromV1ImageFormatConstraints(image_format_constraints_v1).take_value();
+  auto image_format_constraints_v2_result =
+      sysmem::V2CopyFromV1ImageFormatConstraints(image_format_constraints_v1);
+  if (!image_format_constraints_v2_result.is_ok()) {
+    return kInvalidCheckedNumeric32;
+  }
+  auto image_format_constraints_v2 = image_format_constraints_v2_result.take_value();
   return ImageFormatMinimumRowBytesChecked(image_format_constraints_v2, width);
 }
 

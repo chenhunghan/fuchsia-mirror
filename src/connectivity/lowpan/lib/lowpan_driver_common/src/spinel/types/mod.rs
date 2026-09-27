@@ -168,6 +168,18 @@ impl<'a> std::fmt::Debug for SpinelFrameRef<'a> {
                             Err(e) => write!(f, " {e:?}")?,
                         }
                     }
+                    // Redact the key info to prevent raw bytes from leaking.
+                    Ok(SpinelPropValueRef { prop, value })
+                        if [
+                            Prop::Rcp(PropRcp::MacKey),
+                            Prop::Net(PropNet::MasterKey),
+                            Prop::Net(PropNet::Pskc),
+                        ]
+                        .contains(&prop) =>
+                    {
+                        write!(f, " {:?} [REDACTED {} bytes]", prop, value.len())?
+                    }
+
                     Ok(x) => write!(f, " {:?} {}", x.prop, hex::encode(x.value))?,
                     Err(e) => write!(f, " {e:?}")?,
                 }

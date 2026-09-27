@@ -12,21 +12,56 @@
 
 namespace media {
 
-bool VaapiWrapper::UploadVideoFrameToSurface(VideoFrame& frame, VASurfaceID input_surface_id,
+bool VaapiWrapper::UploadVideoFrameToSurface(const VideoFrame& frame, VASurfaceID input_surface_id,
                                              const gfx::Size& input_surface_size) {
-  if (safemath::checked_cast<uint32_t>(input_surface_size.width()) > frame.stride) {
-    FX_LOGS(WARNING) << "Invalid image stride " << input_surface_size.width() << " vs "
+  if (frame.display_size.IsEmpty() || frame.coded_size.IsEmpty() || input_surface_size.IsEmpty()) {
+    FX_LOGS(WARNING) << "Invalid empty dimensions: display=" << frame.display_size.ToString()
+                     << " coded=" << frame.coded_size.ToString()
+                     << " surface=" << input_surface_size.ToString();
+    return false;
+  }
+  if (frame.display_size.width() > frame.coded_size.width() ||
+      frame.display_size.height() > frame.coded_size.height()) {
+    FX_LOGS(WARNING) << "Display dimensions " << frame.display_size.ToString()
+                     << " exceed coded dimensions " << frame.coded_size.ToString();
+    return false;
+  }
+  if (frame.display_size.width() > input_surface_size.width() ||
+      frame.display_size.height() > input_surface_size.height()) {
+    FX_LOGS(WARNING) << "Display dimensions " << frame.display_size.ToString()
+                     << " exceed input surface dimensions " << input_surface_size.ToString();
+    return false;
+  }
+  if (safemath::checked_cast<uint32_t>(frame.coded_size.width()) > frame.stride) {
+    FX_LOGS(WARNING) << "Invalid image stride " << frame.coded_size.width() << " vs "
                      << frame.stride;
     return false;
   }
-  auto main_plane_size = safemath::CheckMul(frame.stride, input_surface_size.height());
-  auto uv_plane_size = main_plane_size / 2;
+  auto main_plane_size =
+      safemath::CheckMul(frame.stride, safemath::checked_cast<uint32_t>(frame.coded_size.height()));
+  auto uv_coded_height = CheckedRoundUp(frame.coded_size.height(), 2) / 2;
+  auto uv_plane_size = safemath::CheckMul(frame.stride, uv_coded_height.Cast<uint32_t>());
   auto pic_size_checked = main_plane_size + uv_plane_size;
   if (!pic_size_checked.IsValid() || pic_size_checked.ValueOrDie() > frame.size_bytes) {
-    FX_LOGS(WARNING) << "Invalid image dimensions stride " << frame.stride << " height "
-                     << input_surface_size.height() << " byte size " << frame.size_bytes;
+    FX_LOGS(WARNING) << "Invalid image dimensions stride " << frame.stride << " coded height "
+                     << frame.coded_size.height() << " byte size " << frame.size_bytes;
     return false;
   }
+
+  size_t y_rows = safemath::checked_cast<size_t>(frame.display_size.height());
+  size_t y_row_bytes = safemath::checked_cast<size_t>(frame.display_size.width());
+  auto uv_rows_checked = CheckedRoundUp(frame.display_size.height(), 2) / 2;
+  auto uv_row_bytes_checked = CheckedRoundUp(frame.display_size.width(), 2);
+  if (!uv_rows_checked.IsValid() || !uv_row_bytes_checked.IsValid()) {
+    return false;
+  }
+  size_t uv_rows = safemath::checked_cast<size_t>(uv_rows_checked.ValueOrDie());
+  size_t uv_row_bytes = safemath::checked_cast<size_t>(uv_row_bytes_checked.ValueOrDie());
+  if (uv_row_bytes > frame.stride) {
+    FX_LOGS(WARNING) << "UV row bytes exceed input frame stride";
+    return false;
+  }
+
   VAImage image;
   VAStatus status =
       vaDeriveImage(VADisplayWrapper::GetSingleton()->display(), input_surface_id, &image);
@@ -34,31 +69,67 @@ bool VaapiWrapper::UploadVideoFrameToSurface(VideoFrame& frame, VASurfaceID inpu
     FX_LOGS(WARNING) << "DeriveImage failed: " << status;
     return false;
   }
+  ScopedImageID scoped_image(image.image_id);
+
+  if (image.num_planes < 2 || frame.display_size.width() > static_cast<int>(image.width) ||
+      frame.display_size.height() > static_cast<int>(image.height)) {
+    FX_LOGS(WARNING) << "Destination VAImage dimensions or plane count insufficient";
+    return false;
+  }
+
+  if (y_row_bytes > image.pitches[0] || uv_row_bytes > image.pitches[1]) {
+    FX_LOGS(WARNING) << "Row bytes exceed destination VAImage pitch";
+    return false;
+  }
+
+  auto y_end_offset = safemath::CheckAdd(
+      image.offsets[0],
+      safemath::CheckAdd(safemath::CheckMul(y_rows - 1, static_cast<size_t>(image.pitches[0])),
+                         y_row_bytes));
+  auto uv_end_offset = safemath::CheckAdd(
+      image.offsets[1],
+      safemath::CheckAdd(safemath::CheckMul(uv_rows - 1, static_cast<size_t>(image.pitches[1])),
+                         uv_row_bytes));
+  if (!y_end_offset.IsValid() || !uv_end_offset.IsValid() ||
+      y_end_offset.ValueOrDie() > image.data_size || uv_end_offset.ValueOrDie() > image.data_size) {
+    FX_LOGS(WARNING) << "Destination VAImage buffer too small for frame upload";
+    return false;
+  }
+
+  // In NV12, the Y plane write interval [image.offsets[0], y_end_offset)
+  // precedes the UV plane write interval [image.offsets[1], uv_end_offset) in
+  // memory. Verify that image.offsets[0] <= image.offsets[1] and that Y plane
+  // scanlines do not spill into the start of the UV plane
+  // (y_end_offset <= image.offsets[1]).
+  if (image.offsets[0] > image.offsets[1] || y_end_offset.ValueOrDie() > image.offsets[1]) {
+    FX_LOGS(WARNING) << "Y plane overlaps or follows UV plane in destination VAImage";
+    return false;
+  }
 
   void* surface_p;
   status = vaMapBuffer(VADisplayWrapper::GetSingleton()->display(), image.buf, &surface_p);
   if (status != VA_STATUS_SUCCESS) {
     FX_LOGS(WARNING) << "MapBuffer failed: " << status;
-    vaDestroyImage(VADisplayWrapper::GetSingleton()->display(), image.image_id);
     return false;
   }
   // TODO(https://fxbug.dev/42051383): Optimize this code to reduce copies.
-  uint8_t* in_ptr = frame.base;
+  const uint8_t* in_ptr = frame.base;
   uint8_t* out_ptr = static_cast<uint8_t*>(surface_p);
-  for (size_t y = 0; y < static_cast<size_t>(frame.display_size.height()); y++) {
-    uint8_t* in_start = in_ptr + y * frame.stride;
+  for (size_t y = 0; y < y_rows; y++) {
+    const uint8_t* in_start = in_ptr + y * frame.stride;
     uint8_t* out_start = out_ptr + image.offsets[0] + image.pitches[0] * y;
-    memcpy(out_start, in_start, static_cast<size_t>(frame.display_size.width()));
+    memcpy(out_start, in_start, y_row_bytes);
   }
 
-  for (size_t y = 0; y < static_cast<size_t>(frame.display_size.height() / 2); y++) {
-    uint8_t* in_start = in_ptr + (frame.coded_size.height() + y) * frame.stride;
+  for (size_t y = 0; y < uv_rows; y++) {
+    const uint8_t* in_start =
+        in_ptr + (safemath::checked_cast<size_t>(frame.coded_size.height()) + y) * frame.stride;
     uint8_t* out_start = out_ptr + image.offsets[1] + image.pitches[1] * y;
-    memcpy(out_start, in_start, static_cast<size_t>(frame.display_size.width()));
+    memcpy(out_start, in_start, uv_row_bytes);
   }
   vaUnmapBuffer(VADisplayWrapper::GetSingleton()->display(), image.buf);
 
-  status = vaDestroyImage(VADisplayWrapper::GetSingleton()->display(), image.image_id);
+  status = vaDestroyImage(VADisplayWrapper::GetSingleton()->display(), scoped_image.release());
   if (status != VA_STATUS_SUCCESS) {
     FX_LOGS(WARNING) << "DestroyImage failed: " << status;
     return false;

@@ -7,7 +7,6 @@
 pub mod counters;
 
 use alloc::boxed::Box;
-use core::convert::{Infallible as Never, TryInto as _};
 use core::fmt::Debug;
 use core::num::{NonZeroU8, NonZeroU16};
 
@@ -930,7 +929,7 @@ impl<
         + CounterContext<IcmpTxCounters<Ipv4>>,
 > IpTransportContext<Ipv4, BC, CC> for IcmpIpTransportContext
 {
-    type EarlyDemuxSocket = Never;
+    type EarlyDemuxSocket = !;
 
     fn early_demux<B: ParseBuffer>(
         _core_ctx: &mut CC,
@@ -970,7 +969,7 @@ impl<
         dst_ip: SpecifiedAddr<Ipv4Addr>,
         mut buffer: B,
         info: &mut LocalDeliveryPacketInfo<Ipv4, H>,
-        _early_demux_socket: Option<Never>,
+        _early_demux_socket: Option<!>,
     ) -> Result<(), (B, Icmpv4Error)> {
         let LocalDeliveryPacketInfo { meta, header_info: _, marks } = info;
         let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _ } = meta;
@@ -1941,7 +1940,7 @@ impl<
         + CounterContext<NdpCounters>,
 > IpTransportContext<Ipv6, BC, CC> for IcmpIpTransportContext
 {
-    type EarlyDemuxSocket = Never;
+    type EarlyDemuxSocket = !;
 
     fn early_demux<B: ParseBuffer>(
         _core_ctx: &mut CC,
@@ -1981,7 +1980,7 @@ impl<
         dst_ip: SpecifiedAddr<Ipv6Addr>,
         mut buffer: B,
         info: &mut LocalDeliveryPacketInfo<Ipv6, H>,
-        _early_demux_socket: Option<Never>,
+        _early_demux_socket: Option<!>,
     ) -> Result<(), (B, Icmpv6Error)> {
         let LocalDeliveryPacketInfo { meta, header_info, marks } = info;
         let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _ } = meta;
@@ -2708,8 +2707,6 @@ mod tests {
     };
     use crate::socket::RouteResolutionOptions;
 
-    use test_util::assert_geq;
-
     pub(super) trait IcmpTestIpExt:
         TestIpExt + IpExt + FilterIpExt + IcmpCountersIpExt
     {
@@ -2812,7 +2809,7 @@ mod tests {
     where
         I: IcmpTestIpExt + IpLayerIpExt,
     {
-        type EarlyDemuxSocket = Never;
+        type EarlyDemuxSocket = !;
 
         fn early_demux<B: ParseBuffer>(
             _core_ctx: &mut FakeIcmpCoreCtx<I>,
@@ -2844,7 +2841,7 @@ mod tests {
             _dst_ip: SpecifiedAddr<I::Addr>,
             _buffer: B,
             _info: &mut LocalDeliveryPacketInfo<I, H>,
-            _early_demux_socket: Option<Never>,
+            _early_demux_socket: Option<!>,
         ) -> Result<(), (B, I::IcmpError)> {
             unimplemented!()
         }
@@ -3811,7 +3808,8 @@ mod tests {
                 packet_formats::ip::IpProto::Udp.into(),
                 &Default::default(),
             );
-            assert_geq!(core_ctx.icmp.tx_counters.time_exceeded.ttl_expired.get(), 1);
+            let count = core_ctx.icmp.tx_counters.time_exceeded.ttl_expired.get();
+            assert!(count >= 1, "{count} >= 1");
         }
 
         /// Call `send_icmpv4_parameter_problem` with fake values.
@@ -3834,10 +3832,8 @@ mod tests {
                 packet_formats::ip::IpProto::Udp.into(),
                 &Default::default(),
             );
-            assert_geq!(
-                core_ctx.icmp.tx_counters.parameter_problem.pointer_indicates_error.get(),
-                1
-            );
+            let count = core_ctx.icmp.tx_counters.parameter_problem.pointer_indicates_error.get();
+            assert!(count >= 1, "{count} >= 1");
         }
 
         /// Call `send_icmpv4_dest_unreachable` with fake values.
@@ -3856,10 +3852,8 @@ mod tests {
                 packet_formats::ip::IpProto::Udp.into(),
                 &Default::default(),
             );
-            assert_geq!(
-                core_ctx.icmp.tx_counters.dest_unreachable.dest_network_unreachable.get(),
-                1
-            );
+            let count = core_ctx.icmp.tx_counters.dest_unreachable.dest_network_unreachable.get();
+            assert!(count >= 1, "{count} >= 1");
         }
 
         /// Call `send_icmpv6_ttl_expired` with fake values.
@@ -3878,7 +3872,8 @@ mod tests {
                 Ipv6Proto::NoNextHeader,
                 &Default::default(),
             );
-            assert_geq!(core_ctx.icmp.tx_counters.time_exceeded.hop_limit_exceeded.get(), 1);
+            let count = core_ctx.icmp.tx_counters.time_exceeded.hop_limit_exceeded.get();
+            assert!(count >= 1, "{count} >= 1");
         }
 
         /// Call `send_icmpv6_packet_too_big` with fake values.
@@ -3897,7 +3892,8 @@ mod tests {
                 Ipv6Proto::NoNextHeader,
                 &Default::default(),
             );
-            assert_geq!(core_ctx.icmp.tx_counters.packet_too_big.get(), 1);
+            let count = core_ctx.icmp.tx_counters.packet_too_big.get();
+            assert!(count >= 1, "{count} >= 1");
         }
 
         /// Call `send_icmpv6_parameter_problem` with fake values.
@@ -3921,10 +3917,8 @@ mod tests {
                 Ipv6Proto::NoNextHeader,
                 &Default::default(),
             );
-            assert_geq!(
-                core_ctx.icmp.tx_counters.parameter_problem.erroneous_header_field.get(),
-                1
-            );
+            let count = core_ctx.icmp.tx_counters.parameter_problem.erroneous_header_field.get();
+            assert!(count >= 1, "{count} >= 1");
         }
 
         /// Call `send_icmpv6_dest_unreachable` with fake values.
@@ -3943,7 +3937,8 @@ mod tests {
                 Ipv6Proto::NoNextHeader,
                 &Default::default(),
             );
-            assert_geq!(core_ctx.icmp.tx_counters.dest_unreachable.no_route.get(), 1);
+            let count = core_ctx.icmp.tx_counters.dest_unreachable.no_route.get();
+            assert!(count >= 1, "{count} >= 1");
         }
 
         // Run tests for each function that sends error messages to make sure

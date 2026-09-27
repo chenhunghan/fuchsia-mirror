@@ -110,18 +110,19 @@ rust_binary(
     name = "a_rust_binary",
     srcs = ["a_main.rs"],
     edition = "2024",
-    rustc_flags = [
-        "-Cpanic=abort",
-    ],
+    deps = select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
 )
 
 rust_test(
     name = "a_rust_test",
     crate = ":a_rust_binary",
-    rustc_flags = [
-        "-Zpanic_abort_tests",
-        "-Cpanic=abort",
-    ],
+    deps = select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
 )
 
 # The following targets will fail to compile in a non-Fuchsia build configuration

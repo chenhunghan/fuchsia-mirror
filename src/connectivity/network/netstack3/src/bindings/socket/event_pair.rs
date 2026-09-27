@@ -59,7 +59,10 @@ impl QueueReadableListener for zx::EventPair {
 
 fn signal_zx_event(event: &zx::EventPair, signal: zx::Signals, on: bool) {
     let (clear, set) = if on { (zx::Signals::NONE, signal) } else { (signal, zx::Signals::NONE) };
-    event
-        .signal_peer(clear, set)
-        .unwrap_or_else(|e| error!("failed to signal socket event {signal:?} = {on:?}: {e:?}"));
+    event.signal_peer(clear, set).unwrap_or_else(|e| {
+        // Peer may close the handle asynchronously. The error is safe to ignore in this case.
+        if e != zx::Status::PEER_CLOSED {
+            error!("failed to signal socket event {signal:?} = {on:?}: {e:?}")
+        }
+    });
 }

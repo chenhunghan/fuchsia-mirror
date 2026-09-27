@@ -235,7 +235,8 @@ async fn main() {
         run_reporter,
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
     log::info!("run test suite duration: {:?}", start_time.elapsed().as_secs_f32());
     let is_no_matching_cases = match outcome {
         run_test_suite_lib::Outcome::Error { ref origin } => match **origin {

@@ -110,7 +110,7 @@ template <typename GpuMapping>
 bool Ringbuffer<GpuMapping>::HasSpace(uint32_t bytes) {
   // Can't fill completely such that tail_ == head_
   int32_t space = head_ - tail_ - sizeof(uint32_t);
-  if (space <= 0)
+  if (head_ <= tail_)
     space += size_;
   bool ret = static_cast<uint32_t>(space) >= bytes;
   return MAGMA_DRETF(ret, "Insufficient space: bytes 0x%x space 0x%x", bytes, space);

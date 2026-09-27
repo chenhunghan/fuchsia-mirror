@@ -436,7 +436,7 @@ mod test {
             .is_some()
         );
 
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::BssSelectionResult {
                 reason,
                 scored_candidates,

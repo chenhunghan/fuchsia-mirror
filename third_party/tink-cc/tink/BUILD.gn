@@ -217,18 +217,7 @@ source_set("primitive_set") {
   configs += [ "//build/config:no_rtti" ]
   configs -= [ "//build/config:no_rtti" ]
   sources = [ "//third_party/tink-cc/src/tink/primitive_set.h" ]
-  public_deps = [
-    ":crypto_format",
-    "//third_party/abseil-cpp/absl/base:core_headers",
-    "//third_party/abseil-cpp/absl/container:flat_hash_map",
-    "//third_party/abseil-cpp/absl/memory",
-    "//third_party/abseil-cpp/absl/status",
-    "//third_party/abseil-cpp/absl/status:statusor",
-    "//third_party/abseil-cpp/absl/strings:string_view",
-    "//third_party/abseil-cpp/absl/synchronization",
-    "//third_party/tink-cc/proto:tink_proto",
-    "//third_party/tink-cc/tink/util:errors",
-  ]
+  public_deps = [ "//third_party/tink-cc/tink/internal:primitive_set" ]
   public_configs = [ "//third_party/tink-cc:tink_config" ]
 }
 

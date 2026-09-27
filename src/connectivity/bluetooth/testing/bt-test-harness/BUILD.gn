@@ -48,7 +48,6 @@ rustc_library("bt-test-harness") {
   # HostRealm
   deps += [
     ":test-bt-init",
-    ":test-bt-init-config",
     "//sdk/lib/driver_test_realm/realm_builder/rust",
     "//src/connectivity/bluetooth/core/bt-gap:test-stash-secure",
     "//src/connectivity/bluetooth/hci/virtual",
@@ -91,20 +90,10 @@ fuchsia_component_manifest("test_bt_init_manifest") {
   manifest = "meta/test-bt-init.cml"
 }
 
-fuchsia_structured_config_values("test-bt-init-config") {
-  cm_label = ":test_bt_init_manifest"
-  values = {
-    autostart_snoop = true
-    fastpair_provider_enabled = false
-    rfcomm_enabled = true
-  }
-}
-
 fuchsia_component("test-bt-init") {
   cm_label = ":test_bt_init_manifest"
   deps = [
     "//src/connectivity/bluetooth/core/bt-gap:component",
-    "//src/connectivity/bluetooth/core/bt-gap:default_config_values",
     "//src/connectivity/bluetooth/core/bt-init:bin",
     "//src/connectivity/bluetooth/profiles/bt-rfcomm:component",
   ]

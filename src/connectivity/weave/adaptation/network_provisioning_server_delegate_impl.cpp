@@ -77,22 +77,26 @@ WEAVE_ERROR NetworkProvisioningServerDelegateImpl::GetWiFiStationProvision(
   switch (current_network_config_.credential().Which()) {
     case fuchsia::wlan::policy::Credential::Tag::kNone:
       break;
-    case fuchsia::wlan::policy::Credential::Tag::kPassword:
-      net_info.WiFiKeyLen = current_network_config_.credential().password().size();
-      if (net_info.WiFiKeyLen > DeviceNetworkInfo::kMaxWiFiKeyLength) {
+    case fuchsia::wlan::policy::Credential::Tag::kPassword: {
+      const size_t password_size = current_network_config_.credential().password().size();
+      if (password_size > DeviceNetworkInfo::kMaxWiFiKeyLength) {
         return WEAVE_ERROR_BUFFER_TOO_SMALL;
       }
+      net_info.WiFiKeyLen = static_cast<uint8_t>(password_size);
       std::copy(current_network_config_.credential().password().begin(),
                 current_network_config_.credential().password().end(), net_info.WiFiKey);
       break;
-    case fuchsia::wlan::policy::Credential::Tag::kPsk:
-      net_info.WiFiKeyLen = current_network_config_.credential().psk().size();
-      if (net_info.WiFiKeyLen > DeviceNetworkInfo::kMaxWiFiKeyLength) {
+    }
+    case fuchsia::wlan::policy::Credential::Tag::kPsk: {
+      const size_t psk_size = current_network_config_.credential().psk().size();
+      if (psk_size > DeviceNetworkInfo::kMaxWiFiKeyLength) {
         return WEAVE_ERROR_BUFFER_TOO_SMALL;
       }
+      net_info.WiFiKeyLen = static_cast<uint8_t>(psk_size);
       std::copy(current_network_config_.credential().psk().begin(),
                 current_network_config_.credential().psk().end(), net_info.WiFiKey);
       break;
+    }
     default:
       FX_LOGS(ERROR) << "Unknown WLAN credential type: "
                      << current_network_config_.credential().Which();

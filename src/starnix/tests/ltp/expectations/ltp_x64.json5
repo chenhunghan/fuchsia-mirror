@@ -12,7 +12,15 @@
                 "ioperm02",
                 "iopl01",
                 "iopl02",
-            ]
-        }
+
+                // TODO(https://fxbug.dev/560397662): Triage the x64-specific tests
+                "cve-2018-1000199",
+                "cve-2018-8897",
+                "prctl10",
+                "ptrace10",
+                "runpwtests03",
+                "runpwtests06",
+            ],
+        },
     ],
 }

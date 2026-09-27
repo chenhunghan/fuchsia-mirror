@@ -12,7 +12,7 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock, Weak};
 
 #[cfg(not(target_os = "fuchsia"))]
-use fuchsia_async::emulated_handle::zx_handle_t;
+use fuchsia_emulated_handle::zx_handle_t;
 #[cfg(target_os = "fuchsia")]
 use zx::sys::zx_handle_t;
 

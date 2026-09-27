@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/lib/chunked-compression/chunked-archive.h"
+
 #include <lib/cksum.h>
 #include <lib/syslog/cpp/macros.h>
 #include <string.h>
 #include <zircon/compiler.h>
 
 #include <fbl/array.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
-#include <src/lib/chunked-compression/status.h>
+
+#include "src/lib/chunked-compression/status.h"
 
 namespace chunked_compression {
 

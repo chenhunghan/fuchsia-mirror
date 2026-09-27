@@ -21,6 +21,13 @@
 # Build system files throughout the tree
 per-file **.gn,**.gni,**.bazel,**.bzl,fuchsia.code-workspace = file:/build/OWNERS
 
+# These patterns give Bazel migration reviewers who are not Build team members
+# OWNERS approval rights on Bazel migration related files.
+#
+# TODO(jayzhuang): Remove these patterns after the majority of migration is done.
+per-file **/BUILD.gn,**/BUILD.bazel = file:/build/bazel/BAZEL_MIGRATION_OWNERS
+per-file **/bazel2gn_verification_targets.gni = file:/build/bazel/BAZEL_MIGRATION_OWNERS
+
 # C++ language support files
 per-file .clang-format,.clang-tidy = file:/build/toolchain/OWNERS
 

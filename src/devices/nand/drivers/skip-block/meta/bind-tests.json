@@ -56,7 +56,7 @@
         "expected": "abort",
         "device": {
             "fuchsia.BIND_AUTOBIND": "1",
-            "fuchsia.BIND_PROTOCOL": "fuchsia.block.BIND_PROTOCOL.BLOCK",
+            "fuchsia.BIND_PROTOCOL": "fuchsia.i2c.BIND_PROTOCOL.DEVICE",
             "fuchsia.BIND_NAND_CLASS": "fuchsia.nand.BIND_NAND_CLASS.BBS"
         }
     },
@@ -65,7 +65,7 @@
         "expected": "abort",
         "device": {
             "fuchsia.BIND_AUTOBIND": "0",
-            "fuchsia.BIND_PROTOCOL": "fuchsia.block.BIND_PROTOCOL.BLOCK",
+            "fuchsia.BIND_PROTOCOL": "fuchsia.i2c.BIND_PROTOCOL.DEVICE",
             "fuchsia.BIND_NAND_CLASS": "fuchsia.nand.BIND_NAND_CLASS.BBS"
         }
     },

@@ -72,7 +72,14 @@ unsafe extern "C" {
     ) -> zx_status_t;
 
     /// Returns a reference-counted pointer to the root job dispatcher.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call from any thread context after root job initialization.
     pub(crate) fn cpp_job_dispatcher_get_root_job() -> *mut JobDispatcher;
+
+    /// Creates and returns a reference-counted pointer to a new root job dispatcher.
+    pub(crate) fn cpp_job_dispatcher_create_root_job() -> *mut JobDispatcher;
 
     /// Returns a reference-counted pointer to the parent job dispatcher, or null if root.
     ///
@@ -127,10 +134,22 @@ unsafe extern "C" {
         info_out: *mut zx_info_job_t,
     );
 
+    /// Returns the accumulated runtime statistics for the given job.
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher`.
     pub(crate) fn cpp_job_dispatcher_get_runtime_stats(
         job: *const JobDispatcher,
     ) -> zx_types::zx_info_task_runtime_t;
 
+    /// Enumerates child jobs or child processes of the given job.
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher`. `user_koids` must point to a buffer capable
+    /// of holding at least `max` KOIDs, and `out_count` and `out_avail` must point to writable
+    /// memory for `usize`.
     pub(crate) fn cpp_job_dispatcher_enumerate_children(
         job: *const JobDispatcher,
         user_koids: *mut zx_types::zx_koid_t,

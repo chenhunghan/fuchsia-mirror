@@ -143,4 +143,31 @@ FFI_ALWAYS_INLINE VmCowPages* cpp_vm_cow_pages_upgrade_from_raw(VmCowPages* cow)
   return cow;
 }
 
+FFI_ALWAYS_INLINE void cpp_priority_changer_construct(ffi::Uninitialized<PriorityChanger>* out,
+                                                      VmCowPages* cow, int64_t delta) {
+  out->Initialize(delta, cow);
+}
+
+FFI_ALWAYS_INLINE void cpp_priority_changer_destroy(PriorityChanger* pc) { ktl::destroy_at(pc); }
+
+FFI_ALWAYS_INLINE void cpp_priority_changer_prepare_may_not_already_be_high_priority(
+    PriorityChanger* pc) TA_NO_THREAD_SAFETY_ANALYSIS {
+  pc->PrepareMayNotAlreadyBeHighPriority();
+}
+
+FFI_ALWAYS_INLINE void cpp_priority_changer_prepare_is_already_high_priority_locked(
+    PriorityChanger* pc) TA_NO_THREAD_SAFETY_ANALYSIS {
+  pc->PrepareIsAlreadyHighPriorityLocked();
+}
+
+FFI_ALWAYS_INLINE void cpp_priority_changer_change_high_priority_count_locked(PriorityChanger* pc)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  pc->ChangeHighPriorityCountLocked();
+}
+
+FFI_ALWAYS_INLINE void* cpp_priority_changer_lock(const PriorityChanger* pc)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  return pc->lock();
+}
+
 }  // extern "C"

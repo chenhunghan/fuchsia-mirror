@@ -5,15 +5,15 @@
 # Collect information about one or more Bazel test labels.
 #
 # This template does not build anything, it emits GN metadata, and targets using
-# this template should be in transitive dependencies of //:bazel_test_suites to
-# ensure that the Bazel tests they reference appear in `tests.json` and thus are
-# visible to `fx test` and infra builders.
+# this template should be in transitive dependencies of
+# //:bazel_host_test_suites to ensure that the Bazel tests they reference appear
+# in `tests.json` and thus are visible to `fx test` and infra builders.
 #
 # See //docs/development/build/bazel_concepts/tests.md for details. In a
 # nutshell:
 #
 # - Add a GN bazel_test_suite() target referencing the Bazel tests.
-# - Ensure it is reachable from the //:bazel_test_suites target, e.g. by
+# - Ensure it is reachable from the //:bazel_host_test_suites target, e.g. by
 #   adding it to `host_tests` or `developer_specified_tests` in `args.gn`.
 #
 # Args:
@@ -29,11 +29,15 @@ template("bazel_test_suite") {
     forward_variables_from(invoker, [ "visibility" ])
     testonly = true
     metadata = {
-      # TODO(https://fxbug.dev/546173288): Support target tests as well, not
-      # just host tests.
-      # Used by //:bazel_test_suites target.
-      bazel_test_suite = [] + invoker.host_tests
-      bazel_test_suite_barrier = []
+      # TODO(https://fxbug.dev/546173288): Support target tests and e2e tests
+      # as well, not just host tests. Those are three distinct buckets,
+      # mirroring GN's host_test_labels/e2e_test_labels/target test split. e2e
+      # tests run on the host but depend on an assembled platform image, so
+      # they cannot be built by the //build/bazel/host_tests bazel_action(),
+      # which uses a `host` bazel_config that has no assembly dependencies.
+      # Used by //:bazel_host_test_suites target.
+      bazel_host_test_suite = [] + invoker.host_tests
+      bazel_host_test_suite_barrier = []
     }
   }
 }

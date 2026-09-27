@@ -15,17 +15,16 @@ rustc_library_with_features("netstack3-udp") {
     "src/counters.rs",
     "src/diagnostics.rs",
     "src/lib.rs",
-    "src/settings.rs",
   ]
   deps = [
     "//src/connectivity/lib/net-types",
     "//src/connectivity/lib/packet-formats",
-    "//src/connectivity/network/netstack3/core/hashmap",
     "//src/connectivity/network/netstack3/core/lock-order",
     "//src/lib/network/packet",
     "//third_party/rust_crates:derivative",
     "//third_party/rust_crates:either",
     "//third_party/rust_crates:log",
+    "//third_party/rust_crates:siphasher",
     "//third_party/rust_crates:smallvec",
     "//third_party/rust_crates:thiserror",
   ]
@@ -94,6 +93,7 @@ rustc_library_with_features("netstack3-udp") {
         "//src/connectivity/network/netstack3/core/base:netstack3-base-testutils",
         "//src/connectivity/network/netstack3/core/datagram:netstack3-datagram-testutils",
         "//src/connectivity/network/netstack3/core/filter:netstack3-filter-testutils",
+        "//src/connectivity/network/netstack3/core/hashmap",
         "//src/connectivity/network/netstack3/core/ip:netstack3-ip-testutils",
         "//src/connectivity/network/netstack3/core/trace:netstack3-trace-testutils",
         "//third_party/rust_crates:assert_matches",

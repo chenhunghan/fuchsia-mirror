@@ -77,12 +77,17 @@ zx_status_t HevcDec::LoadFirmware(InternalBuffer& buffer) {
     TRACE_DURATION("media", "SpinWaitForRegister");
 
     // Measured spin wait time is around 5 microseconds on sherlock, so it makes sense to SpinWait.
-    if (!SpinWaitForRegister(std::chrono::milliseconds(100), [this] {
+
+    // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+    if (!SpinWaitForRegister(std::chrono::milliseconds(1000), [this] {
           return (HevcImemDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000) == 0;
         })) {
       DECODE_ERROR("Failed to load microcode, ImemDmaCtrl %d, ImemDmaAdr 0x%x",
                    HevcImemDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value(),
                    HevcImemDmaAdr::Get().ReadFrom(mmio()->dosbus).reg_value());
+
+      // This will quarantine currently-pinned VMOs.
+      ZX_PANIC("wait failed: %d", __LINE__);
 
       BarrierBeforeRelease();
       return ZX_ERR_TIMED_OUT;
@@ -271,6 +276,8 @@ void HevcDec::StopDecoding() {
         return (HevcImemDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000) == 0;
       })) {
     DECODE_ERROR("Failed to wait for DMA completion");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return;
   }
   // Delay to wait for previous command to finish.
@@ -281,6 +288,7 @@ void HevcDec::StopDecoding() {
 
 void HevcDec::WaitForIdle() {
   auto timeout = std::chrono::milliseconds(100);
+  auto longer_timeout = std::chrono::milliseconds(1000);
   if (!WaitForRegister(timeout, [this] {
         return HevcMdecPicDcStatus::Get().ReadFrom(mmio()->dosbus).reg_value() == 0;
       })) {
@@ -305,9 +313,13 @@ void HevcDec::WaitForIdle() {
     }
   }
 
-  WaitForRegister(timeout, [this] {
-    return !(HevcDcacDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000);
-  });
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  if (!WaitForRegister(longer_timeout, [this] {
+        return !(HevcDcacDmaCtrl::Get().ReadFrom(mmio()->dosbus).reg_value() & 0x8000);
+      })) {
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
+  }
 }
 
 void HevcDec::ResetForNewStream() {
@@ -403,11 +415,14 @@ zx_status_t HevcDec::SaveInputContext(InputContext* context) {
       .FromValue(truncate_to_32(context->buffer->phys_base()))
       .WriteTo(mmio()->dosbus);
   HevcStreamSwapCtrl::Get().FromValue(0).set_enable(true).set_save(true).WriteTo(mmio()->dosbus);
-  bool finished = SpinWaitForRegister(std::chrono::milliseconds(100), [this]() {
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  bool finished = SpinWaitForRegister(std::chrono::milliseconds(1000), [this]() {
     return !HevcStreamSwapCtrl::Get().ReadFrom(mmio()->dosbus).in_progress();
   });
   if (!finished) {
     DECODE_ERROR("Timed out in HevcDec::SaveInputContext");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return ZX_ERR_TIMED_OUT;
   }
   HevcStreamSwapCtrl::Get().FromValue(0).WriteTo(mmio()->dosbus);
@@ -429,11 +444,14 @@ zx_status_t HevcDec::RestoreInputContext(InputContext* context) {
       .FromValue(truncate_to_32(context->buffer->phys_base()))
       .WriteTo(mmio()->dosbus);
   HevcStreamSwapCtrl::Get().FromValue(0).set_enable(true).WriteTo(mmio()->dosbus);
-  bool finished = SpinWaitForRegister(std::chrono::milliseconds(100), [this]() {
+  // 100ms is observed to be long enough, but due to ZX_PANIC if this times out, wait longer.
+  bool finished = SpinWaitForRegister(std::chrono::milliseconds(1000), [this]() {
     return !HevcStreamSwapCtrl::Get().ReadFrom(mmio()->dosbus).in_progress();
   });
   if (!finished) {
     DECODE_ERROR("Timed out in HevcDec::RestoreInputContext");
+    // This will quarantine currently-pinned VMOs.
+    ZX_PANIC("wait failed: %d", __LINE__);
     return ZX_ERR_TIMED_OUT;
   }
   HevcStreamSwapCtrl::Get().FromValue(0).WriteTo(mmio()->dosbus);

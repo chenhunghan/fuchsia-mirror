@@ -8,8 +8,10 @@ use fho::{FfxTool, FhoEnvironment, Result};
 mod args;
 mod subtools;
 
-pub use args::{GceCommand, GceSubCommand, ListCommand, SerialCommand, ShowCommand, StopCommand};
-pub use subtools::{ListTool, SerialTool, ShowTool, StopTool};
+pub use args::{
+    GceCommand, GceSubCommand, ListCommand, SerialCommand, ShowCommand, StartCommand, StopCommand,
+};
+pub use subtools::{ListTool, SerialTool, ShowTool, StartTool, StopTool};
 
 impl ToolSuiteCommand for GceCommand {
     type SubCommand = GceSubCommand;
@@ -29,6 +31,7 @@ impl SubtoolSuite for GceSuite {
         subcommand: GceSubCommand,
     ) -> Result<Box<dyn SubtoolBox>> {
         Ok(match subcommand {
+            GceSubCommand::Start(cmd) => Subtool::new(StartTool::from_env(env, cmd).await?),
             GceSubCommand::List(cmd) => Subtool::new(ListTool::from_env(env, cmd).await?),
             GceSubCommand::Show(cmd) => Subtool::new(ShowTool::from_env(env, cmd).await?),
             GceSubCommand::Serial(cmd) => Subtool::new(SerialTool::from_env(env, cmd).await?),
@@ -44,7 +47,24 @@ mod tests {
     use super::*;
     use argh::FromArgs;
 
-    #[test]
+    #[fuchsia::test]
+    fn test_parse_start_command() {
+        let cmd = GceCommand::from_args(
+            &["gce"],
+            &["start", "--name", "my-vm", "--machine-type", "e2-standard-8", "--serial"],
+        )
+        .expect("parsed start");
+        match cmd.subcommand {
+            GceSubCommand::Start(s) => {
+                assert_eq!(s.name.as_deref(), Some("my-vm"));
+                assert_eq!(s.machine_type.as_deref(), Some("e2-standard-8"));
+                assert!(s.serial);
+            }
+            _ => panic!("expected Start subcommand"),
+        }
+    }
+
+    #[fuchsia::test]
     fn test_parse_list_command() {
         let cmd = GceCommand::from_args(&["gce"], &["list", "--zone", "us-east1-c"])
             .expect("parsed list");
@@ -56,7 +76,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_parse_show_command() {
         let cmd = GceCommand::from_args(&["gce"], &["show", "test-vm"]).expect("parsed show");
         match cmd.subcommand {
@@ -67,7 +87,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_parse_serial_command() {
         let cmd =
             GceCommand::from_args(&["gce"], &["serial", "test-vm", "--follow", "--port", "1"])
@@ -82,7 +102,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_parse_stop_command() {
         let cmd =
             GceCommand::from_args(&["gce"], &["stop", "my-vm", "--keep"]).expect("parsed stop");
@@ -95,7 +115,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_parse_stop_command_requires_name() {
         assert!(GceCommand::from_args(&["gce"], &["stop"]).is_err());
     }

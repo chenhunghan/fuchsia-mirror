@@ -1321,8 +1321,8 @@ mod tests {
 
         // Check that the metrics were logged
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ActiveScanRequested{num_ssids_requested})) => {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ActiveScanRequested{num_ssids_requested}) => {
                 if hidden {
                         assert_eq!(num_ssids_requested, 1);
                 } else {
@@ -1370,7 +1370,7 @@ mod tests {
         });
 
         // Verify TelemetryEvent for network selection was sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::NetworkSelectionDecision {
                 network_selection_type: telemetry::NetworkSelectionType::Undirected,
                 num_candidates: Err(()),
@@ -1378,8 +1378,8 @@ mod tests {
             });
         });
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::BssSelectionResult { selected_candidate: None, .. }))
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::BssSelectionResult { selected_candidate: None, .. })
         );
     }
 
@@ -1568,19 +1568,19 @@ mod tests {
 
         // Verify TelemetryEvents for network selection were sent
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ActiveScanRequested { num_ssids_requested: 0 }))
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ActiveScanRequested { num_ssids_requested: 0 })
         );
         assert_matches!(
-            telemetry_receiver.try_next(), Ok(Some(TelemetryEvent::ConnectionSelectionScanResults {
+            telemetry_receiver.try_recv(), Ok(TelemetryEvent::ConnectionSelectionScanResults {
                 saved_network_count, bss_count_per_saved_network, saved_network_count_found_by_active_scan
-            })) => {
+            }) => {
                 assert_eq!(saved_network_count, 2);
                 assert_eq!(bss_count_per_saved_network, vec![1, 1]);
                 assert_eq!(saved_network_count_found_by_active_scan, 0);
             }
         );
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::NetworkSelectionDecision {
                 network_selection_type: telemetry::NetworkSelectionType::Undirected,
                 num_candidates: Ok(2),
@@ -1588,8 +1588,8 @@ mod tests {
             });
         });
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::BssSelectionResult { .. }))
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::BssSelectionResult { .. })
         );
     }
 
@@ -1659,7 +1659,7 @@ mod tests {
             vec![(ScanReason::BssSelection, vec![test_id_1.ssid.clone()], vec![])]
         );
         // Verify that NetworkSelectionDecision telemetry event is sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::NetworkSelectionDecision {
                 network_selection_type: telemetry::NetworkSelectionType::Directed,
                 num_candidates: Ok(1),
@@ -1667,8 +1667,8 @@ mod tests {
             });
         });
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::BssSelectionResult { .. }))
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::BssSelectionResult { .. })
         );
     }
 
@@ -1708,7 +1708,7 @@ mod tests {
         );
 
         // Verify that NetworkSelectionDecision telemetry event is sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::NetworkSelectionDecision {
                 network_selection_type: telemetry::NetworkSelectionType::Directed,
                 num_candidates: Err(()),
@@ -1717,8 +1717,8 @@ mod tests {
         });
 
         assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::BssSelectionResult { .. }))
+            telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::BssSelectionResult { .. })
         );
     }
 
@@ -1860,9 +1860,9 @@ mod tests {
         record_metrics_on_scan(mock_scan_results, &telemetry_sender);
 
         assert_matches!(
-            telemetry_receiver.try_next(), Ok(Some(TelemetryEvent::ConnectionSelectionScanResults {
+            telemetry_receiver.try_recv(), Ok(TelemetryEvent::ConnectionSelectionScanResults {
                 saved_network_count, mut bss_count_per_saved_network, saved_network_count_found_by_active_scan
-            })) => {
+            }) => {
                 assert_eq!(saved_network_count, 2);
                 bss_count_per_saved_network.sort();
                 assert_eq!(bss_count_per_saved_network, vec![1, 3]);
@@ -1881,9 +1881,9 @@ mod tests {
         record_metrics_on_scan(mock_scan_results, &telemetry_sender);
 
         assert_matches!(
-            telemetry_receiver.try_next(), Ok(Some(TelemetryEvent::ConnectionSelectionScanResults {
+            telemetry_receiver.try_recv(), Ok(TelemetryEvent::ConnectionSelectionScanResults {
                 saved_network_count, bss_count_per_saved_network, saved_network_count_found_by_active_scan
-            })) => {
+            }) => {
                 assert_eq!(saved_network_count, 0);
                 assert_eq!(bss_count_per_saved_network, Vec::<usize>::new());
                 assert_eq!(saved_network_count_found_by_active_scan, 0);

@@ -5,8 +5,8 @@
 // https://opensource.org/licenses/MIT
 
 use crate::object::{
-    BusTransactionInitiatorDispatcher, Dispatcher, HandleValue, JobDispatcher, MsiDispatcher,
-    SocketDispatcher, ThreadDispatcher, TimerDispatcher, VmAddressRegionDispatcher,
+    BusTransactionInitiatorDispatcher, ClockDispatcher, Dispatcher, HandleValue, JobDispatcher,
+    MsiDispatcher, SocketDispatcher, ThreadDispatcher, TimerDispatcher, VmAddressRegionDispatcher,
     VmObjectDispatcher,
 };
 use crate::user_copy::UserOutPtr;
@@ -320,6 +320,7 @@ pub fn sys_object_get_info(
         ZX_INFO_TIMER => single_record_info!(TimerDispatcher, get_info),
         ZX_INFO_MSI => single_record_info!(MsiDispatcher, get_info),
         ZX_INFO_BTI => single_record_info!(BusTransactionInitiatorDispatcher, get_info),
+        ZX_INFO_CLOCK_MAPPED_SIZE => single_record_info!(ClockDispatcher, get_mapped_size?),
         // C++ only topics (and VM map/vmo enumeration, system resources, process info, etc.)
         _ => {
             // SAFETY: Call C++ FFI helper for topics handled by C++ dispatcher instances or subsystems.

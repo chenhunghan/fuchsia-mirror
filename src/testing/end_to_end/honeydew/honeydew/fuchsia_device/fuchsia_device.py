@@ -3,7 +3,6 @@
 # found in the LICENSE file.
 """FuchsiaDevice abstract base class implementation."""
 
-
 import asyncio
 import dataclasses
 import inspect
@@ -81,6 +80,7 @@ from honeydew.transports.adb import adb as adb_transport
 from honeydew.transports.fastboot import fastboot
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx import ffx
+from honeydew.transports.ffx import types as ffx_types
 from honeydew.transports.ffx.config import FfxConfigData
 from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.transports.fuchsia_controller import (
@@ -352,7 +352,6 @@ class FuchsiaDevice(
             FfxCommandError: Failed to instantiate.
         """
         use_monitor_state = False
-        shared_data = None
         if self._config is not None:
             # Read monitor state
             config_use_monitor_state = common.read_from_dict(
@@ -362,26 +361,19 @@ class FuchsiaDevice(
             )
             if config_use_monitor_state is not None:
                 use_monitor_state = config_use_monitor_state
-            # Read shared_data path
-            config_shared_data = common.read_from_dict(
-                self._config,
-                key_path=("transports", "ffx", "shared_data"),
-                should_exist=False,
-            )
-            if config_shared_data is not None:
-                shared_data = config_shared_data
         query: str = (
             str(self._device_info.ip_port)
             if self._device_info.ip_port
             else self.device_name
         )
         ffx_obj: ffx.FFX = ffx.FFX(
-            query=query,
-            name=self.device_name,
-            config_data=self._ffx_config_data,
-            use_monitor_state=use_monitor_state,
-            shared_data=shared_data,
-            device_ip_change=self,
+            args=ffx_types.FfxArgs(
+                query=query,
+                name=self.device_name,
+                config_data=self._ffx_config_data,
+                use_monitor_state=use_monitor_state,
+                device_ip_change=self,
+            )
         )
         return ffx_obj
 
@@ -416,9 +408,17 @@ class FuchsiaDevice(
 
         Raises:
             errors.NotEnabledError: If ADB transport is not enabled.
+            errors.NotSupportedError: If ADB transport is not supported by Fuchsia device.
         """
-        run_isolated_server = False
+        run_isolated_server = True
         vendor_keys_path = None
+        enabled = True
+
+        if self._config:
+            adb_config = self._config.get("transports", {}).get("adb", {})
+            run_isolated_server = adb_config.get("run_isolated_server", True)
+            vendor_keys_path = adb_config.get("vendor_keys_path")
+            enabled = adb_config.get("enabled", True)
 
         # Note - An existing ADB implementation in //vendor/google is used by
         # some Lacewing tests. Running two ADB server implementations against
@@ -427,24 +427,43 @@ class FuchsiaDevice(
         # TODO(b/559563915): Delete this `enabled` config once legacy ADB
         # server implementations are removed and all Lacewing tests use
         # Honeydew's ADB transport.
-        enabled = True
-        if self._config:
-            adb_config = self._config.get("transports", {}).get("adb", {})
-            run_isolated_server = adb_config.get("run_isolated_server", False)
-            vendor_keys_path = adb_config.get("vendor_keys_path")
-            enabled = adb_config.get("enabled", True)
-
         if not enabled:
+            _LOGGER.warning(
+                "User has requested to not enable the ADB transport for '%s'",
+                self.device_name,
+            )
             raise errors.NotEnabledError(
-                f"ADB transport is not enabled for '{self.device_name}'"
+                f"User has requested to not enable the ADB transport for '{self.device_name}'"
             )
 
-        serial_number = self._device_info.serial_number or self.serial_number
+        serial_number: str | None = self._device_info.serial_number
+        if serial_number is None:
+            try:
+                serial_number = self.ffx.serial_number
+            except Exception as err:
+                _LOGGER.debug(
+                    "Failed to get serial number from FFX for %s: %s",
+                    self.device_name,
+                    err,
+                )
+                serial_number = None
+
+        if serial_number is None:
+            _LOGGER.warning(
+                "ADB transport is not supported on %s as 'serial_number' was not provided and could not be retrieved via FFX",
+                self.device_name,
+            )
+            raise errors.NotSupportedError(
+                f"ADB transport is not supported on {self.device_name} "
+                f"as 'serial_number' was not provided and could not be retrieved via FFX"
+            )
+
         adb_obj: adb_transport.Adb = adb_transport.Adb(
             device_name=self.device_name,
             serial_number=serial_number,
             run_isolated_server=run_isolated_server,
             vendor_keys_path=vendor_keys_path,
+            ffx_transport=self.ffx,
         )
         self.register_for_on_device_close(adb_obj.close)
         return adb_obj
@@ -867,6 +886,14 @@ class FuchsiaDevice(
                 if self._is_sl4f_needed:
                     self.sl4f.check_connection()
 
+                try:
+                    self.adb.check_connection()
+                except (errors.NotSupportedError, errors.NotEnabledError):
+                    _LOGGER.info(
+                        "ADB is not supported or not enabled on %s, so skipping the ADB connection check.",
+                        self.device_name,
+                    )
+
                 _LOGGER.info(
                     "Completed the health check successfully on %s...",
                     self.device_name,
@@ -980,6 +1007,14 @@ class FuchsiaDevice(
 
         # Create a new Fuchsia controller context for new device connection.
         self.fuchsia_controller.create_context()
+
+        try:
+            self.adb.on_device_boot()
+        except (errors.NotSupportedError, errors.NotEnabledError):
+            _LOGGER.info(
+                "ADB is not supported or not enabled on %s, so skipping ADB on_device_boot.",
+                self.device_name,
+            )
 
         # Ensure device is healthy
         self.health_check()

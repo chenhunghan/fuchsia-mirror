@@ -22,7 +22,8 @@ use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::errors::{EACCES, EPERM, ESRCH, Errno};
 use starnix_uapi::user_address::UserRef;
 use starnix_uapi::{
-    binder_driver_return_protocol, binder_driver_return_protocol_BR_ACQUIRE,
+    IOCSIZE_MASK, IOCSIZE_SHIFT, binder_driver_return_protocol,
+    binder_driver_return_protocol_BR_ACQUIRE,
     binder_driver_return_protocol_BR_CLEAR_DEATH_NOTIFICATION_DONE,
     binder_driver_return_protocol_BR_CLEAR_FREEZE_NOTIFICATION_DONE,
     binder_driver_return_protocol_BR_DEAD_BINDER, binder_driver_return_protocol_BR_DEAD_REPLY,
@@ -34,7 +35,7 @@ use starnix_uapi::{
     binder_driver_return_protocol_BR_TRANSACTION_COMPLETE,
     binder_driver_return_protocol_BR_TRANSACTION_PENDING_FROZEN,
     binder_driver_return_protocol_BR_TRANSACTION_SEC_CTX, binder_frozen_state_info,
-    binder_transaction_data, binder_uintptr_t, errno, error, pid_t,
+    binder_ptr_cookie, binder_transaction_data, binder_uintptr_t, errno, error, pid_t,
 };
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
@@ -605,80 +606,34 @@ impl Command {
             Self::AcquireRef(obj)
             | Self::ReleaseRef(obj)
             | Self::IncRef(obj)
-            | Self::DecRef(obj) => {
-                #[repr(C, packed)]
-                #[derive(IntoBytes, Immutable)]
-                struct AcquireRefData {
-                    command: binder_driver_return_protocol,
-                    weak_ref_addr: u64,
-                    strong_ref_addr: u64,
-                }
-                if buffer.length < std::mem::size_of::<AcquireRefData>() {
-                    return error!(ENOMEM);
-                }
-                memory_accessor.write_object(
-                    UserRef::new(buffer.address),
-                    &AcquireRefData {
-                        command: self.driver_return_code(),
-                        weak_ref_addr: obj.weak_ref_addr.ptr() as u64,
-                        strong_ref_addr: obj.strong_ref_addr.ptr() as u64,
-                    },
-                )
-            }
-            Self::Error(error_val) => {
-                #[repr(C, packed)]
-                #[derive(IntoBytes, Immutable)]
-                struct ErrorData {
-                    command: binder_driver_return_protocol,
-                    error_val: i32,
-                }
-                if buffer.length < std::mem::size_of::<ErrorData>() {
-                    return error!(ENOMEM);
-                }
-                memory_accessor.write_object(
-                    UserRef::new(buffer.address),
-                    &ErrorData { command: self.driver_return_code(), error_val: *error_val },
-                )
-            }
+            | Self::DecRef(obj) => self.write_command(
+                memory_accessor,
+                buffer,
+                binder_ptr_cookie {
+                    ptr: obj.weak_ref_addr.ptr() as binder_uintptr_t,
+                    cookie: obj.strong_ref_addr.ptr() as binder_uintptr_t,
+                },
+            ),
+            Self::Error(error_val) => self.write_command(memory_accessor, buffer, *error_val),
             Self::OnewayTransaction(data) | Self::Transaction { data, .. } | Self::Reply(data) => {
                 if let Some(security_context_buffer) = data.buffers.security_context.as_ref() {
                     #[repr(C, packed)]
                     #[derive(IntoBytes, Immutable)]
-                    struct TransactionData {
-                        command: binder_driver_return_protocol,
+                    struct TransactionDataSecCtx {
                         data: [u8; std::mem::size_of::<binder_transaction_data>()],
                         secctx: binder_uintptr_t,
                     }
 
-                    if buffer.length < std::mem::size_of::<TransactionData>() {
-                        return error!(ENOMEM);
-                    }
-                    memory_accessor.write_object(
-                        UserRef::new(buffer.address),
-                        &TransactionData {
-                            command: self.driver_return_code(),
+                    self.write_command(
+                        memory_accessor,
+                        buffer,
+                        TransactionDataSecCtx {
                             data: data.as_bytes(),
                             secctx: security_context_buffer.address.ptr() as binder_uintptr_t,
                         },
                     )
                 } else {
-                    #[repr(C, packed)]
-                    #[derive(IntoBytes, Immutable)]
-                    struct TransactionData {
-                        command: binder_driver_return_protocol,
-                        data: [u8; std::mem::size_of::<binder_transaction_data>()],
-                    }
-
-                    if buffer.length < std::mem::size_of::<TransactionData>() {
-                        return error!(ENOMEM);
-                    }
-                    memory_accessor.write_object(
-                        UserRef::new(buffer.address),
-                        &TransactionData {
-                            command: self.driver_return_code(),
-                            data: data.as_bytes(),
-                        },
-                    )
+                    self.write_command(memory_accessor, buffer, data.as_bytes())
                 }
             }
             Self::TransactionComplete
@@ -687,46 +642,42 @@ impl Command {
             | Self::FrozenReply
             | Self::PendingFrozen
             | Self::DeadReply { .. }
-            | Self::SpawnLooper => {
-                if buffer.length < std::mem::size_of::<binder_driver_return_protocol>() {
-                    return error!(ENOMEM);
-                }
-                memory_accessor
-                    .write_object(UserRef::new(buffer.address), &self.driver_return_code())
-            }
+            | Self::SpawnLooper => self.write_command(memory_accessor, buffer, ()),
             Self::DeadBinder(cookie)
             | Self::ClearDeathNotificationDone(cookie)
             | Self::ClearFreezeNotificationDone(cookie) => {
-                #[repr(C, packed)]
-                #[derive(IntoBytes, Immutable)]
-                struct CookieData {
-                    command: binder_driver_return_protocol,
-                    cookie: binder_uintptr_t,
-                }
-                if buffer.length < std::mem::size_of::<CookieData>() {
-                    return error!(ENOMEM);
-                }
-                memory_accessor.write_object(
-                    UserRef::new(buffer.address),
-                    &CookieData { command: self.driver_return_code(), cookie: *cookie },
-                )
+                self.write_command(memory_accessor, buffer, *cookie)
             }
-            Self::FrozenBinder(state) => {
-                #[repr(C, packed)]
-                #[derive(IntoBytes, Immutable)]
-                struct FreezeBinderData {
-                    command: binder_driver_return_protocol,
-                    state: binder_frozen_state_info,
-                }
-                if buffer.length < std::mem::size_of::<FreezeBinderData>() {
-                    return error!(ENOMEM);
-                }
-                memory_accessor.write_object(
-                    UserRef::new(buffer.address),
-                    &FreezeBinderData { command: self.driver_return_code(), state: *state },
-                )
-            }
+            Self::FrozenBinder(state) => self.write_command(memory_accessor, buffer, *state),
         }
+    }
+
+    /// Writes the command's `BR_*` return code followed by `parameters` into userspace memory at
+    /// `buffer`, asserting that the size of `parameters` matches the payload size encoded in the
+    /// return code.
+    fn write_command<A: IntoBytes + Immutable>(
+        &self,
+        memory_accessor: &dyn MemoryAccessor,
+        buffer: &UserBuffer,
+        parameters: A,
+    ) -> Result<usize, Errno> {
+        assert_eq!(std::mem::size_of::<A>(), ioc_size(self.driver_return_code()));
+
+        #[repr(C, packed)]
+        #[derive(IntoBytes, Immutable)]
+        struct Data<A> {
+            command: binder_driver_return_protocol,
+            parameters: A,
+        }
+
+        if buffer.length < std::mem::size_of::<Data<A>>() {
+            return error!(ENOMEM);
+        }
+
+        memory_accessor.write_object(
+            UserRef::new(buffer.address),
+            &Data { command: self.driver_return_code(), parameters },
+        )
     }
 }
 
@@ -867,4 +818,9 @@ impl From<Errno> for TransactionError {
             _ => TransactionError::Malformed(errno),
         }
     }
+}
+
+// Returns the size of an ioctl command build with the standard bit scheme.
+fn ioc_size(n: u32) -> usize {
+    ((n & IOCSIZE_MASK) >> IOCSIZE_SHIFT) as usize
 }

@@ -454,7 +454,101 @@ the Rust wrappers):
 - **Store in Struct**: Always store the `NodeController` client in your driver
   struct if you want the node to persist beyond the `start` method.
 
-## 10. Testing Drivers
+## 10. System Suspend and Resume
+
+For system suspend and resume, prefer **runtime-managed dispatchers**
+(`power_managed_dispatchers_enabled: "true"`) over manual power element runner
+management.
+
+- **Include the CML Shard**: Include
+  [`//sdk/lib/driver_component/power_managed_dispatchers.shard.cml`](/sdk/lib/driver_component/power_managed_dispatchers.shard.cml)
+  in the driver's `.cml` manifest. This sets
+  `program.power_managed_dispatchers_enabled: "true"` and routes the required
+  power protocols.
+- **Implement
+  [`fdf_component::Driver`](/sdk/lib/driver/component/rust/src/lib.rs) Hooks**:
+  Implement `system_suspend(&self)` and `system_resume(&self, lease:
+  Option<zx::EventPair>)` directly on the `Driver` trait (both execute on the
+  always-on view of the driver's default dispatcher):
+  - Before invoking `system_suspend`, the driver runtime pauses all
+    power-managed dispatchers and waits for **actively executing** callbacks to
+    finish, while moving already-queued or newly arriving tasks into the
+    dispatcher's sleep queue.
+  - On resume, the runtime invokes `system_resume` **before** unpausing the
+    driver's dispatchers so hardware state is restored before queued tasks run.
+- **Wake Lease Management ("First Domino" Semantics)**:
+  - `lease` is `Some(zx::EventPair)` when the driver is the "first domino" woken
+    by its own registered runtime wake vector, and `None` when resumed as a
+    dependency by a downstream driver or system-wide resume.
+  - When unpausing dispatchers, the runtime splices triggered wake vector tasks
+    to the **front** of the dispatcher's queue so the wake handler runs
+    immediately.
+  - Always store `lease` in driver state during `system_resume` and take it at
+    the start of the wake handler. Even if a hardware wake interrupt holds a
+    kernel `WakeEvent` until acknowledged, dropping `lease` inside
+    `system_resume` allows Power Broker to issue `SetLevel(0)` on the driver's
+    power element before the wake task runs. **Move** `wake_lease` (power baton)
+    directly into any outgoing FIDL message **before** calling `interrupt.ack()`
+    (or let `wake_lease` drop after `interrupt.ack()` if no message is forwarded
+    upstream).
+- **Execution Inside `system_suspend` / `system_resume` & Dispatcher
+  Deadlocks**:
+  - `DriverServer` polls `system_suspend` and `system_resume` on a
+    `fuchsia_async::LocalExecutor` backed by an always-on dispatcher, so
+    standard **Zircon-transport (`zx::Channel`) async FIDL calls** and
+    `fuchsia_async` tasks are safe to `.await`.
+  - However, `fdf::CurrentDispatcher` and `context.root_dispatcher` still point
+    to the **regular (suspended)** power-managed dispatcher. Awaiting a default
+    **Driver-Transport (`fdf::Channel`)** FIDL client
+    (`DriverChannel<CurrentDispatcher>`) or a task spawned on
+    `context.root_dispatcher` / `fdf::CurrentDispatcher` inside `system_suspend`
+    or `system_resume` will **deadlock** unless bound to an explicit always-on
+    dispatcher obtained via
+    `DriverDispatcherRef::from_async_dispatcher(context.root_dispatcher.as_async_dispatcher_ref()).always_on_dispatcher()`.
+- **Alternative (`fdf_power::SuspendableDriver`)**: Only use
+  [`fdf_power::SuspendableDriver`](/sdk/lib/driver/power/rust/src/lib.rs) (with
+  `driver_register!(Suspendable<MyDriver>)` and `suspend_enabled: "true"`) when
+  dispatchers must remain active while suspended for custom request queue
+  draining/rejection or when toggling suspend via the
+  `fuchsia.power.SuspendEnabled` structured configuration capability. See the
+  [`suspend-resume-integration`
+  skill](/src/devices/skills/fuchsia-suspendable/SKILL.md) for full details.
+
+Example:
+```rust
+use fdf_component::{Driver, DriverContext, DriverError, driver_register};
+use fuchsia_sync::Mutex;
+
+pub struct MyDriver {
+    wake_lease: Mutex<Option<zx::EventPair>>,
+}
+
+impl Driver for MyDriver {
+    const NAME: &str = "my_driver";
+
+    async fn start(context: DriverContext) -> Result<Self, DriverError> {
+        Ok(Self { wake_lease: Mutex::new(None) })
+    }
+
+    async fn stop(&self) {}
+
+    async fn system_suspend(&self) -> Result<(), DriverError> {
+        // Dispatchers are paused and active callbacks have finished; place hardware in low-power mode.
+        Ok(())
+    }
+
+    async fn system_resume(&self, lease: Option<zx::EventPair>) -> Result<(), DriverError> {
+        // Restore hardware state and store the optional wake lease (`Some` if woken by this
+        // driver's wake vector, `None` if woken as a dependency) for the wake handler to take.
+        *self.wake_lease.lock() = lease;
+        Ok(())
+    }
+}
+
+driver_register!(MyDriver);
+```
+
+## 11. Testing Drivers
 
 When testing drivers that use `MmioRegion`:
 - **Avoid Manual Mocks**: Instead of mocking read/write methods, use real VMOs
@@ -472,7 +566,7 @@ Example:
     // Pass sensor_region to driver
 ```
 
-## 11. Reviewing Changes
+## 12. Reviewing Changes
 
 Upon finishing authoring a change to a driver written in Rust, you MUST use this
 skill and the `rust_best_practices` skill to review the change.

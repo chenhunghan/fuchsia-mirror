@@ -10,7 +10,7 @@ use super::x86::{read_msr, read_msr32, write_msr};
 use super::{feature, interrupts, pv};
 use crate::arch_rs::InterruptDisableGuard;
 #[cfg(console_enabled)]
-use crate::console_rust::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 use crate::kernel::types::{CPU_MASK_ALL, highest_cpu_set, lowest_cpu_set, mask_all_but_one};
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE,

@@ -344,6 +344,7 @@ if (!is_kernel) {
 
     configs += [
       ":internal.config",
+      "//build/config:Wno-call-graph-section-no-prototype",
       "//build/config:Wno-strict-prototypes",
     ]
     deps = [ ":zstd" ]

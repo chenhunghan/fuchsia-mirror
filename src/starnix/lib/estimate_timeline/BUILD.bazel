@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "estimate_timeline",
+    srcs = ["src/lib.rs"],
+    crate_name = "estimate_timeline",
+    edition = "2024",
+    lint_config = "//src/starnix/config:starnix_clippy_lints",
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/zx",
+    ],
+)

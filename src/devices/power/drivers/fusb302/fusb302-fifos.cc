@@ -111,10 +111,10 @@ zx::result<> Fusb302Fifos::FifoI2cRead(cpp20::span<uint8_t> read_output) {
                         .data_transfer(fuchsia_hardware_i2c::wire::DataTransfer::WithWriteData(
                             arena, fidl::VectorView<uint8_t>::FromExternal(&i2c_address, 1)))
                         .Build();
-  transactions[1] =
-      fuchsia_hardware_i2c::wire::Transaction::Builder(arena)
-          .data_transfer(fuchsia_hardware_i2c::wire::DataTransfer::WithReadSize(read_output.size()))
-          .Build();
+  transactions[1] = fuchsia_hardware_i2c::wire::Transaction::Builder(arena)
+                        .data_transfer(fuchsia_hardware_i2c::wire::DataTransfer::WithReadSize(
+                            static_cast<uint32_t>(read_output.size())))
+                        .Build();
 
   auto response = fidl::WireCall(i2c_)->Transfer(transactions);
   if (!response.ok()) {
@@ -181,7 +181,7 @@ zx::result<> Fusb302Fifos::TransmitMessage(const usb_pd::Message& main_message) 
   static constexpr size_t kTransmitterOnOffSize = 2;
   uint8_t i2c_write_bytes[kI2cHeaderSize + kMaxMessageSerializedSize + kTransmitterOnOffSize];
 
-  i2c_write_bytes[0] = FifosReg::Get().addr();
+  i2c_write_bytes[0] = static_cast<uint8_t>(FifosReg::Get().addr());
   size_t i2c_write_offset = kI2cHeaderSize;
 
   fdf::trace("Transmitting header - {}, {} data objects, message ID: {}, extended: {} ",

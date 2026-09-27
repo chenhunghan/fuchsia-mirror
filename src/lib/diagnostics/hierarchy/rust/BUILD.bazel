@@ -1,0 +1,54 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "diagnostics-hierarchy",
+    srcs = [
+        "src/lib.rs",
+        "src/macros.rs",
+        "src/serialization/deserialize.rs",
+        "src/serialization/mod.rs",
+        "src/serialization/serialize.rs",
+    ],
+    crate_features = select({
+        "//build/bazel/platforms:is_host_os": ["json_schema"],
+        "//conditions:default": [],
+    }),
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:num-derive",
+        "//third_party/rust_crates/vendor:paste",
+    ],
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:test-case",
+    ] + select({
+        # Contains a one-line check for a schema.
+        "//build/bazel/platforms:is_host_os": ["//src/developer/ffx/lib/writer:lib"],
+        "//conditions:default": [],
+    }),
+    version = "0.1.0",
+    visibility = ["//:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_common",
+        "//src/lib/diagnostics/selectors",
+        "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:either",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:thiserror",
+    ] + select({
+        "//build/bazel/platforms:is_host_os": ["//third_party/rust_crates/vendor:schemars"],
+        "//conditions:default": [],
+    }),
+)

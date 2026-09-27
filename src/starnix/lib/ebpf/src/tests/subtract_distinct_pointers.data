@@ -1,0 +1,19 @@
+# Test that subtracting two pointers obtained from separate helper invocations
+# is prohibited (they have distinct MemoryIds), resulting in an uninitialized
+# register and failing verification, preventing KASLR layout leaks.
+
+-- asm
+# Obtain two pointers from distinct helper invocations (helper 201, mock_get_ptr).
+call 201
+mov %r6, %r0
+call 201
+mov %r7, %r0
+# Attempt to subtract two distinct pointers.
+# Because the two pointers have different memory IDs, subtraction is not permitted
+# and yields an uninitialized value in %r6, preventing ASLR pointer leaks.
+sub %r6, %r7
+mov %r0, %r6
+# Verification must fail at exit because %r0 contains an uninitialized value.
+exit
+-- error
+register 0 is incorrect at exit time at pc 6

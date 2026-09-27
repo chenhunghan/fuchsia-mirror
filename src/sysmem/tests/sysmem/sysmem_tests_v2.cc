@@ -8453,7 +8453,7 @@ TEST(Sysmem, PadForBlockSizeMiniStress) {
   //
   // This does not always apply to max_size, which sometimes has max of {0x7FFFFFFF, 0xFFFFFFFF}.
   constexpr uint32_t kMaxDimension = 768;
-  constexpr uint32_t kMinSizeAlignmentDimLog2 = 1;
+  constexpr uint32_t kMinSizeAlignmentDimLog2 = 0;
   constexpr uint32_t kMaxSizeAlignmentDimLog2 = 5;
   // bytes_per_row_divisor is intentionally not required to be a power of 2
   constexpr uint32_t kMinBytesPerRowDivisor = 1;
@@ -8482,6 +8482,7 @@ TEST(Sysmem, PadForBlockSizeMiniStress) {
       fuchsia_images2::PixelFormat::kL8,          fuchsia_images2::PixelFormat::kR8,
       fuchsia_images2::PixelFormat::kR8G8,        fuchsia_images2::PixelFormat::kA2R10G10B10,
       fuchsia_images2::PixelFormat::kA2B10G10R10, fuchsia_images2::PixelFormat::kR8G8B8,
+      fuchsia_images2::PixelFormat::kYuy2,
   };
   // Currently there are no fuchsia_images2::PixelFormatModifier values which could return true from
   // ImageFormatIsNonTiledSinglePlane other than Linear (whether that's by definition doesn't need
@@ -8542,10 +8543,14 @@ TEST(Sysmem, PadForBlockSizeMiniStress) {
                  stride_bytes_per_width_pixel * block_size.width());
     const uint32_t size_alignment_width = 1 << size_alignment_dim_log2_distribution(prng);
     const uint32_t size_alignment_height = 1 << size_alignment_dim_log2_distribution(prng);
-    const uint32_t allocate_width =
-        fbl::round_up(dimension_distribution(prng), size_alignment_width);
-    const uint32_t allocate_height =
-        fbl::round_up(dimension_distribution(prng), size_alignment_height);
+    const uint32_t format_width_divisor =
+        ImageFormatSurfaceWidthMinDivisor(PixelFormatAndModifier(pixel_format, kLinear));
+    const uint32_t format_height_divisor =
+        ImageFormatSurfaceHeightMinDivisor(PixelFormatAndModifier(pixel_format, kLinear));
+    const uint32_t alignment_width = std::lcm(format_width_divisor, size_alignment_width);
+    const uint32_t alignment_height = std::lcm(format_height_divisor, size_alignment_height);
+    const uint32_t allocate_width = fbl::round_up(dimension_distribution(prng), alignment_width);
+    const uint32_t allocate_height = fbl::round_up(dimension_distribution(prng), alignment_height);
     std::uniform_int_distribution<uint32_t> min_size_width_distribution(kMinDimension,
                                                                         allocate_width);
     std::uniform_int_distribution<uint32_t> min_size_height_distribution(kMinDimension,
@@ -8671,7 +8676,11 @@ TEST(Sysmem, PadForBlockSizeMiniStress) {
     ASSERT_EQ(with_blocks_bytes,
               *buffer_collection_info.settings()->buffer_settings()->raw_vmo_size());
 
-    auto constraints_for_block_aligned = image_constraints;
+    ASSERT_TRUE(buffer_collection_info.settings()->image_format_constraints().has_value());
+    const auto& aggregated_image_constraints =
+        buffer_collection_info.settings()->image_format_constraints().value();
+
+    auto constraints_for_block_aligned = aggregated_image_constraints;
     constraints_for_block_aligned.max_size().reset();
     constraints_for_block_aligned.max_bytes_per_row().reset();
     constraints_for_block_aligned.max_width_times_height().reset();
@@ -8679,32 +8688,41 @@ TEST(Sysmem, PadForBlockSizeMiniStress) {
     // is just padding, not official size
     constraints_for_block_aligned.size_alignment().reset();
 
-    uint64_t min_probe_width = fbl::round_up(image_constraints.min_size()->width(),
-                                             image_constraints.size_alignment()->width());
+    const uint32_t aggregated_bytes_per_row_divisor =
+        aggregated_image_constraints.bytes_per_row_divisor().value_or(1);
+    const uint32_t aggregated_max_bytes_per_row =
+        aggregated_image_constraints.max_bytes_per_row().value_or(0xFFFFFFFF);
+    const fuchsia_math::SizeU aggregated_size_alignment =
+        aggregated_image_constraints.size_alignment().value_or(fuchsia_math::SizeU{1, 1});
+    const uint32_t aggregated_size_alignment_width = aggregated_size_alignment.width();
+    const uint32_t aggregated_size_alignment_height = aggregated_size_alignment.height();
+
+    uint64_t min_probe_width = fbl::round_up(aggregated_image_constraints.min_size()->width(),
+                                             aggregated_size_alignment_width);
     ZX_ASSERT(min_probe_width <= std::numeric_limits<uint32_t>::max());
     uint64_t max_probe_width =
         (buffer_settings_size_bytes / stride_bytes_per_width_pixel) + (2ull * block_width);
     max_probe_width = std::min(max_probe_width, static_cast<uint64_t>(max_size_width));
-    max_probe_width =
-        std::min(max_probe_width,
-                 fbl::round_down(static_cast<uint64_t>(max_bytes_per_row), bytes_per_row_divisor) /
-                     stride_bytes_per_width_pixel);
-    max_probe_width = fbl::round_down(max_probe_width, size_alignment_width);
+    max_probe_width = std::min(max_probe_width,
+                               fbl::round_down(static_cast<uint64_t>(aggregated_max_bytes_per_row),
+                                               aggregated_bytes_per_row_divisor) /
+                                   stride_bytes_per_width_pixel);
+    max_probe_width = fbl::round_down(max_probe_width, aggregated_size_alignment_width);
     ZX_ASSERT(max_probe_width <= std::numeric_limits<uint32_t>::max());
     std::uniform_int_distribution<uint32_t> probe_width_distribution(
         static_cast<uint32_t>(min_probe_width), static_cast<uint32_t>(max_probe_width));
 
-    uint64_t min_probe_height = fbl::round_up(image_constraints.min_size()->height(),
-                                              image_constraints.size_alignment()->height());
+    uint64_t min_probe_height = fbl::round_up(aggregated_image_constraints.min_size()->height(),
+                                              aggregated_size_alignment_height);
     ZX_ASSERT(min_probe_height <= std::numeric_limits<uint32_t>::max());
     // we have no min_bytes_per_row, so we use bytes_per_row_divisor here because it does also act
     // as a min_bytes_per_row in a sense, and this can avoid the probe space being a lot larger than
     // needed
     uint64_t max_probe_height =
-        (buffer_settings_size_bytes / bytes_per_row_divisor) + (2ull * block_height);
+        (buffer_settings_size_bytes / aggregated_bytes_per_row_divisor) + (2ull * block_height);
     ZX_ASSERT(max_probe_height <= std::numeric_limits<uint32_t>::max());
     max_probe_height = std::min(max_probe_height, static_cast<uint64_t>(max_size_height));
-    max_probe_height = fbl::round_down(max_probe_height, size_alignment_height);
+    max_probe_height = fbl::round_down(max_probe_height, aggregated_size_alignment_height);
     std::uniform_int_distribution<uint32_t> probe_height_distribution(
         static_cast<uint32_t>(min_probe_height), static_cast<uint32_t>(max_probe_height));
 
@@ -8726,21 +8744,22 @@ TEST(Sysmem, PadForBlockSizeMiniStress) {
       // sampling random (somewhat-constrained) image sizes where the distribution overlaps the
       // sizes that can fit in buffer_settings_size_bytes.
       const uint32_t probe_width =
-          fbl::round_up(probe_width_distribution(prng), size_alignment_width);
+          fbl::round_up(probe_width_distribution(prng), aggregated_size_alignment_width);
       const uint32_t probe_height =
-          fbl::round_up(probe_height_distribution(prng), size_alignment_height);
+          fbl::round_up(probe_height_distribution(prng), aggregated_size_alignment_height);
       fuchsia_math::SizeU probe_size = {probe_width, probe_height};
 
-      ZX_DEBUG_ASSERT(probe_width >= constraints_for_block_aligned.min_size()->width());
-      ZX_DEBUG_ASSERT(probe_height >= constraints_for_block_aligned.min_size()->height());
-      ZX_DEBUG_ASSERT(probe_width <= constraints_for_block_aligned.max_size()->width());
-      ZX_DEBUG_ASSERT(probe_height <= constraints_for_block_aligned.max_size()->height());
-      ZX_DEBUG_ASSERT(probe_width % size_alignment_width == 0);
-      ZX_DEBUG_ASSERT(probe_height % size_alignment_height == 0);
+      ZX_DEBUG_ASSERT(probe_width >= aggregated_image_constraints.min_size()->width());
+      ZX_DEBUG_ASSERT(probe_height >= aggregated_image_constraints.min_size()->height());
+      ZX_DEBUG_ASSERT(probe_width <= aggregated_image_constraints.max_size()->width());
+      ZX_DEBUG_ASSERT(probe_height <= aggregated_image_constraints.max_size()->height());
+      ZX_DEBUG_ASSERT(probe_width % aggregated_size_alignment_width == 0);
+      ZX_DEBUG_ASSERT(probe_height % aggregated_size_alignment_height == 0);
       ZX_DEBUG_ASSERT(fbl::round_up(probe_width * stride_bytes_per_width_pixel,
-                                    bytes_per_row_divisor) <= max_bytes_per_row);
+                                    aggregated_bytes_per_row_divisor) <=
+                      aggregated_max_bytes_per_row);
       auto non_aligned_image_format_result =
-          ImageConstraintsToFormat(image_constraints, probe_width, probe_height);
+          ImageConstraintsToFormat(aggregated_image_constraints, probe_width, probe_height);
       if (!non_aligned_image_format_result.is_ok()) {
         ++result_counts.probe_image_constraints_to_format_non_aligned_failed_count;
         print_unexpected_failure_params("!non_aligned_image_format_result.is_ok()", probe_size);
@@ -8802,6 +8821,7 @@ TEST(Sysmem, PadForBlockSizeMiniStress) {
                stride_bytes_per_width_pixel);
         printf("non_aligned_size_bytes: 0x%" PRIx64 "\n", non_aligned_size_bytes);
         printf("without_blocks_bytes:   0x%" PRIx64 "\n", without_blocks_bytes);
+        printf("buffer_settings_size_bytes: 0x%" PRIx64 "\n", buffer_settings_size_bytes);
         // try to get a few examples per run output to stdout before failing the test, in case a few
         // examples help clarify why the examples fail
         if (result_counts.probe_image_with_blocks_bytes_too_low >=

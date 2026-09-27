@@ -14,6 +14,7 @@
 
 #include <list>
 #include <map>
+#include <optional>
 
 #include <fbl/auto_lock.h>
 
@@ -64,8 +65,12 @@ template <typename T>
 class Register : public fidl::WireServer<fuchsia_hardware_registers::Device> {
  public:
   explicit Register(std::shared_ptr<MmioInfo> mmio, std::string id,
+                    std::optional<uint32_t> global_id,
                     std::map<uint64_t, std::pair<T, uint32_t>> masks)
-      : mmio_(std::move(mmio)), id_(std::move(id)), masks_(std::move(masks)) {}
+      : mmio_(std::move(mmio)),
+        id_(std::move(id)),
+        global_id_(global_id),
+        masks_(std::move(masks)) {}
   ~Register() override = default;
 
   auto GetHandler() {
@@ -74,7 +79,8 @@ class Register : public fidl::WireServer<fuchsia_hardware_registers::Device> {
                                           fidl::kIgnoreBindingClosure),
     });
   }
-  const std::string& id() { return id_; }
+  const std::string& id() const { return id_; }
+  const std::optional<uint32_t>& global_id() const { return global_id_; }
 
  private:
   friend class RegistersDevice;
@@ -124,6 +130,7 @@ class Register : public fidl::WireServer<fuchsia_hardware_registers::Device> {
 
   std::shared_ptr<MmioInfo> mmio_;
   const std::string id_;
+  std::optional<uint32_t> global_id_;
   const std::map<uint64_t, std::pair<T, uint32_t>> masks_;  // base_address to (mask, reg_count)
 
   compat::SyncInitializedDeviceServer compat_server_;
@@ -249,6 +256,7 @@ class RegistersDevice : public fdf::DriverBase2 {
       std::variant<Register<uint8_t>, Register<uint16_t>, Register<uint32_t>, Register<uint64_t>>;
   std::list<RegisterType> registers_;
   std::map<uint32_t, std::shared_ptr<MmioInfo>> mmios_;  // MMIO ID to MmioInfo
+  std::map<std::string, uint32_t> register_ids_;
 
   std::shared_ptr<fdf::Namespace> incoming_;
   std::string node_name_;

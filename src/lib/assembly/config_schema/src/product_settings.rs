@@ -106,6 +106,7 @@ pub struct ProductSettings {
 ///
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(default, deny_unknown_fields, from = "ProductPackagesConfigDeserializeHelper")]
+#[schemars(!from)]
 pub struct ProductPackagesConfig {
     /// Paths to package manifests, or more detailed json entries for packages
     /// to add to the 'base' package set, which are keyed by package name.
@@ -535,15 +536,14 @@ pub struct TeeClientConfigData {
 }
 
 impl JsonSchema for TeeClientConfigData {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         "TeeClientConfigData".into()
     }
 
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        let mut schema: schemars::schema::SchemaObject =
-            <BTreeMap<String, String>>::json_schema(generator).into();
-        schema.format = Some("BTreeMap<String, Utf8PathBuf>".to_owned());
-        schema.into()
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = <BTreeMap<String, String>>::json_schema(generator);
+        schema.insert("format".to_owned(), "BTreeMap<String, Utf8PathBuf>".into());
+        schema
     }
 }
 

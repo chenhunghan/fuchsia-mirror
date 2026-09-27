@@ -46,6 +46,7 @@ static_library("test_support") {
     "test_with_loop.h",
   ]
   visibility = [
+    ":*",
     "//src/developer/debug/*",
     "//src/lib/unwinder/*",
   ]

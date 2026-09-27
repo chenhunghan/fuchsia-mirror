@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Gives //build/bazel/host_tests:host_tests a Ninja output to ask for.
+#
+# bazel_action() derives the work to do from the Ninja outputs it is asked for,
+# so it needs a target that produces a file. `deps` is empty because the host
+# test suites cannot be reached through a dependency edge; they are passed to
+# Bazel as top-level command line targets instead, see that target's
+# extra_bazel_targets_file.
+stamp_group(
+    name = "host_tests_stamp",
+    testonly = True,
+    stamp = "host_tests.stamp",
+    deps = [],
+)

@@ -630,10 +630,17 @@ TEST(Conformance, GoldenByteArrayStruct_V2_Decode) {
     ::fidl::internal::WireFormatVersion::kV2, bytes, handles, [&](test_conformance::GoldenByteArrayStruct& value) {
     [[maybe_unused]] const auto& f1 = value;
 [[maybe_unused]] const auto& f2 = f1.v();
-ASSERT_EQ(f2[0], uint8_t(1ull));
-ASSERT_EQ(f2[1], uint8_t(2ull));
-ASSERT_EQ(f2[2], uint8_t(3ull));
-ASSERT_EQ(f2[3], uint8_t(4ull));
+{
+auto var1 = std::array<uint8_t, 4>(::fidl::internal::DefaultConstructPossiblyInvalidObject<std::array<uint8_t, 4>>::Make());
+var1[0] = uint8_t(1ull);
+var1[1] = uint8_t(2ull);
+var1[2] = uint8_t(3ull);
+var1[3] = uint8_t(4ull);
+[[maybe_unused]] const auto& f3 = std::move(var1);
+for (size_t i = 0; i < f2.size(); ++i) {
+	ASSERT_EQ(f2[i], f3[i]);
+}
+}
 
   });
 }
@@ -668,18 +675,21 @@ TEST(Conformance, GoldenByteVectorStruct_V2_Decode) {
     [[maybe_unused]] const auto& f1 = value;
 [[maybe_unused]] const auto& f2 = f1.v();
 ASSERT_EQ(f2.size(), 12);
-ASSERT_EQ(f2[0], uint8_t(1ull));
-ASSERT_EQ(f2[1], uint8_t(2ull));
-ASSERT_EQ(f2[2], uint8_t(3ull));
-ASSERT_EQ(f2[3], uint8_t(4ull));
-ASSERT_EQ(f2[4], uint8_t(1ull));
-ASSERT_EQ(f2[5], uint8_t(2ull));
-ASSERT_EQ(f2[6], uint8_t(3ull));
-ASSERT_EQ(f2[7], uint8_t(4ull));
-ASSERT_EQ(f2[8], uint8_t(1ull));
-ASSERT_EQ(f2[9], uint8_t(2ull));
-ASSERT_EQ(f2[10], uint8_t(3ull));
-ASSERT_EQ(f2[11], uint8_t(4ull));
+{
+auto var1 = std::vector<uint8_t>();
+var1.resize(12);
+var1[0] = uint8_t(1ull);
+var1[1] = uint8_t(2ull);
+var1[2] = uint8_t(3ull);
+var1[3] = uint8_t(4ull);
+for (size_t offset = 0; offset < var1.size(); offset += 4) {
+memcpy(var1.data() + offset, var1.data(), 4);
+}
+[[maybe_unused]] const auto& f3 = std::move(var1);
+for (size_t i = 0; i < f2.size(); ++i) {
+	ASSERT_EQ(f2[i], f3[i]);
+}
+}
 
   });
 }
@@ -696,10 +706,18 @@ TEST(Conformance, GoldenByteNullableVectorStructNonNull_V2_Decode) {
     [[maybe_unused]] const auto& f1 = value;
 [[maybe_unused]] const auto& f2 = f1.v().value();
 ASSERT_EQ(f2.size(), 4);
-ASSERT_EQ(f2[0], uint8_t(1ull));
-ASSERT_EQ(f2[1], uint8_t(2ull));
-ASSERT_EQ(f2[2], uint8_t(3ull));
-ASSERT_EQ(f2[3], uint8_t(4ull));
+{
+auto var1 = std::optional<std::vector<uint8_t>>();
+var1.emplace();
+var1.value().emplace_back(uint8_t(1ull));
+var1.value().emplace_back(uint8_t(2ull));
+var1.value().emplace_back(uint8_t(3ull));
+var1.value().emplace_back(uint8_t(4ull));
+[[maybe_unused]] const auto& f3 = std::move(var1);
+for (size_t i = 0; i < f2.size(); ++i) {
+	ASSERT_EQ(f2[i], f3.value()[i]);
+}
+}
 
   });
 }

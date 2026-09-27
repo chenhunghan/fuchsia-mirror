@@ -1,0 +1,5 @@
+fuchsia.rcu.atomic: read_scope/non_nested
+fuchsia.rcu.atomic: read_scope/nested
+fuchsia.rcu.atomic: read_scope/with_contention/1
+fuchsia.rcu.atomic: read_scope/with_contention/3
+fuchsia.rcu.atomic: read_scope/with_contention/7

@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "event-queue",
+    srcs = [
+        "src/barrier.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "event_queue",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        ":test.pkg.eventqueue_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+    version = "0.0.1",
+    visibility = ["//src/sys/pkg:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fidl_library(
+    name = "test.pkg.eventqueue",
+    testonly = True,
+    srcs = ["test.fidl"],
+)

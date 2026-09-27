@@ -25,7 +25,7 @@ use net_types::MulticastAddr;
 use net_types::ethernet::Mac;
 use net_types::ip::{Ip as _, IpAddress as _, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr};
 use netemul::RealmUdpSocket as _;
-use netstack_testing_common::realms::{Netstack, Netstack3, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
 };
@@ -212,7 +212,6 @@ fn icmp_event_stream<'a>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     "fragmented",
     netemul::DEFAULT_MTU.into(),
@@ -228,7 +227,7 @@ fn icmp_event_stream<'a>(
     possible_icmp_payload_length(FULLY_USABLE_MTU);
     "fully used mtu"
 )]
-async fn ping_succeeds_with_expected_payload<N: Netstack>(
+async fn ping_succeeds_with_expected_payload(
     name: &str,
     sub_name: &str,
     mtu: usize,
@@ -244,10 +243,10 @@ async fn ping_succeeds_with_expected_payload<N: Netstack>(
         .await
         .expect("failed to create network");
     let source_realm = sandbox
-        .create_netstack_realm::<N, _>(format!("source_{}_{}", name, sub_name))
+        .create_netstack_realm::<Netstack3, _>(format!("source_{}_{}", name, sub_name))
         .expect("failed to create source realm");
     let target_realm = sandbox
-        .create_netstack_realm::<N, _>(format!("target_{}_{}", name, sub_name))
+        .create_netstack_realm::<Netstack3, _>(format!("target_{}_{}", name, sub_name))
         .expect("failed to reate target realm");
     let fake_ep = network.create_fake_endpoint().expect("failed to create fake endpoint");
 
@@ -317,75 +316,12 @@ async fn ping_succeeds_with_expected_payload<N: Netstack>(
     );
 }
 
-#[netstack_test]
-#[cfg(not(target_arch = "riscv64"))]
-async fn starts_device_in_multicast_promiscuous_ns2(name: &str) {
-    let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox
-        .create_netstack_realm::<netstack_testing_common::realms::Netstack2, _>(name)
-        .expect("failed to create source realm");
-
-    let (tun, netdevice) = netstack_testing_common::devices::create_tun_device();
-    let (tun_port, dev_port) = netstack_testing_common::devices::create_eth_tun_port(
-        &tun,
-        /* port_id */ 1,
-        TARGET_MAC_ADDRESS,
-    )
-    .await;
-
-    let mac_state_stream = futures::stream::unfold(
-        (tun_port, Option::<fnet_tun::MacState>::None),
-        |(tun_port, last_observed)| async move {
-            loop {
-                let fnet_tun::InternalState { mac, .. } =
-                    tun_port.watch_state().await.expect("watch_state");
-                let mac = mac.expect("missing mac state");
-                if last_observed.as_ref().is_none_or(|l| l != &mac) {
-                    let last_observed = Some(mac.clone());
-                    break Some((mac, (tun_port, last_observed)));
-                }
-            }
-        },
-    );
-    let mut mac_state_stream = pin!(mac_state_stream);
-
-    assert_matches::assert_matches!(
-        mac_state_stream.next().await,
-        Some(fnet_tun::MacState {
-            mode: Some(fhardware_network::MacFilterMode::MulticastFilter),
-            multicast_filters: Some(mcast_filters),
-            ..
-        }) if mcast_filters == vec![]
-    );
-
-    let device_control = netstack_testing_common::devices::install_device(&realm, netdevice);
-    let port_id = dev_port.get_info().await.expect("get info").id.expect("missing port id");
-    let (control, server_end) =
-        fidl::endpoints::create_proxy::<fnet_interfaces_admin::ControlMarker>();
-    device_control
-        .create_interface(&port_id, server_end, fnet_interfaces_admin::Options::default())
-        .expect("create interface");
-
-    // Read the interface ID to make sure device install succeeded.
-    let _id: u64 = control.get_id().await.expect("get id");
-
-    assert_matches::assert_matches!(
-        mac_state_stream.next().await,
-        Some(fnet_tun::MacState {
-            mode: Some(fhardware_network::MacFilterMode::MulticastPromiscuous),
-            multicast_filters: Some(mcast_filters),
-            ..
-        }) if mcast_filters == vec![]
-    );
-}
-
 const ETH_HDR: usize = ETHERNET_HDR_LEN_NO_TAG;
 const ETH_BODY: usize = ETHERNET_MIN_BODY_LEN_NO_TAG;
 const MIN_ETH_FRAME: usize = ETHERNET_HDR_LEN_NO_TAG + ETH_BODY;
 const LARGE_BODY: usize = ETH_BODY + 1024;
 const LARGE_FRAME: usize = ETHERNET_HDR_LEN_NO_TAG + LARGE_BODY;
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(fposix_socket_packet::Kind::Network, 1, 0; "network no padding")]
 #[test_case(fposix_socket_packet::Kind::Link, 1, 0; "link no padding")]
 #[test_case(fposix_socket_packet::Kind::Network, ETH_HDR, 0; "network header only")]
@@ -394,14 +330,15 @@ const LARGE_FRAME: usize = ETHERNET_HDR_LEN_NO_TAG + LARGE_BODY;
 #[test_case(fposix_socket_packet::Kind::Link, MIN_ETH_FRAME, ETH_BODY; "link min eth")]
 #[test_case(fposix_socket_packet::Kind::Network, LARGE_FRAME, LARGE_BODY ; "network large body")]
 #[test_case(fposix_socket_packet::Kind::Link, LARGE_FRAME, LARGE_BODY; "link large body")]
-async fn device_minimum_tx_frame_size<N: Netstack>(
+async fn device_minimum_tx_frame_size(
     name: &str,
     socket_kind: fposix_socket_packet::Kind,
     min_tx_len: usize,
     expected_body_len: usize,
 ) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create source realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create source realm");
 
     let (tun, netdevice) =
         netstack_testing_common::devices::create_tun_device_with(fnet_tun::DeviceConfig {
@@ -502,10 +439,10 @@ async fn device_minimum_tx_frame_size<N: Netstack>(
 /// Tests that frames parked in the TX queue wait for device buffers to become
 /// available.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn tx_queue_drops<N: Netstack>(name: &str) {
+async fn tx_queue_drops(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create source realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create source realm");
 
     let (tun, netdevice) =
         netstack_testing_common::devices::create_tun_device_with(fnet_tun::DeviceConfig {

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use anyhow::{Result, anyhow, bail};
-use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec};
+use schemars::Schema;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,14 +23,21 @@ pub struct AllData {
 
 impl AllData {
     /// Construct AllData from a root json schema.
-    pub fn from_root_schema(url_path: &String, root_schema: &RootSchema) -> Result<Self> {
+    pub fn from_root_schema(url_path: &String, root_schema: &Schema) -> Result<Self> {
         let url_path = url_path.clone();
         let mut data_types = BTreeMap::new();
         let root_type = DataType::from_root_schema(root_schema)?;
         data_types.insert(root_type.rust_type.clone(), root_type.clone());
-        for (rust_type, schema) in &root_schema.definitions {
-            let child = DataType::from_schema(rust_type.clone(), schema)?;
-            data_types.insert(child.rust_type.clone(), child.clone());
+        let defs = root_schema
+            .get("$defs")
+            .or_else(|| root_schema.get("definitions"))
+            .and_then(|v| v.as_object());
+        if let Some(defs) = defs {
+            for (rust_type, schema_val) in defs {
+                let schema: &Schema = schema_val.try_into()?;
+                let child = DataType::from_schema(rust_type.clone(), schema)?;
+                data_types.insert(child.rust_type.clone(), child);
+            }
         }
         Ok(Self { url_path, root: root_type.rust_type, data_types })
     }
@@ -119,58 +126,84 @@ impl PartialOrd for StructFieldData {
     }
 }
 
+fn strip_ref_prefix(reference: &str) -> String {
+    reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+        .or_else(|| reference.strip_prefix("#/"))
+        .unwrap_or(reference)
+        .to_string()
+}
+
+fn extract_unit_variants_from_one_of(one_of: &[Value]) -> Option<BTreeSet<String>> {
+    let mut variants = BTreeSet::new();
+    for item in one_of {
+        let obj = item.as_object()?;
+        if obj.get("type").and_then(|v| v.as_str()) != Some("string") {
+            return None;
+        }
+        if let Some(const_val) = obj.get("const") {
+            variants.insert(const_val.to_string());
+        } else if let Some(enum_vals) = obj.get("enum").and_then(|v| v.as_array()) {
+            for v in enum_vals {
+                variants.insert(v.to_string());
+            }
+        } else {
+            return None;
+        }
+    }
+    if variants.is_empty() { None } else { Some(variants) }
+}
+
 impl DataType {
     /// Construct a DataType from a root schema object.
-    fn from_root_schema(root_schema: &RootSchema) -> Result<Self> {
-        let schema = root_schema.schema.clone();
-        let metadata = root_schema
-            .schema
-            .metadata
-            .as_ref()
-            .ok_or_else(|| anyhow!("missing metadata from root"))?;
-        let rust_type =
-            metadata.title.as_ref().ok_or_else(|| anyhow!("missing title from root"))?.clone();
-        let description = metadata
-            .description
-            .as_ref()
+    fn from_root_schema(root_schema: &Schema) -> Result<Self> {
+        let rust_type = root_schema
+            .get("title")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing title from root"))?
+            .to_string();
+        let description = root_schema
+            .get("description")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing description from {}", rust_type))?
-            .clone();
-        Self::from_schema_object(rust_type, description, schema)
+            .to_string();
+        Self::from_schema_object(rust_type, description, root_schema)
     }
 
     /// Construct a DataType from a non-root schema object.
     fn from_schema(rust_type: String, schema: &Schema) -> Result<Self> {
-        let schema = schema.clone().into_object();
-        let description = if let Some(metadata) = &schema.metadata {
-            metadata
-                .description
-                .as_ref()
-                .ok_or_else(|| anyhow!("missing description from {}", rust_type))?
-                .clone()
-        } else {
-            "no description".to_string()
-        };
+        let description = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "no description".to_string());
         Self::from_schema_object(rust_type, description, schema)
     }
 
     /// Construct a DataType from a generic schema object.
-    fn from_schema_object(
-        rust_type: String,
-        description: String,
-        schema: SchemaObject,
-    ) -> Result<Self> {
+    fn from_schema_object(rust_type: String, description: String, schema: &Schema) -> Result<Self> {
         // The description may be modified to add an error message.
         let mut description = description;
 
         // An enum.
-        let inner = if let Some(enum_values) = schema.enum_values {
-            let variants = enum_values.into_iter().map(|v| v.to_string()).collect();
+        let inner = if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array()) {
+            let variants = enum_values.iter().map(|v| v.to_string()).collect();
+            DataTypeInner::Enum(EnumDataType { variants })
+        } else if let Some(variants) = schema
+            .get("oneOf")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| extract_unit_variants_from_one_of(arr))
+        {
             DataTypeInner::Enum(EnumDataType { variants })
         }
         // An enum with variants of different types.
         // TODO(b/332348955): Support this properly.
         // TODO(b/436293725): Support comments on enum variants.
-        else if let Some(_) = schema.subschemas {
+        else if schema.get("oneOf").is_some()
+            || schema.get("anyOf").is_some()
+            || schema.get("allOf").is_some()
+        {
             let error_message = format!(
                 "Failed to generate docs for complex {} enum: b/332348955 or b/436293725",
                 rust_type
@@ -180,57 +213,69 @@ impl DataType {
             DataTypeInner::Enum(EnumDataType { variants: BTreeSet::new() })
         }
         // A struct.
-        else if let Some(object) = schema.object {
-            let fields = object
-                .properties
-                .into_iter()
+        else if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+            let fields = properties
+                .iter()
                 .map(|(field_name, p)| {
-                    let mut object = p.into_object();
-                    let data_type = if let Some(format) = &object.format {
-                        StructFieldType::Primitive { data_type: format.clone() }
-                    } else if let Some(single_or_vec) = &object.instance_type {
+                    let object: &Schema = p.try_into()?;
+                    let data_type = if let Some(format) =
+                        object.get("format").and_then(|v| v.as_str())
+                    {
+                        StructFieldType::Primitive { data_type: format.to_string() }
+                    } else if let Some(reference) = object.get("$ref").and_then(|v| v.as_str()) {
+                        StructFieldType::Custom { data_type: strip_ref_prefix(reference) }
+                    } else if let Some(single_or_vec) = object.get("type") {
                         StructFieldType::Primitive {
-                            data_type: single_or_vec_to_string(&single_or_vec)?,
+                            data_type: single_or_vec_to_string(single_or_vec)?,
                         }
-                    } else if let Some(reference) = &object.reference {
-                        StructFieldType::Custom { data_type: reference.clone() }
                     } else {
-                        let subschemas = object
-                            .subschemas
-                            .as_ref()
-                            .ok_or_else(|| anyhow!("Missing subschemas for {}", rust_type))?;
-                        let mut subobjects = Vec::<SchemaObject>::new();
-                        if let Some(subs) = &subschemas.all_of {
-                            for sub in subs {
-                                subobjects.push(sub.clone().into_object());
-                            }
+                        let mut subobjects = Vec::<&Value>::new();
+                        if let Some(subs) = object.get("allOf").and_then(|v| v.as_array()) {
+                            subobjects.extend(subs.iter());
                         }
-                        if let Some(subs) = &subschemas.any_of {
-                            for sub in subs {
-                                subobjects.push(sub.clone().into_object());
-                            }
+                        if let Some(subs) = object.get("anyOf").and_then(|v| v.as_array()) {
+                            subobjects.extend(subs.iter());
+                        }
+                        if let Some(subs) = object.get("oneOf").and_then(|v| v.as_array()) {
+                            subobjects.extend(subs.iter());
+                        }
+                        if subobjects.is_empty() {
+                            bail!("Missing subschemas for {}", rust_type);
                         }
                         let subobject = subobjects
                             .first()
-                            .ok_or_else(|| anyhow!("Missing subobject for {}", rust_type))?
-                            .clone();
-                        let reference = subobject.reference.ok_or_else(|| {
-                            anyhow!("Missing reference for field in {}", rust_type)
-                        })?;
-                        StructFieldType::Custom { data_type: reference }
+                            .ok_or_else(|| anyhow!("Missing subobject for {}", rust_type))?;
+                        let reference =
+                            subobject.get("$ref").and_then(|v| v.as_str()).ok_or_else(|| {
+                                anyhow!("Missing reference for field in {}", rust_type)
+                            })?;
+                        StructFieldType::Custom { data_type: strip_ref_prefix(reference) }
                     };
-                    let metadata = object.metadata();
-                    let description = metadata.description.clone().unwrap_or_else(|| "".into());
-                    let default = metadata.default.clone();
-                    Ok(StructFieldData { field_name, data_type, description, default })
+                    let description = object
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let default = object.get("default").cloned();
+                    Ok(StructFieldData {
+                        field_name: field_name.clone(),
+                        data_type,
+                        description,
+                        default,
+                    })
                 })
                 .collect::<Result<BTreeSet<StructFieldData>>>()?;
             DataTypeInner::Struct(StructDataType { fields })
+        } else if schema.get("type").and_then(|v| v.as_str()) == Some("object")
+            && (schema.get("additionalProperties").is_some()
+                || schema.get("patternProperties").is_some())
+        {
+            DataTypeInner::Struct(StructDataType { fields: BTreeSet::new() })
         }
         // A primitive wrapped by a type.
         // e.g. ImageName(String)
-        else if let Some(single_or_vec) = schema.instance_type {
-            let data_type = single_or_vec_to_string(&single_or_vec)?;
+        else if let Some(single_or_vec) = schema.get("type") {
+            let data_type = single_or_vec_to_string(single_or_vec)?;
             DataTypeInner::Primitive(PrimitiveDataType { data_type })
         }
         // Unsupported.
@@ -242,26 +287,29 @@ impl DataType {
     }
 }
 
-/// Convert a SingleOrVec<InstanceType> to a user-friendly String.
-fn single_or_vec_to_string(single_or_vec: &SingleOrVec<InstanceType>) -> Result<String> {
+/// Convert a type Value (string or array of strings) to a user-friendly String.
+fn single_or_vec_to_string(single_or_vec: &Value) -> Result<String> {
     match single_or_vec {
-        SingleOrVec::Single(t) => Ok(format!("{}", instance_type_to_string(&t)?)),
-        SingleOrVec::Vec(v) => {
-            let t = v.first().ok_or_else(|| anyhow!("Missing instance type"))?;
-            Ok(format!("[{}]", instance_type_to_string(&t)?))
+        Value::String(t) => Ok(instance_type_to_string(t)?),
+        Value::Array(v) => {
+            let t = v
+                .first()
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("Missing instance type"))?;
+            Ok(format!("[{}]", instance_type_to_string(t)?))
         }
+        _ => bail!("unsupported type value"),
     }
 }
 
-/// Convert a schema InstanceType to a user-friendly String.
-fn instance_type_to_string(instance_type: &InstanceType) -> Result<String> {
+/// Convert a schema InstanceType string to a user-friendly String.
+fn instance_type_to_string(instance_type: &str) -> Result<String> {
     let s = match instance_type {
-        schemars::schema::InstanceType::Boolean => "bool",
-        schemars::schema::InstanceType::Array => "vector",
-        schemars::schema::InstanceType::String => "string",
-        schemars::schema::InstanceType::Integer => "integer",
-        schemars::schema::InstanceType::Number => "integer",
-        schemars::schema::InstanceType::Object => "object",
+        "boolean" => "bool",
+        "array" => "vector",
+        "string" => "string",
+        "integer" | "number" => "integer",
+        "object" => "object",
         _ => bail!("unsupported type"),
     }
     .to_string();
@@ -276,9 +324,9 @@ mod tests {
     };
     use pretty_assertions::assert_eq;
     use schemars::JsonSchema;
-    use schemars::r#gen::SchemaSettings;
-    use schemars::schema::{InstanceType, SingleOrVec};
+    use schemars::generate::SchemaSettings;
     use serde::Serialize;
+    use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
 
     /// Mandatory description on root struct.
@@ -312,9 +360,7 @@ mod tests {
 
     #[test]
     fn test() {
-        let settings = SchemaSettings::default().with(|s| {
-            s.definitions_path = "".to_string();
-        });
+        let settings = SchemaSettings::default();
         let generator = settings.into_generator();
         let root_schema = generator.into_root_schema_for::<RootStruct>();
         let all_data = AllData::from_root_schema(&"url_path".into(), &root_schema).unwrap();
@@ -402,11 +448,11 @@ mod tests {
 
     #[test]
     fn test_instance_type_to_string() {
-        let s = single_or_vec_to_string(&SingleOrVec::from(InstanceType::Integer)).unwrap();
+        let s = single_or_vec_to_string(&json!("integer")).unwrap();
         assert_eq!("integer", &s);
-        let s = single_or_vec_to_string(&SingleOrVec::from(InstanceType::Boolean)).unwrap();
+        let s = single_or_vec_to_string(&json!("boolean")).unwrap();
         assert_eq!("bool", &s);
-        let s = single_or_vec_to_string(&SingleOrVec::from(vec![InstanceType::Boolean])).unwrap();
+        let s = single_or_vec_to_string(&json!(["boolean"])).unwrap();
         assert_eq!("[bool]", &s);
     }
 }

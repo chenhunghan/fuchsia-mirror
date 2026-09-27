@@ -4,8 +4,6 @@
 
 //! A blackhole device receives no traffic and drops all traffic sent through it.
 
-use core::convert::Infallible as Never;
-
 use netstack3_base::{ChecksumOffloadSpec, Device, NeverBuffer};
 
 use crate::internal::base::{BlackholeDeviceCounters, DeviceReceiveFrameSpec};
@@ -63,7 +61,7 @@ impl DeviceStateSpec for BlackholeDevice {
 
     type Counters = BlackholeDeviceCounters;
 
-    type TimerId<D: netstack3_base::WeakDeviceIdentifier> = Never;
+    type TimerId<D: netstack3_base::WeakDeviceIdentifier> = !;
 
     fn new_device_state<
         CC: netstack3_base::CoreTimerContext<Self::TimerId<CC::WeakDeviceId>, BC>
@@ -95,5 +93,5 @@ impl DeviceStateSpec for BlackholeDevice {
 impl DeviceReceiveFrameSpec for BlackholeDevice {
     // Blackhole devices never receive frames from bindings, so make it impossible to
     // instantiate it.
-    type FrameMetadata<D> = Never;
+    type FrameMetadata<D> = !;
 }

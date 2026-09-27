@@ -192,3 +192,49 @@ func TestStartFFXMonitor(t *testing.T) {
 		t.Error("ffx_monitor entry not found in summary.json")
 	}
 }
+
+func TestGetBootTimeout(t *testing.T) {
+	tests := []struct {
+		name                   string
+		bootTimeout            time.Duration
+		testTimeoutScaleFactor int
+		want                   time.Duration
+	}{
+		{
+			name:                   "default unscaled",
+			bootTimeout:            0,
+			testTimeoutScaleFactor: 1,
+			want:                   0,
+		},
+		{
+			name:                   "default scaled by 2",
+			bootTimeout:            0,
+			testTimeoutScaleFactor: 2,
+			want:                   2 * targets.DefaultConnectionTimeout,
+		},
+		{
+			name:                   "custom unscaled",
+			bootTimeout:            60 * time.Second,
+			testTimeoutScaleFactor: 1,
+			want:                   60 * time.Second,
+		},
+		{
+			name:                   "custom scaled by 3",
+			bootTimeout:            60 * time.Second,
+			testTimeoutScaleFactor: 3,
+			want:                   180 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &RunCommand{
+				bootupTimeout:          tc.bootTimeout,
+				testTimeoutScaleFactor: tc.testTimeoutScaleFactor,
+			}
+			if got := cmd.getBootTimeout(); got != tc.want {
+				t.Errorf("getBootTimeout() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

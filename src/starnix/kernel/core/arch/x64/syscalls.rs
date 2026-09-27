@@ -8,9 +8,9 @@ use crate::task::CurrentTask;
 use crate::task::syscalls::do_clone;
 use crate::time::utc;
 use crate::vfs::syscalls::{
-    poll, sys_dup3, sys_epoll_create1, sys_epoll_pwait, sys_eventfd2, sys_faccessat, sys_fchmodat,
-    sys_fchownat, sys_linkat, sys_mkdirat, sys_mknodat, sys_newfstatat, sys_openat, sys_pipe2,
-    sys_readlinkat, sys_renameat2, sys_symlinkat, sys_unlinkat,
+    poll_with_restart, sys_dup3, sys_epoll_create1, sys_epoll_pwait, sys_eventfd2, sys_faccessat,
+    sys_fchmodat, sys_fchownat, sys_linkat, sys_mkdirat, sys_mknodat, sys_newfstatat, sys_openat,
+    sys_pipe2, sys_readlinkat, sys_renameat2, sys_symlinkat, sys_unlinkat,
 };
 use crate::vfs::{DirentSink32, FdNumber};
 use starnix_logging::track_stub;
@@ -272,7 +272,7 @@ pub fn sys_poll(
     timeout: i32,
 ) -> Result<usize, Errno> {
     let deadline = zx::MonotonicInstant::after(duration_from_poll_timeout(timeout)?);
-    poll(current_task, user_fds, num_fds, None, deadline)
+    poll_with_restart(current_task, user_fds, num_fds, deadline)
 }
 
 pub fn sys_readlink(

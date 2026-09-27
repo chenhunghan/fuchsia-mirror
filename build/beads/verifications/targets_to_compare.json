@@ -8,5 +8,29 @@
         "gn": "//build/beads/verifications/rust:rust_example_lib.actual(//build/toolchain:host_x64)",
         "bazel": "//build/beads/verifications/rust:rust_example_lib",
         "type": "rustc"
+    },
+    {
+        "gn": "//build/beads/verifications/cc:c_example_lib(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:c_example_lib",
+        "type": "c_compile",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:cc_example_lib(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:cc_example_lib",
+        "type": "cpp_compile",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:asm_example_lib(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:asm_example_lib",
+        "type": "assemble",
+        "allow_differences": true
+    },
+    {
+        "gn": "//build/beads/verifications/cc:cc_example_bin(//build/toolchain:host_x64)",
+        "bazel": "//build/beads/verifications/cc:cc_example_bin",
+        "type": "cpp_link",
+        "allow_differences": true
     }
 ]

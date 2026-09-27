@@ -31,7 +31,7 @@ class CodecAdapterMpeg2 : public CodecAdapter {
   void CoreCodecStartStream() override;
   void CoreCodecQueueInputFormatDetails(
       const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override;
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
   void CoreCodecStopStream() override;
   void CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buffer) override;

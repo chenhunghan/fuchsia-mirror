@@ -9,6 +9,7 @@
 #include <fidl/fuchsia.hardware.gpio/cpp/wire.h>
 #include <fidl/fuchsia.hardware.platform.device/cpp/wire.h>
 #include <fidl/fuchsia.hardware.power/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.sdio/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.sdmmc/cpp/driver/fidl.h>
 #include <fidl/fuchsia.power.broker/cpp/fidl.h>
 #include <lib/ddk/metadata.h>
@@ -126,8 +127,6 @@ class AmlSdmmc : public fdf::DriverBase2,
   std::optional<fidl::ServerEnd<fuchsia_power_broker::ElementRunner>> take_power_element_runner() {
     return std::move(power_element_runner_);
   }
-
-
 
   // Visible for tests
   zx_status_t Init(const std::string& instance_identifier) __TA_EXCLUDES(lock_);
@@ -346,6 +345,7 @@ class AmlSdmmc : public fdf::DriverBase2,
   fdf::Dispatcher worker_dispatcher_;
 
   fdf_metadata::MetadataServer<fuchsia_hardware_sdmmc::SdmmcMetadata> metadata_server_;
+  fdf_metadata::MetadataServer<fuchsia_hardware_sdio::Metadata> sdio_metadata_server_;
 };
 
 }  // namespace aml_sdmmc

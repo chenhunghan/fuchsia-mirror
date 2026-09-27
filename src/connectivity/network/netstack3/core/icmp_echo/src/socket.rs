@@ -6,7 +6,6 @@
 
 use alloc::vec::Vec;
 use core::borrow::Borrow;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::num::{NonZeroU8, NonZeroU16};
@@ -22,14 +21,14 @@ use netstack3_base::socket::{
     self, AddrIsMappedError, AddrVec, AddrVecIter, ConnAddr, ConnInfoAddr, ConnIpAddr,
     IncompatibleError, InsertError, ListenerAddrInfo, MaybeDualStack, ShutdownType, SocketCookie,
     SocketIpAddr, SocketMapAddrSpec, SocketMapAddrStateSpec, SocketMapConflictPolicy,
-    SocketMapStateSpec, SocketWritableListener,
+    SocketMapStateSpec,
 };
 use netstack3_base::socketmap::{IterShadows as _, SocketMap};
 use netstack3_base::sync::{RwLock, StrongRc};
 use netstack3_base::{
     AnyDevice, ContextPair, CoreTxMetadataContext, CounterContext, DeviceIdContext, IcmpIpExt,
     Inspector, InspectorDeviceExt, LocalAddressError, Mark, MarkDomain, Marks, PortAllocImpl,
-    ReferenceNotifiers, RemoveResourceResultWithContext, RngContext, SettingsContext, SocketError,
+    ReferenceNotifiers, RemoveResourceResultWithContext, RngContext, SocketError,
     StrongDeviceIdentifier, UninstantiableWrapper, WeakDeviceIdentifier,
 };
 use netstack3_datagram::{
@@ -47,8 +46,6 @@ use netstack3_ip::{
 use packet::{BufferMut, NestablePacketBuilder as _, ParsablePacket as _, ParseBuffer};
 use packet_formats::icmp::{IcmpEchoReply, IcmpEchoRequest, IcmpPacketBuilder, IcmpPacketRaw};
 use packet_formats::ip::{IpProtoExt, Ipv4Proto, Ipv6Proto};
-
-use crate::internal::settings::IcmpEchoSettings;
 
 /// A marker trait for all IP extensions required by ICMP sockets.
 pub trait IpExt: datagram::IpExt + IcmpIpExt + IpLayerIpExt {}
@@ -259,7 +256,7 @@ pub enum ReceiveIcmpEchoError {
 /// The context required by the ICMP layer in order to deliver events related to
 /// ICMP sockets.
 pub trait IcmpEchoBindingsContext<I: IpExt, D: StrongDeviceIdentifier>:
-    IcmpEchoBindingsTypes + ReferenceNotifiers + RngContext + SettingsContext<IcmpEchoSettings>
+    IcmpEchoBindingsTypes + ReferenceNotifiers + RngContext
 {
     /// Receives an ICMP echo reply.
     fn receive_icmp_echo_reply<B: BufferMut>(
@@ -288,8 +285,6 @@ pub trait IcmpEchoBindingsContext<I: IpExt, D: StrongDeviceIdentifier>:
 pub trait IcmpEchoBindingsTypes: DatagramBindingsTypes + Sized + 'static {
     /// Opaque bindings data held by core for a given IP version.
     type ExternalData<I: Ip>: Debug + Send + Sync + 'static;
-    /// The listener notified when sockets' writable state changes.
-    type SocketWritableListener: SocketWritableListener + Debug + Send + Sync + 'static;
     /// A token representing resources allocated for an in-flight send operation.
     ///
     /// Core holds this token until the packet is either transmitted by the
@@ -388,7 +383,7 @@ pub trait IcmpEchoStateContext<I: IcmpIpExt + IpExt, BC: IcmpEchoBindingsTypes>:
 }
 
 /// Uninstantiatable type for implementing [`DatagramSocketSpec`].
-pub struct Icmp<BT>(PhantomData<BT>, Never);
+pub struct Icmp<BT>(PhantomData<BT>, !);
 
 impl<BT: IcmpEchoBindingsTypes> DatagramSocketSpec for Icmp<BT> {
     const NAME: &'static str = "ICMP_ECHO";
@@ -423,17 +418,10 @@ impl<BT: IcmpEchoBindingsTypes> DatagramSocketSpec for Icmp<BT> {
     type SerializeError = packet_formats::error::ParseError;
 
     type ExternalData<I: Ip> = BT::ExternalData<I>;
-    type Settings = IcmpEchoSettings;
+    type SendToken = BT::SendToken;
 
     // NB: At present, there's no need to track per-socket ICMP counters.
     type Counters<I: Ip> = ();
-    type SocketWritableListener = BT::SocketWritableListener;
-    type SendToken = BT::SendToken;
-
-    // NB: `make_packet` does not add any extra bytes because applications send
-    // the ICMP header alongside the message which gets parsed and then rebuilt.
-    // That means we incur 0 extra cost here.
-    const FIXED_HEADER_SIZE: usize = 0;
 
     fn make_packet<I: datagram::IpExt, B: BufferMut>(
         mut body: B,
@@ -706,7 +694,7 @@ where
 
 /// An uninstantiable type providing a [`SocketMapStateSpec`] implementation for
 /// ICMP.
-pub struct IcmpSocketMapStateSpec<I, D, BT>(PhantomData<(I, D, BT)>, Never);
+pub struct IcmpSocketMapStateSpec<I, D, BT>(PhantomData<(I, D, BT)>, !);
 
 impl<I: IpExt, D: WeakDeviceIdentifier, BT: IcmpEchoBindingsTypes> SocketMapStateSpec
     for IcmpSocketMapStateSpec<I, D, BT>
@@ -741,7 +729,7 @@ impl<I: IpExt, D: WeakDeviceIdentifier, BT: IcmpEchoBindingsTypes> SocketMapAddr
     type SharingState = ();
 
     type Inserter<'a>
-        = core::convert::Infallible
+        = !
     where
         Self: 'a;
 
@@ -852,18 +840,16 @@ where
     pub fn create(&mut self) -> IcmpApiSocketId<I, C>
     where
         <C::BindingsContext as IcmpEchoBindingsTypes>::ExternalData<I>: Default,
-        <C::BindingsContext as IcmpEchoBindingsTypes>::SocketWritableListener: Default,
     {
-        self.create_with(Default::default(), Default::default())
+        self.create_with(Default::default())
     }
 
     /// Creates a new unbound ICMP socket with provided external data.
     pub fn create_with(
         &mut self,
         external_data: <C::BindingsContext as IcmpEchoBindingsTypes>::ExternalData<I>,
-        writable_listener: <C::BindingsContext as IcmpEchoBindingsTypes>::SocketWritableListener,
     ) -> IcmpApiSocketId<I, C> {
-        self.datagram().create(external_data, writable_listener)
+        self.datagram().create(external_data)
     }
 
     /// Connects an ICMP socket to remote IP.
@@ -1015,16 +1001,6 @@ where
         self.datagram().get_mark(id, domain)
     }
 
-    /// Sets the send buffer maximum size to `size`.
-    pub fn set_send_buffer(&mut self, id: &IcmpApiSocketId<I, C>, size: usize) {
-        self.datagram().set_send_buffer(id, size)
-    }
-
-    /// Returns the current maximum send buffer size.
-    pub fn send_buffer(&mut self, id: &IcmpApiSocketId<I, C>) -> usize {
-        self.datagram().send_buffer(id)
-    }
-
     /// Sends an ICMP packet through a connection.
     ///
     /// The socket must be connected in order for the operation to succeed.
@@ -1089,7 +1065,7 @@ impl EchoTransportContextMarker for IcmpEchoIpTransportContext {}
 impl<I: IpExt, BC: IcmpEchoBindingsContext<I, CC::DeviceId>, CC: IcmpEchoBoundStateContext<I, BC>>
     IpTransportContext<I, BC, CC> for IcmpEchoIpTransportContext
 {
-    type EarlyDemuxSocket = Never;
+    type EarlyDemuxSocket = !;
 
     fn early_demux<B: ParseBuffer>(
         _core_ctx: &mut CC,
@@ -1178,7 +1154,7 @@ impl<I: IpExt, BC: IcmpEchoBindingsContext<I, CC::DeviceId>, CC: IcmpEchoBoundSt
         dst_ip: SpecifiedAddr<I::Addr>,
         mut buffer: B,
         info: &mut LocalDeliveryPacketInfo<I, H>,
-        _early_demux_socket: Option<Never>,
+        _early_demux_socket: Option<!>,
     ) -> Result<(), (B, I::IcmpError)> {
         let LocalDeliveryPacketInfo { meta, header_info: _, marks: _ } = info;
         let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _ } = meta;
@@ -1298,8 +1274,7 @@ mod tests {
     use net_types::ip::Ipv6;
     use netstack3_base::socket::StrictlyZonedAddr;
     use netstack3_base::testutil::{
-        FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeSendToken, FakeSocketWritableListener,
-        FakeWeakDeviceId, TestIpExt,
+        FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeSendToken, FakeWeakDeviceId, TestIpExt,
     };
     use netstack3_base::{CtxPair, Icmpv4ErrorCode, Icmpv6ErrorCode, NetworkSerializationContext};
     use netstack3_ip::socket::testutil::{FakeDeviceConfig, FakeIpSocketCtx, InnerFakeIpSocketCtx};
@@ -1516,7 +1491,6 @@ mod tests {
 
     impl<I: IpExt> IcmpEchoBindingsTypes for FakeIcmpBindingsCtx<I> {
         type ExternalData<II: Ip> = ();
-        type SocketWritableListener = FakeSocketWritableListener;
         type SendToken = FakeSendToken;
     }
 

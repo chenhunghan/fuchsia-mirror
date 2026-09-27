@@ -50,7 +50,7 @@ inline uint32_t truncate_to_32(uint64_t input) {
 
 // Wait for a condition to become true, with a timeout.
 template <typename DurationType, typename T>
-bool WaitForRegister(DurationType timeout, T condition) {
+[[nodiscard]] bool WaitForRegister(DurationType timeout, T condition) {
   auto start = std::chrono::high_resolution_clock::now();
   auto cast_timeout =
       std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(timeout);
@@ -64,7 +64,7 @@ bool WaitForRegister(DurationType timeout, T condition) {
 }
 
 template <typename DurationType, typename T>
-__WARN_UNUSED_RESULT bool SpinWaitForRegister(DurationType timeout, T condition) {
+[[nodiscard]] bool SpinWaitForRegister(DurationType timeout, T condition) {
   auto start = std::chrono::high_resolution_clock::now();
   auto cast_timeout =
       std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(timeout);

@@ -433,6 +433,7 @@ pub(crate) trait ClientIface: Sync + Send {
     ) -> Result<fidl::endpoints::ClientEnd<fidl_sme::ScheduledScanTransactionMarker>, Error>;
     async fn get_signal_report(&self) -> Result<fidl_stats::SignalReport, Error>;
     async fn get_iface_stats(&self) -> Result<fidl_stats::IfaceStats, Error>;
+    async fn get_link_layer_stats(&self) -> Result<fidl_wlanix::LinkLayerStats, Error>;
     fn update_last_scan_results(&self, results: Vec<fidl_sme::ScanResult>);
 }
 
@@ -1048,6 +1049,20 @@ impl ClientIface for SmeClientIface {
             .await?
             .map_err(|e| format_err!("Failed to get iface stats: {:?}", e))
     }
+
+    async fn get_link_layer_stats(&self) -> Result<fidl_wlanix::LinkLayerStats, Error> {
+        let iface_stats = self.get_iface_stats().await?;
+        let signal_report = self.get_signal_report().await?;
+
+        let wme = iface_stats.connection_stats.and_then(|conn_stats| conn_stats.wme);
+
+        let rssi_dbm = signal_report
+            .connection_signal_report
+            .and_then(|conn_signal| conn_signal.rssi_dbm)
+            .map(|rssi| rssi as i32);
+
+        Ok(fidl_wlanix::LinkLayerStats { wme, rssi_dbm, ..Default::default() })
+    }
 }
 
 fn check_scan_result_matches(
@@ -1460,6 +1475,10 @@ pub mod test_utils {
             } else {
                 Err(format_err!("get iface stats not mocked"))
             }
+        }
+
+        async fn get_link_layer_stats(&self) -> Result<fidl_wlanix::LinkLayerStats, Error> {
+            Ok(fidl_wlanix::LinkLayerStats::default())
         }
     }
 
@@ -2449,8 +2468,7 @@ mod tests {
         test_values.exec.set_fake_time(fasync::MonotonicInstant::from_nanos(61_000_000_000));
         assert_matches!(test_values.exec.run_until_stalled(&mut scan_fut), Poll::Ready(Err(_)));
 
-        let event =
-            assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => event);
+        let event = assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => event);
         assert_matches!(
             event,
             TelemetryEvent::SmeTimeout { source: wlan_telemetry::TimeoutSource::Scan }
@@ -3169,8 +3187,7 @@ mod tests {
         let failure = assert_matches!(connect_result, ConnectResult::Fail(failure) => failure);
         assert!(failure.timed_out);
 
-        let event =
-            assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => event);
+        let event = assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => event);
         assert_matches!(
             event,
             TelemetryEvent::SmeTimeout { source: wlan_telemetry::TimeoutSource::Connect }
@@ -3332,8 +3349,7 @@ mod tests {
             Poll::Ready(Err(_))
         );
 
-        let event =
-            assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => event);
+        let event = assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => event);
         assert_matches!(
             event,
             TelemetryEvent::SmeTimeout { source: wlan_telemetry::TimeoutSource::Disconnect }
@@ -3412,6 +3428,215 @@ mod tests {
         let conn_report = response.connection_signal_report.expect("No connection report");
         assert_eq!(conn_report.tx_rate_500kbps, Some(300));
         assert_eq!(conn_report.rssi_dbm, Some(-53));
+    }
+
+    #[test]
+    fn test_get_iface_stats_success() {
+        const RX_UNICAST_TOTAL: u64 = 100;
+        const TX_TOTAL: u64 = 50;
+
+        let wme_stats = fidl_stats::WmePacketStats {
+            be: Some(fidl_stats::PacketStats {
+                rx: Some(101),
+                tx: Some(102),
+                tx_drop: Some(103),
+                tx_retries: Some(104),
+                ..Default::default()
+            }),
+            bk: Some(fidl_stats::PacketStats {
+                rx: Some(201),
+                tx: Some(202),
+                tx_drop: Some(203),
+                tx_retries: Some(204),
+                ..Default::default()
+            }),
+            vi: Some(fidl_stats::PacketStats {
+                rx: Some(301),
+                tx: Some(302),
+                tx_drop: Some(303),
+                tx_retries: Some(304),
+                ..Default::default()
+            }),
+            vo: Some(fidl_stats::PacketStats {
+                rx: Some(401),
+                tx: Some(402),
+                tx_drop: Some(403),
+                tx_retries: Some(404),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut test_values = setup_test_manager_with_iface();
+
+        let mut iface_stats_fut = test_values.iface.get_iface_stats();
+        assert_matches!(test_values.exec.run_until_stalled(&mut iface_stats_fut), Poll::Pending);
+
+        // Respond to the call to SME telemetry for iface stats
+        let responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetIfaceStats { responder }))) => responder
+        );
+
+        let mock_stats = fidl_stats::IfaceStats {
+            connection_stats: Some(fidl_stats::ConnectionStats {
+                rx_unicast_total: Some(RX_UNICAST_TOTAL),
+                tx_total: Some(TX_TOTAL),
+                wme: Some(wme_stats.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        responder.send(Ok(&mock_stats)).expect("Failed to send mock iface stats response");
+
+        let response = assert_matches!(
+            test_values.exec.run_until_stalled(&mut iface_stats_fut),
+            Poll::Ready(Ok(response)) => response
+        );
+
+        let conn_stats = response.connection_stats.expect("No connection stats");
+        assert_eq!(conn_stats.rx_unicast_total, Some(RX_UNICAST_TOTAL));
+        assert_eq!(conn_stats.tx_total, Some(TX_TOTAL));
+        assert_eq!(conn_stats.wme, Some(wme_stats));
+    }
+
+    #[test]
+    fn test_get_link_layer_stats_success() {
+        const RSSI_DBM: i8 = -45;
+
+        let wme_stats = fidl_stats::WmePacketStats {
+            be: Some(fidl_stats::PacketStats {
+                rx: Some(101),
+                tx: Some(102),
+                tx_drop: Some(103),
+                tx_retries: Some(104),
+                ..Default::default()
+            }),
+            bk: Some(fidl_stats::PacketStats {
+                rx: Some(201),
+                tx: Some(202),
+                tx_drop: Some(203),
+                tx_retries: Some(204),
+                ..Default::default()
+            }),
+            vi: Some(fidl_stats::PacketStats {
+                rx: Some(301),
+                tx: Some(302),
+                tx_drop: Some(303),
+                tx_retries: Some(304),
+                ..Default::default()
+            }),
+            vo: Some(fidl_stats::PacketStats {
+                rx: Some(401),
+                tx: Some(402),
+                tx_drop: Some(403),
+                tx_retries: Some(404),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut test_values = setup_test_manager_with_iface();
+
+        let mut link_stats_fut = test_values.iface.get_link_layer_stats();
+        assert_matches!(test_values.exec.run_until_stalled(&mut link_stats_fut), Poll::Pending);
+
+        // Respond to GetIfaceStats
+        let telemetry_responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetIfaceStats { responder }))) => responder
+        );
+
+        let mock_stats = fidl_stats::IfaceStats {
+            connection_stats: Some(fidl_stats::ConnectionStats {
+                wme: Some(wme_stats.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        telemetry_responder
+            .send(Ok(&mock_stats))
+            .expect("Failed to send mock iface stats response");
+
+        assert_matches!(test_values.exec.run_until_stalled(&mut link_stats_fut), Poll::Pending);
+
+        // Respond to GetSignalReport
+        let signal_responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => responder
+        );
+
+        let mock_signal = fidl_stats::SignalReport {
+            connection_signal_report: Some(fidl_stats::ConnectionSignalReport {
+                rssi_dbm: Some(RSSI_DBM),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        signal_responder
+            .send(Ok(&mock_signal))
+            .expect("Failed to send mock signal report response");
+
+        // Verify returned LinkLayerStats
+        let result = assert_matches!(
+            test_values.exec.run_until_stalled(&mut link_stats_fut),
+            Poll::Ready(Ok(stats)) => stats
+        );
+
+        assert_eq!(result.rssi_dbm, Some(RSSI_DBM as i32));
+        assert_eq!(result.wme, Some(wme_stats));
+    }
+
+    #[test]
+    fn test_get_link_layer_stats_stats_error() {
+        let mut test_values = setup_test_manager_with_iface();
+
+        let mut link_stats_fut = test_values.iface.get_link_layer_stats();
+        assert_matches!(test_values.exec.run_until_stalled(&mut link_stats_fut), Poll::Pending);
+
+        // Respond to GetIfaceStats with an error
+        let telemetry_responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetIfaceStats { responder }))) => responder
+        );
+        telemetry_responder.send(Err(-20)).expect("Failed to send mock iface stats error response");
+
+        let response = assert_matches!(
+            test_values.exec.run_until_stalled(&mut link_stats_fut),
+            Poll::Ready(Err(e)) => e
+        );
+        assert!(response.to_string().contains("Failed to get iface stats"));
+    }
+
+    #[test]
+    fn test_get_link_layer_stats_rssi_error() {
+        let mut test_values = setup_test_manager_with_iface();
+
+        let mut link_stats_fut = test_values.iface.get_link_layer_stats();
+        assert_matches!(test_values.exec.run_until_stalled(&mut link_stats_fut), Poll::Pending);
+
+        // Respond to GetIfaceStats successfully
+        let telemetry_responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetIfaceStats { responder }))) => responder
+        );
+        telemetry_responder
+            .send(Ok(&fidl_stats::IfaceStats::default()))
+            .expect("Failed to send mock iface stats response");
+        assert_matches!(test_values.exec.run_until_stalled(&mut link_stats_fut), Poll::Pending);
+
+        // Respond to GetSignalReport with an error
+        let signal_responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => responder
+        );
+        signal_responder.send(Err(-20)).expect("Failed to send mock signal report error response");
+
+        let response = assert_matches!(
+            test_values.exec.run_until_stalled(&mut link_stats_fut),
+            Poll::Ready(Err(e)) => e
+        );
+        assert!(response.to_string().contains("Failed to get signal report"));
     }
 
     #[test]
@@ -3597,7 +3822,7 @@ mod tests {
             }
         };
 
-        let event = assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => event);
+        let event = assert_matches!(telemetry_receiver.try_recv(), Ok(event) => event);
         assert_matches!(event, TelemetryEvent::IfacePowerLevelChanged {
             iface_id,
             iface_power_level
@@ -3656,7 +3881,7 @@ mod tests {
         // Future completes
         exec.run_singlethreaded(power_call_fut).expect("future finished");
 
-        let event = assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => event);
+        let event = assert_matches!(telemetry_receiver.try_recv(), Ok(event) => event);
         assert_matches!(
             event,
             TelemetryEvent::IfacePowerLevelChanged { iface_power_level: _, iface_id: _ }
@@ -3689,7 +3914,7 @@ mod tests {
         exec.run_singlethreaded(power_call_fut).expect("future finished");
 
         // Check for the unclear power demand metric
-        let event = assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => event);
+        let event = assert_matches!(telemetry_receiver.try_recv(), Ok(event) => event);
         assert_matches!(
             event,
             TelemetryEvent::UnclearPowerDemand(

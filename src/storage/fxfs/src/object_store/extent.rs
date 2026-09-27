@@ -97,8 +97,13 @@ impl Extent {
 }
 
 impl SerializeKey for Extent {
+    type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
+
     #[inline]
-    fn serialize_key_to<B: Buffer>(&self, serializer: &mut KeySerializer<'_, B>) {
+    fn serialize_key_to<'a, B: Buffer>(
+        &self,
+        mut serializer: KeySerializer<'a, B>,
+    ) -> Self::Output<'a, B> {
         assert!(
             MIN_BLOCK_SIZE.is_aligned(&self.0),
             "Extent bounds must be aligned to MIN_BLOCK_SIZE"
@@ -106,6 +111,7 @@ impl SerializeKey for Extent {
         assert!(self.0.start <= self.0.end, "Extent length cannot be negative");
         serializer.write_u64(self.0.end / MIN_BLOCK_SIZE);
         serializer.write_u64((self.0.end - self.0.start) / MIN_BLOCK_SIZE);
+        serializer
     }
 
     #[inline]
@@ -254,10 +260,9 @@ mod tests {
 
         // Serialize
         {
-            let mut ser =
+            let ser =
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, Some(0));
-            key.serialize_key_to(&mut ser);
-            ser.finalize().unwrap();
+            key.serialize_key_to(ser).finalize();
         }
 
         let (mut deser, length) = KeyDeserializer::new(&buf, Some(0)).unwrap();
@@ -283,7 +288,7 @@ mod tests {
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
             ser.write_u64(u64::MAX);
             ser.write_u64(u64::MAX);
-            ser.finalize().unwrap();
+            ser.finalize();
         }
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());
@@ -300,7 +305,7 @@ mod tests {
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
             ser.write_u64(1); // end = 512
             ser.write_u64(2); // len = 1024 (len > end)
-            ser.finalize().unwrap();
+            ser.finalize();
         }
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());
@@ -314,8 +319,8 @@ mod tests {
     fn test_extent_key_serialization_unaligned_end_panics() {
         let key = Extent(1024..2049);
         let mut buf = Vec::new();
-        let mut ser = crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
-        key.serialize_key_to(&mut ser);
+        let ser = crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
+        key.serialize_key_to(ser);
     }
 
     #[test]
@@ -323,8 +328,8 @@ mod tests {
     fn test_extent_key_serialization_unaligned_start_panics() {
         let key = Extent(1025..2048);
         let mut buf = Vec::new();
-        let mut ser = crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
-        key.serialize_key_to(&mut ser);
+        let ser = crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
+        key.serialize_key_to(ser);
     }
 
     #[test]
@@ -390,12 +395,7 @@ mod tests {
         let extent = Extent(50 * 512..200 * 512);
 
         let mut buf = Vec::new();
-        {
-            let mut ser =
-                crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
-            extent.serialize_key_to(&mut ser);
-            ser.finalize().unwrap();
-        }
+        extent.serialize_key_into(&mut buf);
 
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());
@@ -437,7 +437,7 @@ mod tests {
     fn test_extent_key_serialization_zero_length() {
         let key = Extent(2 * MIN_BLOCK_SIZE..2 * MIN_BLOCK_SIZE);
         let mut buf = Vec::new();
-        key.serialize_key_into(&mut buf, None).unwrap();
+        key.serialize_key_into(&mut buf);
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());
         let result = Extent::deserialize_key_from(&mut deser);
@@ -451,8 +451,7 @@ mod tests {
     fn test_extent_key_serialization_inverted_panics() {
         let key = Extent(2 * MIN_BLOCK_SIZE..MIN_BLOCK_SIZE.get());
         let mut buf = Vec::new();
-        let mut ser = crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
-        key.serialize_key_to(&mut ser);
+        key.serialize_key_into(&mut buf);
     }
 
     #[test]
@@ -463,7 +462,7 @@ mod tests {
                 crate::serialized_types::serialized_key::KeySerializer::new(&mut buf, None);
             ser.write_u64(4); // end = 2048 (4 * 512)
             ser.write_u64(0); // len = 0
-            ser.finalize().unwrap();
+            ser.finalize();
         }
         let (mut deser, length) = KeyDeserializer::new(&buf, None).unwrap();
         assert_eq!(length, buf.len());

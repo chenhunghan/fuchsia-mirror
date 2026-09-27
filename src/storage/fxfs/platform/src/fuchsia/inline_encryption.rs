@@ -248,26 +248,27 @@ mod tests {
         transaction.commit().await.expect("commit failed");
 
         // Write and read using inline encryption
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
+        let block_size = handle.block_size().get() as usize;
+        let mut buf = handle.allocate_buffer(block_size).await;
         buf.fill(0xaa);
         handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
 
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
-        handle.read(0, buf.as_mut()).await.expect("read failed");
-        assert_eq!(buf.to_vec(), vec![0xaa; 2 * TEST_DEVICE_BLOCK_SIZE as usize]);
+        let mut buf = handle.allocate_buffer(block_size).await;
+        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
+        assert_eq!(buf.to_vec(), vec![0xaa; block_size]);
 
         // If the keyslots are removed, reading from and writing to the file should now fail.
         // Cheat: Only one keyslot was programmed in this test, and VmoBackedServer programs keys to
         // the next available keyslot. The keyslot that we want to evict is 0.
         fixture.block_server.evict_key_slot(0).expect("evict_key_slot failed");
 
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
-        handle.read(0, buf.as_mut()).await.expect_err("read passed unexpectedly");
+        let mut buf = handle.allocate_buffer(block_size).await;
+        handle.read_aligned(0, buf.as_mut()).await.expect_err("read passed unexpectedly");
 
         // Write with an aligned buffer to avoid reading from vmo when creating a new aligned
         // buffer. We already know that reading from vmo will fail, we want to check that writing
         // fails as well.
-        let mut buf = handle.allocate_buffer(handle.block_size().get() as usize).await;
+        let mut buf = handle.allocate_buffer(block_size).await;
         buf.fill(0xcc);
         handle.write_or_append(Some(0), buf.as_ref()).await.expect_err("write passed unexpectedly");
 
@@ -345,13 +346,14 @@ mod tests {
         transaction.commit().await.expect("commit failed");
 
         // Write and read using inline encryption
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
+        let block_size = handle.block_size().get() as usize;
+        let mut buf = handle.allocate_buffer(block_size).await;
         buf.fill(0xaa);
         handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
 
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
-        handle.read(0, buf.as_mut()).await.expect("read failed");
-        assert_eq!(buf.to_vec(), vec![0xaa; 2 * TEST_DEVICE_BLOCK_SIZE as usize]);
+        let mut buf = handle.allocate_buffer(block_size).await;
+        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
+        assert_eq!(buf.to_vec(), vec![0xaa; block_size]);
 
         // (2) Test write and read from file in volume with fxfs crypt service
         let vol_with_fxfs_crypt_root_dir =
@@ -391,13 +393,14 @@ mod tests {
         transaction.commit().await.expect("commit failed");
 
         // Write and read non-inline encrypted files
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
+        let block_size = handle.block_size().get() as usize;
+        let mut buf = handle.allocate_buffer(block_size).await;
         buf.fill(0xbb);
         handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
 
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
-        handle.read(0, buf.as_mut()).await.expect("read failed");
-        assert_eq!(buf.to_vec(), vec![0xbb; 2 * TEST_DEVICE_BLOCK_SIZE as usize]);
+        let mut buf = handle.allocate_buffer(block_size).await;
+        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
+        assert_eq!(buf.to_vec(), vec![0xbb; block_size]);
 
         fixture.close().await;
     }
@@ -576,13 +579,14 @@ mod tests {
             .expect("create_child_file failed");
         transaction.commit().await.expect("commit failed");
 
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
+        let block_size = handle.block_size().get() as usize;
+        let mut buf = handle.allocate_buffer(block_size).await;
         buf.fill(0xaa);
         handle.write_or_append(Some(0), buf.as_ref()).await.expect("write failed");
 
-        let mut buf = handle.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
-        handle.read(0, buf.as_mut()).await.expect("read failed");
-        assert_eq!(buf.to_vec(), vec![0xaa; 2 * TEST_DEVICE_BLOCK_SIZE as usize]);
+        let mut buf = handle.allocate_buffer(block_size).await;
+        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
+        assert_eq!(buf.to_vec(), vec![0xaa; block_size]);
 
         // Reopen filesystem and unlock existing inline encrypted volume.
         let block_server = fixture.block_server.clone();
@@ -671,14 +675,17 @@ mod tests {
             .await
             .expect("open_object failed");
 
-        let mut buf = file.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
+        let block_size = file.block_size().get() as usize;
+        let mut buf = file.allocate_buffer(block_size).await;
         buf.fill(0xbb);
         file.write_or_append(Some(0), buf.as_ref())
             .await
             .expect_err("write passed unexpectedly without barriers");
 
-        let mut buf = file.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE as usize).await;
-        file.read(0, buf.as_mut()).await.expect_err("read passed unexpectedly without barriers");
+        let mut buf = file.allocate_buffer(block_size).await;
+        file.read_aligned(0, buf.as_mut())
+            .await
+            .expect_err("read passed unexpectedly without barriers");
 
         fs.close().await.expect("close failed");
     }

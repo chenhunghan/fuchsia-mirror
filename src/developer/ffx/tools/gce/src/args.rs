@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use argh::{ArgsInfo, FromArgs};
+use std::path::PathBuf;
 
 #[derive(ArgsInfo, FromArgs, Debug, PartialEq)]
 #[argh(
@@ -19,10 +20,60 @@ pub struct GceCommand {
 #[derive(ArgsInfo, FromArgs, Debug, PartialEq)]
 #[argh(subcommand)]
 pub enum GceSubCommand {
+    Start(StartCommand),
     List(ListCommand),
     Show(ShowCommand),
     Serial(SerialCommand),
     Stop(StopCommand),
+}
+
+#[derive(ArgsInfo, FromArgs, Debug, Default, PartialEq)]
+#[argh(
+    subcommand,
+    name = "start",
+    description = "Start a Fuchsia GCE virtual machine instance.",
+    example = "To start a Fuchsia instance on GCE:\n\n    $ ffx gce start"
+)]
+pub struct StartCommand {
+    /// product bundle directory path. If unset, uses default `product.path` from config.
+    #[argh(positional)]
+    pub product_bundle: Option<PathBuf>,
+
+    /// name of the instance. If unset, a random instance name ("fuchsia-gce-<hex>") is generated.
+    #[argh(option)]
+    pub name: Option<String>,
+
+    /// GCP Project ID. If unset, uses default from config.
+    #[argh(option)]
+    pub project: Option<String>,
+
+    /// GCE zone. If unset, uses default from config.
+    #[argh(option)]
+    pub zone: Option<String>,
+
+    /// GCE machine type. Defaults to "n2-standard-4" for x64 and "t2a-standard-4" for arm64.
+    #[argh(option)]
+    pub machine_type: Option<String>,
+
+    /// GCS bucket used to store disk images. Defaults to "<project>-fuchsia-images".
+    #[argh(option)]
+    pub bucket: Option<String>,
+
+    /// attach to the VM serial port output after starting.
+    #[argh(switch)]
+    pub serial: bool,
+
+    /// reuse an existing GCE custom image if one with the matching bundle hash already exists.
+    #[argh(switch)]
+    pub reuse_image: bool,
+
+    /// optional path to VBMeta signing key (.pem).
+    #[argh(option)]
+    pub vbmeta_key: Option<PathBuf>,
+
+    /// optional path to VBMeta key metadata (.bin).
+    #[argh(option)]
+    pub vbmeta_metadata: Option<PathBuf>,
 }
 
 #[derive(ArgsInfo, FromArgs, Debug, Default, PartialEq)]

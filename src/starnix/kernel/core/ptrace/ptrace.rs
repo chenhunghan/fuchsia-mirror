@@ -745,16 +745,30 @@ fn ptrace_cont(
         return error!(ESRCH);
     }
 
+    let signal_mask = state.signal_mask();
     if let Some(ptrace) = &mut state.ptrace {
         if data != 0 {
-            new_state = PtraceStatus::Continuing;
             if let Some(last_signal) = &mut ptrace.last_signal {
-                if let Some(si) = siginfo {
-                    let new_signal = si.signal;
-                    last_signal.signal = new_signal;
+                // If the tracer resumes the tracee with the same signal number (or one already
+                // updated via `PTRACE_SETSIGINFO`), preserve `last_signal`'s `siginfo_t` details
+                // and `force` state; otherwise replace `last_signal` with the newly injected
+                // signal so details and `force` from the stopping signal do not leak.
+                if let Some(si) = &siginfo {
+                    if last_signal.signal == si.signal {
+                        siginfo = Some(last_signal.clone());
+                    } else {
+                        *last_signal = si.clone();
+                    }
                 }
-                siginfo = Some(last_signal.clone());
             }
+            new_state = if siginfo
+                .as_ref()
+                .is_some_and(|si| !signal_mask.has_signal(si.signal) || si.force)
+            {
+                PtraceStatus::Continuing
+            } else {
+                PtraceStatus::Default
+            };
         } else {
             new_state = PtraceStatus::Default;
             ptrace.last_signal = None;
@@ -1051,8 +1065,14 @@ pub fn ptrace_dispatch(
             Ok(starnix_syscalls::SUCCESS)
         }
         PTRACE_SETSIGINFO => {
-            let siginfo = UncheckedSignalInfo::read_from_siginfo(current_task, data)?.try_into()?;
+            let mut siginfo: SignalInfo =
+                UncheckedSignalInfo::read_from_siginfo(current_task, data)?.try_into()?;
             if let Some(ptrace) = &mut state.ptrace {
+                if let Some(last_signal) = &ptrace.last_signal {
+                    if last_signal.signal == siginfo.signal {
+                        siginfo.force = last_signal.force;
+                    }
+                }
                 ptrace.last_signal = Some(siginfo);
             }
             Ok(starnix_syscalls::SUCCESS)

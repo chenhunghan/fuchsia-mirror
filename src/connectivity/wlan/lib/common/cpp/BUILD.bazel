@@ -4,14 +4,14 @@
 
 # LINT.IfChange
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 package(
     default_applicable_licenses = ["//:license"],
     default_visibility = ["//visibility:public"],
 )
 
-cc_library(
+fx_cc_library(
     name = "common",
     srcs = [
         "channel.cc",
@@ -32,16 +32,13 @@ cc_library(
         "include/wlan/common/mac_frame.h",
         "include/wlan/common/mcs_rate_lookup.h",
     ],
-    features = ["enable_zircon_asserts"],
+    build_flags = ["//build/config/fuchsia:enable_zircon_asserts"],
     includes = ["include"],
     deps = [
-        "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_cpp",
-        "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
-        "//sdk/fidl/fuchsia.wlan.mlme:fuchsia.wlan.mlme_hlcpp",
-        "//sdk/fidl/fuchsia.wlan.stats:fuchsia.wlan.stats_hlcpp",
         "//src/connectivity/wlan/drivers/lib/macaddr",
         "//zircon/system/ulib/fbl",
         "//zircon/system/ulib/zx",
+        "@fuchsia_sdk//fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
         "@fuchsia_sdk//pkg/async-cpp",
         "@fuchsia_sdk//pkg/async-loop-cpp",
         "@fuchsia_sdk//pkg/async-loop-default",

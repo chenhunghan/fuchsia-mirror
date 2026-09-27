@@ -44,7 +44,9 @@ rustc_test = macro(
     IMPORTANT: The resulting Bazel test target is *not* visible to Fuchsia test
     runners. It must be exposed via a secondary mechanism. For example using
     wrap_host_rust_test() for host build configurations, or using it in a test
-    component for Fuchsia ones.
+    component for Fuchsia ones. Note that `args` set here reach the test binary
+    under `bazel test`, but Bazel does not record them in providers, so
+    wrap_host_rust_test() cannot see them; repeat them in its `test_args`.
     """,
     implementation = _rustc_test_impl,
     inherit_attrs = rust_test,

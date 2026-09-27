@@ -1,0 +1,17 @@
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load(
+    "@rules_fuchsia//fuchsia:defs.bzl",
+    "variant_select",
+)
+load("@rules_fuchsia//fuchsia/constraints:target_compatibility.bzl", "COMPATIBILITY")
+
+cc_import(
+    name = "{{name}}",
+    hdrs = [
+        {{headers}}
+    ],
+    strip_include_prefix = "{{relative_include_dir}}",
+    static_library = variant_select({{static_lib_select}}),
+    target_compatible_with = COMPATIBILITY.FUCHSIA_CONDITION,
+    deps = [ {{deps}} ],
+)

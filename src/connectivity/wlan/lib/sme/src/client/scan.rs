@@ -523,11 +523,14 @@ mod tests {
 
     impl ScheduledScanReceiver {
         pub(crate) fn try_next(&mut self) -> Result<Option<fidl::Vmo>, mpsc::TryRecvError> {
-            let res = self.scan_results_receiver.try_next();
-            if let Ok(None) = res {
-                self.stopped_by_firmware = true;
+            match self.scan_results_receiver.try_recv() {
+                Ok(vmo) => Ok(Some(vmo)),
+                Err(mpsc::TryRecvError::Closed) => {
+                    self.stopped_by_firmware = true;
+                    Ok(None)
+                }
+                Err(e @ mpsc::TryRecvError::Empty) => Err(e),
             }
-            res
         }
     }
 

@@ -55,7 +55,7 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 		defer metrics.ChecksDuration.Track()()
 
 		projectHasLicense := make(map[string]bool)
-		projectHasReadme := make(map[string]bool)
+		projectReadmePath := make(map[string]string)
 		projectIsFirstParty := make(map[string]bool)
 
 		for cf := range in {
@@ -66,8 +66,8 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 			if _, exists := projectHasLicense[cf.ProjectRoot]; !exists {
 				projectHasLicense[cf.ProjectRoot] = false
 			}
-			if cf.HasReadme {
-				projectHasReadme[cf.ProjectRoot] = true
+			if cf.ReadmePath != "" {
+				projectReadmePath[cf.ProjectRoot] = cf.ReadmePath
 			}
 			if cf.IsFirstParty {
 				projectIsFirstParty[cf.ProjectRoot] = true
@@ -253,22 +253,20 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 				relProjRoot = filepath.ToSlash(relProjRoot)
 				if !v.isPolicyExceptionAllowed(PolicyNoLicense, relProjRoot) {
 					metrics.ValidationErrors.Inc(PolicyNoLicense)
-					targetFile := ""
-					if projectHasReadme[proj] {
-						targetFile = filepath.Join(proj, "README.fuchsia")
-					}
 					err := pipeline.ComplianceError{
 						CheckName: PolicyNoLicense,
 						Project:   proj,
-						FilePath:  targetFile,
+						FilePath:  projectReadmePath[proj],
 						Issue: fmt.Sprintf(
 							"Project has no recognized license files.\n\n"+
 								"Details:\n"+
 								"  - Project: %s\n"+
 								"  - Requirement: Every third-party project must contain a license file.\n\n"+
 								"Remediation:\n"+
-								"  Add a LICENSE file to the project, or if this project is an exception, allow it by running:\n"+
-								"    fx check-licenses policy add -bug BUG_ID AllProjectsMustHaveALicense %s\n\n"+
+								"  Add a LICENSE file to the project, or if this project legitimately has no license file:\n"+
+								"    1. Omit 'License' and 'License File' from its README.fuchsia (do not point 'License File' to a non-existent file).\n"+
+								"    2. Allow the project by running (replace BUG_ID with your tracking bug):\n"+
+								"         fx check-licenses policy add -bug BUG_ID AllProjectsMustHaveALicense %s\n\n"+
 								"Documentation:\n"+
 								"  https://fuchsia.dev/fuchsia-src/contribute/governance/policy/open-source-licensing-policies",
 							relProjRoot, relProjRoot),
@@ -285,8 +283,7 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 
 			// 5. Check: AllProjectsMustHaveAReadme
 			// Every third-party project must contain a README.fuchsia or package manifest.
-			hasReadme := projectHasReadme[proj]
-			if !hasReadme {
+			if projectReadmePath[proj] == "" {
 				relProjRoot, _ := filepath.Rel(v.FuchsiaDir, proj)
 				relProjRoot = filepath.ToSlash(relProjRoot)
 				if !v.isPolicyExceptionAllowed(PolicyNoReadme, relProjRoot) {
@@ -306,10 +303,13 @@ func (v *Validator) Run(ctx context.Context, in <-chan pipeline.ClassifiedFile) 
 								"    - Add a README.fuchsia to %s/README.fuchsia\n"+
 								"    - Or add a virtual README to %s/%s/README.fuchsia\n"+
 								"    - Or allow an exception by running:\n"+
-								"        fx check-licenses policy add -bug BUG_ID AllProjectsMustHaveAReadme %s\n\n"+
+								"        fx check-licenses policy add -bug BUG_ID AllProjectsMustHaveAReadme %s\n"+
+								"  Note: If the project does not ship with a license file, omit 'License' and 'License File'\n"+
+								"  from README.fuchsia and also run:\n"+
+								"        fx check-licenses policy add -bug BUG_ID AllProjectsMustHaveALicense %s\n\n"+
 								"Documentation:\n"+
 								"  https://fuchsia.dev/fuchsia-src/development/source_code/third-party-metadata",
-							relProjRoot, relProjRoot, virtualReadmeDir, relProjRoot, relProjRoot),
+							relProjRoot, relProjRoot, virtualReadmeDir, relProjRoot, relProjRoot, relProjRoot),
 					}
 					select {
 					case <-ctx.Done():

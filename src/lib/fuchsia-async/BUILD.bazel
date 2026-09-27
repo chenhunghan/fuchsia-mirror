@@ -48,9 +48,6 @@ rustc_library(
             "src/runtime/fuchsia/timer.rs",
         ],
         "//conditions:default": [
-            "src/handle/emulated/channel.rs",
-            "src/handle/emulated/mod.rs",
-            "src/handle/emulated/socket.rs",
             "src/net/portable/mod.rs",
             "src/net/portable/udp.rs",
             "src/runtime/portable.rs",
@@ -63,16 +60,15 @@ rustc_library(
     ],
     test_deps = [
         "//third_party/rust_crates/vendor:assert_matches",
-        "//third_party/rust_crates/vendor:futures-test",
     ] + select({
         "@platforms//os:fuchsia": [
+            "//third_party/rust_crates/vendor:futures-test",
             "//third_party/rust_crates/vendor:rand",
         ],
         "//conditions:default": [],
     }),
     with_host_unit_tests = True,
     deps = [
-        "//sdk/rust/zx-status-ext",
         "//src/lib/fuchsia-sync",
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:pin-project-lite",
@@ -81,6 +77,7 @@ rustc_library(
         "@platforms//os:fuchsia": [
             "//sdk/lib/fdio",
             "//sdk/rust/zx",
+            "//sdk/rust/zx-status-ext",
             "//third_party/rust_crates/vendor:crossbeam",
             "//third_party/rust_crates/vendor:libc",
             "//third_party/rust_crates/vendor:rustc-hash",
@@ -88,9 +85,7 @@ rustc_library(
             "//third_party/rust_crates/vendor:zerocopy",
         ],
         "//conditions:default": [
-            "//sdk/rust/zx-status",
-            "//sdk/rust/zx-types",
-            "//third_party/rust_crates/vendor:bitflags",
+            "//src/lib/fuchsia-emulated-handle",
             "//third_party/rust_crates/vendor:futures-lite",
             "//third_party/rust_crates/vendor:tokio",
         ],

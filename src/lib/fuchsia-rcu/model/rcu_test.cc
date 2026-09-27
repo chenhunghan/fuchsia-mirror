@@ -14,6 +14,10 @@
 #include "librace.h"
 #include "model-assert.h"
 
+// CDSChecker's <stdatomic.h> omits using declarations for these two symbols.
+using std::atomic_init;
+using std::atomic_uintptr_t;
+
 using Func = void (*)(void*);
 
 // RCU Implementation mimicking fuchsia-rcu
@@ -26,15 +30,18 @@ struct Callback {
 atomic_int generation;
 atomic_int read_counters[2];
 atomic_uintptr_t callback_chain;
+Callback* waiting_callbacks = nullptr;
 
-// The real implementation uses a futex for the advancer and a mutex for waiting_callbacks.
+// The real implementation uses a futex for waking the advancer and a mutex for waiting_callbacks.
 // This model uses std::mutex and std::condition_variable to simulate that behavior.
 struct State {
-  std::mutex waiting_callbacks_mtx, advancer_mtx;
-  std::condition_variable advancer_cnd;
-}* state;
+  std::mutex waiting_callbacks_mtx;
 
-Callback* pending_callbacks = nullptr;
+  // Used by rcu_wait_for_callbacks and rcu_call to simulate the advancer futex.
+  std::mutex advancer_mtx;
+  std::condition_variable advancer_cnd;
+  uint32_t work_pending;
+}* state;
 
 void my_rcu_read_lock(int* index) {
   int gen = atomic_load_explicit(&generation, memory_order_relaxed);
@@ -43,11 +50,7 @@ void my_rcu_read_lock(int* index) {
 }
 
 void my_rcu_read_unlock(int index) {
-  if (atomic_fetch_sub_explicit(&read_counters[index], 1, memory_order_seq_cst) == 1) {
-    state->advancer_mtx.lock();
-    state->advancer_mtx.unlock();
-    state->advancer_cnd.notify_all();
-  }
+  atomic_fetch_sub_explicit(&read_counters[index], 1, memory_order_seq_cst);
 }
 
 void rcu_call(Func func, void* arg) {
@@ -67,20 +70,43 @@ void rcu_call(Func func, void* arg) {
       break;
     }
   }
+
+  // Wake the advancer.
+  state->advancer_mtx.lock();
+  store_32(&state->work_pending, 1);
+  state->advancer_cnd.notify_all();
+  state->advancer_mtx.unlock();
+}
+
+bool has_pending_work() {
+  state->waiting_callbacks_mtx.lock();
+  bool has_work = (atomic_load_explicit(&callback_chain, memory_order_relaxed) != 0) ||
+                  (waiting_callbacks != nullptr);
+  state->waiting_callbacks_mtx.unlock();
+  return has_work;
+}
+
+void rcu_wait_for_callbacks() {
+  state->advancer_mtx.lock();
+  while (load_32(&state->work_pending) == 0) {
+    state->advancer_cnd.wait(state->advancer_mtx);
+  }
+  store_32(&state->work_pending, 0);
+  state->advancer_mtx.unlock();
 }
 
 void rcu_grace_period() {
   state->waiting_callbacks_mtx.lock();
 
-  Callback* ready = pending_callbacks;
+  Callback* ready = waiting_callbacks;
 
-  pending_callbacks = (Callback*)atomic_exchange_explicit(&callback_chain, 0, memory_order_acquire);
+  waiting_callbacks = (Callback*)atomic_exchange_explicit(&callback_chain, 0, memory_order_acquire);
 
   int gen = atomic_fetch_add_explicit(&generation, 1, memory_order_relaxed);
 
   state->advancer_mtx.lock();
   while (atomic_load_explicit(&read_counters[gen & 1], memory_order_acquire) > 0) {
-    state->advancer_cnd.wait(state->advancer_mtx);
+    thrd_yield();
   }
   state->advancer_mtx.unlock();
 
@@ -94,9 +120,13 @@ void rcu_grace_period() {
   }
 }
 
-void my_rcu_synchronize() {
-  rcu_grace_period();
-  rcu_grace_period();
+bool rcu_run_callbacks() {
+  if (has_pending_work()) {
+    rcu_grace_period();
+    rcu_grace_period();
+    return true;
+  }
+  return false;
 }
 
 // DirEntry test structures
@@ -133,6 +163,12 @@ void thread_writer(void* arg) {
   }
 }
 
+void thread_advancer(void* arg) {
+  rcu_wait_for_callbacks();
+  while (rcu_run_callbacks()) {
+  }
+}
+
 int user_main(int argc, char** argv) {
   state = new State;
 
@@ -141,20 +177,22 @@ int user_main(int argc, char** argv) {
   atomic_init(&read_counters[1], 0);
   atomic_init(&callback_chain, 0);
 
+  store_32(&state->work_pending, 0);
+
+  waiting_callbacks = nullptr;
+
   DirEntry* initial_p = (DirEntry*)malloc(sizeof(DirEntry));
   initial_p->alive = 1;
   atomic_init(&global_parent, (uintptr_t)initial_p);
 
-  thrd_t t1, t2;
-  thrd_create(&t1, thread_reader, nullptr);
-  thrd_create(&t2, thread_writer, nullptr);
+  thrd_t t_reader, t_writer, t_advancer;
+  thrd_create(&t_advancer, thread_advancer, nullptr);
+  thrd_create(&t_reader, thread_reader, nullptr);
+  thrd_create(&t_writer, thread_writer, nullptr);
 
-  my_rcu_synchronize();
-
-  thrd_join(t1);
-  thrd_join(t2);
-
-  my_rcu_synchronize();
+  thrd_join(t_reader);
+  thrd_join(t_writer);
+  thrd_join(t_advancer);
 
   MODEL_ASSERT(initial_p->alive == 0);
 

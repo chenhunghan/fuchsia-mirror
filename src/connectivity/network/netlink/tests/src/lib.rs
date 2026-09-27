@@ -1956,8 +1956,8 @@ async fn sock_diag_get_one<I: Ip>(name: &str, proto: i32) {
         p => panic!("unexpected payload: {:?}", p),
     }
 
-    match client.receiver.try_next() {
-        Ok(Some(payload)) => panic!("received unexpected extra message: {:?}", payload),
+    match client.receiver.try_recv() {
+        Ok(payload) => panic!("received unexpected extra message: {:?}", payload),
         _ => {}
     }
 }

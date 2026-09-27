@@ -131,7 +131,10 @@ class RunnerTest(GitWorkspaceTestCase):
             mock_reporter.on_partial_staging_conflict.assert_called_once_with(
                 ["bar.py"],
                 message="Custom error",
-                remediation_cmds=["fx format-code --files=bar.py"],
+                remediation_cmds=[
+                    "fx format-code --files=bar.py",
+                    "fx lint --files=bar.py",
+                ],
             )
             mock_reporter.finish.assert_called_once()
 
@@ -159,7 +162,10 @@ class RunnerTest(GitWorkspaceTestCase):
                     "Formatting issues in partially staged files. Auto-fix"
                     " skipped to prevent stash conflicts."
                 ),
-                remediation_cmds=["fx format-code --files=bar.py"],
+                remediation_cmds=[
+                    "fx format-code --files=bar.py",
+                    "fx lint --files=bar.py",
+                ],
             )
 
     def test_run_pre_commit_hook_partial_staging_conflict_custom_remediation(

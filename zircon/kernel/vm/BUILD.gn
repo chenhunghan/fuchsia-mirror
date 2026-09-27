@@ -56,6 +56,7 @@ source_set("vm") {
     "vm_address_region.cc",
     "vm_address_region_or_mapping.cc",
     "vm_aspace.cc",
+    "vm_aspace_ffi.cc",
     "vm_cow_pages.cc",
     "vm_cow_pages_ffi.cc",
     "vm_mapping.cc",
@@ -264,6 +265,7 @@ kernel_bindgen_crate("physmap-bindings") {
 
   notice_year = 2026
   function_allowlist = [
+    "cpp_is_physmap_phys_addr",
     "cpp_paddr_to_physmap",
     "cpp_physmap_to_paddr",
   ]
@@ -887,14 +889,15 @@ kernel_bindgen_crate("vm-object-bindings") {
     "cpp_vm_object_get_ref_counted",
     "cpp_vm_object_is_contiguous",
     "cpp_vm_object_is_stream_compatible",
+    "cpp_vm_object_lock",
     "cpp_vm_object_is_paged",
     "cpp_vm_object_is_resizable",
     "cpp_vm_object_resize",
     "cpp_vm_object_set_name",
     "cpp_vm_object_get_name",
     "cpp_vm_object_set_child_observer",
-    "cpp_vm_object_size",
     "cpp_vm_object_unpin",
+    "cpp_vm_object_size_locked",
     "cpp_vm_object_write",
     "cpp_vm_object_hint_range",
     "cpp_vm_object_get_mapping_cache_policy",
@@ -967,12 +970,14 @@ kernel_bindgen_crate("vm-object-bindings") {
     "Resizability",
     "SnapshotType",
     "SupplyOptions",
-    "VmObjectReadWriteOptions",
     "VmObject_EvictionHint",
   ]
   function_blocklist = [ "VmObject_.*" ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  var_allowlist = [ "VmObject_MAX_SIZE" ]
+  var_allowlist = [
+    "VmObjectReadWriteOptions_.*",
+    "VmObject_MAX_SIZE",
+  ]
   deps = [
     ":attribution-bindings",
     ":page-bindings",
@@ -1169,11 +1174,18 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "cpp_vm_cow_pages_can_evict",
     "cpp_vm_cow_pages_is_discardable",
     "cpp_vm_cow_pages_upgrade_from_raw",
+    "cpp_priority_changer_construct",
+    "cpp_priority_changer_destroy",
+    "cpp_priority_changer_prepare_may_not_already_be_high_priority",
+    "cpp_priority_changer_prepare_is_already_high_priority_locked",
+    "cpp_priority_changer_change_high_priority_count_locked",
+    "cpp_priority_changer_lock",
   ]
   type_allowlist = [
     "DirtyState",
     "EvictionAction",
     "PageSourceType",
+    "PriorityChanger",
     "VmCompressor",
     "VmCowPages",
     "VmCowPages_CanOverwriteSlot",
@@ -1209,6 +1221,7 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
   ]
   var_allowlist = [ "VmCowPagesOptions_.*" ]
   opaque_types = [
+    "PriorityChanger",
     "VmCompressor",
     "VmCowPages",
     "VmCowPages_DeferredOps",
@@ -1222,6 +1235,7 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "VmCowReclaimSuccess_Type",
   ]
   function_blocklist = [
+    "PriorityChanger_.*",
     "VmCompressor_.*",
     "VmCowPages_.*",
     "VmCowRange_.*",

@@ -7,26 +7,15 @@ use crate::elementary_stream::*;
 use fidl_fuchsia_media::*;
 use fuchsia_stream_processors::*;
 
-use std::collections::HashMap;
 use std::fmt;
 use thiserror::Error;
 
-type PacketIdx = u32;
-type BufferIdx = u32;
-
 /// A stream converting elementary stream chunks into input packets for a stream processor.
 pub struct InputPacketStream<I> {
-    packet_and_buffer_pairs: HashMap<PacketIdx, (BufferIdx, UsageStatus)>,
     buffer_set: BufferSet,
     stream_lifetime_ordinal: u64,
     stream: I,
     sent_eos: bool,
-}
-
-#[derive(Copy, Clone, PartialEq, Debug)]
-enum UsageStatus {
-    Free,
-    InUse,
 }
 
 #[derive(Debug, Error)]
@@ -50,38 +39,43 @@ pub enum PacketPoll {
 
 impl<'a, I: Iterator<Item = ElementaryStreamChunk>> InputPacketStream<I> {
     pub fn new(buffer_set: BufferSet, stream: I, stream_lifetime_ordinal: u64) -> Self {
-        // The official # of packets / usable packet_index values can be greater than this (for
-        // now), but we don't need to use more packets than buffers, and we know # of packets will
-        // be at least buffer_count.
-        let packets = 0..(buffer_set.buffers.len() as u32);
-        let buffers = packets.clone().rev().map(|idx| (idx, UsageStatus::Free));
-        Self {
-            packet_and_buffer_pairs: packets.zip(buffers).collect(),
-            buffer_set,
-            stream_lifetime_ordinal,
-            stream,
-            sent_eos: false,
-        }
+        Self { buffer_set, stream_lifetime_ordinal, stream, sent_eos: false }
     }
 
     pub fn add_free_packet(&mut self, packet: ValidPacketHeader) -> Result<(), Error> {
         let (_, ref mut status) = *self
+            .buffer_set
             .packet_and_buffer_pairs
             .get_mut(&packet.packet_index)
             .ok_or(Error::PacketRefersToInvalidBuffer)?;
-        *status = UsageStatus::Free;
+        *status = crate::buffer_set::UsageStatus::Free;
         Ok(())
     }
 
-    fn free_packet_and_buffer(&mut self) -> Option<(u32, u32)> {
+    pub fn all_packets_free(&self) -> bool {
+        self.buffer_set
+            .packet_and_buffer_pairs
+            .values()
+            .all(|(_, usage)| *usage == crate::buffer_set::UsageStatus::Free)
+    }
+
+    fn free_packet_and_buffer(&mut self) -> Option<(PacketIdx, BufferIdx)> {
         // This is a linear search. This may not be appropriate in prod code.
-        self.packet_and_buffer_pairs.iter_mut().find_map(|(packet, (buffer, usage))| match usage {
-            UsageStatus::Free => {
-                *usage = UsageStatus::InUse;
-                Some((*packet, *buffer))
+        self.buffer_set.packet_and_buffer_pairs.iter_mut().find_map(|(packet, (buffer, usage))| {
+            match usage {
+                crate::buffer_set::UsageStatus::Free => {
+                    *usage = crate::buffer_set::UsageStatus::InUse;
+                    Some((*packet, *buffer))
+                }
+                crate::buffer_set::UsageStatus::InUse => None,
             }
-            UsageStatus::InUse => None,
         })
+    }
+
+    fn mark_packet_free(&mut self, packet_idx: PacketIdx) {
+        if let Some((_, status)) = self.buffer_set.packet_and_buffer_pairs.get_mut(&packet_idx) {
+            *status = crate::buffer_set::UsageStatus::Free;
+        }
     }
 
     pub fn next_packet(&mut self) -> Result<PacketPoll, Error> {
@@ -95,8 +89,10 @@ impl<'a, I: Iterator<Item = ElementaryStreamChunk>> InputPacketStream<I> {
             chunk
         } else if !self.sent_eos {
             self.sent_eos = true;
+            self.mark_packet_free(packet_idx);
             return Ok(PacketPoll::Eos);
         } else {
+            self.mark_packet_free(packet_idx);
             return Ok(PacketPoll::NotReady);
         };
 

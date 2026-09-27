@@ -232,7 +232,7 @@ impl Pager {
     }
 
     fn create_pager_vmo(&self, key: u64, size: u64) -> Result<zx::Vmo, zx::Status> {
-        self.pager.create_vmo(zx::VmoOptions::RESIZABLE, &self.port, key, size)
+        self.pager.create_vmo(zx::VmoOptions::empty(), &self.port, key, size)
     }
 
     fn allocate_filesystem_id(&self) -> u32 {

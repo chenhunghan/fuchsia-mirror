@@ -258,6 +258,8 @@ pub enum UploadProgress {
     OnReady { partition: String, files: u64 },
     OnStarted { size: u64 },
     OnFinished,
+    // Note: this is the bytes written by the current operation,
+    // not total bytes written.
     OnProgress { bytes_written: u64 },
     OnError { error: anyhow::Error },
 }

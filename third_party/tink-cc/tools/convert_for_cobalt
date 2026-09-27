@@ -832,6 +832,7 @@ def main(args):
 
   targets = [
       "//tink/hybrid:config_v0",
+      "//tink/hybrid:key_gen_config_v0",
       "//tink/hybrid:hybrid_config",
       "//tink/hybrid:hpke_config",
       "//tink/hybrid:hybrid_decrypt_factory",

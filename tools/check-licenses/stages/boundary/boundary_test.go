@@ -436,6 +436,18 @@ func TestGrouper_ResolveProjectRootAndFindReadme(t *testing.T) {
 	if !grouper.BelongsToProject(srcFile, fuchsiaDir) {
 		t.Errorf("Expected 1st-party srcFile to belong to absolute fuchsiaDir")
 	}
+
+	// Case 7: Virtual README paths resolve to their logical project directory
+	virtualPrebuiltReadme := filepath.Join(fuchsiaDir, "tools", "check-licenses", "assets", "readmes", "prebuilt", "third_party", "gn_prev", "README.fuchsia")
+	expectedLogicalRoot := filepath.Join(fuchsiaDir, "prebuilt", "third_party", "gn_prev")
+	if root := grouper.ResolveProjectRoot(virtualPrebuiltReadme); root != expectedLogicalRoot {
+		t.Errorf("ResolveProjectRoot(%q) = %q, want %q", virtualPrebuiltReadme, root, expectedLogicalRoot)
+	}
+	vendorVirtualReadme := filepath.Join(fuchsiaDir, "vendor", "google", "tools", "check-licenses", "assets", "readmes", "prebuilt", "internal", "fw", "README.fuchsia")
+	expectedVendorLogicalRoot := filepath.Join(fuchsiaDir, "prebuilt", "internal", "fw")
+	if root := grouper.ResolveProjectRoot(vendorVirtualReadme); root != expectedVendorLogicalRoot {
+		t.Errorf("ResolveProjectRoot(%q) = %q, want %q", vendorVirtualReadme, root, expectedVendorLogicalRoot)
+	}
 }
 
 func TestGrouper_DartSubpackages(t *testing.T) {

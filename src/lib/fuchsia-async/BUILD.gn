@@ -30,29 +30,9 @@ fuchsia_unittest_package("fuchsia-async-tests") {
   }
 }
 
-if (is_host) {
-  rustc_binary("fuchsia-async-shutdown-test-bin") {
-    edition = "2024"
-    with_unit_tests = false
-    deps = [
-      ":fuchsia-async",
-      "//sdk/rust/zx-status",
-      "//third_party/rust_crates:futures",
-    ]
-    source_root = "src/handle/emulated/shutdown_test.rs"
-    sources = [ "src/handle/emulated/shutdown_test.rs" ]
-  }
-
-  host_test("fuchsia-async-shutdown-test") {
-    binary_path = "$root_out_dir/fuchsia-async-shutdown-test-bin"
-    deps = [ ":fuchsia-async-shutdown-test-bin" ]
-  }
-}
-
 group("tests") {
   testonly = true
   deps = [
-    ":fuchsia-async-shutdown-test($host_toolchain)",
     ":fuchsia-async-tests",
     ":fuchsia-async_test($host_toolchain)",
   ]
@@ -130,9 +110,6 @@ rustc_library("fuchsia-async") {
     ]
   } else {
     sources += [
-      "src/handle/emulated/channel.rs",
-      "src/handle/emulated/mod.rs",
-      "src/handle/emulated/socket.rs",
       "src/net/portable/mod.rs",
       "src/net/portable/udp.rs",
       "src/runtime/portable.rs",
@@ -142,17 +119,16 @@ rustc_library("fuchsia-async") {
   edition = "2024"
   proc_macro_deps = [ "//src/lib/fuchsia-async-macro" ]
   test_deps = []
-  test_deps += [
-    "//third_party/rust_crates:assert_matches",
-    "//third_party/rust_crates:futures-test",
-  ]
+  test_deps += [ "//third_party/rust_crates:assert_matches" ]
   if (is_fuchsia) {
-    test_deps += [ "//third_party/rust_crates:rand" ]
+    test_deps += [
+      "//third_party/rust_crates:futures-test",
+      "//third_party/rust_crates:rand",
+    ]
   }
   with_unit_tests = true
   deps = []
   deps += [
-    "//sdk/rust/zx-status-ext",
     "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:pin-project-lite",
@@ -162,6 +138,7 @@ rustc_library("fuchsia-async") {
     deps += [
       "//sdk/lib/fdio",
       "//sdk/rust/zx",
+      "//sdk/rust/zx-status-ext",
       "//third_party/rust_crates:crossbeam",
       "//third_party/rust_crates:libc",
       "//third_party/rust_crates:rustc-hash",
@@ -170,9 +147,7 @@ rustc_library("fuchsia-async") {
     ]
   } else {
     deps += [
-      "//sdk/rust/zx-status",
-      "//sdk/rust/zx-types",
-      "//third_party/rust_crates:bitflags",
+      "//src/lib/fuchsia-emulated-handle",
       "//third_party/rust_crates:futures-lite",
       "//third_party/rust_crates:tokio",
     ]

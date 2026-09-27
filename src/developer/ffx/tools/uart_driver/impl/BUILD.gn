@@ -13,14 +13,20 @@ if (is_host) {
     name = "uart_driver_impl"
     edition = "2024"
     with_unit_tests = true
-
-    sources = [ "src/lib.rs" ]
+    sources = [
+      "src/adapters.rs",
+      "src/lib.rs",
+    ]
 
     deps = [
+      "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain",
       "//src/developer/ffx/lib/uart_driver_api:lib",
       "//src/developer/ffx/tools/uart:lib",
       "//src/developer/lib/uart_fpl",
-      "//third_party/rust_crates:anyhow",
+      "//src/lib/fdomain/client",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia-async",
       "//third_party/rust_crates:futures",
       "//third_party/rust_crates:libc",
       "//third_party/rust_crates:log",

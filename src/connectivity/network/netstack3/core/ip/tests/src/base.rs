@@ -6,7 +6,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use assert_matches::assert_matches;
 use core::fmt::Debug;
-use core::num::{NonZeroU8, NonZeroU16};
+use core::num::{NonZeroU8, NonZeroU16, NonZeroUsize};
 use core::time::Duration;
 
 use ip_test_macro::ip_test;
@@ -54,8 +54,8 @@ use netstack3_base::testutil::{
     set_logger_for_test,
 };
 use netstack3_base::{
-    InstantContext as _, IpDeviceAddr, LocalFrameDestination, Marks, NetworkParsingContext,
-    NetworkSerializationContext,
+    InstantContext as _, IpDeviceAddr, LocalFrameDestination, Mark, MarkDomain, Marks,
+    NetworkParsingContext, NetworkSerializationContext,
 };
 use netstack3_core::device::{
     DeviceId, EthernetCreationProperties, EthernetLinkDevice, MaxEthernetFrameSize,
@@ -1544,6 +1544,7 @@ fn test_joining_leaving_ip_multicast_group<I: TestIpExt + IpExt>() {
         RecvEthernetFrameMeta {
             device_id: eth_device.clone(),
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         buf.clone(),
     );
@@ -1579,6 +1580,7 @@ fn test_joining_leaving_ip_multicast_group<I: TestIpExt + IpExt>() {
         RecvEthernetFrameMeta {
             device_id: eth_device.clone(),
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         buf.clone(),
     );
@@ -1615,6 +1617,7 @@ fn test_joining_leaving_ip_multicast_group<I: TestIpExt + IpExt>() {
         RecvEthernetFrameMeta {
             device_id: eth_device.clone(),
             parsing_context: NetworkParsingContext::default(),
+            gso_info: None,
         },
         buf,
     );
@@ -2988,4 +2991,99 @@ fn test_receive_ipv6_mapped_dst() {
 
     // The packet should be dropped due to invalid destination address.
     assert_matches!(ctx.bindings_ctx.take_ethernet_frames()[..], []);
+}
+
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+fn test_socket_ops_filter_on_ingress_marks<I: IpExt + TestIpExt>() {
+    set_logger_for_test();
+
+    let (mut ctx, _device_ids) = FakeCtxBuilder::default().build();
+    let _loopback = ctx.test_api().add_loopback();
+
+    // 1. Test UDP socket ingress filter marks over loopback.
+    // FakeBindingsCtx configures:
+    // - marks_to_keep_on_egress: &[MarkDomain::Mark1]
+    // - marks_to_set_on_ingress: &[MarkDomain::Mark2]
+    let mut udp_api = ctx.core_api().udp::<I>();
+    let receiver = udp_api.create();
+    const UDP_PORT: NonZeroU16 = NonZeroU16::new(12345).unwrap();
+    udp_api
+        .listen(&receiver, Some(ZonedAddr::Unzoned(I::LOOPBACK_ADDRESS)), Some(UDP_PORT))
+        .unwrap();
+    udp_api.set_mark(&receiver, MarkDomain::Mark1, Mark(Some(200)));
+    udp_api.set_mark(&receiver, MarkDomain::Mark2, Mark(Some(2000)));
+
+    let sender = udp_api.create();
+    udp_api.set_mark(&sender, MarkDomain::Mark1, Mark(Some(100)));
+    udp_api.set_mark(&sender, MarkDomain::Mark2, Mark(Some(1000)));
+
+    udp_api
+        .send_to(
+            &sender,
+            Some(ZonedAddr::Unzoned(I::LOOPBACK_ADDRESS)),
+            UDP_PORT.into(),
+            Buf::new(b"hello".to_vec(), ..),
+            Default::default(),
+        )
+        .unwrap();
+
+    assert!(ctx.test_api().handle_queued_rx_packets());
+    assert_matches!(
+        &ctx.bindings_ctx.take_udp_received(&receiver)[..],
+        [packet] => assert_eq!(packet, b"hello")
+    );
+
+    let udp_filter_marks =
+        core::mem::take(&mut ctx.bindings_ctx.state_mut().socket_ingress_filter_marks);
+    assert_eq!(udp_filter_marks.len(), 1);
+    let (_sock_info, marks) = &udp_filter_marks[0];
+    // Mark1 (SO_MARK) comes from the packet (kept on egress from sender).
+    assert_eq!(marks.get(MarkDomain::Mark1), &Mark(Some(100)));
+    // Mark2 (SOCKET_UID) comes from the destination socket (set on ingress from
+    // receiver).
+    assert_eq!(marks.get(MarkDomain::Mark2), &Mark(Some(2000)));
+
+    // 2. Test TCP socket ingress filter marks and accepted socket marks over
+    //    loopback.
+    let mut tcp_api = ctx.core_api().tcp::<I>();
+    let listener = tcp_api.create(Default::default());
+    const TCP_PORT: NonZeroU16 = NonZeroU16::new(54321).unwrap();
+    tcp_api.bind(&listener, Some(ZonedAddr::Unzoned(I::LOOPBACK_ADDRESS)), Some(TCP_PORT)).unwrap();
+    tcp_api.set_mark(&listener, MarkDomain::Mark1, Mark(Some(300)));
+    tcp_api.set_mark(&listener, MarkDomain::Mark2, Mark(Some(3000)));
+    tcp_api.listen(&listener, NonZeroUsize::new(1).unwrap()).unwrap();
+
+    let client = tcp_api.create(Default::default());
+    tcp_api.set_mark(&client, MarkDomain::Mark1, Mark(Some(400)));
+    tcp_api.set_mark(&client, MarkDomain::Mark2, Mark(Some(4000)));
+    tcp_api.connect(&client, Some(ZonedAddr::Unzoned(I::LOOPBACK_ADDRESS)), TCP_PORT).unwrap();
+
+    while ctx.test_api().handle_queued_rx_packets() {}
+
+    let tcp_filter_marks =
+        core::mem::take(&mut ctx.bindings_ctx.state_mut().socket_ingress_filter_marks);
+    assert_eq!(tcp_filter_marks.len(), 3);
+    // 1. SYN arriving at the listener: Mark1 from client (400), Mark2 from
+    //    listener (3000).
+    let (_syn_sock_info, syn_marks) = &tcp_filter_marks[0];
+    assert_eq!(syn_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
+    assert_eq!(syn_marks.get(MarkDomain::Mark2), &Mark(Some(3000)));
+    // 2. SYN-ACK arriving at the client: Mark1 from child socket (inherited
+    //    from SYN: 400), Mark2 from client (4000).
+    let (_syn_ack_sock_info, syn_ack_marks) = &tcp_filter_marks[1];
+    assert_eq!(syn_ack_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
+    assert_eq!(syn_ack_marks.get(MarkDomain::Mark2), &Mark(Some(4000)));
+    // 3. Final ACK arriving at the listener: Mark1 from client (400), Mark2
+    //    from child socket (3000).
+    let (_ack_sock_info, ack_marks) = &tcp_filter_marks[2];
+    assert_eq!(ack_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
+    assert_eq!(ack_marks.get(MarkDomain::Mark2), &Mark(Some(3000)));
+
+    let mut tcp_api = ctx.core_api().tcp::<I>();
+    let (accepted, _addr, _buffers) = tcp_api.accept(&listener).unwrap();
+    // Accepted socket should inherit Mark1 from the SYN packet (400) and Mark2
+    // from the listener (3000).
+    assert_eq!(tcp_api.get_mark(&accepted, MarkDomain::Mark1), Mark(Some(400)));
+    assert_eq!(tcp_api.get_mark(&accepted, MarkDomain::Mark2), Mark(Some(3000)));
 }

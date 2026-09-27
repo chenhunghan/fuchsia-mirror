@@ -4,6 +4,7 @@
 
 #include "dispatcher.h"
 #include "dispatcher_state.h"
+#include "thread_pool.h"
 
 namespace driver_runtime {
 
@@ -72,6 +73,8 @@ void Dispatcher::DumpLocked(DumpState* out_state) {
   out_state->driver_owner =
       out_state->dispatcher_to_dump ? out_state->dispatcher_to_dump->owner() : nullptr;
   out_state->name = name_.ToString();
+  out_state->options = options_;
+  out_state->scheduler_role = scheduler_role_;
   out_state->synchronized = !unsynchronized_;
   out_state->allow_sync_calls = allow_sync_calls_;
   out_state->state = state_;

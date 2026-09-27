@@ -5,6 +5,7 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_SW_CODEC_ADAPTER_SW_IMPL_H_
 #define SRC_MEDIA_CODEC_CODECS_SW_CODEC_ADAPTER_SW_IMPL_H_
 
+#include <lib/fit/defer.h>
 #include <lib/media/codec_impl/codec_adapter.h>
 #include <lib/media/codec_impl/codec_port.h>
 #include <lib/media/codec_impl/log.h>
@@ -72,35 +73,43 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
       CodecPort port,
       const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override {}
 
-  void CoreCodecStopStream() override {
-    PostSerial(input_processing_loop_.dispatcher(), [this] {
-      if (output_item_ && output_item_->buffer) {
-        // If we have an output buffer pending but not sent, return it to the pool. CodecAdapterSW
-        // expects all buffers returned after stream is stopped.
-        auto base = output_item_->buffer->base();
-        output_buffer_pool_.FreeBuffer(base);
-        output_item_->buffer = nullptr;
-      }
-    });
-
-    CodecAdapterSW::CoreCodecStopStream();
-  }
-
  protected:
   void ProcessInputLoop() override {
     std::optional<CodecInputItem> maybe_input_item;
     while ((maybe_input_item = input_queue_.WaitForElement())) {
       CodecInputItem item = std::move(maybe_input_item.value());
 
-      if (!item.is_valid()) {
+      auto return_packet = fit::defer([this, &item] {
+        if (item.is_packet()) {
+          events_->onCoreCodecInputPacketDone(item.packet());
+        }
+      });
+
+      bool is_active = [this, &item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
+        std::unique_lock<std::mutex> lock(lock_);
+        while (output_reconfig_pending_ && !item.is_format_details()) {
+          reconfig_cond_.wait(lock);
+        }
+        return stream_active_;
+      }();
+      if (!is_active) {
         return;
       }
 
       // Item is format details.
       if (item.is_format_details()) {
+        if (input_packet_seen_) {
+          events_->onCoreCodecFailCodec(
+              "Midstream format change not supported after input packet.");
+          return;
+        }
         if (ProcessFormatDetails(item.format_details()) == kShouldTerminate) {
           // A failure was reported through `events_` or the stream was stopped.
           return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(lock_);
+          output_reconfig_pending_ = true;
         }
         // CodecImpl guarantees that QueueInputFormatDetails() will happen before
         // any input packets (in CodecImpl::HandlePendingInputFormatDetails()),
@@ -118,8 +127,8 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
       } else {
         // Input is packet.
         ZX_DEBUG_ASSERT(item.is_packet());
+        input_packet_seen_ = true;
         auto status = ProcessInputPacket(item.packet());
-        events_->onCoreCodecInputPacketDone(item.packet());
         if (status == kShouldTerminate) {
           // A failure was reported through `events_` or the stream was stopped.
           return;
@@ -136,6 +145,14 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
           if (!output_item_ || output_item_->packet == nullptr) {
             std::optional<CodecPacket*> maybe_output_packet = free_output_packets_.WaitForElement();
             if (!maybe_output_packet) {
+              bool active;
+              {
+                std::lock_guard<std::mutex> lock(lock_);
+                active = stream_active_;
+              }
+              if (!active) {
+                return ChunkInputStream::kTerminate;
+              }
               // We should close the stream since we couldn't fetch output buffer.
               events_->onCoreCodecFailCodec("Could not get output packet.");
               return ChunkInputStream::kTerminate;
@@ -144,7 +161,18 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
             ZX_DEBUG_ASSERT(packet);
 
             const CodecBuffer* buffer = output_buffer_pool_.AllocateBuffer();
-            ZX_DEBUG_ASSERT(buffer);
+            if (!buffer) {
+              bool active;
+              {
+                std::lock_guard<std::mutex> lock(lock_);
+                active = stream_active_;
+              }
+              if (!active) {
+                return ChunkInputStream::kTerminate;
+              }
+              events_->onCoreCodecFailCodec("Could not get output buffer.");
+              return ChunkInputStream::kTerminate;
+            }
             auto checked_buffer_length = safemath::CheckedNumeric(buffer->size()).Cast<uint32_t>();
             ZX_DEBUG_ASSERT(checked_buffer_length.IsValid());
             ZX_DEBUG_ASSERT(checked_buffer_length.ValueOrDie() >= MinOutputBufferSize());
@@ -206,7 +234,22 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
         });
   }
 
-  void CleanUpAfterStream() override { ResetCodecParams(); }
+  void CleanUpAfterStream() override {
+    if (output_item_) {
+      if (output_item_->buffer) {
+        auto base = output_item_->buffer->base();
+        output_buffer_pool_.FreeBuffer(base);
+        output_item_->buffer = nullptr;
+      }
+      if (output_item_->packet) {
+        free_output_packets_.Push(output_item_->packet);
+        output_item_->packet = nullptr;
+      }
+      output_item_ = std::nullopt;
+    }
+    ResetCodecParams();
+    input_packet_seen_ = false;
+  }
 
   // Processes format details and initializes appropriate internal configurations based
   // on it.
@@ -257,9 +300,11 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
     return ProcessCodecPacket(nullptr);
   }
 
-  InputLoopStatus ProcessInputPacket(CodecPacket* packet) { return ProcessCodecPacket(packet); }
+  InputLoopStatus ProcessInputPacket(const CodecPacket* packet) {
+    return ProcessCodecPacket(packet);
+  }
 
-  InputLoopStatus ProcessCodecPacket(CodecPacket* packet) {
+  InputLoopStatus ProcessCodecPacket(const CodecPacket* packet) {
     ZX_DEBUG_ASSERT(codec_params_);
     ZX_DEBUG_ASSERT(chunk_input_stream_);
     ChunkInputStream::Status status;
@@ -322,6 +367,8 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
 
   // Current output item that we are currently encoding into.
   std::optional<OutputItem> output_item_;
+
+  bool input_packet_seen_ = false;
 };
 
 #endif  // SRC_MEDIA_CODEC_CODECS_SW_CODEC_ADAPTER_SW_IMPL_H_

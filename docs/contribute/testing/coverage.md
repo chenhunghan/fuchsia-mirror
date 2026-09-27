@@ -64,29 +64,29 @@ ask authors to close any testing gaps that they identify as important.
 
 ## Coverage-driven development workflow {#local_coverage_edit_loop}
 
-Note: Only component tests are supported at this time.
-
-You can view coverage from local edits in your browser or in VS Code.
-You can use this to establish a coverage-driven development workflow.
+You can view coverage from local edits in your browser or in VS Code for both
+Fuchsia component tests and host tests. You can use this to establish a
+coverage-driven development workflow.
 
 ### Prepare your test environment
 
-First let's configure the build to use the coverage variant and to include the
-examples that we'll use to demonstrate the workflow.
+First let's configure the build to use a coverage variant. Note that
+`--variant coverage` only instruments Fuchsia target binaries (`host = false`).
+To collect coverage for host tests, use `--variant host_coverage`.
 
-* {C++}
+#### Fuchsia component tests
 
-  ```posix-terminal
-  fx set core.x64 --variant coverage --with examples/hello_world --include-clippy=false
-  fx build
-  ```
+```posix-terminal
+fx set core.x64 --variant coverage --with examples/hello_world
+fx build
+```
 
-* {Rust}
+#### Host tests
 
-  ```posix-terminal
-  fx set core.x64 --variant coverage-rust --with examples/hello_world
-  fx build
-  ```
+```posix-terminal
+fx set core.x64 --variant host_coverage --with examples/hello_world
+fx build
+```
 
 Let's start an emulator which will be your target device and then start an
 update server, we'll use two terminals for this step. If you already have a
@@ -118,13 +118,13 @@ view in a browser.
 
 We execute our tests and generate an html report.
 
-* {C++}
+- {C++}
 
   ```posix-terminal
   fx coverage --html-output-dir $HOME/fx_coverage hello-world-cpp-unittests
   ```
 
-* {Rust}
+- {Rust}
 
   ```posix-terminal
   fx coverage --html-output-dir $HOME/fx_coverage hello-world-rust-tests
@@ -151,9 +151,9 @@ Start this section only after you’ve prepared your test environment.
 
 ```json
 {
-    "coverage-gutters.coverageBaseDir": ".",
-    "coverage-gutters.showLineCoverage": true,
-    "coverage-gutters.coverageFileNames": [ "lcov.info" ]
+  "coverage-gutters.coverageBaseDir": ".",
+  "coverage-gutters.showLineCoverage": true,
+  "coverage-gutters.coverageFileNames": ["lcov.info"]
 }
 ```
 
@@ -162,13 +162,13 @@ Start this section only after you’ve prepared your test environment.
 Let's execute the test and export the LCOV file, which VS Code will use to show
 coverage.
 
-* {C++}
+- {C++}
 
   ```posix-terminal
   fx coverage --lcov-output-path $FUCHSIA_DIR/lcov.info hello-world-cpp-unittests
   ```
 
-* {Rust}
+- {Rust}
 
   ```posix-terminal
   fx coverage --lcov-output-path $FUCHSIA_DIR/lcov.info hello-world-rust-tests
@@ -192,13 +192,13 @@ coverage.
 Lastly, you can use this command to monitor for filesystem changes and rerun
 the test every time you save your code.
 
-* {C++}
+- {C++}
 
   ```posix-terminal
   fx -i coverage --lcov-output-path $FUCHSIA_DIR/lcov.info hello-world-cpp-unittests
   ```
 
-* {Rust}
+- {Rust}
 
   ```posix-terminal
   fx -i coverage --lcov-output-path $FUCHSIA_DIR/lcov.info hello-world-rust-tests

@@ -6,7 +6,6 @@
 #include <lib/sysmem-version/sysmem-version.h>
 #include <lib/zbi-format/graphics.h>
 
-#include <fbl/array.h>
 #include <zxtest/zxtest.h>
 
 namespace sysmem_v1 = fuchsia_sysmem;
@@ -1053,6 +1052,16 @@ TEST(ImageFormat, BasicSizes_V2) {
   EXPECT_EQ(2, ImageFormatSurfaceWidthMinDivisor(pixel_format_and_modifier_p010));
   EXPECT_EQ(2, ImageFormatSurfaceHeightMinDivisor(pixel_format_and_modifier_p010));
   EXPECT_EQ(4, ImageFormatSampleAlignment(pixel_format_and_modifier_p010));
+
+  fuchsia_images2::ImageFormat image_format_yuy2;
+  image_format_yuy2.pixel_format() = fuchsia_images2::PixelFormat::kYuy2;
+  image_format_yuy2.size() = {kWidth, kHeight};
+  image_format_yuy2.bytes_per_row() = kStride;
+  EXPECT_EQ(kHeight * kStride, ImageFormatImageSize(image_format_yuy2));
+  auto pixel_format_and_modifier_yuy2 = PixelFormatAndModifierFromImageFormat(image_format_yuy2);
+  EXPECT_EQ(2, ImageFormatSurfaceWidthMinDivisor(pixel_format_and_modifier_yuy2));
+  EXPECT_EQ(2, ImageFormatSurfaceHeightMinDivisor(pixel_format_and_modifier_yuy2));
+  EXPECT_EQ(2, ImageFormatSampleAlignment(pixel_format_and_modifier_yuy2));
 }
 
 #if FUCHSIA_API_LEVEL_AT_LEAST(32)
@@ -1097,6 +1106,18 @@ TEST(ImageFormat, BasicSizesChecked_V2) {
   EXPECT_EQ(2, ImageFormatSurfaceWidthMinDivisor(pixel_format_and_modifier_p010));
   EXPECT_EQ(2, ImageFormatSurfaceHeightMinDivisor(pixel_format_and_modifier_p010));
   EXPECT_EQ(4, ImageFormatSampleAlignment(pixel_format_and_modifier_p010));
+
+  fuchsia_images2::ImageFormat image_format_yuy2;
+  image_format_yuy2.pixel_format() = fuchsia_images2::PixelFormat::kYuy2;
+  image_format_yuy2.size() = {kWidth, kHeight};
+  image_format_yuy2.bytes_per_row() = kStride;
+  auto size_checked_yuy2 = ImageFormatImageSizeChecked(image_format_yuy2);
+  EXPECT_TRUE(size_checked_yuy2.IsValid());
+  EXPECT_EQ(kHeight * kStride, size_checked_yuy2.ValueOrDie());
+  auto pixel_format_and_modifier_yuy2 = PixelFormatAndModifierFromImageFormat(image_format_yuy2);
+  EXPECT_EQ(2, ImageFormatSurfaceWidthMinDivisor(pixel_format_and_modifier_yuy2));
+  EXPECT_EQ(2, ImageFormatSurfaceHeightMinDivisor(pixel_format_and_modifier_yuy2));
+  EXPECT_EQ(2, ImageFormatSampleAlignment(pixel_format_and_modifier_yuy2));
 }
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(32)
 
@@ -2145,3 +2166,19 @@ TEST(ImageFormat, RoundUpWidthForCallersChecked) {
   EXPECT_EQ(24u, minimum_row_bytes.ValueOrDie());
 }
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(32)
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(30)
+TEST(ImageFormat, IsNonTiledSinglePlaneTest) {
+  PixelFormatAndModifier p010(fuchsia_images2::PixelFormat::kP010,
+                              fuchsia_images2::PixelFormatModifier::kLinear);
+  EXPECT_FALSE(ImageFormatIsNonTiledSinglePlane(p010));
+
+  PixelFormatAndModifier yuy2(fuchsia_images2::PixelFormat::kYuy2,
+                              fuchsia_images2::PixelFormatModifier::kLinear);
+  EXPECT_TRUE(ImageFormatIsNonTiledSinglePlane(yuy2));
+
+  PixelFormatAndModifier bgra32(fuchsia_images2::PixelFormat::kB8G8R8A8,
+                                fuchsia_images2::PixelFormatModifier::kLinear);
+  EXPECT_TRUE(ImageFormatIsNonTiledSinglePlane(bgra32));
+}
+#endif  // FUCHSIA_API_LEVEL_AT_LEAST(30)

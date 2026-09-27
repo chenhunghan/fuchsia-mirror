@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 {
     include: [
-        "//src/lib/fuchsia-hyper/hyper.shard.cml",
         "//src/sys/test_runners/rust/default.shard.cml",
         "//src/sys/test_runners/tmp_storage.shard.cml",
         "inspect/client.shard.cml",
@@ -15,7 +14,9 @@
     use: [
         {
             protocol: [
+                "fuchsia.net.http.Loader",
                 "fuchsia.net.routes.State",
+                "fuchsia.posix.socket.Provider",
 
                 // TODO(https://fxbug.dev/389134835): Remove the initiator
                 // capability.
@@ -31,12 +32,6 @@
             rights: [ "r*" ],
             path: "/config/data",
             subdir: "omaha-client-fuchsia-tests",
-        },
-        {
-            directory: "root-ssl-certificates",
-            from: "parent",
-            rights: [ "r*" ],
-            path: "/config/ssl",
         },
     ],
 }

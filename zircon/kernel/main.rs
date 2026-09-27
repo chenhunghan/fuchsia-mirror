@@ -38,8 +38,12 @@ pub mod kernel;
 #[path = "lib/cbuf/src/mod.rs"]
 pub mod cbuf;
 
+#[cfg(console_enabled)]
 #[path = "lib/console/mod.rs"]
-pub mod console_rust;
+pub mod console;
+
+#[cfg(not(console_enabled))]
+use console_env as _;
 
 #[path = "lib/counters/src/lib.rs"]
 pub mod counters;

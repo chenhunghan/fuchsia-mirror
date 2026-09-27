@@ -28,7 +28,7 @@ class JobScheduler : public TimeoutSource {
     virtual magma::PlatformPort* GetPlatformPort() { return nullptr; }
     virtual void UpdateGpuActive(bool active, bool has_pending_work) {}
     virtual bool IsInProtectedMode() = 0;
-    virtual void EnterProtectedMode() = 0;
+    virtual bool EnterProtectedMode() = 0;
     virtual bool ExitProtectedMode() = 0;
     virtual void OutputHangMessage(bool hardware_hang) = 0;
     virtual void PowerOnGpuForRunnableAtoms() = 0;

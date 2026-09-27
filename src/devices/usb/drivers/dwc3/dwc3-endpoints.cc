@@ -113,23 +113,47 @@ void Dwc3::EpServer::FlushCancelCompleters(zx_status_t status) {
 
 void Dwc3::EpServer::CancelAll(zx_status_t reason) {
   TRACE_DURATION("dwc3", "Dwc3::EpServer::CancelAll", "ep_num", uep_->ep.ep_num, "reason", reason);
-  fdf::debug("Dwc3::EpServer::CancelAll ep {} reason {} reqs = ({}, {}), controller={}",
-             uep_->ep.ep_num, zx_status_get_string(reason), uep_->server->active_reqs.size(),
-             uep_->server->queued_reqs.size(), dwc3_->controller_started_);
+  fdf::debug(
+      "Dwc3::EpServer::CancelAll ep {} reason {} reqs = ({}, {}), controller={}, power_on={}",
+      uep_->ep.ep_num, zx_status_get_string(reason), uep_->server->active_reqs.size(),
+      uep_->server->queued_reqs.size(), dwc3_->controller_started_, dwc3_->power_on_);
 
-  // Likely performing a full reset. We can't stop any ongoing transfers and
-  // assume everything is back to original state.
-  if (!dwc3_->controller_started_) {
-    for (; !active_reqs.empty(); active_reqs.pop()) {
-      RequestComplete(reason, 0, std::move(active_reqs.front().request), /*send_now=*/false);
+  // Emergency safety net fallback: if the controller is inactive or unpowered, we cannot issue
+  // CmdEpEndTransfer commands to hardware. Drain active and queued requests directly in software
+  // to prevent upper layers from deadlocking while waiting for hardware completions that can never
+  // fire.
+  if (!dwc3_->is_active()) {
+    if (!active_reqs.empty() || !queued_reqs.empty()) {
+      fdf::error(
+          "Dwc3::EpServer::CancelAll ep {}: Controller inactive (power_on={}, controller_started={}); "
+          "draining {} active and {} queued requests via emergency fallback without hardware End Transfer",
+          uep_->ep.ep_num, dwc3_->power_on_, dwc3_->controller_started_, active_reqs.size(),
+          queued_reqs.size());
     }
-    for (; !queued_reqs.empty(); queued_reqs.pop()) {
+
+    size_t pending_trbs = 0;
+    while (!active_reqs.empty()) {
+      auto& request_state = active_reqs.front();
+      pending_trbs += request_state.total_trbs - request_state.completed_trbs;
+      RequestComplete(reason, 0, std::move(request_state.request), /*send_now=*/false);
+      active_reqs.pop();
+    }
+    while (!queued_reqs.empty()) {
       RequestComplete(reason, 0, std::move(queued_reqs.front()), /*send_now=*/false);
+      queued_reqs.pop();
     }
-    SendCompletions();
+
+    size_t active_count = uep_->fifo.GetActiveCount();
+    ZX_DEBUG_ASSERT_MSG(active_count == pending_trbs, "%zu == %zu", active_count, pending_trbs);
+
+    if (uep_->fifo.TotalSlots() > 0) {
+      uep_->fifo.Reset();
+    }
+    pending_cancel_reason.reset();
     uep_->ep.transfer_state = Endpoint::TransferState::kIdle;
     uep_->ep.rsrc_id = Endpoint::kInvalidResourceId;
-    FlushCancelCompleters(reason);
+    SendCompletions();
+    FlushCancelCompleters(ZX_OK);
     return;
   }
 

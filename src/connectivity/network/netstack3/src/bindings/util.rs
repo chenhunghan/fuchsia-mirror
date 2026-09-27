@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::convert::Infallible as Never;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::num::{NonZeroU16, NonZeroU64};
@@ -194,17 +193,17 @@ pub(crate) trait TryIntoFidl<F>: Sized {
 
 /// A core type which can be infallibly converted into the FIDL type `F`.
 ///
-/// `IntoFidl<F>` extends [`TryIntoFidl<F, Error = Never>`], and provides the
+/// `IntoFidl<F>` extends [`TryIntoFidl<F, Error = !>`], and provides the
 /// infallible conversion method [`into_fidl`].
 ///
-/// [`TryIntoFidl<F, Error = Never>`]: TryIntoFidl
+/// [`TryIntoFidl<F, Error = !>`]: TryIntoFidl
 /// [`into_fidl`]: IntoFidl::into_fidl
 pub(crate) trait IntoFidl<F> {
     /// Infallibly convert `self` into an instance of `F`.
     fn into_fidl(self) -> F;
 }
 
-impl<C: TryIntoFidl<F, Error = Never>, F> IntoFidl<F> for C {
+impl<C: TryIntoFidl<F, Error = !>, F> IntoFidl<F> for C {
     fn into_fidl(self) -> F {
         match self.try_into_fidl() {
             Ok(f) => f,
@@ -272,7 +271,7 @@ impl<F, C: TryFromFidl<F>> TryIntoCore<C> for F {
 /// A FIDL type which can be infallibly converted into the core type `C`.
 ///
 /// `IntoCore<C>` extends [`TryIntoCore<C>`] where `<C as TryFromFidl<_>>::Error
-/// = Never`, and provides the infallible conversion method [`into_core`].
+/// = !`, and provides the infallible conversion method [`into_core`].
 ///
 /// [`TryIntoCore<C>`]: TryIntoCore
 /// [`into_core`]: IntoCore::into_core
@@ -281,7 +280,7 @@ pub(crate) trait IntoCore<C> {
     fn into_core(self) -> C;
 }
 
-impl<F, C: TryFromFidl<F, Error = Never>> IntoCore<C> for F {
+impl<F, C: TryFromFidl<F, Error = !>> IntoCore<C> for F {
     fn into_core(self) -> C {
         match self.try_into_core() {
             Ok(c) => c,
@@ -289,50 +288,50 @@ impl<F, C: TryFromFidl<F, Error = Never>> IntoCore<C> for F {
     }
 }
 
-impl<T> TryIntoFidl<T> for Never {
-    type Error = Never;
+impl<T> TryIntoFidl<T> for ! {
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<T, Never> {
+    fn try_into_fidl(self) -> Result<T, !> {
         match self {}
     }
 }
 
 impl TryIntoFidl<fidl_net_stack::Error> for SubnetError {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, !> {
         Ok(fidl_net_stack::Error::InvalidArgs)
     }
 }
 
 impl TryIntoFidl<fidl_net_stack::Error> for AddrSubnetError {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, !> {
         Ok(fidl_net_stack::Error::InvalidArgs)
     }
 }
 
 impl TryIntoFidl<fidl_net_stack::Error> for ExistsError {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, !> {
         Ok(fidl_net_stack::Error::AlreadyExists)
     }
 }
 
 impl TryIntoFidl<fidl_net_stack::Error> for NotFoundError {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, !> {
         Ok(fidl_net_stack::Error::NotFound)
     }
 }
 
 impl TryIntoFidl<fidl_net_stack::Error> for AddRouteError {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, !> {
         match self {
             AddRouteError::AlreadyExists => Ok(fidl_net_stack::Error::AlreadyExists),
             AddRouteError::GatewayNotNeighbor => Ok(fidl_net_stack::Error::BadState),
@@ -341,9 +340,9 @@ impl TryIntoFidl<fidl_net_stack::Error> for AddRouteError {
 }
 
 impl TryFromFidl<fidl_net::IpAddress> for IpAddr {
-    type Error = Never;
+    type Error = !;
 
-    fn try_from_fidl(addr: fidl_net::IpAddress) -> Result<IpAddr, Never> {
+    fn try_from_fidl(addr: fidl_net::IpAddress) -> Result<IpAddr, !> {
         match addr {
             fidl_net::IpAddress::Ipv4(v4) => Ok(IpAddr::V4(v4.into_core())),
             fidl_net::IpAddress::Ipv6(v6) => Ok(IpAddr::V6(v6.into_core())),
@@ -352,9 +351,9 @@ impl TryFromFidl<fidl_net::IpAddress> for IpAddr {
 }
 
 impl TryIntoFidl<fidl_net::IpAddress> for IpAddr {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net::IpAddress, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net::IpAddress, !> {
         match self {
             IpAddr::V4(addr) => Ok(fidl_net::IpAddress::Ipv4(addr.into_fidl())),
             IpAddr::V6(addr) => Ok(fidl_net::IpAddress::Ipv6(addr.into_fidl())),
@@ -363,49 +362,49 @@ impl TryIntoFidl<fidl_net::IpAddress> for IpAddr {
 }
 
 impl TryFromFidl<fidl_net::Ipv4Address> for Ipv4Addr {
-    type Error = Never;
+    type Error = !;
 
-    fn try_from_fidl(addr: fidl_net::Ipv4Address) -> Result<Ipv4Addr, Never> {
+    fn try_from_fidl(addr: fidl_net::Ipv4Address) -> Result<Ipv4Addr, !> {
         Ok(addr.addr.into())
     }
 }
 
 impl TryIntoFidl<fidl_net::Ipv4Address> for Ipv4Addr {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net::Ipv4Address, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net::Ipv4Address, !> {
         Ok(fidl_net::Ipv4Address { addr: self.ipv4_bytes() })
     }
 }
 
 impl TryFromFidl<fidl_net::Ipv6Address> for Ipv6Addr {
-    type Error = Never;
+    type Error = !;
 
-    fn try_from_fidl(addr: fidl_net::Ipv6Address) -> Result<Ipv6Addr, Never> {
+    fn try_from_fidl(addr: fidl_net::Ipv6Address) -> Result<Ipv6Addr, !> {
         Ok(addr.addr.into())
     }
 }
 
 impl TryIntoFidl<fidl_net::Ipv6Address> for Ipv6Addr {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net::Ipv6Address, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net::Ipv6Address, !> {
         Ok(fidl_net::Ipv6Address { addr: self.ipv6_bytes() })
     }
 }
 
 impl TryFromFidl<fidl_net::MacAddress> for Mac {
-    type Error = Never;
+    type Error = !;
 
-    fn try_from_fidl(mac: fidl_net::MacAddress) -> Result<Mac, Never> {
+    fn try_from_fidl(mac: fidl_net::MacAddress) -> Result<Mac, !> {
         Ok(Mac::new(mac.octets))
     }
 }
 
 impl TryIntoFidl<fidl_net::MacAddress> for Mac {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net::MacAddress, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net::MacAddress, !> {
         Ok(fidl_net::MacAddress { octets: self.bytes() })
     }
 }
@@ -418,9 +417,9 @@ pub(crate) struct AddrClassError;
 // TODO(joshlf): Introduce a separate variant to `fidl_net_stack::Error` for
 // `AddrClassError`?
 impl TryIntoFidl<fidl_net_stack::Error> for AddrClassError {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net_stack::Error, !> {
         Ok(fidl_net_stack::Error::InvalidArgs)
     }
 }
@@ -434,9 +433,9 @@ impl TryFromFidl<fidl_net::IpAddress> for SpecifiedAddr<IpAddr> {
 }
 
 impl TryIntoFidl<fidl_net::IpAddress> for SpecifiedAddr<IpAddr> {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net::IpAddress, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net::IpAddress, !> {
         Ok(self.get().into_fidl())
     }
 }
@@ -450,9 +449,9 @@ impl TryFromFidl<fidl_net::Subnet> for AddrSubnetEither {
 }
 
 impl TryIntoFidl<fidl_net::Subnet> for AddrSubnetEither {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net::Subnet, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net::Subnet, !> {
         let (addr, prefix) = self.addr_prefix();
         Ok(fidl_net::Subnet { addr: addr.into_fidl(), prefix_len: prefix })
     }
@@ -467,16 +466,16 @@ impl TryFromFidl<fidl_net::Subnet> for SubnetEither {
 }
 
 impl TryIntoFidl<fidl_net::Subnet> for SubnetEither {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fidl_net::Subnet, Never> {
+    fn try_into_fidl(self) -> Result<fidl_net::Subnet, !> {
         let (net, prefix) = self.net_prefix();
         Ok(fidl_net::Subnet { addr: net.into_fidl(), prefix_len: prefix })
     }
 }
 
 impl TryFromFidl<fposix_socket::OptionalUint8> for Option<u8> {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fposix_socket::OptionalUint8) -> Result<Self, Self::Error> {
         Ok(match fidl {
@@ -487,7 +486,7 @@ impl TryFromFidl<fposix_socket::OptionalUint8> for Option<u8> {
 }
 
 impl TryIntoFidl<fposix_socket::OptionalUint8> for Option<u8> {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fposix_socket::OptionalUint8, Self::Error> {
         Ok(self
@@ -497,9 +496,9 @@ impl TryIntoFidl<fposix_socket::OptionalUint8> for Option<u8> {
 }
 
 impl TryIntoFidl<fnet_interfaces::AddressAssignmentState> for netstack3_core::ip::IpAddressState {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl(self) -> Result<fnet_interfaces::AddressAssignmentState, Never> {
+    fn try_into_fidl(self) -> Result<fnet_interfaces::AddressAssignmentState, !> {
         match self {
             netstack3_core::ip::IpAddressState::Unavailable => {
                 Ok(fnet_interfaces::AddressAssignmentState::Unavailable)
@@ -519,7 +518,7 @@ impl<A: IpAddress> TryIntoFidl<<A::Version as IpSockAddrExt>::SocketAddress>
 where
     A::Version: IpSockAddrExt,
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<<A::Version as IpSockAddrExt>::SocketAddress, Self::Error> {
         let (addr, port) = self;
@@ -528,7 +527,7 @@ where
 }
 
 impl TryIntoFidl<fposix_socket::OptionalUint32> for Option<u32> {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fposix_socket::OptionalUint32, Self::Error> {
         Ok(match self {
@@ -539,7 +538,7 @@ impl TryIntoFidl<fposix_socket::OptionalUint32> for Option<u32> {
 }
 
 impl TryFromFidl<fposix_socket::OptionalUint32> for Option<u32> {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fposix_socket::OptionalUint32) -> Result<Self, Self::Error> {
         Ok(match fidl {
@@ -680,7 +679,7 @@ pub(crate) trait IntoFidlWithContext<F> {
     fn into_fidl_with_ctx<X: ConversionContext>(self, ctx: &X) -> F;
 }
 
-impl<C: TryIntoFidlWithContext<F, Error = Never>, F> IntoFidlWithContext<F> for C {
+impl<C: TryIntoFidlWithContext<F, Error = !>, F> IntoFidlWithContext<F> for C {
     fn into_fidl_with_ctx<X: ConversionContext>(self, ctx: &X) -> F {
         match self.try_into_fidl_with_ctx(ctx) {
             Ok(f) => f,
@@ -889,9 +888,9 @@ impl TryFromFidlWithContext<BindingId> for DeviceId<BindingsCtx> {
 }
 
 impl TryIntoFidlWithContext<BindingId> for DeviceId<BindingsCtx> {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl_with_ctx<C: ConversionContext>(self, ctx: &C) -> Result<BindingId, Never> {
+    fn try_into_fidl_with_ctx<C: ConversionContext>(self, ctx: &C) -> Result<BindingId, !> {
         Ok(ctx.get_binding_id(self))
     }
 }
@@ -916,9 +915,9 @@ impl TryIntoFidlWithContext<BindingId> for WeakDeviceId<BindingsCtx> {
 pub(crate) struct AllowBindingIdFromWeak(pub(crate) WeakDeviceId<BindingsCtx>);
 
 impl TryIntoFidlWithContext<BindingId> for AllowBindingIdFromWeak {
-    type Error = Never;
+    type Error = !;
 
-    fn try_into_fidl_with_ctx<C: ConversionContext>(self, _ctx: &C) -> Result<BindingId, Never> {
+    fn try_into_fidl_with_ctx<C: ConversionContext>(self, _ctx: &C) -> Result<BindingId, !> {
         let Self(weak) = self;
         Ok(weak.bindings_id().id)
     }
@@ -1060,12 +1059,12 @@ impl<I: Ip> TryFromFidlWithContext<fnet_routes_ext::Route<I>>
 impl TryIntoFidlWithContext<fidl_net_stack::ForwardingEntry>
     for EntryEither<DeviceId<BindingsCtx>>
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl_with_ctx<C: ConversionContext>(
         self,
         ctx: &C,
-    ) -> Result<fidl_net_stack::ForwardingEntry, Never> {
+    ) -> Result<fidl_net_stack::ForwardingEntry, !> {
         let (subnet, device, gateway, metric): (
             SubnetEither,
             _,
@@ -1097,12 +1096,12 @@ impl TryIntoFidlWithContext<fidl_net_stack::ForwardingEntry>
 impl<I: Ip> TryIntoFidlWithContext<fnet_routes_ext::Route<I>>
     for Entry<I::Addr, DeviceId<BindingsCtx>>
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl_with_ctx<C: ConversionContext>(
         self,
         ctx: &C,
-    ) -> Result<fnet_routes_ext::Route<I>, Never> {
+    ) -> Result<fnet_routes_ext::Route<I>, !> {
         let Entry { subnet, device, gateway, metric, route_preference: _ } = self;
 
         let device_id: BindingId = device.try_into_fidl_with_ctx(ctx)?;
@@ -1129,12 +1128,12 @@ pub(crate) struct EntryAndTableId<I: Ip> {
 }
 
 impl<I: Ip> TryIntoFidlWithContext<fnet_routes_ext::InstalledRoute<I>> for EntryAndTableId<I> {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl_with_ctx<C: ConversionContext>(
         self,
         ctx: &C,
-    ) -> Result<fnet_routes_ext::InstalledRoute<I>, Never> {
+    ) -> Result<fnet_routes_ext::InstalledRoute<I>, !> {
         let EntryAndTableId {
             entry: Entry { subnet, device, gateway, metric, route_preference: _ },
             table_id,
@@ -1170,7 +1169,7 @@ impl<I: Ip> TryIntoFidlWithContext<fnet_routes_ext::InstalledRoute<I>> for Entry
 }
 
 impl TryFromFidl<fnet_ext::Marks> for netstack3_core::ip::Marks {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(marks: fnet_ext::Marks) -> Result<Self, Self::Error> {
         Ok(Self::new(marks.into_iter().map(|(domain, mark)| (domain.into_core(), mark))))
@@ -1178,7 +1177,7 @@ impl TryFromFidl<fnet_ext::Marks> for netstack3_core::ip::Marks {
 }
 
 impl TryIntoFidl<fidl_net::Marks> for netstack3_core::ip::Marks {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fidl_net::Marks, Self::Error> {
         let netstack3_core::ip::Mark(mark_1) = *self.get(MarkDomain::Mark1);
@@ -1189,7 +1188,7 @@ impl TryIntoFidl<fidl_net::Marks> for netstack3_core::ip::Marks {
 }
 
 impl TryIntoFidl<fnet_ext::Marks> for netstack3_core::ip::Marks {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fnet_ext::Marks, Self::Error> {
         let netstack3_core::ip::Mark(mark_1) = *self.get(MarkDomain::Mark1);
@@ -1200,7 +1199,7 @@ impl TryIntoFidl<fnet_ext::Marks> for netstack3_core::ip::Marks {
 }
 
 impl TryFromFidl<fnet_routes_ext::ResolveOptions> for netstack3_core::routes::RouteResolveOptions {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(options: fnet_routes_ext::ResolveOptions) -> Result<Self, Self::Error> {
         let fnet_routes_ext::ResolveOptions { marks } = options;
@@ -1292,7 +1291,7 @@ pub const fn fidl_mark_domain_to_core(
 }
 
 impl TryFromFidl<fidl_net::MarkDomain> for netstack3_core::ip::MarkDomain {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fidl_net::MarkDomain) -> Result<Self, Self::Error> {
         Ok(fidl_mark_domain_to_core(fidl))
@@ -1309,7 +1308,7 @@ impl IntoFidl<fidl_net::MarkDomain> for netstack3_core::ip::MarkDomain {
 }
 
 impl TryFromFidl<fposix_socket::OptionalUint32> for netstack3_core::ip::Mark {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fposix_socket::OptionalUint32) -> Result<Self, Self::Error> {
         Ok(match fidl {
@@ -1451,7 +1450,7 @@ impl TryIntoFidl<fnet_interfaces_ext::PreferredLifetimeInfo>
 impl TryFromFidl<fnet_interfaces_ext::PreferredLifetimeInfo>
     for PreferredLifetime<zx::MonotonicInstant>
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(
         fidl: fnet_interfaces_ext::PreferredLifetimeInfo,

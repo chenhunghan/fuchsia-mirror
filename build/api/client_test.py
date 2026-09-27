@@ -1299,6 +1299,44 @@ default $:default
             "//packages:foo(//toolchain:device),device\n",
         )
 
+        # Testing --format=json when build is unaffected.
+        self.assert_output(
+            [
+                "affected_tests",
+                "--files-list",
+                self.write_list_file(["src/other.h"]),
+                "--format=json",
+            ],
+            json.dumps(
+                {"test_targets": [], "build_not_affected": True},
+                indent=2,
+            )
+            + "\n",
+        )
+
+        # Testing --format=json when tests are affected.
+        self.assert_output(
+            [
+                "affected_tests",
+                "--files-list",
+                self.write_list_file(["src/host_test.cc"]),
+                "--format=json",
+            ],
+            json.dumps(
+                {
+                    "test_targets": [
+                        {
+                            "label": "//src:host_test(//toolchain:host)",
+                            "env": "host",
+                        }
+                    ],
+                    "build_not_affected": False,
+                },
+                indent=2,
+            )
+            + "\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

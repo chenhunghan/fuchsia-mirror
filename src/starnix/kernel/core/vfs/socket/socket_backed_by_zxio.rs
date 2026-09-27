@@ -375,8 +375,7 @@ impl ZxioBackedSocket {
             self.zxio.clone_handle().map_err(|_| errno!(EIO))?.into(),
         )
         .into_sync_proxy();
-        let code = program.to_code();
-        let code: &[u64] = zerocopy::transmute_ref!(code.as_slice());
+        let code: &[u64] = zerocopy::transmute_ref!(program.code());
         let result = packet_socket.attach_bpf_filter_unsafe(code, zx::MonotonicInstant::INFINITE);
         result.map_err(|_: fidl::Error| errno!(EIO))?.map_err(|e| {
             Errno::with_context(

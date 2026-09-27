@@ -93,10 +93,10 @@ crc = "3.4.0"
 crc32fast = "1.5.0"
 criterion = { version = "0.8.2", default-features = false, features = ["csv_output", "cargo_bench_support"] }
 crossbeam = "0.8.4"
-crossbeam-utils = "0.8.21"
+crossbeam-utils = "0.8.23"
 csv = "1.4.0"
 darling = "0.23.0"
-data-encoding = "2.11.0"
+data-encoding = "2.11.1"
 derivative = { version = "2.2.0", features = ["use_core"] }
 derive_builder = "0.20.2"
 difference = "2.0.0"
@@ -104,22 +104,22 @@ digest = "0.11.3"
 downcast-rs = "2.0.2"
 dyn-clone = "1.0.20"
 ecb = "0.2"
-either = "1.15.0"
+either = "1.18.0"
 enumn = "0.1.14"
 eui48 = { version = "1.1.0", default-features = false, features = ["serde", "disp_hexstring"] }
 event-listener = "5.4.2"
 fatfs = "0.3.6"
 figment = "0.10.19"
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
-flyweights = { version = "0.1.5", features = ["json_schema", "serde"] }
+flyweights = { version = "0.1.5", features = ["serde"] }
 foreign-types = "0.3.1"
 fragile = "=2.0.1"
-futures = "=0.3.31"
-futures-executor = "=0.3.31"
-futures-io = "=0.3.31"
+futures = "=0.3.34"
+futures-executor = "=0.3.34"
+futures-io = "=0.3.34"
 futures-lite = "2.6.1"
-futures-test = "=0.3.31"
-futures-util = "=0.3.31"
+futures-test = "=0.3.34"
+futures-util = "=0.3.34"
 glob = "0.3.3"
 googletest = "0.14.2"
 gpt = "4.1.0"
@@ -153,7 +153,7 @@ libm = "0.2.16"
 linked-hash-map = "0.5.6"
 lock_api = { version = "0.4.14", features = ["serde"] }
 log = { version = "0.4.29", features = ["kv", "std"] }
-lru-cache = "0.1.2"
+lru = "0.18.5"
 macro_rules_attribute = "0.2.2"
 maplit = "1.0"
 maybe-owned = "0.3.4"
@@ -161,16 +161,16 @@ md-5 = "0.11.0"
 memchr = "2.8.3"
 memoffset = "0.9.1"
 mockall = "0.15"
-munge = "0.4.4"
+munge = "0.4.7"
 nix = { version = "0.31.3", features = ["feature", "fs", "hostname", "net", "process", "signal", "user"] }
 nom = { version = "8.0.0", default-features = false, features = ["std"] }
 nom-language = "0.1.0"
 nom_locate = "5.0.0"
 num = { version = "0.4.3", features = ["rand"] }
-num-derive = "0.4.2"
+num-derive = "0.5.1"
 num-traits = "0.2.19"
 omaha_client = "0.4.1"
-once_cell = "1.21.3"
+once_cell = "1.21.4"
 p256 = { version = "0.14.0", features = ["ecdh", "pem", "serde"] }
 p256-0_11 = { package = "p256", version = "0.11.1", features = ["ecdh", "pem", "serde"] }
 paste = "1.0.15"
@@ -202,7 +202,7 @@ range-alloc = "0.1.5"
 rapidhash = { version = "1.4.0", features = ["unsafe"] }
 rayon = "1.10.0"
 ref-cast = "1.0.26"
-regex = "1.12.3"
+regex = "1.13.1"
 regex-lite = "0.1.9"
 ring = "0.17.14"
 rkyv = { version = "0.8.18", features = ["little_endian", "unaligned", "pointer_width_32"] }
@@ -224,13 +224,13 @@ sapphire-hci = "0.1.0"
 sapphire-host = "0.1.0"
 sapphire-rpc-macro = "0.1.0"
 sapphire-sync = { version = "0.1.0", features = ["std"] }
-schemars = { version = "0.8.22", features = ["chrono", "preserve_order"] }
+schemars = { version = "1.2.2", features = ["chrono04", "preserve_order"] }
 scopeguard = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_derive = "1.0.229"
 serde_json = "1.0.151"
 serde_json5 = "0.2.1"
-serde_repr = "0.1.20"
+serde_repr = "0.1.21"
 sha1 = "0.11.0"
 sha1-0_10 = { package = "sha1", version = "0.10.7" }
 sha2 = "0.11.0"
@@ -238,7 +238,7 @@ sha2-0_10 = { package = "sha2", version = "0.10.9" }
 # TODO(https://fxbug.dev/385403698): add a visibility allowlist to prevent unintended usage when
 # targetting fuchsia.
 simplelog = { version = "0.10.2", default-features = false }
-siphasher = "1.0.2"
+siphasher = "1.0.3"
 slab = "0.4.12"
 smallvec = {version= "1.15.2", features = ["const_generics", "const_new", "union"]}
 socket2 = { version = "=0.6.4", features = ["all"] }
@@ -254,7 +254,7 @@ test-case = "3.3.1"
 textwrap = { version = "0.16.2", default-features = false }
 thiserror = "2.0.20"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-toml = "1.1.2"
+toml = "1.1.6"
 toml_edit = "0.24.0"
 tower-service = "0.3"
 tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes", "log"] }
@@ -333,7 +333,7 @@ unicode-normalization = "0.1"
 vk-sys = "0.7.0"
 x509-cert = "0.3.0"
 x509-cert-0_2_5 = { package = "x509-cert", version = "0.2.5" }
-zeroize = "1.8.1"
+zeroize = "1.9.0"
 # keep-sorted end
 
 # Host-side only dependencies
@@ -360,7 +360,7 @@ num_cpus = "1.17.0"
 parking_lot = "0.12.5"
 parking_lot_core = "0.9.12"
 petgraph = { version = "0.6.2" }
-proc-macro2 = { version = "1.0.106", features = ["span-locations"] }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 pulldown-cmark = { version = "0.13.4", features = ["serde"] }
 quote = "1.0.47"
 rustfix = "0.9.7"
@@ -645,7 +645,7 @@ env_vars = [
   "CARGO_PKG_VERSION_PATCH=2",
 ]
 
-[gn.package.crossbeam-utils."0.8.21"]
+[gn.package.crossbeam-utils."0.8.23"]
 rustflags = []
 
 [gn.package.crunchy."0.2.3"]
@@ -703,23 +703,6 @@ tests = true
 
 [gn.package.figment."0.10.19"]
 rustflags = []
-
-[gn.package.futures-channel."0.3.31"]
-env_vars = [ "CARGO_PKG_NAME=futures-channel" ]
-
-[gn.package.futures-core."0.3.32"]
-env_vars = [ "CARGO_PKG_NAME=futures-core" ]
-
-[gn.package.futures-macro."0.3.31"]
-env_vars = [ "CARGO_PKG_NAME=futures-macro" ]
-rustflags = [ "--cfg=fn_like_proc_macro" ]
-
-[gn.package.futures-task."0.3.31"]
-env_vars = [ "CARGO_PKG_NAME=futures-task" ]
-
-[gn.package.futures-util."0.3.31"]
-env_vars = [ "CARGO_PKG_NAME=futures-util" ]
-rustflags = [ "--cfg=fn_like_proc_macro" ]
 
 # generator has not gone through a thorough safety review yet, and needs to be
 # re-reviewed before it can be used outside of tests.
@@ -953,7 +936,7 @@ rustflags = [
   "--cfg=has_total_cmp",
 ]
 
-[gn.package.once_cell."1.21.3"]
+[gn.package.once_cell."1.21.4"]
 group_visibility = { import = "//third_party/rust_crates/visibility.gni", variable = "once_cell_visibility" }
 
 [gn.package.openssl."0.10.81"]
@@ -1004,7 +987,7 @@ groups = [
 rustflags = []
 
 # cargo-gnaw suggested "--cfg=proc_macro_span" as well but proc_macro_span is still an unstable feature.
-[gn.package.proc-macro2."1.0.106"]
+[gn.package.proc-macro2."1.0.107"]
 rustflags = ["--cfg=span_locations", "--cfg=wrap_proc_macro"]
 
 [gn.package.pulldown-cmark."0.13.4"]
@@ -1049,10 +1032,10 @@ env_vars = [
 [gn.package.ref-cast-impl."1.0.26"]
 rustflags = []
 env_vars = [
-  "CARGO_PKG_VERSION_PATCH=25",
+  "CARGO_PKG_VERSION_PATCH=26",
 ]
 
-[gn.package.regex."1.12.3"]
+[gn.package.regex."1.13.1"]
 group_visibility = { import = "//third_party/rust_crates/visibility.gni", variable = "regex_visibility" }
 
 [gn.package.ring."0.17.14"]
@@ -1203,8 +1186,6 @@ rustflags = []
 [gn.package.rutabaga_gfx."0.1.75"]
 # Has build script but no config needed.
 
-[gn.package.schemars."0.8.22"]
-rustflags = ["--cfg=std_atomic64", "--cfg=std_atomic"]
 
 # scoped-tls has not gone through a thorough safety review yet, and needs to be
 # re-reviewed before it can be used outside of tests.
@@ -1473,7 +1454,7 @@ features = [ "alloc", "std" ]
 # See https://github.com/google/zerocopy/issues/1792
 rustflags = [ "--cfg=zerocopy_derive_union_into_bytes" ]
 
-[gn.package.zeroize."1.8.1"]
+[gn.package.zeroize."1.9.0"]
 group_visibility = { import = "//third_party/rust_crates/visibility.gni", variable = "zeroize_visibility" }
 
 [gn.package.zip."8.6.0"]

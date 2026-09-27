@@ -48,7 +48,7 @@ zx_status_t Nelson::CanvasInit() {
   fdf::Arena arena('CANV');
 
   auto composite_spec =
-      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("aml_canvas").Build();
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(arena).name("canvas").Build();
 
   auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, canvas_dev),
                                                           composite_spec);

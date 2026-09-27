@@ -46,6 +46,7 @@ use futures::FutureExt;
 use netlink::interfaces::InterfacesHandler;
 use netlink::{NETLINK_LOG_TAG, Netlink};
 use once_cell::sync::OnceCell;
+use scopeguard::ScopeGuard;
 use smallvec::SmallVec;
 use starnix_lifecycle::AtomicCounter;
 use starnix_logging::{SyscallLogFilter, log_debug, log_error, log_info, log_warn};
@@ -170,18 +171,27 @@ impl MountsWriteToken {
         Self { deferred_drops: RefCell::new(SmallVec::new()) }
     }
 
-    /// We cannot block while holding a [MountsWriteGuard] as it is a spinlock. If a Drop requires
-    /// a blocking operation, use [Self::defer_drop] defer the blocking operation until
-    /// after the [MountsWriteGuard] is released.
-    pub fn defer_drop<T: Send + Sync + 'static>(&self, value: T) {
+    fn defer_drop_internal<T: Send + Sync + 'static>(&self, value: T) {
         self.deferred_drops.borrow_mut().push(Box::new(move || {
             drop(value);
         }));
     }
 
+    /// We cannot block while holding a [MountsWriteGuard] as it is a spinlock. If a Drop requires
+    /// a blocking operation, use [Self::defer_drop] to defer the blocking operation until
+    /// after the [MountsWriteGuard] is released.
+    pub fn defer_drop<T: Send + Sync + 'static>(
+        &self,
+        value: T,
+    ) -> ScopeGuard<T, impl FnOnce(T) + '_> {
+        scopeguard::guard(value, |value| {
+            self.defer_drop_internal(value);
+        })
+    }
+
     /// Helper method to [Self::defer_drop] specifically for [Arc<T>]s.
     pub fn retain<T: Send + Sync + 'static>(&self, value: &Arc<T>) -> Arc<T> {
-        self.defer_drop(value.clone());
+        self.defer_drop_internal(value.clone());
         value.clone()
     }
 

@@ -25,7 +25,6 @@ test("fcrypto-test") {
     "utils.cc",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_cpp",
     "//src/security/lib/fcrypto",
     "//zircon/system/ulib/zxtest",
   ]

@@ -64,6 +64,7 @@ rust_library(
     ],
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=boringssl",
     ],
     tags = [
         "cargo-bazel",

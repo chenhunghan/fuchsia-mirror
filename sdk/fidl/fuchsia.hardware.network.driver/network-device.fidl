@@ -297,14 +297,16 @@ type RxBufferManagement = flexible union {
     /// No dynamic management, queue everything. The default algorithm.
     1: static struct {};
     /// Use Little's Law: Queue size is the product of packet arrival rate and
-    /// the average time each packet spend in the queue (L = lambda * W).
+    /// the average time each packet spends in the queue, plus a constant term
+    /// for buffers the device holds regardless of the arrival rate
+    /// (`L = lambda * W + intercept`).
     2: simple struct {
         /// This is used to calculate the arrival rate:
         /// `Rate_n = alpha * Sample_n + (1 - alpha) * Rate_(n-1)`
         /// The bigger this value, the more sensitive it is to the latest sample.
         ///
-        /// Must be in the range (0, 1]. Defaults to server-assigned value if zero
-        /// or unset.
+        /// Must be in the range (0, 1]. Defaults to server-assigned value if
+        /// zero.
         alpha float64;
         /// Wait time budget at the driver.
         ///
@@ -323,13 +325,36 @@ type RxBufferManagement = flexible union {
         ///    for packet drops. You can compare the value against common interrupt
         ///    coalescing configurations for reference.
         ///
-        /// Defaults to server-assigned value if zero or unset.
+        /// Defaults to server-assigned value if zero.
         delay_budget zx.Duration;
+        /// Number of Rx buffers the device holds regardless of the arrival
+        /// rate.
+        ///
+        /// This is the constant offset (`intercept` in
+        /// `L = lambda * W + intercept`). `delay_budget` only accounts for
+        /// buffers that are in flight because of queueing delay; it cannot
+        /// account for buffers a device parks for structural reasons, such as
+        /// keeping a fixed size hardware descriptor ring filled or letting
+        /// firmware hold a reserve of host buffers. Those buffers are never
+        /// returned to the device interface, no matter how slow the traffic is,
+        /// so they must be accounted for separately.
+        ///
+        /// Guidance for driver implementors: set this to the number of buffers
+        /// the device can hold without completing them. Leaving it at zero
+        /// while the device parks buffers will starve the device until
+        /// `min_rx_buffers` covers the shortfall.
+        ///
+        /// Note that this is distinct from
+        /// [`fuchsia.hardware.network.driver/DeviceImplInfo.min_rx_buffers`],
+        /// which is a floor applied to the final target. A floor keeps the
+        /// target flat until the rate dependent term grows past it, whereas
+        /// `intercept` shifts the whole curve up.
+        intercept uint16;
         /// The sampling interval for estimating packet arrival rate.
         ///
         /// Determines how frequently the arrival rate is sampled and updated.
         ///
-        /// Defaults to server-assigned value if zero or unset.
+        /// Defaults to server-assigned value if zero.
         sample_interval zx.Duration;
         /// The multiple of variance to consider when triggering immediate
         /// buffer requests.
@@ -338,7 +363,7 @@ type RxBufferManagement = flexible union {
         /// rate by more than `variance_threshold` times the variance, the
         /// queue will immediately request additional buffers.
         ///
-        /// Must be positive. Defaults to server-assigned value if zero or unset.
+        /// Must be positive. Defaults to server-assigned value if zero.
         variance_threshold float64;
     };
 };

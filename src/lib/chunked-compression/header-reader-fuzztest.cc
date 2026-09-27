@@ -10,8 +10,9 @@
 #include <vector>
 
 #include <fbl/array.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
-#include <src/lib/chunked-compression/test-utils.h>
+
+#include "src/lib/chunked-compression/chunked-archive.h"
+#include "src/lib/chunked-compression/test-utils.h"
 
 namespace {
 

@@ -217,37 +217,8 @@ impl FuseFs {
     async fn read_fxfs(&self, inode: u64, offset: u64, size: u32) -> FxfsResult<ReplyData> {
         if self.get_object_type(inode).await? == ObjectDescriptor::File {
             let handle = self.get_object_handle(inode).await?;
-            let mut out: Vec<u8> = Vec::new();
-            let align = offset % self.fs.block_size();
-
-            let mut buf = handle.allocate_buffer(handle.block_size().get() as usize).await;
-            // Round down for the block alignment.
-            let mut ofs = offset - align;
-            let len = size as u64 + align + ofs;
-
-            loop {
-                let bytes = handle.read(ofs, buf.as_mut()).await?;
-                if len - ofs > bytes as u64 {
-                    // Read `bytes` size of content from buf.
-                    ofs += bytes as u64;
-                    buf.subslice(..bytes).append_to(&mut out);
-                    if bytes as u64 != handle.block_size() {
-                        break;
-                    }
-                } else {
-                    // Read the remaining content from buf.
-                    let target_len = (len - ofs) as usize;
-                    buf.subslice(..target_len).append_to(&mut out);
-                    break;
-                }
-            }
-            let out: Vec<u8> = if (align as usize) < out.len() {
-                out.drain((align as usize)..).collect()
-            } else {
-                vec![]
-            };
-
-            Ok(ReplyData { data: out.into() })
+            let data = handle.read_bytes(offset..offset + size as u64).await?;
+            Ok(ReplyData { data: data.into() })
         } else {
             Err(FxfsError::NotFile.into())
         }

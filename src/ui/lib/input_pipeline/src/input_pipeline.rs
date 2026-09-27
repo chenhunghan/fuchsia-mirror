@@ -1801,7 +1801,7 @@ mod tests {
         assert_eq!(received_by_fake, Some(fake_event));
 
         // Verify Mouse Handler did NOT receive it
-        assert!(mouse_receiver.try_next().is_err());
+        assert!(mouse_receiver.try_recv().is_err());
     }
 
     fn create_mouse_event(x: f32, y: f32) -> input_device::InputEvent {

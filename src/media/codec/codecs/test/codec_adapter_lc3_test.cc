@@ -36,7 +36,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
   void onCoreCodecResetStreamAfterCurrentFrame() override {}
   void onCoreCodecMidStreamOutputConstraintsChange(bool output_re_config_required) override {}
   void onCoreCodecOutputFormatChange() override {}
-  void onCoreCodecInputPacketDone(CodecPacket* packet) override {}
+  void onCoreCodecInputPacketDone(const CodecPacket* packet) override {}
   void onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected_before,
                                bool error_detected_during) override {}
   void onCoreCodecOutputTimestampHasNoOutput(uint64_t timestamp_ish) override {}

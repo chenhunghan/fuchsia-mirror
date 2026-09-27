@@ -32,6 +32,7 @@
     use: [
         {
             protocol: [
+                "fuchsia.net.filter.Control",
                 "fuchsia.net.interfaces.admin.Installer",
                 "fuchsia.net.interfaces.State",
                 "fuchsia.net.name.DnsServerWatcher",
@@ -49,14 +50,6 @@
         },
         {
             protocol: "fuchsia.net.ndp.RouterAdvertisementOptionWatcherProvider",
-            availability: "optional",
-        },
-        {
-            protocol: "fuchsia.net.filter.deprecated.Filter",
-            availability: "optional",
-        },
-        {
-            protocol: "fuchsia.net.filter.Control",
             availability: "optional",
         },
         {

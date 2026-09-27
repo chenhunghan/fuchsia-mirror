@@ -6,14 +6,14 @@ use crate::gpu_command::{AttachScanoutResponder, GpuCommand, GpuCommandSender, S
 use crate::resource::Resource2D;
 use crate::scanout::Scanout;
 use crate::wire;
-use anyhow::{anyhow, Context, Error};
+use anyhow::{Context, Error, anyhow};
 use fidl_fuchsia_ui_composition::LayoutInfo;
 use fidl_fuchsia_virtualization_hardware::VirtioGpuControlHandle;
 use futures::channel::mpsc;
-use futures::{select, StreamExt};
+use futures::{StreamExt, select};
 use machina_virtio_device::WrappedDescChainStream;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::{Read, Write};
 use virtio_device::chain::{ReadableChain, Remaining, WritableChain};
 use virtio_device::mem::{DriverMem, DriverRange};
@@ -176,7 +176,7 @@ impl<'a, M: DriverMem> GpuDevice<'a, M> {
 
     #[cfg(test)]
     pub fn process_gpu_commands_until_idle(&mut self) {
-        while let Ok(Some(command)) = self.command_receiver.try_next() {
+        while let Ok(command) = self.command_receiver.try_recv() {
             self.handle_gpu_command(command);
         }
     }
@@ -706,7 +706,7 @@ mod tests {
     use crate::gpu_command::ScanoutController;
     use crate::resource::bytes_per_pixel;
     use crate::scanout::FakeScanout;
-    use fidl::endpoints::{create_proxy_and_stream, RequestStream};
+    use fidl::endpoints::{RequestStream, create_proxy_and_stream};
     use fidl_fuchsia_math as fmath;
     use fidl_fuchsia_virtualization_hardware::{VirtioGpuMarker, VirtioGpuProxy};
     use futures::FutureExt;

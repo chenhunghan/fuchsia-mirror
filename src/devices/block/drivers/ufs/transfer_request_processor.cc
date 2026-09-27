@@ -121,12 +121,12 @@ zx::result<std::unique_ptr<ResponseUpiu>> TransferRequestProcessor::SendAdminScs
                                                         dma_length);
 }
 
-void TransferRequestProcessor::SendIoScsiCmd(ScsiCommandUpiu &request, uint8_t lun, uint8_t slot,
-                                             zx::unowned_vmo data_vmo, uint64_t dma_offset,
-                                             uint64_t dma_length,
-                                             fit::callback<void(zx_status_t)> completion_cb) {
+void TransferRequestProcessor::SendIoScsiCmd(
+    ScsiCommandUpiu &request, uint8_t lun, uint8_t slot, zx::unowned_vmo data_vmo,
+    uint64_t dma_offset, uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb,
+    block_server::internal::InlineCryptoOptions inline_crypto) {
   SendRequestUsingSlot<ScsiCommandUpiu>(request, lun, slot, std::move(data_vmo), dma_offset,
-                                        dma_length, std::move(completion_cb));
+                                        dma_length, std::move(completion_cb), inline_crypto);
 }
 
 template <class RequestType, class ResponseType>
@@ -207,7 +207,8 @@ zx::result<std::unique_ptr<QueryResponseUpiu>> TransferRequestProcessor::SendQue
 template <class RequestType>
 void TransferRequestProcessor::SendRequestUsingSlot(
     RequestType &request, uint8_t lun, uint8_t slot, zx::unowned_vmo data_vmo, uint64_t dma_offset,
-    uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb) {
+    uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb,
+    block_server::internal::InlineCryptoOptions inline_crypto) {
   zx_status_t status = ZX_OK;
   {
     std::lock_guard<std::mutex> lock(slot_lock_);
@@ -284,7 +285,7 @@ void TransferRequestProcessor::SendRequestUsingSlot(
 
       if (zx::result<> result = FillDescriptorAndSendRequest(
               slot, request.GetDataDirection(), response_offset, response_length, prdt_offset,
-              prdt_entry_count, reliable_write);
+              prdt_entry_count, reliable_write, inline_crypto);
           result.is_error()) {
         fdf::error("Failed to send upiu: {}", result);
         status = result.status_value();
@@ -309,13 +310,16 @@ void TransferRequestProcessor::SendRequestUsingSlot(
 
 template void TransferRequestProcessor::SendRequestUsingSlot<QueryRequestUpiu>(
     QueryRequestUpiu &request, uint8_t lun, uint8_t slot, zx::unowned_vmo data_vmo,
-    uint64_t dma_offset, uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb);
+    uint64_t dma_offset, uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb,
+    block_server::internal::InlineCryptoOptions inline_crypto);
 template void TransferRequestProcessor::SendRequestUsingSlot<ScsiCommandUpiu>(
     ScsiCommandUpiu &request, uint8_t lun, uint8_t slot, zx::unowned_vmo data_vmo,
-    uint64_t dma_offset, uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb);
+    uint64_t dma_offset, uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb,
+    block_server::internal::InlineCryptoOptions inline_crypto);
 template void TransferRequestProcessor::SendRequestUsingSlot<NopOutUpiu>(
     NopOutUpiu &request, uint8_t lun, uint8_t slot, zx::unowned_vmo data_vmo, uint64_t dma_offset,
-    uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb);
+    uint64_t dma_length, fit::callback<void(zx_status_t)> completion_cb,
+    block_server::internal::InlineCryptoOptions inline_crypto);
 
 template zx::result<std::unique_ptr<QueryResponseUpiu>>
 TransferRequestProcessor::SendRequestUpiu<QueryRequestUpiu, QueryResponseUpiu>(
@@ -571,7 +575,7 @@ zx_time_t TransferRequestProcessor::GetEarliestTimeoutDeadline() {
 zx::result<> TransferRequestProcessor::FillDescriptorAndSendRequest(
     uint8_t slot, const DataDirection data_dir, const uint16_t response_offset,
     const uint16_t response_length, const uint16_t prdt_offset, const uint32_t prdt_entry_count,
-    const bool reliable_write) {
+    const bool reliable_write, const block_server::internal::InlineCryptoOptions inline_crypto) {
   auto descriptor = slots_.GetRequestDescriptor<TransferRequestDescriptor>(slot);
   RequestSlot &request_slot = slots_.GetSlot(slot);
   constexpr uint16_t kDwordSize = 4;
@@ -594,6 +598,13 @@ zx::result<> TransferRequestProcessor::FillDescriptorAndSendRequest(
   descriptor->set_response_upiu_length(response_length / kDwordSize);
   descriptor->set_prdt_offset(prdt_entry_count > 0 ? (prdt_offset / kDwordSize) : 0);
   descriptor->set_prdt_length(prdt_entry_count);
+
+  if (inline_crypto.is_enabled) {
+    descriptor->set_ce(1);
+    descriptor->set_cci(inline_crypto.slot);
+    descriptor->set_data_unit_number_lower(static_cast<uint32_t>(inline_crypto.dun & 0xffffffff));
+    descriptor->set_data_unit_number_upper(static_cast<uint32_t>(inline_crypto.dun >> 32));
+  }
 
   TRACE_DURATION("ufs", "RingRequestDoorbell", "slot", slot);
   if (zx::result<> result = controller_.Notify(NotifyEvent::kSetupTransferRequestList, slot);

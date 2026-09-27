@@ -14,6 +14,14 @@
         { service: "fuchsia.hardware.pinimpl.Service" },
         { service: "fuchsia.hardware.pinimpl.Metadata" },
     ],
+    use: [
+        { service: "fuchsia.hardware.platform.device.Service" },
+        {
+            config: "fuchsia.power.SuspendEnabled",
+            key: "suspend_enabled",
+            type: "bool",
+        },
+    ],
     expose: [
         {
             service: "fuchsia.hardware.pinimpl.Service",

@@ -400,3 +400,76 @@ TEST_F(DispatcherDumpTest, DumpChannelWaitRegistered) {
     ASSERT_EQ(state.debug_stats.non_inlined.task, 1);
   }
 }
+
+TEST_F(DispatcherDumpTest, DumpAllDispatchersCAbi) {
+  ASSERT_OK(async::PostTask(dispatcher_.async_dispatcher(), [&] {}));
+  ASSERT_OK(fdf_testing_run_until_idle());
+
+  ASSERT_OK(async::PostTask(dispatcher2_.async_dispatcher(), [&] {}));
+
+  fdf_dispatcher_dump_entry_t* entries = nullptr;
+  size_t count = 0;
+  fdf_env_get_all_dispatchers_dump(&entries, &count);
+  ASSERT_NE(entries, nullptr);
+  ASSERT_GE(count, 2u);
+
+  bool found_dispatcher1 = false;
+  bool found_dispatcher2 = false;
+  for (size_t i = 0; i < count; i++) {
+    std::string_view name(entries[i].name);
+    if (name == kDispatcherName) {
+      found_dispatcher1 = true;
+      EXPECT_EQ(entries[i].driver, fake_driver_);
+      EXPECT_TRUE(entries[i].synchronized);
+      EXPECT_FALSE(entries[i].allow_sync_calls);
+      EXPECT_EQ(entries[i].state, FDF_DISPATCHER_STATE_RUNNING);
+      EXPECT_EQ(entries[i].debug_stats.num_total_requests, 1u);
+      EXPECT_EQ(entries[i].debug_stats.non_inlined.task, 1u);
+      EXPECT_EQ(entries[i].num_queued_tasks, 0u);
+    } else if (name == kAdditionalDispatcherName) {
+      found_dispatcher2 = true;
+      EXPECT_EQ(entries[i].driver, fake_driver2_);
+      EXPECT_EQ(entries[i].num_queued_tasks, 1u);
+      ASSERT_NE(entries[i].queued_tasks, nullptr);
+      EXPECT_NE(entries[i].queued_tasks[0].ptr, 0u);
+    }
+  }
+  EXPECT_TRUE(found_dispatcher1);
+  EXPECT_TRUE(found_dispatcher2);
+
+  fdf_env_free_all_dispatchers_dump(entries, count);
+
+  fdf_thread_dump_entry_t* thread_entries = nullptr;
+  size_t thread_count = 0;
+  fdf_env_get_all_threads_dump(&thread_entries, &thread_count);
+  EXPECT_EQ(thread_entries, nullptr);
+  EXPECT_EQ(thread_count, 0u);
+  fdf_env_free_all_threads_dump(thread_entries, thread_count);
+
+  ASSERT_OK(driver_runtime::GetDispatcherCoordinator().default_thread_pool()->AddThread());
+  zx::result role_thread_pool =
+      driver_runtime::GetDispatcherCoordinator().GetOrCreateThreadPool("fuchsia.test.role");
+  ASSERT_OK(role_thread_pool.status_value());
+
+  fdf_env_get_all_threads_dump(&thread_entries, &thread_count);
+  ASSERT_NE(thread_entries, nullptr);
+  ASSERT_EQ(thread_count, 2u);
+  bool found_default_thread = false;
+  bool found_role_thread = false;
+  for (size_t i = 0; i < thread_count; ++i) {
+    EXPECT_NE(thread_entries[i].koid, ZX_KOID_INVALID);
+    if (std::string_view(thread_entries[i].scheduler_role).empty()) {
+      found_default_thread = true;
+      EXPECT_EQ(std::string_view(thread_entries[i].name), "fdf-dispatcher-thread-0");
+    } else if (std::string_view(thread_entries[i].scheduler_role) == "fuchsia.test.role") {
+      found_role_thread = true;
+      EXPECT_EQ(std::string_view(thread_entries[i].name),
+                "fdf-dispatcher-thread-0:fuchsia.test.role");
+    }
+  }
+  EXPECT_TRUE(found_default_thread);
+  EXPECT_TRUE(found_role_thread);
+  fdf_env_free_all_threads_dump(thread_entries, thread_count);
+
+  ASSERT_OK(fdf_testing_run_until_idle());
+}

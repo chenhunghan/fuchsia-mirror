@@ -120,6 +120,7 @@
         },
         {
             protocol: [
+                "fuchsia.fxfs.BlobReader",
                 "fuchsia.pkg.garbagecollector.Manager",
                 "fuchsia.pkg.PackageCache",
             ],
@@ -161,6 +162,7 @@
         },
         {
             protocol: [
+                "fuchsia.fxfs.BlobReader",
                 "fuchsia.pkg.garbagecollector.Manager",
                 "fuchsia.pkg.PackageCache",
                 "fuchsia.pkg.RetainedBlobs",

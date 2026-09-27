@@ -11,6 +11,7 @@ namespace driver_development {
 namespace {
 
 constexpr size_t kMaxEntries = 7;
+constexpr size_t kMaxDriverHostEntries = 4;
 
 }  // namespace
 
@@ -29,9 +30,8 @@ void DeviceInfoIterator::GetNext(GetNextCompleter::Sync& completer) {
 
 void DriverHostInfoIterator::GetNext(GetNextCompleter::Sync& completer) {
   std::vector<fdd::DriverHostInfo> result;
-  constexpr size_t kMaxEntries = 50;
-  std::ranges::move(list_ | std::views::take(kMaxEntries), std::back_inserter(result));
-  list_.erase(list_.begin(), list_.begin() + std::min<size_t>(kMaxEntries, list_.size()));
+  std::ranges::move(list_ | std::views::take(kMaxDriverHostEntries), std::back_inserter(result));
+  list_.erase(list_.begin(), list_.begin() + std::min<size_t>(kMaxDriverHostEntries, list_.size()));
 
   completer.Reply(std::move(result));
 }

@@ -13,14 +13,15 @@ use crate::config_management::{
 };
 use crate::legacy;
 use crate::mode_management::iface_manager_api::IfaceManagerApi;
-use crate::mode_management::phy_manager::{PhyManager, PhyManagerApi};
+use crate::mode_management::phy_manager::{PhyManager, PhyManagerApi, serve_suspend_blocker};
 use crate::mode_management::{DEFECT_CHANNEL_SIZE, create_iface_manager, device_monitor, recovery};
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use crate::util::listener;
 use crate::util::testing::{generate_ssid, run_until_completion, run_while};
 use anyhow::{Error, format_err};
 use assert_matches::assert_matches;
-use fidl::endpoints::{create_proxy, create_request_stream};
+use fidl::endpoints::{create_proxy, create_proxy_and_stream, create_request_stream};
+use fidl_fuchsia_power_system as fsystem;
 use fidl_fuchsia_wlan_device_service::DeviceWatcherEvent;
 use fidl_fuchsia_wlan_internal::SignalReportIndication;
 use fuchsia_async::{self as fasync, TestExecutor};
@@ -155,6 +156,7 @@ struct InternalObjects {
     phy_manager: Arc<Mutex<dyn PhyManagerApi>>,
     iface_manager: Arc<Mutex<dyn IfaceManagerApi>>,
     roaming_policy: RoamingPolicy,
+    power_manager: Arc<wlan_power_manager_testing::TestPowerManager>,
 }
 
 struct ExternalInterfaces {
@@ -239,6 +241,7 @@ fn test_setup(
     let (client_update_sender, client_update_receiver) = mpsc::unbounded();
     let (ap_update_sender, _ap_update_receiver) = mpsc::unbounded();
 
+    let power_manager = Arc::new(wlan_power_manager_testing::TestPowerManager::new());
     let phy_manager = Arc::new(Mutex::new(PhyManager::new(
         monitor_service_proxy.clone(),
         recovery::lookup_recovery_profile(recovery_profile),
@@ -246,6 +249,7 @@ fn test_setup(
         inspect::Inspector::default().root().create_child("phy_manager"),
         telemetry_sender.clone(),
         recovery_sender,
+        power_manager.clone(),
     )));
     let (defect_sender, defect_receiver) = mpsc::channel(DEFECT_CHANNEL_SIZE);
     let (iface_manager, iface_manager_service) = create_iface_manager(
@@ -332,6 +336,7 @@ fn test_setup(
         phy_manager,
         iface_manager,
         roaming_policy,
+        power_manager,
     };
 
     let external_interfaces = ExternalInterfaces {
@@ -358,6 +363,21 @@ fn add_phy(exec: &mut TestExecutor, test_values: &mut TestValues) {
     let add_phy_event = DeviceWatcherEvent::OnPhyAdded { phy_id: TEST_PHY_ID };
     let add_phy_fut = device_monitor::handle_event(&listener, add_phy_event);
     let mut add_phy_fut = pin!(add_phy_fut);
+
+    let power_token_req = run_while(
+        exec,
+        &mut add_phy_fut,
+        test_values.external_interfaces.monitor_service_stream.next(),
+    );
+    assert_matches!(
+        power_token_req,
+        Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetPowerElementDependencyToken {
+            phy_id: TEST_PHY_ID, responder
+        })) => {
+            let token = zx::Event::create();
+            assert!(responder.send(Ok(token)).is_ok());
+        }
+    );
 
     let device_monitor_req = run_while(
         exec,
@@ -3465,4 +3485,81 @@ fn test_autconnect_starts_after_roam_error() {
             responder.send(Ok(vmo)).expect("failed to send scan data");
         }
     );
+}
+
+#[fuchsia::test]
+fn test_power_element_lease_and_suspend_resume_lifecycle() {
+    let mut exec = fasync::TestExecutor::new();
+    let mut test_values =
+        test_setup(&mut exec, RECOVERY_PROFILE_EMPTY_STRING, false, RoamingPolicy::Disabled);
+
+    // 1. Add PHY via device monitor watcher.
+    add_phy(&mut exec, &mut test_values);
+
+    // Verify initial Level 2 power element dependency lease was taken on discovery.
+    {
+        let calls = test_values.internal_objects.power_manager.calls.lock();
+        assert!(calls.contains(&format!("wlancfg-phy-{}-level-2-dependency", TEST_PHY_ID)));
+    }
+
+    // 2. Set up SuspendBlocker serving.
+    let (suspend_blocker_proxy, suspend_blocker_requests) =
+        create_proxy_and_stream::<fsystem::SuspendBlockerMarker>();
+    let suspend_blocker_fut = serve_suspend_blocker(
+        test_values.internal_objects.phy_manager.clone(),
+        suspend_blocker_requests,
+    );
+    let mut suspend_blocker_fut = pin!(suspend_blocker_fut);
+    assert_matches!(exec.run_until_stalled(&mut suspend_blocker_fut), Poll::Pending);
+
+    // 3. Suspend transition: Trigger BeforeSuspend.
+    let before_suspend_fut = suspend_blocker_proxy.before_suspend();
+    let mut before_suspend_fut = pin!(before_suspend_fut);
+    assert_matches!(exec.run_until_stalled(&mut before_suspend_fut), Poll::Pending);
+
+    let before_suspend_res =
+        run_while(&mut exec, &mut suspend_blocker_fut, &mut before_suspend_fut);
+    assert_matches!(before_suspend_res, Ok(()));
+
+    // Verify lease was downgraded to Level 1 during suspend.
+    {
+        let calls = test_values.internal_objects.power_manager.calls.lock();
+        assert!(calls.contains(&format!("wlancfg-phy-{}-level-1-dependency", TEST_PHY_ID)));
+    }
+
+    // 4. Resume transition: Trigger AfterResume.
+    let after_resume_fut = suspend_blocker_proxy.after_resume();
+    let mut after_resume_fut = pin!(after_resume_fut);
+    assert_matches!(exec.run_until_stalled(&mut after_resume_fut), Poll::Pending);
+
+    let after_resume_res = run_while(&mut exec, &mut suspend_blocker_fut, &mut after_resume_fut);
+    assert_matches!(after_resume_res, Ok(()));
+
+    // Verify lease was restored to Level 2 upon resume.
+    {
+        let calls = test_values.internal_objects.power_manager.calls.lock();
+        let last_call = calls.last().expect("expected non-empty calls list");
+        assert_eq!(last_call, &format!("wlancfg-phy-{}-level-2-dependency", TEST_PHY_ID));
+    }
+
+    // 5. Remove PHY and verify suspend/resume no longer affects the removed PHY.
+    let legacy_client = legacy::IfaceRef::new();
+    let listener = device_monitor::Listener::new(
+        test_values.external_interfaces.monitor_service_proxy.clone(),
+        legacy_client.clone(),
+        test_values.internal_objects.phy_manager.clone(),
+        test_values.internal_objects.iface_manager.clone(),
+    );
+    let remove_phy_event = DeviceWatcherEvent::OnPhyRemoved { phy_id: TEST_PHY_ID };
+    let remove_phy_fut = device_monitor::handle_event(&listener, remove_phy_event);
+    let mut remove_phy_fut = pin!(remove_phy_fut);
+    assert_matches!(exec.run_until_stalled(&mut remove_phy_fut), Poll::Ready(()));
+
+    let calls_count = test_values.internal_objects.power_manager.calls.lock().len();
+    let before_suspend_fut = suspend_blocker_proxy.before_suspend();
+    let mut before_suspend_fut = pin!(before_suspend_fut);
+    let before_suspend_res =
+        run_while(&mut exec, &mut suspend_blocker_fut, &mut before_suspend_fut);
+    assert_matches!(before_suspend_res, Ok(()));
+    assert_eq!(test_values.internal_objects.power_manager.calls.lock().len(), calls_count);
 }

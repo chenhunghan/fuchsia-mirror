@@ -3,6 +3,8 @@
         // TODO: https://fxbug.dev/558674709 - Evaluate binder permissions against cached
         // target SID.
         "BinderTest.TargetUsesCachedSid",
+        "BinderTest.TargetUsesCachedSidTransferBinder",
+        "BinderTest.TargetUsesCachedSidTransferFile",
 
         // TODO: https://fxbug.dev/509488263 - Make (SE)Starnix match the (SE)Linux behavior
         // demonstrated in this test.
@@ -15,10 +17,6 @@
         // because Starnix avoids the unnecessary capability check when EUIDs match.
         "SchedTest.SchedSetschedulerDeniedWithoutSetsched",
         "SchedTest.SchedSetschedulerSucceedsWithSetsched",
-
-        // TODO: https://fxbug.dev/559523569 - Starnix does not check
-        // `unix_dgram_socket { sendto }` on datagram connect.
-        "SocketTest.UnixDomainDatagramConnectDeniedWithoutSendTo",
 
         // The permission is checked correctly, but Linux adds multiple logs for the same denial.
         "SyslogTest.ProcKmsgReadDeniedIfDroppedPermission",

@@ -270,8 +270,8 @@ When Bazel host tests are exported to the GN build:
    directory and written to
    `${root_build_dir}/bazel_host_tests.debug_symbols.json`.
 
-3. **GN Build API Integration**: `//:bazel_test_suites` in `BUILD.gn` attaches
-   `debug_symbol_manifests` metadata pointing to
+3. **GN Build API Integration**: `//:bazel_host_test_suites` in `BUILD.gn`
+   attaches `debug_symbol_manifests` metadata pointing to
    `bazel_host_tests.debug_symbols.json`, which is consumed by the
    `build_api_module("debug_symbols")` target.
 

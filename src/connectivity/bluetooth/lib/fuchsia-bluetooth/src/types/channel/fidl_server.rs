@@ -235,8 +235,8 @@ impl FidlServerConnection {
                     send_queue.push_back(data);
                     let mut processed = 1;
                     while send_queue.len() < Self::SEND_BUFFER_SIZE {
-                        match send_rx.try_next() {
-                            Ok(Some(packet)) => {
+                        match send_rx.try_recv() {
+                            Ok(packet) => {
                                 send_queue.push_back(packet);
                                 processed += 1;
                             }

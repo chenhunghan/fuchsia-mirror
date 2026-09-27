@@ -1,0 +1,56 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "goodix-gt6853-bind",
+    composite_name: "goodix_gt6853_touch",
+    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
+    program: {
+        compat: "driver/goodix-gt6853-cpp.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        allowed_scheduler_roles: [ "fuchsia.ui.input.drivers.goodix-gt6853.device" ],
+    },
+    use: [
+        {
+            name: "pdev",
+            primary: true,
+            bind: {
+                protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                vid: "fuchsia.goodix.platform.BIND_PLATFORM_DEV_VID.GOODIX",
+                did: "fuchsia.goodix.platform.BIND_PLATFORM_DEV_DID.GT6853",
+            },
+        },
+        { protocol: "fuchsia.scheduler.RoleManager" },
+        {
+            name: "gpio-int",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-int" },
+            },
+        },
+        {
+            name: "i2c",
+            service: "fuchsia.hardware.i2c.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "i2c" },
+            },
+        },
+        {
+            name: "gpio-reset",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-reset" },
+            },
+        },
+        {
+            name: "gpio-init",
+            service: "fuchsia.gpio.Init",
+            availability: "optional",
+        },
+        {
+            name: "pin-states-0",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            availability: "optional",
+        },
+    ],
+}

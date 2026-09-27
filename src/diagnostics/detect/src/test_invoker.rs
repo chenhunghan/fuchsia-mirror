@@ -81,7 +81,7 @@ mod test {
             for _ in 0..n {
                 assert_eq!(self.next().await, Some(()));
             }
-            assert!(self.try_next().is_err());
+            assert!(self.try_recv().is_err());
         }
     }
 

@@ -9,6 +9,7 @@ python_library("perf_publish") {
   library_name = "perf_publish"
   sources = [
     "__init__.py",
+    "device_types.py",
     "metrics_allowlist.py",
     "publish.py",
     "summarize.py",

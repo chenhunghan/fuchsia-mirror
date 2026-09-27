@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 use crate::fuchsia::errors::map_to_status;
+use crate::fuchsia::fxblob::blob::FxBlob;
 use crate::fuchsia::fxblob::directory::BlobDirectory;
+use crate::fuchsia::node::OpenedNode;
 use crate::fuchsia::pager::PagerBacked;
 use anyhow::Error;
 use fidl_fuchsia_storage_mapping as fmapping;
@@ -14,6 +16,7 @@ use log::{error, warn};
 use mapping::{
     Extents, MAPPING_VMO_SIZE, MappingCommand, PENDING_COMMANDS_CAPACITY, RawMappingCommand,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use vmo_fifo::AsyncSender;
 
@@ -86,11 +89,12 @@ impl BlobMappingProvider {
 pub struct BlobMappingSession {
     blob_directory: Arc<BlobDirectory>,
     sender: AsyncSender<RawMappingCommand>,
+    opened_blobs: HashMap<u64, OpenedNode<FxBlob>>,
 }
 
 impl BlobMappingSession {
     pub fn new(blob_directory: Arc<BlobDirectory>, sender: AsyncSender<RawMappingCommand>) -> Self {
-        Self { blob_directory, sender }
+        Self { blob_directory, sender, opened_blobs: HashMap::new() }
     }
 
     /// Retrieves the extent mappings for the blob and registers the blob in the mapping session.
@@ -133,11 +137,16 @@ impl BlobMappingSession {
             payload.commit(command.into()).await?;
         }
 
+        self.opened_blobs.insert(key, node);
+
         Ok(size)
     }
 
     /// Unregisters the blob mapping and signals the block driver to terminate tracking.
     async fn close_blob(&mut self, key: u64) -> Result<(), Error> {
+        if self.opened_blobs.remove(&key).is_none() {
+            return Ok(());
+        }
         self.sender.push(MappingCommand::CloseBlob { key }.into()).await?;
         Ok(())
     }
@@ -201,6 +210,8 @@ mod tests {
     use fidl_fuchsia_io::UnlinkOptions;
     use fuchsia_async as fasync;
     use futures::channel::oneshot;
+    use fxfs::object_handle::ObjectHandle;
+    use fxfs::object_store::{HandleOptions, ObjectStore};
     use storage_device::Device;
     use storage_device::buffer::OwnedBuffer;
     use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
@@ -353,6 +364,81 @@ mod tests {
         session.close_blob(42).await.expect("close_blob should return Ok with invalid key");
         std::mem::drop(session);
 
+        fixture.close().await;
+    }
+
+    // Verifies that unlinking an open blob does not deallocate its extents until all references
+    // are closed.
+    #[fuchsia::test]
+    async fn test_unlink_open_blob() {
+        let fixture = new_blob_fixture().await;
+        let data = vec![77u8; 8192];
+        let hash = fixture.write_blob(&data, CompressionMode::Never).await;
+        let hash_string = format!("{}", hash);
+
+        let object_id = fixture.get_blob_handle(&hash_string).await.object_id();
+
+        let blob_dir = fixture
+            .volume()
+            .root()
+            .clone()
+            .as_node()
+            .into_any()
+            .downcast::<BlobDirectory>()
+            .expect("Failed to downcast root directory to BlobDirectory");
+
+        let vmo = zx::Vmo::create(MAPPING_VMO_SIZE).unwrap();
+        let sender =
+            AsyncSender::<RawMappingCommand>::new(vmo, 8, PENDING_COMMANDS_CAPACITY).unwrap();
+        let mut session = BlobMappingSession::new(blob_dir, sender);
+
+        let key = 1;
+        session.open_blob(key, hash).await.expect("open_blob failed");
+
+        // Unlink the blob from the root directory.
+        fixture
+            .root()
+            .unlink(&hash_string, &UnlinkOptions::default())
+            .await
+            .expect("FIDL failed")
+            .expect("unlink failed");
+
+        // Flush the graveyard to trigger purging if the object has no open references.
+        fixture.fs().graveyard().flush().await;
+
+        // Since the blob is currently open in the mapping session, it must not be purged.
+        assert!(
+            ObjectStore::open_object(
+                fixture.volume().volume(),
+                object_id,
+                HandleOptions::default(),
+                None
+            )
+            .await
+            .is_ok(),
+            "Blob was purged from store while still open in BlobMappingSession"
+        );
+
+        // Close the blob in the mapping session.
+        session.close_blob(key).await.expect("close_blob failed");
+
+        // Flush the graveyard again now that the session has released the blob.
+        fixture.fs().graveyard().flush().await;
+
+        // Now the blob must be tombstoned and purged from the object store.
+        assert!(
+            ObjectStore::open_object(
+                fixture.volume().volume(),
+                object_id,
+                HandleOptions::default(),
+                None
+            )
+            .await
+            .is_err(),
+            "Blob should have been purged from store after close_blob"
+        );
+
+        drop(session);
         fixture.close().await;
     }
 
@@ -581,7 +667,11 @@ mod tests {
         .unwrap();
 
         let verifier = block_server::verifier::Verifier::new(delivery_queue);
-        let files = Arc::new(mapping::Files::new(service, verifier));
+        let files = Arc::new(mapping::Files::new(
+            service,
+            verifier,
+            port.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+        ));
 
         let id: [u8; 32] = hash.into();
         let key = 1;
@@ -614,7 +704,7 @@ mod tests {
         vmo_provider
             .register_vmo(key, paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap());
 
-        let _pager_thread = mapping::PagerThread::spawn(port, files.clone());
+        let _pager_thread = files.spawn_pager_thread();
 
         let (tx, rx) = oneshot::channel();
         let len = uncompressed_data.len();

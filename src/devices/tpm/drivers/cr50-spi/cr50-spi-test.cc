@@ -135,7 +135,7 @@ class Cr50SpiTest : public zxtest::Test,
 
     std::vector<uint8_t> empty;
     std::vector<uint8_t> header_tx(4);
-    header_tx[0] = len - 1;
+    header_tx[0] = static_cast<uint8_t>(len - 1);
     if (!writing) {
       header_tx[0] |= 0x80;
     }

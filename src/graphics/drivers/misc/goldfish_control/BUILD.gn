@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("goldfish_control-dml") {
+  dml = "meta/goldfish_control.dml"
+  driver_name = "goldfish_control"
+}
+
 driver_bind_rules("goldfish_control_composite-bind") {
-  rules = "meta/goldfish_control.bind"
+  dml_label = ":goldfish_control-dml"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -69,7 +74,7 @@ fuchsia_driver_component("control_driver") {
   component_name = "goldfish_control"
   deps = [ ":control_driver-driver" ]
   info = "meta/control_driver-info.json"
-  manifest = "meta/goldfish_control.cml"
+  dml_label = ":goldfish_control-dml"
 }
 
 fuchsia_driver_package("goldfish_control") {

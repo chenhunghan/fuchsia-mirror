@@ -21,10 +21,11 @@
 #include <vector>
 
 #include <fbl/unique_fd.h>
-#include <src/lib/chunked-compression/chunked-compressor.h>
-#include <src/lib/chunked-compression/chunked-decompressor.h>
-#include <src/lib/chunked-compression/status.h>
-#include <src/lib/chunked-compression/streaming-chunked-compressor.h>
+
+#include "src/lib/chunked-compression/chunked-compressor.h"
+#include "src/lib/chunked-compression/chunked-decompressor.h"
+#include "src/lib/chunked-compression/status.h"
+#include "src/lib/chunked-compression/streaming-chunked-compressor.h"
 
 namespace {
 

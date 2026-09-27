@@ -18,7 +18,13 @@ Follow this 5-step workflow to prepare, audit, and commit changes.
    fx format-code
    # Or: fx format-code --files=path/to/file1.cc,path/to/file2.rs
    ```
-2.  **Explicit Staging**: Stage only the intended files explicitly by path:
+2.  **Lint Code**: Run static analysis linters across modified files and apply
+    automated fixes before staging:
+   ```bash
+   fx lint --fix
+   # Or: fx lint --fix --files=path/to/file1.cc,path/to/file2.rs
+   ```
+3.  **Explicit Staging**: Stage only the intended files explicitly by path:
    ```bash
    git add path/to/file1.cc path/to/file2.rs
    ```
@@ -26,7 +32,7 @@ Follow this 5-step workflow to prepare, audit, and commit changes.
      -a`).
    - In multi-repo workspaces, execute git commands in the target repository
      root (e.g., `//` or `//vendor/google`).
-3.  **Diff Hygiene**: Inspect `git diff --staged` and ensure only intended
+4.  **Diff Hygiene**: Inspect `git diff --staged` and ensure only intended
     changes are included:
    - **Accidentally Staged Files**: If scratch scripts, temporary files (`.tmp`,
      `.log`), or unrelated files were staged, unstage them:

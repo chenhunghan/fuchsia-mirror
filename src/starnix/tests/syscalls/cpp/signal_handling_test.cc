@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <errno.h>
 #include <fcntl.h> /* Definition of O_* constants */
 #include <poll.h>
 #include <sched.h>
@@ -9,16 +10,20 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <climits>
 #include <csignal>
 #include <cstdint>
 #include <functional>
 #include <latch>
+#include <new>
 #include <optional>
 #include <thread>
 
@@ -308,6 +313,48 @@ TEST(SignalHandling, GetSIGSEGVOnMainStackUnderflowHandledInAltStack) {
         exit(kExitTestFailure);
       }(),
       testing::ExitedWithCode(kRaisedSIGSEGV), "");
+}
+
+// Check that if delivering a signal with SA_RESETHAND fails (e.g. due to a
+// stack fault), its disposition is still reset to SIG_DFL before the resulting
+// SIGSEGV handler runs.
+TEST(SignalHandling, FailedSignalDeliveryWithSaResethandResetsHandler) {
+  EXPECT_EXIT(
+      []() {
+        constexpr size_t kStackSize = 0x20000;
+        setup_sigaltstack(kStackSize);
+
+        // Set up a handler for SIGUSR1 on the main stack with SA_RESETHAND.
+        struct sigaction sa = {};
+        sa.sa_handler = [](int) { _exit(kExitTestFailure); };
+        sa.sa_flags = SA_RESETHAND;
+        if (sigaction(SIGUSR1, &sa, nullptr)) {
+          _exit(kExitTestFailure);
+        }
+
+        // Catch the resulting SIGSEGV on the alternate stack and verify that
+        // SIGUSR1's disposition has been reset to SIG_DFL.
+        struct sigaction sa_sigsegv = {};
+        sa_sigsegv.sa_handler = [](int) {
+          struct sigaction old_sa = {};
+          if (sigaction(SIGUSR1, nullptr, &old_sa) != 0) {
+            _exit(kExitTestFailure);
+          }
+          if (old_sa.sa_handler == SIG_DFL) {
+            _exit(kExitTestSuccess);
+          }
+          _exit(kExitTestFailure);
+        };
+        sa_sigsegv.sa_flags = SA_ONSTACK;
+        if (sigaction(SIGSEGV, &sa_sigsegv, nullptr)) {
+          _exit(kExitTestFailure);
+        }
+
+        // Raise SIGUSR1 with a bogus stack so signal frame setup fails.
+        raise_with_stack(SIGUSR1, 0x0);
+        _exit(kExitTestFailure);
+      }(),
+      testing::ExitedWithCode(kExitTestSuccess), "");
 }
 
 // Check that if we fail to deliver a signal, and SIGSEGV is masked, we unmask
@@ -1626,5 +1673,224 @@ TEST(SignalHandling, SigillAddress) {
 
   ASSERT_TRUE(helper.WaitForChildren());
 }
+
+// A signal whose action is to ignore it must be discarded when it is generated. Leaving it pending
+// on the thread group makes the next interruptible syscall fail with EINTR, which userspace cannot
+// tell apart from a real interruption since no handler ever runs. The exit of a child with the
+// default SIGCHLD disposition is the usual way to generate such a signal.
+TEST(SignalHandling, IgnoredChildExitDoesNotInterruptSyscall) {
+  test_helper::ForkHelper helper;
+
+  helper.RunInForkedProcess([&helper] {
+    // Nothing is ever written to this pipe, so `epoll_wait` always waits for its full timeout.
+    // `epoll_wait` is used rather than `poll` because it reports an interruption instead of being
+    // restarted.
+    test_helper::ScopedPipe idle_pipe;
+    fbl::unique_fd epfd(SAFE_SYSCALL(epoll_create1(0)));
+    struct epoll_event watch = {.events = EPOLLIN, .data = {.fd = idle_pipe.ReadSide().get()}};
+    SAFE_SYSCALL(epoll_ctl(epfd.get(), EPOLL_CTL_ADD, idle_pipe.ReadSide().get(), &watch));
+
+    // A separate watcher process observes the child exit through a pidfd and reports it through
+    // shared memory, so the parent can wait until SIGCHLD has been generated without making any
+    // syscall that would drain a wrongly queued signal before `epoll_wait`.
+    struct Shared {
+      std::atomic<pid_t> child_pid;
+      std::atomic<bool> child_exited;
+    };
+    auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+        nullptr, sizeof(Shared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    Shared *shared = new (mapping.mapping()) Shared{{0}, {false}};
+
+    helper.RunInForkedProcess([&] {
+      idle_pipe.WriteSide().reset();
+      while (shared->child_pid.load() == 0) {
+        usleep(1000);
+      }
+      fbl::unique_fd pidfd(test_helper::PidFdOpen(shared->child_pid.load(), 0u));
+      ASSERT_TRUE(pidfd.is_valid());
+      struct pollfd pfd = {.fd = pidfd.get(), .events = POLLIN};
+      EXPECT_EQ(poll(&pfd, 1, -1), 1);
+      shared->child_exited.store(true);
+      char done;
+      read(idle_pipe.ReadSide().get(), &done, 1);
+    });
+
+    pid_t child = helper.RunInForkedProcess([&] {
+      while (shared->child_pid.load() == 0) {
+      }
+    });
+
+    shared->child_pid.store(child);
+    while (!shared->child_exited.load()) {
+    }
+
+    struct epoll_event event;
+    EXPECT_EQ(epoll_wait(epfd.get(), &event, 1, 10), 0)
+        << "the exit of a child interrupted epoll_wait, errno " << errno;
+
+    idle_pipe.WriteSide().reset();
+    ASSERT_TRUE(helper.WaitForChildren());
+  });
+
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+// A blocked signal stays pending whatever its action would be, so that it can be accepted once it
+// is unblocked.
+TEST(SignalHandling, BlockedIgnoredSignalStaysPending) {
+  test_helper::ForkHelper helper;
+
+  helper.RunInForkedProcess([] {
+    // SIGWINCH is ignored by default and is not otherwise used by this test.
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGWINCH);
+    ASSERT_EQ(sigprocmask(SIG_BLOCK, &blocked, nullptr), 0);
+
+    // Target the process rather than a specific thread, to exercise the thread group path.
+    ASSERT_EQ(kill(getpid(), SIGWINCH), 0);
+
+    sigset_t pending;
+    sigemptyset(&pending);
+    ASSERT_EQ(sigpending(&pending), 0);
+    EXPECT_EQ(sigismember(&pending, SIGWINCH), 1);
+
+    siginfo_t info;
+    struct timespec timeout = {.tv_sec = 0, .tv_nsec = 0};
+    EXPECT_EQ(sigtimedwait(&blocked, &info, &timeout), SIGWINCH);
+  });
+
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+// `sigtimedwait` unblocks the signals it waits for, but a signal blocked before the call must still
+// be queued while the call is running, otherwise the wait would never observe it.
+TEST(SignalHandling, SigtimedwaitReceivesBlockedIgnoredSignal) {
+  test_helper::ForkHelper helper;
+
+  helper.RunInForkedProcess([&helper] {
+    sigset_t waited;
+    sigemptyset(&waited);
+    sigaddset(&waited, SIGWINCH);
+    ASSERT_EQ(sigprocmask(SIG_BLOCK, &waited, nullptr), 0);
+
+    pid_t parent = getpid();
+    helper.RunInForkedProcess([parent] {
+      // Aim for the signal to be sent while the parent waits. Sending it too early is harmless,
+      // the signal is then already pending when the wait starts.
+      usleep(100000);
+      kill(parent, SIGWINCH);
+    });
+
+    siginfo_t info;
+    struct timespec timeout = {.tv_sec = 30, .tv_nsec = 0};
+    EXPECT_EQ(sigtimedwait(&waited, &info, &timeout), SIGWINCH);
+
+    ASSERT_TRUE(helper.WaitForChildren());
+  });
+
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+#if (!__has_feature(address_sanitizer))
+class HandlerEntryPointFaultTest : public testing::TestWithParam<uintptr_t> {};
+
+TEST_P(HandlerEntryPointFaultTest, FaultAtEntryResetsToDefault) {
+  const uintptr_t handler_offset = GetParam();
+  constexpr size_t kAltStackSize = 0x10000;
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  // Allocate a shared sigaltstack initialized to zero so the parent can inspect how many signal
+  // frames were pushed before the child terminated.
+  auto altstack = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, kAltStackSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+
+  auto fault_page = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+
+  test_helper::ForkHelper helper;
+  helper.ExpectSignal(SIGSEGV);
+  helper.RunInForkedProcess([&] {
+    ASSERT_EQ(setup_sigaltstack_at(reinterpret_cast<uintptr_t>(altstack.mapping()), kAltStackSize),
+              0);
+
+    struct sigaction sa = {};
+    sa.sa_handler = reinterpret_cast<sighandler_t>(
+        reinterpret_cast<uintptr_t>(fault_page.mapping()) | handler_offset);
+    sa.sa_flags = SA_ONSTACK;
+    ASSERT_EQ(sigaction(SIGSEGV, &sa, nullptr), 0);
+
+    // Trigger an initial SIGSEGV. The kernel will push one frame onto `altstack`, mask SIGSEGV,
+    // and jump to `sa.sa_handler`, which immediately faults on instruction fetch at its own entry
+    // point.
+    *reinterpret_cast<volatile char *>(fault_page.mapping()) = 0;
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  const auto *bytes = static_cast<const uint8_t *>(altstack.mapping());
+  const bool upper_half_written = std::any_of(bytes + kAltStackSize / 2, bytes + kAltStackSize,
+                                              [](uint8_t b) { return b != 0; });
+  const bool lower_half_written =
+      std::any_of(bytes, bytes + kAltStackSize / 2, [](uint8_t b) { return b != 0; });
+
+  // Without SA_NODEFER, SIGSEGV is masked upon entering the handler, so the fault at the
+  // handler's entry point must reset SIGSEGV to SIG_DFL immediately after writing a single frame
+  // near the top of `altstack`.
+  EXPECT_TRUE(upper_half_written);
+  EXPECT_FALSE(lower_half_written);
+}
+
+TEST_P(HandlerEntryPointFaultTest, FaultAtEntryWithNodeferExhaustsAltStack) {
+  const uintptr_t handler_offset = GetParam();
+  constexpr size_t kAltStackSize = 0x10000;
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  auto altstack = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, kAltStackSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+
+  auto fault_page = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+
+  test_helper::ForkHelper helper;
+  helper.ExpectSignal(SIGSEGV);
+  helper.RunInForkedProcess([&] {
+    ASSERT_EQ(setup_sigaltstack_at(reinterpret_cast<uintptr_t>(altstack.mapping()), kAltStackSize),
+              0);
+
+    struct sigaction sa = {};
+    sa.sa_handler = reinterpret_cast<sighandler_t>(
+        reinterpret_cast<uintptr_t>(fault_page.mapping()) | handler_offset);
+    sa.sa_flags = SA_ONSTACK | SA_NODEFER;
+    ASSERT_EQ(sigaction(SIGSEGV, &sa, nullptr), 0);
+
+    // Trigger an initial SIGSEGV. With SA_NODEFER, SIGSEGV remains unmasked upon handler entry, so
+    // the kernel recursively pushes frames down `altstack` until `altstack` overflows and SIGSEGV
+    // is reset to SIG_DFL.
+    *reinterpret_cast<volatile char *>(fault_page.mapping()) = 0;
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  const auto *bytes = static_cast<const uint8_t *>(altstack.mapping());
+  const bool upper_half_written = std::any_of(bytes + kAltStackSize / 2, bytes + kAltStackSize,
+                                              [](uint8_t b) { return b != 0; });
+  const bool lower_half_written =
+      std::any_of(bytes, bytes + kAltStackSize / 2, [](uint8_t b) { return b != 0; });
+
+  EXPECT_TRUE(upper_half_written);
+  EXPECT_TRUE(lower_half_written);
+}
+
+#if defined(__arm__)
+constexpr uintptr_t kHandlerEntryOffsets[] = {0U, 1U};
+#else
+constexpr uintptr_t kHandlerEntryOffsets[] = {0U};
+#endif
+
+INSTANTIATE_TEST_SUITE_P(SignalHandling, HandlerEntryPointFaultTest,
+                         testing::ValuesIn(kHandlerEntryOffsets),
+                         [](const testing::TestParamInfo<uintptr_t> &info) {
+                           return info.param == 1 ? "ThumbEntry" : "AlignedEntry";
+                         });
+#endif  // (!__has_feature(address_sanitizer))
 
 }  // namespace

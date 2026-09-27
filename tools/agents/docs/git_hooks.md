@@ -17,6 +17,14 @@ unstaged edits:
 - **Automatic Formatting**: `fx format-code` formats fully staged files with automatic re-staging
   (`git add`). Partially staged files are evaluated strictly in read-only check mode under stash
   isolation.
+- **Static Analysis & Code Linting**: `fx lint` runs on staged files for every commit, validating
+  compliance with all platform linters (GN format, Python format, fidl-lint, clippy, mdlint, etc.).
+  Fully staged files get two passes: an advisory `fx lint --fix` pass that applies automated
+  replacements (re-staged by the pipeline), followed by a check pass that gates the commit. The
+  second pass is required because `--fix` delegates to `shac fix`, which skips formatter checks and
+  exits 0 even when findings remain. Partially staged files run the check pass only, under stash
+  isolation. Human commits skip `check_licenses` (`HUMAN_SKIPPED_LINTERS`) because it can take over
+  a minute when triggered; agents run the full set so automated changes are CQ-clean before upload.
 - **Commit Message Style Verification**: Validates subject line length ($\le 50$ chars recommended,
   $> 65$ warned), 72-character body line wrapping, and mandatory footers (`Bug:`, `Test:`,
   `Change-Id:`) via `scripts/shac/commit_msg_checker.py`.
@@ -240,17 +248,18 @@ When active runtime agent execution is detected:
 
 ### 7.1 Failure Policies (Fail-Open vs. Fail-Closed)
 
-| Failure Mode                          | Policy                                           | Action                                         | Rationale                                                        |
-| ------------------------------------- | ------------------------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------- |
-| **Missing Tool / Python Environment** | **Fail-Open**                                    | Print warning to stderr; exit 0.               | Never block commits due to environment setup issues.             |
-| **Stash Restoration Failure**         | **Fail-Closed**                                  | Print recovery command; exit 1.                | Prevent silent data loss or corrupted working trees.             |
-| **Code Syntax / Formatter Error**     | **Fail-Closed**                                  | Print formatter error; exit 1.                 | Catch broken code before creating commits.                       |
-| **Partially Staged Formatting Error** | **Fail-Closed**                                  | Print remediation hint; exit 1.                | Avoid committing unformatted code or corrupting unstaged hunks.  |
-| **Commit Message Warnings**           | **Fail-Open** (Human)<br>**Fail-Closed** (Agent) | Advisory warning for humans; error for agents. | Warn human developers without blocking commits; block commits from automated agents. |
+| Failure Mode                                    | Policy                                                      | Action                                                  | Rationale                                                                            |
+| ----------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| **Missing Tool / Python Environment**           | **Fail-Open**                                               | Print warning to stderr; exit 0.                        | Never block commits due to environment setup issues.                                 |
+| **Stash Restoration Failure**                   | **Fail-Closed**                                             | Print recovery command; exit 1.                         | Prevent silent data loss or corrupted working trees.                                 |
+| **Code Syntax / Formatter Error**               | **Fail-Closed**                                             | Print formatter error; exit 1.                          | Catch broken code before creating commits.                                           |
+| **Partially Staged Formatting Error**           | **Fail-Closed**                                             | Print remediation hint; exit 1.                         | Avoid committing unformatted code or corrupting unstaged hunks.                      |
+| **Code Linting / Static Analysis (`fx lint`)**   | **Fail-Closed**                                             | Apply `--fix` where possible; reject commit on remaining findings. | Keep lint violations out of the tree; `FUCHSIA_SKIP_HOOKS=1` remains the escape hatch. |
+| **Commit Message Warnings**                     | **Fail-Open** (Human)<br>**Fail-Closed** (Agent)            | Advisory warning for humans; error for agents.          | Warn human developers without blocking commits; block commits from automated agents. |
 
 ### 7.2 Performance Optimizations
 
-- **Fast-Path Filter**: Skip invoking `fx format-code` entirely if the staged partition contains
+- **Fast-Path Filter**: Skip invoking `fx format-code` and `fx lint` entirely if the staged partition contains
   zero formattable files. Supported extensions match
   [`DEFAULT_FORMATTABLE_EXTENSIONS`](../lib/githooks/adapters.py) (`.py`, `.md`, `.c`, `.cc`,
   `.cpp`, `.h`, `.hh`, `.hpp`, `.rs`, `.go`, `.fidl`, `.gn`, `.gni`, `.json`, `.json5`, `.cml`,

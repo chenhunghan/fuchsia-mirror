@@ -1,0 +1,22 @@
+# Test that passing an already-released resource to a helper function that takes
+# general memory or struct parameters is rejected by the verifier as a use-after-release.
+
+-- asm
+# Allocate a releasable memory buffer using malloc (helper 103).
+mov %r1, 8
+call 103
+jne %r0, 0, +2
+mov %r0, 1
+exit
+mov %r6, %r0
+# Free the buffer using free (helper 104).
+mov %r1, %r6
+call 104
+# Attempt to pass the already-released buffer to another helper (helper 101, read_only).
+# Verification must reject passing released resources to helper calls.
+mov %r1, %r6
+call 101
+mov %r0, 0
+exit
+-- error
+Resource already released for index 0 at pc 9

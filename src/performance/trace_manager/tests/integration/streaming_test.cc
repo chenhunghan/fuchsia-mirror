@@ -116,9 +116,10 @@ TEST(StreamingTest, Stream) {
     controller_client->StartTracing({});
     loop.Run(zx::deadline_after(zx::sec(1)));
     zx_signals_t signals;
-    zx_status_t res = e2.wait_one(ZX_USER_SIGNAL_0, zx::deadline_after(zx::sec(10)), &signals);
-    ASSERT_EQ(res, ZX_OK);
-    ASSERT_TRUE((signals & ZX_USER_SIGNAL_0) != 0);
+    zx_status_t res = e2.wait_one(ZX_USER_SIGNAL_0 | ZX_EVENTPAIR_PEER_CLOSED,
+                                  zx::deadline_after(zx::min(1)), &signals);
+    EXPECT_EQ(res, ZX_OK);
+    EXPECT_TRUE((signals & ZX_USER_SIGNAL_0) != 0);
     controller_client->StopTracing({{.write_results = true}});
     loop.Run(zx::deadline_after(zx::sec(1)));
   }

@@ -94,6 +94,12 @@ class FuchsiaController:
                 config["log.dir"] = log_dir
             else:
                 _LOGGER.debug("log dir not set.")
+            if self._ffx_config_data.shared_data:
+                shared_data = self._ffx_config_data.shared_data
+                _LOGGER.debug("shared_data set to %s", shared_data)
+                config["shared_data"] = shared_data
+            else:
+                _LOGGER.debug("shared_data not set.")
             if self._ffx_config_data.enable_usb:
                 enable_usb = "true"
             else:
@@ -154,13 +160,13 @@ class FuchsiaController:
             FuchsiaControllerConnectionError
         """
         try:
-            _LOGGER.debug(
-                "Waiting for for Fuchsia-Controller to check the "
+            _LOGGER.info(
+                "Waiting for Fuchsia-Controller to check the "
                 "connection from host to %s...",
                 self._target_name,
             )
             self.ctx.target_wait(timeout=0)
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Fuchsia-Controller completed the connection check from host "
                 "to %s...",
                 self._target_name,

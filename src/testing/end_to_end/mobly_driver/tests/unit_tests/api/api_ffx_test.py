@@ -133,6 +133,79 @@ class FfxClientTest(unittest.TestCase):
         with self.assertRaises(api_ffx.OutputFormatException):
             self.client.target_list(isolate_dir=None)
 
+    @patch("subprocess.check_output", autospec=True)
+    def test_get_target_serial(self, mock_check_output: Any) -> None:
+        """Test case for get_target_serial() returning expected results"""
+        mock_check_output.return_value = b"0123456789ABCDEF\n"
+
+        self.assertEqual(
+            self.client.get_target_serial(
+                target_name="fuchsia-emulator",
+                isolate_dir="some_isolate_dir_path",
+            ),
+            "0123456789ABCDEF",
+        )
+
+        # `target_name` must be a positional filter. Passing it via the
+        # global `-t` flag only selects ffx's default target and does not
+        # filter `target list` output, so with more than one device attached
+        # every device's serial would be returned.
+        mock_check_output.assert_called_once_with(
+            [
+                "some_ffx_path",
+                "--isolate-dir",
+                "some_isolate_dir_path",
+                "target",
+                "list",
+                "--format",
+                "serials",
+                "fuchsia-emulator",
+            ],
+            timeout=15,
+        )
+        self.assertNotIn("-t", mock_check_output.call_args.args[0])
+
+    @patch("subprocess.check_output", return_value=b"", autospec=True)
+    def test_get_target_serial_no_serial_returns_none(
+        self, mock_check_output: Any
+    ) -> None:
+        """Test case for get_target_serial() returning None when the target
+        reports no serial number"""
+        self.assertIsNone(
+            self.client.get_target_serial(
+                target_name="fuchsia-emulator",
+                isolate_dir=None,
+            )
+        )
+        mock_check_output.assert_called()
+
+    @parameterized.expand(
+        [
+            (
+                "timeout",
+                subprocess.TimeoutExpired(cmd="", timeout=-1),
+            ),
+            (
+                # ffx exits 2 when a supplied nodename cannot be resolved.
+                "failure",
+                subprocess.CalledProcessError(returncode=2, cmd=[], stderr=""),
+            ),
+        ]
+    )
+    @patch("subprocess.check_output", autospec=True)
+    def test_get_target_serial_failure_raises_exception(
+        self, unused_name: str, mock_exception: Any, mock_check_output: Any
+    ) -> None:
+        """Test case for get_target_serial() raising exceptions for
+        subprocess failure"""
+        mock_check_output.side_effect = mock_exception
+        with self.assertRaises(api_ffx.CommandException):
+            self.client.get_target_serial(
+                target_name="fuchsia-emulator",
+                isolate_dir=None,
+            )
+        mock_check_output.assert_called()
+
     @patch(
         "subprocess.check_output",
         autospec=True,

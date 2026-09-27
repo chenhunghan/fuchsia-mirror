@@ -242,8 +242,14 @@ const Range* FindBestMerge(const Ranges& old_ranges, const Ranges& new_ranges,
 }
 
 Range AlignRequestedRange(const Range& range, uint64_t alignment) {
-  uint64_t aligned_start = fbl::round_down(range.begin(), alignment);
-  uint64_t aligned_end = fbl::round_up(range.end(), alignment);
+  using sysmem_service::CheckRoundDown;
+  using sysmem_service::CheckRoundUp;
+  auto aligned_start_numeric = CheckRoundDown(range.begin(), alignment);
+  ZX_ASSERT(aligned_start_numeric.IsValid());
+  uint64_t aligned_start = aligned_start_numeric.ValueOrDie();
+  auto aligned_end_numeric = CheckRoundUp(range.end(), alignment);
+  ZX_ASSERT(aligned_end_numeric.IsValid());
+  uint64_t aligned_end = aligned_end_numeric.ValueOrDie();
   return Range::BeginEnd(aligned_start, aligned_end);
 }
 
@@ -1276,6 +1282,11 @@ bool ProtectedRanges::DoOpMergeRanges(const Range& first_range, const Range& sec
   ranges_.erase(second_range);
   ranges_bytes_ += new_range.length();
   ranges_.emplace(std::move(new_range));
+
+  ZX_DEBUG_ASSERT(is_dynamic_);
+  if (is_dynamic_) {
+    ranges_control_->ZeroProtectedSubRange(true, gap_going_away);
+  }
 
   return true;
 }

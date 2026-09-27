@@ -10,6 +10,7 @@ mod cml_generator;
 mod cpp_generator;
 mod driver_compiler;
 mod parser;
+mod property_def;
 mod rust_generator;
 mod workarounds;
 

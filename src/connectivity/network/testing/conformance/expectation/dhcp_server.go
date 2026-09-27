@@ -105,6 +105,3 @@ var dhcpServerExpectations map[AnvlCaseNumber]outcome.Outcome = map[AnvlCaseNumb
 	{16, 2}:  Pass,
 	{16, 3}:  Pass,
 }
-
-// No difference from netstack2!
-var dhcpServerExpectationsNS3 map[AnvlCaseNumber]outcome.Outcome = dhcpServerExpectations

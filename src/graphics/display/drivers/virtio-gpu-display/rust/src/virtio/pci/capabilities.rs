@@ -9,7 +9,6 @@ use super::capability_type::PciCapabilityType;
 use super::common_configuration::VirtioPciCommonConfiguration;
 use super::pci_notifications::VirtioPciNotifications;
 use fidl_next_fuchsia_hardware_pci as fidl_pci;
-use log::{info, warn};
 use mmio::region::MmioRegion;
 use mmio::vmo::{VmoMapping, VmoMemory};
 use std::mem::{offset_of, size_of};
@@ -162,7 +161,7 @@ impl PciCapabilityData {
             .value;
 
         if usize::from(capability_length) <= offset_of!(VirtioPciCapability32, cfg_type) {
-            warn!("Ignoring vendor PCI capability too small to contain a virtio type");
+            log::warn!("Ignoring vendor PCI capability too small to contain a virtio type");
             return Ok(None);
         }
 
@@ -182,9 +181,10 @@ impl PciCapabilityData {
         // @cite(virtio): sec="4.1.4.2" title="Device Requirements: Virtio Structure PCI Capabilities"
         // @cite(virtio): sec="4.1.4.1" title="Driver Requirements: Virtio Structure PCI Capabilities"
         if capability_length < size_of::<VirtioPciCapability32>() as u8 {
-            warn!(
+            log::warn!(
                 "virtio PCI capability {:?} has length {:?}, too small to encode a BAR pointer",
-                virtio_capability_type, capability_length
+                virtio_capability_type,
+                capability_length
             );
             return Err(zx::Status::IO_DATA_INTEGRITY);
         }
@@ -199,7 +199,7 @@ impl PciCapabilityData {
         // Invalid BAR indices are designated as "reserved", and drivers must ignore PCI capabilities that use reserved values.
         // @cite(virtio): sec="4.1.4.1" title="Driver Requirements: Virtio Structure PCI Capabilities"
         if !PciDeviceBarMap::is_valid_bar_index(bar_index) {
-            warn!("Ignoring capability with reserved BAR index: {}", bar_index);
+            log::warn!("Ignoring capability with reserved BAR index: {}", bar_index);
             return Ok(None);
         }
 
@@ -229,9 +229,10 @@ impl PciCapabilityData {
             // @cite(virtio): sec="4.1.4.4" title="Notification structure layout"
 
             if capability_length < size_of::<VirtioPciNotifyCapability>() as u8 {
-                warn!(
+                log::warn!(
                     "virtio PCI capability {:?} has length {:?}, too small to encode a BAR pointer",
-                    virtio_capability_type, capability_length
+                    virtio_capability_type,
+                    capability_length
                 );
                 return Err(zx::Status::IO_DATA_INTEGRITY);
             }
@@ -338,7 +339,7 @@ impl VirtioPciCapabilities {
                 continue;
             };
 
-            info!("PCI capability with virtio data: {:?}", capability_data);
+            log::debug!("PCI capability with virtio data: {:?}", capability_data);
 
             bar_map_builder.ensure_bar_memory_region_is_mapped(capability_data.bar_index).await?;
 
@@ -370,14 +371,14 @@ impl VirtioPciCapabilities {
         // The device must present at least one common configuration capability.
         // @cite(virtio): sec="4.1.4.3.1" title="Device Requirements: Common configuration structure layout"
         let common_configuration = common_configuration.ok_or_else(|| {
-            warn!("virtio device missing required PCI capability: common configuration");
+            log::warn!("virtio device missing required PCI capability: common configuration");
             zx::Status::IO_DATA_LOSS
         })?;
 
         // The device must present at least one notification capability.
         // @cite(virtio): sec="4.1.4.4.1" title="Device Requirements: Notification capability"
         let notifications = notifications.ok_or_else(|| {
-            warn!("virtio device missing required PCI capability: notification");
+            log::warn!("virtio device missing required PCI capability: notification");
             zx::Status::IO_DATA_LOSS
         })?;
 

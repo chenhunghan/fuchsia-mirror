@@ -19,11 +19,15 @@ def _rustc_library_impl(
         with_unit_tests,
         test_deps,
         lint_config,
+        disable_clippy,
         rustc_flags,
         build_flags,
         visibility,
         **kwargs):
-    if lint_config == None:
+    if disable_clippy:
+        lint_config = "//build/config/rust/lints:clippy_allow_all"
+        test_lint_config = "//build/config/rust/lints:clippy_allow_all"
+    elif lint_config == None:
         lint_config = "//build/config/rust/lints:clippy_warn_production"
         test_lint_config = "//build/config/rust/lints:clippy_warn_default"
     else:
@@ -103,6 +107,11 @@ See details in https://fxbug.dev/407441714.
         "test_deps": attr.label_list(
             doc = "Extra dependencies for the test target.",
             default = [],
+        ),
+        "disable_clippy": attr.bool(
+            doc = "If true, disables clippy lints on this target.",
+            default = False,
+            configurable = False,
         ),
     } | BUILD_FLAGS_RUST_ATTRS_KWARGS,
 )

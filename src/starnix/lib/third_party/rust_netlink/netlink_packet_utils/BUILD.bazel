@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+rustc_library(
+    name = "netlink_packet_utils",
+    srcs = [
+        "src/errors.rs",
+        "src/lib.rs",
+        "src/macros.rs",
+        "src/nla.rs",
+        "src/parsers.rs",
+        "src/traits.rs",
+    ],
+    crate_name = "netlink_packet_utils",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:paste",
+    ],
+    test_deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

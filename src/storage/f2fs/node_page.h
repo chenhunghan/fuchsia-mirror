@@ -22,7 +22,7 @@ class NodePage : public Page, public fbl::Recyclable<NodePage> {
   NodePage &operator=(const NodePage &) = delete;
   NodePage(const NodePage &&) = delete;
   NodePage &operator=(const NodePage &&) = delete;
-  virtual ~NodePage() = default;
+  ~NodePage() override;
 
   void fbl_recycle() { RecyclePage(); }
 

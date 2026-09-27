@@ -1147,7 +1147,7 @@ mod test {
             },
         ) = TestConnection::<fasync::Socket>::new();
 
-        let (a, other_end) = fasync::emulated_handle::Socket::create_stream();
+        let (a, other_end) = fuchsia_emulated_handle::Socket::create_stream();
         let other_end = fasync::Socket::from_socket(other_end);
         let connect_task = {
             let host = Arc::clone(&host);
@@ -1164,7 +1164,7 @@ mod test {
         assert_eq!(CID_HOST, addr.host_cid);
         assert_eq!(1234, addr.device_port);
 
-        let (b, other_end) = fasync::emulated_handle::Socket::create_stream();
+        let (b, other_end) = fuchsia_emulated_handle::Socket::create_stream();
         let other_end = fasync::Socket::from_socket(other_end);
         let _state = connection.accept(incoming, other_end).await.unwrap();
         connect_task.await.unwrap();
@@ -1209,7 +1209,7 @@ mod test {
         let connection = Arc::new(connection);
 
         for port_offset in 0..2 {
-            let (a, other_end) = fasync::emulated_handle::Socket::create_stream();
+            let (a, other_end) = fuchsia_emulated_handle::Socket::create_stream();
             let other_end = fasync::Socket::from_socket(other_end);
             let mut listener = host.listen(1234).unwrap();
             let connection_clone = Arc::clone(&connection);
@@ -1227,7 +1227,7 @@ mod test {
                     .await
             });
 
-            let (b, other_end) = fasync::emulated_handle::Socket::create_stream();
+            let (b, other_end) = fuchsia_emulated_handle::Socket::create_stream();
             let other_end = fasync::Socket::from_socket(other_end);
             let _state = listener.next().await.unwrap().accept(other_end).await.unwrap();
             let _remote_state = connect_task.await.unwrap();
@@ -1255,7 +1255,7 @@ mod test {
     async fn test_connect_bad_cid() {
         let (event_sender, _unused) = mpsc::channel(1);
         let host = UsbVsockHost::new_for_test(event_sender);
-        let (sock, _) = fasync::emulated_handle::Socket::create_stream();
+        let (sock, _) = fuchsia_emulated_handle::Socket::create_stream();
         let sock = fasync::Socket::from_socket(sock);
         let Err(ConnectError::NotFound(got_cid)) =
             host.connect(3.try_into().unwrap(), 1234, sock).await
@@ -1279,7 +1279,7 @@ mod test {
                 scope: _scope,
             },
         ) = TestConnection::<fasync::Socket>::new();
-        let (sock, _) = fasync::emulated_handle::Socket::create_stream();
+        let (sock, _) = fuchsia_emulated_handle::Socket::create_stream();
         let sock = fasync::Socket::from_socket(sock);
         let Err(ConnectError::PortOutOfRange) =
             host.connect(cid.try_into().unwrap(), u32::MAX, sock).await
@@ -1301,7 +1301,7 @@ mod test {
                 scope: _scope,
             },
         ) = TestConnection::<fasync::Socket>::new();
-        let (sock, _) = fasync::emulated_handle::Socket::create_stream();
+        let (sock, _) = fuchsia_emulated_handle::Socket::create_stream();
         let sock = fasync::Socket::from_socket(sock);
         let connect_task = {
             let host = Arc::clone(&host);
@@ -1331,7 +1331,7 @@ mod test {
                 scope: _scope,
             },
         ) = TestConnection::<fasync::Socket>::new();
-        let (socket, _) = fasync::emulated_handle::Socket::create_stream();
+        let (socket, _) = fuchsia_emulated_handle::Socket::create_stream();
         let socket = fasync::Socket::from_socket(socket);
         let Err(_) = connection
             .connect(
@@ -1363,7 +1363,7 @@ mod test {
             },
         ) = TestConnection::<fasync::Socket>::new();
 
-        let (socket, _) = fasync::emulated_handle::Socket::create_stream();
+        let (socket, _) = fuchsia_emulated_handle::Socket::create_stream();
         let socket = fasync::Socket::from_socket(socket);
         let _listener = host.listen(1234).unwrap();
         let Err(_) = connection
@@ -1396,7 +1396,7 @@ mod test {
             },
         ) = TestConnection::<fasync::Socket>::new();
 
-        let (socket, _) = fasync::emulated_handle::Socket::create_stream();
+        let (socket, _) = fuchsia_emulated_handle::Socket::create_stream();
         let socket = fasync::Socket::from_socket(socket);
         let _listener = host.listen(1234).unwrap();
         let Err(_) = connection
@@ -1451,7 +1451,7 @@ mod test {
             },
         ) = TestConnection::<fasync::Socket>::new();
 
-        let (socket, _a) = fasync::emulated_handle::Socket::create_stream();
+        let (socket, _a) = fuchsia_emulated_handle::Socket::create_stream();
         let socket = fasync::Socket::from_socket(socket);
         let connect_host = Arc::clone(&host);
         let connect_task = fasync::Task::spawn(async move {
@@ -1462,7 +1462,7 @@ mod test {
         let usb_vsock::Address { device_cid: _, host_cid: _, device_port: _, host_port } =
             *request.address();
 
-        let (socket, b) = fasync::emulated_handle::Socket::create_stream();
+        let (socket, b) = fuchsia_emulated_handle::Socket::create_stream();
         let socket = fasync::Socket::from_socket(socket);
         let _remote_state = connection.accept(request, socket).await.unwrap();
         connect_task.await.unwrap();
@@ -1495,7 +1495,7 @@ mod test {
             },
         ) = TestConnection::<fasync::Socket>::new();
 
-        let (a, other_end) = fasync::emulated_handle::Socket::create_stream();
+        let (a, other_end) = fuchsia_emulated_handle::Socket::create_stream();
         let other_end = fasync::Socket::from_socket(other_end);
         let connect_task = {
             let host = Arc::clone(&host);
@@ -1512,7 +1512,7 @@ mod test {
         assert_eq!(2, addr.host_cid);
         assert_eq!(1234, addr.device_port);
 
-        let (b, other_end) = fasync::emulated_handle::Socket::create_stream();
+        let (b, other_end) = fuchsia_emulated_handle::Socket::create_stream();
         let other_end = fasync::Socket::from_socket(other_end);
         let _state = connection.accept(incoming, other_end).await.unwrap();
         connect_task.await.unwrap();
@@ -1545,7 +1545,7 @@ mod test {
 
         assert_eq!(std::io::ErrorKind::UnexpectedEof, e.kind());
 
-        let (_unused, other_end) = fasync::emulated_handle::Socket::create_stream();
+        let (_unused, other_end) = fuchsia_emulated_handle::Socket::create_stream();
         let other_end = fasync::Socket::from_socket(other_end);
         let Err(ConnectError::NotFound(got_cid)) =
             host.connect(cid.try_into().unwrap(), 1234, other_end).await
@@ -1614,7 +1614,7 @@ mod test {
         let host = UsbVsockHost::<fasync::Socket>::new_for_test(event_sender);
 
         let mut incoming_requests = host.listen(TEST_PORT).unwrap();
-        let (a, other_end) = fasync::emulated_handle::Socket::create_stream();
+        let (a, other_end) = fuchsia_emulated_handle::Socket::create_stream();
         let other_end = fasync::Socket::from_socket(other_end);
 
         let connect_task = {
@@ -1632,7 +1632,7 @@ mod test {
         assert_eq!(CID_HOST, addr.host_cid);
         assert_eq!(TEST_PORT, addr.device_port);
 
-        let (b, other_end) = fasync::emulated_handle::Socket::create_stream();
+        let (b, other_end) = fuchsia_emulated_handle::Socket::create_stream();
         let other_end = fasync::Socket::from_socket(other_end);
         incoming.accept(other_end).await.unwrap();
         connect_task.await.unwrap();

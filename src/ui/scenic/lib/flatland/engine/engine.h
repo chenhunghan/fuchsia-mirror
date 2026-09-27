@@ -78,10 +78,12 @@ class Engine {
   Renderables GetRenderables(const FlatlandDisplay& display);
 
   // Signal all release fences and skip rendering.
-  // `rotate_scene_state == true` is probably what you want, unless you know you don't.
+  // Pass `rotate_scene_state = true` if calling outside of `RenderScheduledFrame()` where
+  // `current_scene_state_` has not already been rotated from `cleared_scene_state_`.
   void SkipRender(scheduling::FramePresentedCallback callback, bool rotate_scene_state = true);
 
-  void AddDisplay(display::Display& display);
+  static constexpr uint32_t kNumDisplayFramebuffers = 2;
+  void AddDisplay(display::Display& display, uint32_t num_vmos = kNumDisplayFramebuffers);
 
  private:
   // Holds the per-frame scene state that is generated from the latest UberStructs from each

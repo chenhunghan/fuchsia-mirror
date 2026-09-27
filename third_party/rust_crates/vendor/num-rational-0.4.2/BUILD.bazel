@@ -61,6 +61,7 @@ rust_library(
     edition = "2021",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=has_int_exp_fmt",
     ],
     tags = [
         "cargo-bazel",

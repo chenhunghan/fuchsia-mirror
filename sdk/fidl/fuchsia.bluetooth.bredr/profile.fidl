@@ -46,6 +46,7 @@ type Channel = resource table {
     /// Socket interface for sending/receiving SDUs on the channel.
     /// The channel will be closed if both this socket and the Connection are closed.
     /// Always present.
+    @deprecated("Use connection instead")
     1: socket zx.Handle:SOCKET;
     /// Channel mode accepted by the peer.
     /// Always present.

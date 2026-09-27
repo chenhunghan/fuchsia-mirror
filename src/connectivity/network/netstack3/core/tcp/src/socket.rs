@@ -23,7 +23,6 @@ pub(crate) mod diagnostics;
 pub(crate) mod generators;
 
 use alloc::vec::Vec;
-use core::convert::Infallible as Never;
 use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 use core::num::{NonZeroU16, NonZeroUsize};
@@ -71,7 +70,8 @@ use netstack3_ip::socket::{
     IpSocketHandler,
 };
 use netstack3_ip::{
-    self as ip, BaseTransportIpContext, IpLayerIpExt, SocketMetadata, TransportIpContext,
+    self as ip, BaseTransportIpContext, IpLayerIpExt, MarksBindingsContext, SocketMetadata,
+    TransportIpContext,
 };
 use netstack3_trace::{TraceResourceId, trace_duration};
 use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
@@ -522,6 +522,7 @@ pub trait TcpBindingsContext<D>:
     + SocketOpsFilterBindingContext<D>
     + SettingsContext<TcpSettings>
     + TcpSocketDestructionContext
+    + MarksBindingsContext
 {
 }
 
@@ -534,6 +535,7 @@ impl<D, BC> TcpBindingsContext<D> for BC where
         + SocketOpsFilterBindingContext<D>
         + SettingsContext<TcpSettings>
         + TcpSocketDestructionContext
+        + MarksBindingsContext
 {
 }
 
@@ -988,7 +990,7 @@ impl<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: TcpBindingsTypes> SpecSocke
 impl<A: SpecSocketId, B: SpecSocketId> SpecSocketId for EitherStack<A, B> {}
 
 /// Uninstantiatable type for implementing [`SocketMapStateSpec`].
-struct TcpSocketSpec<I, D, BT>(PhantomData<(I, D, BT)>, Never);
+struct TcpSocketSpec<I, D, BT>(PhantomData<(I, D, BT)>, !);
 
 impl<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: TcpBindingsTypes> SocketMapStateSpec
     for TcpSocketSpec<I, D, BT>
@@ -1467,7 +1469,7 @@ impl<S: SpecSocketId> ConnAddrState<S> {
 
 impl<S: SpecSocketId> SocketMapAddrStateSpec for ConnAddrState<S> {
     type Id = S;
-    type Inserter<'a> = Never;
+    type Inserter<'a> = !;
     type SharingState = SharingState;
 
     fn new(new_sharing_state: &Self::SharingState, id: Self::Id) -> Self {
@@ -2605,7 +2607,7 @@ where
     /// Accepts an established socket from the queue of a listener socket.
     ///
     /// Note: The accepted socket will have the marks of the incoming SYN
-    /// instead of the listener itself.
+    /// overridden by the listener's marks for domains in `marks_to_set_on_ingress`.
     pub fn accept(
         &mut self,
         id: &TcpApiSocketId<I, C>,
@@ -5850,7 +5852,6 @@ mod tests {
     use packet_formats::tcp::{TcpParseArgs, TcpSegment, TcpSegmentBuilder};
     use rand::RngExt as _;
     use test_case::test_case;
-    use test_util::assert_gt;
 
     use super::*;
     use crate::internal::base::{ConnectionError, DEFAULT_FIN_WAIT2_TIMEOUT};
@@ -5968,7 +5969,7 @@ mod tests {
 
     pub(crate) type TcpCtx<D> = CtxPair<TcpCoreCtx<D, TcpBindingsCtx<D>>, TcpBindingsCtx<D>>;
 
-    pub(crate) struct FakeTcpNetworkSpec<D: FakeStrongDeviceId>(PhantomData<D>, Never);
+    pub(crate) struct FakeTcpNetworkSpec<D: FakeStrongDeviceId>(PhantomData<D>, !);
     impl<D: FakeStrongDeviceId> FakeNetworkSpec for FakeTcpNetworkSpec<D> {
         type Context = TcpCtx<D>;
         type TimerId = TcpTimerId<D::Weak, TcpBindingsCtx<D>>;
@@ -6141,9 +6142,9 @@ mod tests {
     }
 
     impl<D: FakeStrongDeviceId> ReferenceNotifiers for TcpBindingsCtx<D> {
-        type ReferenceReceiver<T: 'static> = Never;
+        type ReferenceReceiver<T: 'static> = !;
 
-        type ReferenceNotifier<T: Send + 'static> = Never;
+        type ReferenceNotifier<T: Send + 'static> = !;
 
         fn new_reference_notifier<T: Send + 'static>(
             debug_references: DynDebugReferences,
@@ -6176,7 +6177,19 @@ mod tests {
 
     impl<D: FakeStrongDeviceId> MatcherBindingsTypes for TcpBindingsCtx<D> {
         type DeviceClass = ();
-        type BindingsPacketMatcher = Never;
+        type BindingsPacketMatcher = !;
+    }
+
+    impl<D: FakeStrongDeviceId> MarksBindingsContext for TcpBindingsCtx<D> {
+        fn marks_to_keep_on_egress() -> &'static [netstack3_base::MarkDomain] {
+            const MARKS: [netstack3_base::MarkDomain; 1] = [netstack3_base::MarkDomain::Mark1];
+            &MARKS
+        }
+
+        fn marks_to_set_on_ingress() -> &'static [netstack3_base::MarkDomain] {
+            const MARKS: [netstack3_base::MarkDomain; 1] = [netstack3_base::MarkDomain::Mark2];
+            &MARKS
+        }
     }
 
     impl<D: FakeStrongDeviceId> TcpBindingsTypes for TcpBindingsCtx<D> {
@@ -9705,14 +9718,16 @@ mod tests {
                 DualStackConverter = I::DualStackConverter,
             >,
     {
-        // We want the accepted socket to be marked 101 for MARK_1 and 102 for MARK_2.
+        // We want the accepted socket to be marked 101 for MARK_1 (from SYN packet) and
+        // 102 for MARK_2 (from listener socket, since Mark2 is in marks_to_set_on_ingress).
         let expected_marks = [(MarkDomain::Mark1, 101), (MarkDomain::Mark2, 102)];
-        let marks = netstack3_base::Marks::new(expected_marks);
+        let packet_marks =
+            netstack3_base::Marks::new([(MarkDomain::Mark1, 101), (MarkDomain::Mark2, 2)]);
         let mut net = new_test_net::<I>();
 
         for c in [LOCAL, REMOTE] {
             net.with_context(c, |ctx| {
-                ctx.core_ctx.recv_packet_marks = marks;
+                ctx.core_ctx.recv_packet_marks = packet_marks;
             })
         }
 
@@ -9723,6 +9738,7 @@ mod tests {
             let mut api = ctx.tcp_api::<I>();
             let server = api.create(Default::default());
             api.set_mark(&server, MarkDomain::Mark1, Mark(Some(1)));
+            api.set_mark(&server, MarkDomain::Mark2, Mark(Some(102)));
             api.bind(&server, None, Some(server_port)).expect("failed to bind the server socket");
             api.listen(&server, backlog).expect("can listen");
             server
@@ -10285,7 +10301,9 @@ mod tests {
 
         assert_eq!(client.mss(), expected_mss);
         // The PMTU update should not represent a congestion event.
-        assert_gt!(client.cwnd().cwnd(), u32::from(expected_mss));
+        let cwnd = client.cwnd().cwnd();
+        let expected_mss = u32::from(expected_mss);
+        assert!(cwnd > expected_mss, "{cwnd} > {expected_mss}");
 
         // The segment that was too large should be eagerly retransmitted.
         net.with_context(LOCAL, |ctx| {

@@ -137,7 +137,7 @@ host_script_test_data("fx_bash_tests") {
         "//scripts/fx-env.sh",
         "//scripts/fx-help.awk",
         "//scripts/fx-reentry",
-        "//scripts/fuchsia-vendored-python3.11",
+        "//scripts/fuchsia-vendored-python3.13",
         "//scripts/hermetic-env",
       ]
     },

@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use core::cmp;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::num::NonZeroU16;
 
@@ -1606,21 +1605,21 @@ where
     }
 }
 
-impl<I: FilterIpExt> IpPacket<I> for Never {
+impl<I: FilterIpExt> IpPacket<I> for ! {
     type TransportPacket<'a>
-        = Never
+        = !
     where
         Self: 'a;
     type TransportPacketMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
     type IcmpError<'a>
-        = Never
+        = !
     where
         Self: 'a;
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1661,15 +1660,15 @@ impl<I: FilterIpExt> IpPacket<I> for Never {
     }
 }
 
-impl MaybeTransportPacket for Never {
+impl MaybeTransportPacket for ! {
     fn transport_packet_data(&self) -> Option<TransportPacketData> {
         match *self {}
     }
 }
 
-impl<I: IpExt> MaybeTransportPacketMut<I> for Never {
+impl<I: IpExt> MaybeTransportPacketMut<I> for ! {
     type TransportPacketMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1678,7 +1677,7 @@ impl<I: IpExt> MaybeTransportPacketMut<I> for Never {
     }
 }
 
-impl<I: IpExt> TransportPacketMut<I> for Never {
+impl<I: IpExt> TransportPacketMut<I> for ! {
     fn set_src_port(&mut self, _: NonZeroU16) {
         match *self {}
     }
@@ -1696,15 +1695,15 @@ impl<I: IpExt> TransportPacketMut<I> for Never {
     }
 }
 
-impl<I: IpExt> MaybeIcmpErrorPayload<I> for Never {
+impl<I: IpExt> MaybeIcmpErrorPayload<I> for ! {
     fn icmp_error_payload(&self) -> Option<ParsedIcmpErrorPayload<I>> {
         match *self {}
     }
 }
 
-impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for Never {
+impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for ! {
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1713,9 +1712,9 @@ impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for Never {
     }
 }
 
-impl<I: FilterIpExt> IcmpErrorMut<I> for Never {
+impl<I: FilterIpExt> IcmpErrorMut<I> for ! {
     type InnerPacket<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1778,7 +1777,7 @@ impl<A: IpAddress, I: FilterIpExt, Inner> MaybeIcmpErrorMut<I>
     for Nested<Inner, UdpPacketBuilder<A>>
 {
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1845,7 +1844,7 @@ impl<A: IpAddress, I: FilterIpExt, Inner, O> MaybeIcmpErrorMut<I>
     for Nested<Inner, TcpSegmentBuilderWithOptions<A, O>>
 {
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1918,7 +1917,7 @@ impl<Inner, I: FilterIpExt> MaybeIcmpErrorMut<I>
     for Nested<Inner, IcmpPacketBuilder<I, IcmpEchoRequest>>
 {
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1947,7 +1946,7 @@ impl<Inner, I: FilterIpExt> MaybeIcmpErrorMut<I>
     for Nested<Inner, IcmpPacketBuilder<I, IcmpEchoReply>>
 {
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -2067,7 +2066,7 @@ macro_rules! non_error_icmp_message_type {
 
         impl<Inner> MaybeIcmpErrorMut<$ip> for Nested<Inner, IcmpPacketBuilder<$ip, $message>> {
             type IcmpErrorMut<'a>
-                = Never
+                = !
             where
                 Self: 'a;
 
@@ -2273,7 +2272,7 @@ impl<M: igmp::MessageType<EmptyBuf>> MaybeIcmpErrorMut<Ipv4>
     for InnerSerializer<IgmpPacketBuilder<EmptyBuf, M>, EmptyBuf>
 {
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -2310,7 +2309,7 @@ impl<M: igmp::MessageType<EmptyBuf>> MaybeTransportPacketMut<Ipv4>
     for InnerSerializer<IgmpPacketBuilder<EmptyBuf, M>, EmptyBuf>
 {
     type TransportPacketMut<'a>
-        = Never
+        = !
     where
         M: 'a;
 
@@ -2337,7 +2336,7 @@ impl<I> MaybeTransportPacketMut<Ipv4>
     for InnerSerializer<IgmpMembershipReportV3Builder<I>, EmptyBuf>
 {
     type TransportPacketMut<'a>
-        = Never
+        = !
     where
         I: 'a;
 
@@ -2364,7 +2363,7 @@ impl<I: IpExt, II, B> MaybeIcmpErrorPayload<I>
 
 impl<I, B> MaybeIcmpErrorMut<Ipv4> for InnerSerializer<IgmpMembershipReportV3Builder<I>, B> {
     type IcmpErrorMut<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -3103,7 +3102,7 @@ pub mod testutil {
 
     impl<I: IpExt, B: BufferMut> MaybeTransportPacketMut<I> for Nested<B, ()> {
         type TransportPacketMut<'a>
-            = Never
+            = !
         where
             B: 'a;
 
@@ -3120,7 +3119,7 @@ pub mod testutil {
 
     impl<I: FilterIpExt, B: BufferMut> MaybeIcmpErrorMut<I> for Nested<B, ()> {
         type IcmpErrorMut<'a>
-            = Never
+            = !
         where
             Self: 'a;
 
@@ -3137,7 +3136,7 @@ pub mod testutil {
 
     impl<I: IpExt> MaybeTransportPacketMut<I> for InnerSerializer<&[u8], EmptyBuf> {
         type TransportPacketMut<'a>
-            = Never
+            = !
         where
             Self: 'a;
 
@@ -3154,7 +3153,7 @@ pub mod testutil {
 
     impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for InnerSerializer<&[u8], EmptyBuf> {
         type IcmpErrorMut<'a>
-            = Never
+            = !
         where
             Self: 'a;
 
@@ -3382,7 +3381,7 @@ pub mod testutil {
 
         impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for FakeTcpSegment {
             type IcmpErrorMut<'a>
-                = Never
+                = !
             where
                 Self: 'a;
 
@@ -3458,7 +3457,7 @@ pub mod testutil {
 
         impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for FakeUdpPacket {
             type IcmpErrorMut<'a>
-                = Never
+                = !
             where
                 Self: 'a;
 
@@ -3487,7 +3486,7 @@ pub mod testutil {
         }
 
         impl<I: IpExt> MaybeTransportPacketMut<I> for FakeNullPacket {
-            type TransportPacketMut<'a> = Never;
+            type TransportPacketMut<'a> = !;
 
             fn transport_packet_mut(&mut self) -> Option<Self::TransportPacketMut<'_>> {
                 None
@@ -3502,7 +3501,7 @@ pub mod testutil {
 
         impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for FakeNullPacket {
             type IcmpErrorMut<'a>
-                = Never
+                = !
             where
                 Self: 'a;
 
@@ -3562,7 +3561,7 @@ pub mod testutil {
 
         impl<I: FilterIpExt> MaybeIcmpErrorMut<I> for FakeIcmpEchoRequest {
             type IcmpErrorMut<'a>
-                = Never
+                = !
             where
                 Self: 'a;
 
@@ -3896,7 +3895,7 @@ mod tests {
         for Nested<Inner, TcpSegmentBuilder<A>>
     {
         type IcmpErrorMut<'a>
-            = Never
+            = !
         where
             Self: 'a;
 

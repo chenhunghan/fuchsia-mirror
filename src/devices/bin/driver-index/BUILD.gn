@@ -117,8 +117,25 @@ fuchsia_cc_driver("fake-driver") {
   ldflags = [ "-Wl,--undefined-version" ]
 }
 
+fuchsia_driver_dml("test-bind-component-dml") {
+  dml = "meta/test-bind-component.dml"
+  driver_name = "test-bind-component"
+}
+
+fuchsia_driver_dml("test-bind2-component-dml") {
+  dml = "meta/test-bind2-component.dml"
+  driver_name = "test-bind2-component"
+}
+
+fuchsia_driver_dml("test-fallback-component-dml") {
+  dml = "meta/test-fallback-component.dml"
+  driver_name = "test-fallback-component"
+}
+
 driver_bind_rules("test-bind") {
-  rules = "meta/test.bind"
+  dml_label = ":test-bind-component-dml"
+  bind_output = "test-bind-component.bindbc"
+  deps = [ "//src/devices/bind/fuchsia" ]
 }
 
 fuchsia_driver_component("test-bind-component") {
@@ -127,7 +144,7 @@ fuchsia_driver_component("test-bind-component") {
     ":test-bind",
   ]
   info = "meta/test-bind-component-info.json"
-  manifest = "meta/test-bind-component.cml"
+  dml_label = ":test-bind-component-dml"
 }
 
 fuchsia_cc_driver("fake-driver2") {
@@ -135,7 +152,9 @@ fuchsia_cc_driver("fake-driver2") {
 }
 
 driver_bind_rules("test-bind2") {
-  rules = "meta/test2.bind"
+  dml_label = ":test-bind2-component-dml"
+  bind_output = "test-bind2-component.bindbc"
+  deps = [ "//src/devices/bind/fuchsia" ]
 }
 
 fuchsia_driver_component("test-bind2-component") {
@@ -144,7 +163,7 @@ fuchsia_driver_component("test-bind2-component") {
     ":test-bind2",
   ]
   info = "meta/test-bind2-component-info.json"
-  manifest = "meta/test-bind2-component.cml"
+  dml_label = ":test-bind2-component-dml"
 }
 
 fuchsia_cc_driver("fake-fallback-driver") {
@@ -152,7 +171,9 @@ fuchsia_cc_driver("fake-fallback-driver") {
 }
 
 driver_bind_rules("test-fallback-bind") {
-  rules = "meta/test-fallback.bind"
+  dml_label = ":test-fallback-component-dml"
+  bind_output = "test-fallback-component.bindbc"
+  deps = [ "//src/devices/bind/fuchsia" ]
 }
 
 fuchsia_driver_component("test-fallback-component") {
@@ -161,7 +182,7 @@ fuchsia_driver_component("test-fallback-component") {
     ":test-fallback-bind",
   ]
   info = "meta/test-fallback-component-info.json"
-  manifest = "meta/test-fallback-component.cml"
+  dml_label = ":test-fallback-component-dml"
 }
 
 # Run with `fx test driver-index-unittests`.

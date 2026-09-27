@@ -8,7 +8,7 @@ use fidl_fuchsia_sys2 as fsys;
 use fidl_fuchsia_test_manager::{LaunchError, LogsIteratorType, SuiteRunnerMarker};
 use fuchsia_component::client::connect_to_protocol;
 use regex::Regex;
-use run_test_suite_lib::{output, Outcome, RunTestSuiteError, TestParams};
+use run_test_suite_lib::{Outcome, RunTestSuiteError, TestParams, output};
 use std::ops::Deref;
 use std::str::from_utf8;
 use std::sync::Arc;
@@ -178,7 +178,8 @@ async fn run_test_once(
         run_reporter,
         futures::future::pending(),
     )
-    .await)
+    .await
+    .outcome)
 }
 
 #[fixture::fixture(run_with_reporter)]
@@ -282,7 +283,7 @@ async fn launch_and_test_passing_v2_test(in_provided_realm: bool) {
                 reporter,
                 futures::future::pending(),
             )
-            .await;
+            .await.outcome;
 
             assert_output!(output.lock().as_ref(), expected_output);
 
@@ -340,7 +341,8 @@ async fn launch_and_test_echo_test_in_provided_realm(
         reporter,
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
     let expected_output = "Running test 'fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/echo_test_client.cm'
 [RUNNING]	EchoTest
 [PASSED]	EchoTest
@@ -391,7 +393,8 @@ async fn experimental_parallel_execution_integ_test(
         reporter,
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
 
     let expected_output = "Running test 'fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/test-with-stderr.cm'
 [RUNNING]	Example.Test1
@@ -661,7 +664,8 @@ async fn launch_and_test_logspam_test(iterator_type: LogsIteratorType) {
         run_test_suite_lib::output::RunReporter::new(reporter),
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
     assert_eq!(outcome, Outcome::Passed);
 
     directory::testing::assert_run_result(
@@ -960,8 +964,7 @@ async fn test_timeout(reporter: TestMuxMuxReporter, output: TestOutputView, _: t
     test_params.timeout_seconds = TIMEOUT_SECONDS;
     let outcome = run_test_once(reporter, test_params).await.expect("Running test should not fail");
     assert_eq!(outcome, Outcome::Timedout);
-    let expected_output =
-        "fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/long_running_test.cm completed with result: TIMED_OUT";
+    let expected_output = "fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/long_running_test.cm completed with result: TIMED_OUT";
     let output_lock = output.lock();
     assert!(std::str::from_utf8(output_lock.as_slice()).unwrap().contains(expected_output));
 }
@@ -1045,7 +1048,7 @@ async fn test_logging_component(
                 run_test_suite_lib::output::RunReporter::new(reporter),
                 futures::future::pending(),
             )
-            .await;
+            .await.outcome;
 
             assert_output!(output.lock().as_slice(), expected_output.as_str());
             assert_eq!(outcome, Outcome::Passed);
@@ -1105,7 +1108,7 @@ async fn test_logging_component_min_severity(
             run_test_suite_lib::output::RunReporter::new(reporter),
             futures::future::pending(),
         )
-        .await;
+        .await.outcome;
 
         let expected_output = "Running test 'fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/logging_test.cm'
 [RUNNING]	log_and_exit
@@ -1151,7 +1154,7 @@ async fn test_per_component_min_severity(subcase: &'static str, iterator_option:
             run_test_suite_lib::output::RunReporter::new(reporter),
             futures::future::pending(),
         )
-        .await;
+        .await.outcome;
 
         let expected_output = "Running test 'fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/logging_test.cm'
 [RUNNING]	log_and_exit
@@ -1208,7 +1211,9 @@ async fn test_stdout_and_log_filter_ansi(
     );
     test_params.timeout_seconds = std::num::NonZeroU32::new(600);
     let run_params = run_test_suite_lib::RunParams {
-        min_severity_logs: vec![selectors::parse_log_interest_selector_or_severity("INFO").unwrap()],
+        min_severity_logs: vec![
+            selectors::parse_log_interest_selector_or_severity("INFO").unwrap(),
+        ],
         ..new_run_params()
     };
 
@@ -1221,7 +1226,8 @@ async fn test_stdout_and_log_filter_ansi(
         reporter,
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
 
     let expected_output = "Running test 'fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/stdout_ansi_test.cm'
 [RUNNING]	log_ansi_test
@@ -1277,7 +1283,8 @@ async fn test_max_severity(max_severity: Severity, iterator_option: LogsIterator
         run_test_suite_lib::output::RunReporter::new(reporter),
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
 
     let expected_output_prefix = "Running test 'fuchsia-pkg://fuchsia.com/run_test_suite_integration_tests#meta/error_logging_test.cm'
 [RUNNING]	log_and_exit
@@ -1365,7 +1372,8 @@ async fn test_stdout_to_directory(
         reporter,
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
 
     assert_eq!(outcome, Outcome::Passed);
 
@@ -1428,11 +1436,12 @@ async fn test_syslog_to_directory(
         reporter,
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
 
     assert_eq!(outcome, Outcome::Failed);
 
-    const EXPECTED_SYSLOG: &str =  "[TIMESTAMP][PID][TID][<root>][log_and_exit,error_logging_test] INFO: my info message\n\
+    const EXPECTED_SYSLOG: &str = "[TIMESTAMP][PID][TID][<root>][log_and_exit,error_logging_test] INFO: my info message\n\
 [TIMESTAMP][PID][TID][<root>][log_and_exit,error_logging_test] WARN: my warn message\n\
 [TIMESTAMP][PID][TID][<root>][log_and_exit,error_logging_test] ERROR: [src/sys/run_test_suite/tests/test_data/error_logging_test.rs(12)] my error message\n\
 ";
@@ -1482,7 +1491,8 @@ async fn test_custom_artifacts_to_directory(
         reporter,
         futures::future::pending(),
     )
-    .await;
+    .await
+    .outcome;
 
     assert_eq!(outcome, Outcome::Passed);
 
@@ -1535,7 +1545,8 @@ async fn test_terminate_signal(
         reporter,
         futures::future::ready(()),
     )
-    .await;
+    .await
+    .outcome;
 
     assert_eq!(outcome, Outcome::Cancelled);
 
@@ -1619,5 +1630,5 @@ async fn test_collect_stream_artifacts_from_hung_test(
         assert!(contents.contains("cancelled before completion"));
     };
     let (outcome, ()) = futures::future::join(run_fut, observer_fut).await;
-    assert_matches!(outcome, Outcome::Cancelled);
+    assert_matches!(outcome.outcome, Outcome::Cancelled);
 }

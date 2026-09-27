@@ -303,13 +303,17 @@ async fn run_test<W: 'static + Write + Send + Sync>(
 
     if called_by_test_pilot {
         if let Some(outdir) = output_directory {
-            convert_output_for_test_pilot(outdir.as_path())?;
+            convert_output_for_test_pilot(
+                outdir.as_path(),
+                outcome.setup_succeeded,
+                outcome.teardown_succeeded,
+            )?;
         }
     }
 
-    let show_realm_warning = outcome == run_test_suite_lib::Outcome::Timedout
-        || outcome == run_test_suite_lib::Outcome::Failed
-        || outcome == run_test_suite_lib::Outcome::DidNotFinish;
+    let show_realm_warning = outcome.outcome == run_test_suite_lib::Outcome::Timedout
+        || outcome.outcome == run_test_suite_lib::Outcome::Failed
+        || outcome.outcome == run_test_suite_lib::Outcome::DidNotFinish;
     log::info!("ffx test duration: {:?}", start_time.elapsed().as_secs_f32());
     if hermetic_test && show_realm_warning {
         eprintln!(
@@ -317,7 +321,7 @@ async fn run_test<W: 'static + Write + Send + Sync>(
 capabilities, pass in correct realm. See https://fuchsia.dev/go/components/non-hermetic-tests"
         );
     }
-    match outcome {
+    match outcome.outcome {
         run_test_suite_lib::Outcome::Passed => Ok(()),
         run_test_suite_lib::Outcome::Timedout => {
             ffx_bail_with_code!(*TIMED_OUT_CODE, "Tests timed out.",)

@@ -165,17 +165,47 @@ impl BlockServer {
 
     async fn handle_blockio_read(&self, request: &BlockFifoRequest) -> Result<(), Error> {
         let block_size = self.file.get_block_size();
+        let dev_offset =
+            block_size.checked_mul(request.dev_offset).ok_or(FxfsError::InvalidArgs)?;
+        let vmo_offset =
+            block_size.checked_mul(request.vmo_offset).ok_or(FxfsError::InvalidArgs)?;
+        let length = block_size.checked_mul(request.length as u64).ok_or(FxfsError::InvalidArgs)?;
+        if length == 0 {
+            return Ok(());
+        }
 
-        let mut buffer = vec![0u8; (request.length as u64 * block_size) as usize];
-        let bytes_read =
-            self.file.read_at_uncached(request.dev_offset * block_size, &mut buffer[..]).await?;
+        let file_size = self.file.get_size_uncached();
+        if dev_offset >= file_size {
+            let vmos = self.vmos.lock();
+            let vmo = vmos.get(&request.vmoid).ok_or(FxfsError::NotFound)?;
+            vmo.op_range(zx::VmoOp::ZERO, vmo_offset, length)?;
+            return Ok(());
+        }
 
-        // Fill in the rest of the buffer if bytes_read is less than the requested amount
-        buffer[bytes_read as usize..].fill(0);
+        let bytes_to_read = std::cmp::min(length, file_size - dev_offset);
+        let aligned_bytes_to_read =
+            block_size.align_up(bytes_to_read).ok_or(FxfsError::Inconsistent)? as usize;
 
-        let vmos = self.vmos.lock();
-        let vmo = vmos.get(&request.vmoid).ok_or(FxfsError::NotFound)?;
-        vmo.write(&buffer[..], request.vmo_offset * block_size)?;
+        let buf = self.file.read_at_uncached(dev_offset, aligned_bytes_to_read).await?;
+        let src_offset = buf.range().start as u64;
+        let src_vmo = buf.allocator().buffer_source().vmo();
+
+        {
+            let vmos = self.vmos.lock();
+            let vmo = vmos.get(&request.vmoid).ok_or(FxfsError::NotFound)?;
+            vmo.transfer_data(
+                zx::TransferDataOptions::empty(),
+                vmo_offset,
+                aligned_bytes_to_read as u64,
+                &src_vmo,
+                src_offset,
+            )?;
+            if length > aligned_bytes_to_read as u64 {
+                let zero_offset = vmo_offset + aligned_bytes_to_read as u64;
+                let zero_len = length - aligned_bytes_to_read as u64;
+                vmo.op_range(zx::VmoOp::ZERO, zero_offset, zero_len)?;
+            }
+        }
 
         Ok(())
     }
@@ -669,6 +699,33 @@ mod tests {
                     &vec![0; block_client.block_size() as usize][..]
                 );
 
+                // Test reading past EOF: write to the last block of the device.
+                let last_block_offset = TEST_DEVICE_FILE_SIZE - block_client.block_size() as u64;
+                let last_block_data = vec![0x55u8; block_client.block_size() as usize];
+                block_client
+                    .write_at(last_block_data[..].into(), last_block_offset)
+                    .await
+                    .expect("write_at failed");
+
+                // Read 2 blocks starting from last_block_offset (one block within file, one past
+                // EOF).
+                let mut eof_read_buf = vec![0xeeu8; 2 * block_client.block_size() as usize];
+                block_client
+                    .read_at(eof_read_buf.as_mut_slice().into(), last_block_offset)
+                    .await
+                    .expect("read_at failed");
+                let bs = block_client.block_size() as usize;
+                assert_eq!(&eof_read_buf[..bs], &last_block_data[..]);
+                assert_eq!(&eof_read_buf[bs..], &vec![0u8; bs][..]);
+
+                // Read entirely past EOF.
+                let mut past_eof_buf = vec![0xffu8; block_client.block_size() as usize];
+                block_client
+                    .read_at(past_eof_buf.as_mut_slice().into(), TEST_DEVICE_FILE_SIZE)
+                    .await
+                    .expect("read_at failed");
+                assert_eq!(&past_eof_buf[..], &vec![0u8; bs][..]);
+
                 block_client.detach_vmo(vmo_id).await.expect("detach failed");
             },
             async {
@@ -777,7 +834,7 @@ mod tests {
         let (session_proxy, server) = fidl::endpoints::create_proxy::<SessionMarker>();
         volume.open_session(server).unwrap();
 
-        let vmo = zx::Vmo::create(storage_units::PAGE_SIZE.get()).unwrap();
+        let vmo = zx::Vmo::create(storage_units::page_size().get()).unwrap();
         let vmo_id = session_proxy
             .attach_vmo(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap())
             .await

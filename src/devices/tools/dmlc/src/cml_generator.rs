@@ -94,6 +94,18 @@ pub fn generate_board_cml_file(
     let mut all_use = vec![
         serde_json::json!({ "service": "fuchsia.hardware.platform.bus.Service" }),
         serde_json::json!({ "protocol": "fuchsia.driver.framework.CompositeNodeManager" }),
+        serde_json::json!({
+            "config": "fuchsia.driver.devicetree.EnabledNodes",
+            "key": "enabled_nodes",
+            "type": "vector",
+            "max_count": 50,
+            "element": {
+                "type": "string",
+                "max_size": 100
+            },
+            "availability": "optional",
+            "default": []
+        }),
     ];
     for entry in use_entries {
         if !all_use.contains(entry) {

@@ -20,10 +20,46 @@ pub mod timer;
 pub mod user_copy;
 pub mod vector;
 
-/// Base address of the kernel address space.
-pub const KERNEL_ASPACE_BASE: usize = 0xffff_ffc0_0000_0000;
-/// Size of the kernel address space.
+use riscv64_aspace_bindings as aspace_bindings;
+
+/// Virtual address where the kernel address space begins.
+/// Below this is the user address space.
+/// riscv64 with sv39 means a page-based 39-bit virtual memory space.  The
+/// base kernel address is chosen so that kernel addresses have a 1 in the
+/// most significant bit whereas user addresses have a 0.
+pub const KERNEL_ASPACE_BASE: usize = 0xffffffc000000000;
+zr::static_assert!(KERNEL_ASPACE_BASE == aspace_bindings::KERNEL_ASPACE_BASE as usize);
+
+/// Virtual address where the kernel address space begins.
+/// Below this is the user address space.
+/// riscv64 with sv39 means a page-based 39-bit virtual memory space.  The
+/// base kernel address is chosen so that kernel addresses have a 1 in the
+/// most significant bit whereas user addresses have a 0.
 pub const KERNEL_ASPACE_SIZE: usize = 1usize << 38;
+zr::static_assert!(KERNEL_ASPACE_SIZE == aspace_bindings::KERNEL_ASPACE_SIZE as usize);
+
+/// Virtual address where the user-accessible address space begins.
+/// Below this is wholly inaccessible.
+pub const USER_ASPACE_BASE: usize = 0x0000000000200000;
+zr::static_assert!(USER_ASPACE_BASE == aspace_bindings::USER_ASPACE_BASE as usize);
+
+/// Virtual address where the user-accessible address space begins.
+/// Below this is wholly inaccessible.
+pub const USER_ASPACE_SIZE: usize = (1usize << 38) - USER_ASPACE_BASE;
+zr::static_assert!(USER_ASPACE_SIZE == aspace_bindings::USER_ASPACE_SIZE as usize);
+
+/// Size of the restricted mode address space in unified address spaces.
+/// We set the top of the restricted aspace to exactly halfway through the top
+/// level page table.
+pub const USER_RESTRICTED_ASPACE_SIZE: usize = (1usize << 37) - USER_ASPACE_BASE;
+zr::static_assert!(
+    USER_RESTRICTED_ASPACE_SIZE == aspace_bindings::USER_RESTRICTED_ASPACE_SIZE as usize
+);
+
+/// The dimensions of the paging are determined by libpage.
+///
+/// SvXXx4 for hypervisor guest translation
+pub const MMU_GUEST_SIZE_SHIFT: usize = aspace_bindings::MMU_GUEST_SIZE_SHIFT;
 
 /// Zic64b guarantees.
 pub const MAX_CACHE_LINE: usize = 64;
@@ -43,33 +79,37 @@ pub fn is_valid_user_pc(pc: usize) -> bool {
     (pc == 0) || (is_user_accessible(pc) && !is_kernel_address(pc))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(ktest)]
+/// Architecture unit tests for riscv64.
+#[unittest::suite(name = "riscv64")]
+mod riscv64_tests {
+    use unittest::{assert_false, assert_true};
 
+    /// Tests `is_kernel_address`.
     #[test]
     fn test_is_kernel_address() {
-        assert!(is_kernel_address(KERNEL_ASPACE_BASE));
-        assert!(is_kernel_address(KERNEL_ASPACE_BASE + 0x1000));
-        assert!(is_kernel_address(KERNEL_ASPACE_BASE + KERNEL_ASPACE_SIZE - 1));
-        assert!(!is_kernel_address(0));
-        assert!(!is_kernel_address(0x1000));
-        assert!(!is_kernel_address(0x0000_003f_ffff_ffff));
-        assert!(!is_kernel_address(KERNEL_ASPACE_BASE - 1));
+        assert_true!(is_kernel_address(KERNEL_ASPACE_BASE));
+        assert_true!(is_kernel_address(KERNEL_ASPACE_BASE + 0x1000));
+        assert_true!(is_kernel_address(KERNEL_ASPACE_BASE + (KERNEL_ASPACE_SIZE - 1)));
+        assert_false!(is_kernel_address(0));
+        assert_false!(is_kernel_address(0x1000));
+        assert_false!(is_kernel_address(0x0000_003f_ffff_ffff));
+        assert_false!(is_kernel_address(KERNEL_ASPACE_BASE - 1));
     }
 
+    /// Tests `is_valid_user_pc`.
     #[test]
     fn test_is_valid_user_pc() {
         // Null pointer is valid (used for threads intended to fault).
-        assert!(is_valid_user_pc(0));
+        assert_true!(is_valid_user_pc(0));
         // Valid userspace addresses.
-        assert!(is_valid_user_pc(0x1000));
-        assert!(is_valid_user_pc(0x0000_003f_ffff_0000));
+        assert_true!(is_valid_user_pc(0x1000));
+        assert_true!(is_valid_user_pc(0x0000_003f_ffff_0000));
         // Inaccessible user address (bit 38 set).
-        assert!(!is_valid_user_pc(0x0000_0040_0000_0000));
+        assert_false!(is_valid_user_pc(0x0000_0040_0000_0000));
         // Kernel address.
-        assert!(!is_valid_user_pc(KERNEL_ASPACE_BASE));
-        assert!(!is_valid_user_pc(0xffff_ffff_8000_0000));
+        assert_false!(is_valid_user_pc(KERNEL_ASPACE_BASE));
+        assert_false!(is_valid_user_pc(0xffff_ffff_8000_0000));
     }
 }
 

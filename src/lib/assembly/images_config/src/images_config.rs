@@ -102,6 +102,10 @@ pub struct VBMeta {
     /// Whether to include the base merkle root command line descriptor.
     #[serde(default)]
     pub include_base_merkle: bool,
+
+    /// Delivery mode for OTA updates.
+    #[serde(default)]
+    pub mode: bfc::VBMetaMode,
 }
 
 fn default_vbmeta_name() -> String {
@@ -391,7 +395,7 @@ impl ImagesConfig {
             compression: board.zbi.compression.clone(),
             postprocessing_script: board.zbi.postprocessing_script.clone(),
         }));
-        if let Some(vbmeta) = &board.vbmeta {
+        for vbmeta in board.get_vbmetas()? {
             let bfc::VBMeta {
                 name,
                 style,
@@ -399,15 +403,21 @@ impl ImagesConfig {
                 key_metadata,
                 additional_descriptors,
                 include_base_merkle,
-            } = vbmeta.clone();
+                mode,
+            } = vbmeta;
+            let filename = match mode {
+                bfc::VBMetaMode::Asset => Some(product.image_name.0.clone()),
+                bfc::VBMetaMode::Firmware => name.clone(),
+            };
             images.push(Image::VBMeta(VBMeta {
                 name: name.unwrap_or_else(|| product.image_name.0.clone()),
-                filename: Some(product.image_name.0.clone()),
+                filename,
                 style,
                 key: key.into(),
                 key_metadata: key_metadata.map(Into::into),
                 additional_descriptors,
                 include_base_merkle,
+                mode,
             }));
         }
 
@@ -535,6 +545,7 @@ mod tests {
                 additional_descriptors: vec![],
                 name: Some("fuchsia".into()),
                 include_base_merkle: false,
+                mode: bfc::VBMetaMode::Asset,
             }),
             fxfs: bfc::Fxfs {
                 size_bytes: Some(1234),
@@ -583,6 +594,7 @@ mod tests {
                 additional_descriptors: vec![],
                 name: Some("fuchsia".into()),
                 include_base_merkle: false,
+                mode: bfc::VBMetaMode::Asset,
             }),
             fxfs: bfc::Fxfs {
                 size_bytes: Some(1234),
@@ -654,6 +666,7 @@ mod tests {
                         key_metadata: Some("path/to/metadata".into()),
                         additional_descriptors: vec![],
                         include_base_merkle: false,
+                        mode: bfc::VBMetaMode::Asset,
                     }),
                 ],
             }
@@ -696,6 +709,7 @@ mod tests {
                         key_metadata: Some("path/to/metadata".into()),
                         additional_descriptors: vec![],
                         include_base_merkle: false,
+                        mode: bfc::VBMetaMode::Asset,
                     }),
                     Image::Fxfs(Fxfs {
                         size_bytes: Some(1234),
@@ -749,6 +763,7 @@ mod tests {
                         key_metadata: Some("path/to/metadata".into()),
                         additional_descriptors: vec![],
                         include_base_merkle: false,
+                        mode: bfc::VBMetaMode::Asset,
                     }),
                     Image::Fvm(Fvm {
                         slice_size: 5678,
@@ -848,6 +863,7 @@ mod tests {
                         key_metadata: Some("path/to/metadata".into()),
                         additional_descriptors: vec![],
                         include_base_merkle: false,
+                        mode: bfc::VBMetaMode::Asset,
                     }),
                     Image::Fvm(Fvm {
                         slice_size: 5678,
@@ -1134,5 +1150,102 @@ mod tests {
         let mut cursor = std::io::Cursor::new(json);
         let config: ImagesConfig = ImagesConfig::from_reader(&mut cursor).unwrap();
         assert_eq!(config.images.len(), 3);
+    }
+
+    #[test]
+    fn test_vbmeta_mode_asset_and_firmware() {
+        let mut board = test_board_config_fastboot();
+        board.vbmeta = None;
+        board.vbmetas = vec![
+            bfc::VBMeta {
+                key: "path/to/key1".into(),
+                name: Some("fuchsia".into()),
+                mode: bfc::VBMetaMode::Asset,
+                ..Default::default()
+            },
+            bfc::VBMeta {
+                key: "path/to/key2".into(),
+                name: Some("vbmeta_system".into()),
+                mode: bfc::VBMetaMode::Firmware,
+                ..Default::default()
+            },
+        ];
+        let product = pfc::ProductFilesystemConfig {
+            image_name: pfc::ImageName("a-product".into()),
+            image_mode: pfc::FilesystemImageMode::NoImage,
+            ..Default::default()
+        };
+
+        let images = ImagesConfig::from_product_and_board(&product, &board).unwrap();
+        let vbmeta_images: Vec<_> = images
+            .images
+            .into_iter()
+            .filter_map(|img| match img {
+                Image::VBMeta(v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vbmeta_images.len(), 2);
+        assert_eq!(vbmeta_images[0].mode, bfc::VBMetaMode::Asset);
+        assert_eq!(vbmeta_images[0].name, "fuchsia");
+        assert_eq!(vbmeta_images[0].filename, Some("a-product".into()));
+
+        assert_eq!(vbmeta_images[1].mode, bfc::VBMetaMode::Firmware);
+        assert_eq!(vbmeta_images[1].name, "vbmeta_system");
+        assert_eq!(vbmeta_images[1].filename, Some("vbmeta_system".into()));
+    }
+
+    #[test]
+    fn test_multiple_asset_vbmetas_rejected() {
+        let mut board = test_board_config_fastboot();
+        board.vbmeta = None;
+        board.vbmetas = vec![
+            bfc::VBMeta {
+                key: "path/to/key1".into(),
+                name: Some("vbmeta1".into()),
+                mode: bfc::VBMetaMode::Asset,
+                ..Default::default()
+            },
+            bfc::VBMeta {
+                key: "path/to/key2".into(),
+                name: Some("vbmeta2".into()),
+                mode: bfc::VBMetaMode::Asset,
+                ..Default::default()
+            },
+        ];
+        let product = pfc::ProductFilesystemConfig {
+            image_name: pfc::ImageName("a-product".into()),
+            image_mode: pfc::FilesystemImageMode::NoImage,
+            ..Default::default()
+        };
+
+        let result = ImagesConfig::from_product_and_board(&product, &board);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("multiple VBMeta images with mode 'asset'")
+        );
+    }
+
+    #[test]
+    fn test_firmware_vbmeta_without_name_rejected() {
+        let mut board = test_board_config_fastboot();
+        board.vbmeta = None;
+        board.vbmetas = vec![bfc::VBMeta {
+            key: "path/to/key1".into(),
+            name: None,
+            mode: bfc::VBMetaMode::Firmware,
+            ..Default::default()
+        }];
+        let product = pfc::ProductFilesystemConfig {
+            image_name: pfc::ImageName("a-product".into()),
+            image_mode: pfc::FilesystemImageMode::NoImage,
+            ..Default::default()
+        };
+
+        let result = ImagesConfig::from_product_and_board(&product, &board);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("specifies a firmware VBMeta without a name")
+        );
     }
 }

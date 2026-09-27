@@ -24,3 +24,11 @@ class AdbTimeoutError(AdbError, TimeoutError):
 
 class AdbServerError(AdbError):
     """Exception for ADB server errors."""
+
+
+class AdbConnectionError(errors.TransportConnectionError, AdbError):
+    """Raised when ADB transport's check_connection fails."""
+
+
+class AdbUnauthorizedError(AdbConnectionError, AdbCommandError):
+    """Raised when the device is unauthorized for ADB connections/commands."""

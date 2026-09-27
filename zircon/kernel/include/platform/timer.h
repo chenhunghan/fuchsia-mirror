@@ -15,6 +15,7 @@
 #include <zircon/types.h>
 
 #include <fbl/enum_bits.h>
+#include <kernel/ffi.h>
 #include <ktl/atomic.h>
 #include <ktl/optional.h>
 #include <ktl/type_traits.h>
@@ -361,5 +362,19 @@ inline void timer_unpause_monotonic() {
 inline bool timer_is_monotonic_paused() {
   return internal::mono_ticks_modifier.load(ktl::memory_order_relaxed) > 0;
 }
+
+extern "C" {
+
+struct CppRatio {
+  uint32_t numerator;
+  uint32_t denominator;
+};
+zx_instant_mono_ticks_t cpp_timer_current_mono_ticks();
+zx_instant_boot_ticks_t cpp_timer_current_boot_ticks();
+zx_instant_mono_t cpp_current_mono_time();
+zx_instant_boot_t cpp_current_boot_time();
+CppRatio cpp_timer_get_ticks_to_time_ratio();
+
+}  // extern "C"
 
 #endif  // ZIRCON_KERNEL_INCLUDE_PLATFORM_TIMER_H_

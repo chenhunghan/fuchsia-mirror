@@ -240,11 +240,11 @@ impl serde::Serialize for ControllerCodecs {
 }
 
 impl JsonSchema for ControllerCodecs {
-    fn schema_name() -> String {
-        "ControllerCodecs".to_owned()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ControllerCodecs".into()
     }
 
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         <Option<Vec<HfpCodecId>>>::json_schema(generator)
     }
 }
@@ -309,6 +309,7 @@ pub struct AudioGatewayEnabledConfig {
 /// Configuration options for the Bluetooth HFP Audio Gateway component ('bt-hfp-audio-gateway').
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema)]
 #[serde(from = "BluetoothProfileDeserializer<AudioGatewayEnabledConfig>")]
+#[schemars(!from)]
 pub enum AudioGatewayConfig {
     /// Disable `bt-hfp-audio-gateway`.
     #[default]
@@ -360,6 +361,7 @@ pub struct HandsFreeEnabledConfig {
 /// Configuration options for the Bluetooth HFP Hands Free component ('bt-hfp-hands-free').
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema)]
 #[serde(from = "BluetoothProfileDeserializer<HandsFreeEnabledConfig>")]
+#[schemars(!from)]
 pub enum HandsFreeConfig {
     /// Disabled `bt-hfp-hands-free`.
     #[default]
@@ -423,6 +425,7 @@ pub struct RfcommEnabledConfig {}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, JsonSchema)]
 #[serde(from = "BluetoothProfileDeserializer<RfcommEnabledConfig>")]
+#[schemars(!from)]
 pub enum RfcommConfig {
     Disabled,
     Enabled(RfcommEnabledConfig),

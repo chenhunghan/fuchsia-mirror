@@ -2,9 +2,45 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/fastrpc.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_package(
+    name = "google_fastrpc",
+    package_name = "google_fastrpc",
+    components = [
+        ":google_fastrpc_component",
+    ],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component(
+    name = "google_fastrpc_component",
+    compiled_manifest = ":google_fastrpc_manifest",
+    component_name = "google_fastrpc",
+)
+
+fx_component_manifest(
+    name = "google_fastrpc_manifest",
+    component_name = "google_fastrpc",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/fastrpc.cml",
 )

@@ -8,7 +8,7 @@
 use anyhow::{Context as _, Error, format_err};
 use fidl_fuchsia_recovery::{FactoryResetMarker, FactoryResetProxy};
 use fidl_fuchsia_update_channel::{ProviderMarker, ProviderProxy};
-use fuchsia_component::client::connect_to_protocol;
+use fuchsia_component_client::connect_to_protocol;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

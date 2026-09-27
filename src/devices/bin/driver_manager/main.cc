@@ -148,6 +148,8 @@ int main(int argc, char** argv) {
   loader_loop.StartThread("loader-loop");
   auto loader_service =
       driver_manager::DriverHostLoaderService::Create(loader_loop.dispatcher(), std::move(lib_fd));
+  const bool wait_for_storage_token =
+      config.wait_for_suspending_token() && config.storage_power_management_enabled();
   std::shared_ptr<driver_manager::DriverRunner> driver_runner =
       std::make_shared<driver_manager::DriverRunner>(
           std::move(realm_result.value()), std::move(introspector_result.value()),
@@ -178,7 +180,7 @@ int main(int argc, char** argv) {
               .power_suspend_enabled = config.power_suspend_enabled(),
           }},
           std::move(topology_client), std::nullopt, std::move(cpu_element_mgr),
-          config.wait_for_suspending_token(), std::move(statecontrol_admin));
+          wait_for_storage_token, std::move(statecontrol_admin));
   // Setup devfs.
   std::shared_ptr<driver_manager::Devfs> devfs;
   driver_runner->root_node()->SetupDevfsForRootNode(devfs);
@@ -192,7 +194,7 @@ int main(int argc, char** argv) {
   //
   // TODO(https://fxbug.dev/479254641) Be lazier, only initialize storage once we hit drivers
   // that need it.
-  if (config.power_suspend_enabled() && !config.wait_for_suspending_token()) {
+  if (config.power_suspend_enabled() && !wait_for_storage_token) {
     driver_runner->power_manager()->CreateStoragePowerElement(
         fuchsia_power_broker::DependencyToken(zx::event()),
         static_cast<fuchsia_power_broker::PowerLevel>(1), []() {});

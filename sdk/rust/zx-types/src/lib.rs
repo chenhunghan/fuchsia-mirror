@@ -737,11 +737,28 @@ multiconst!(zx_clock_t, [
 
 // from //zircon/system/public/zircon/syscalls/clock.h
 multiconst!(u64, [
+    // Argument version identifiers.
+    //
+    // All zx_clock_* syscalls which fetch or receive a structure's worth of
+    // arguments encode a version number in the options field of the syscall.  This
+    // version field is in the same location and is the same size for each syscall,
+    // so a common set of macros may be used for encoding and decoding.
+    ZX_CLOCK_ARGS_VERSION_SHIFT = 58;
+    ZX_CLOCK_ARGS_VERSION_BITS = 6;
+    ZX_CLOCK_ARGS_VERSION_MASK = ((1u64 << ZX_CLOCK_ARGS_VERSION_BITS) - 1) << ZX_CLOCK_ARGS_VERSION_SHIFT;
+
+    // Clock creation options.
     ZX_CLOCK_OPT_MONOTONIC = 1 << 0;
     ZX_CLOCK_OPT_CONTINUOUS = 1 << 1;
     ZX_CLOCK_OPT_AUTO_START = 1 << 2;
     ZX_CLOCK_OPT_BOOT = 1 << 3;
     ZX_CLOCK_OPT_MAPPABLE = 1 << 4;
+
+    ZX_CLOCK_OPTS_ALL = ZX_CLOCK_OPT_MONOTONIC
+        | ZX_CLOCK_OPT_CONTINUOUS
+        | ZX_CLOCK_OPT_AUTO_START
+        | ZX_CLOCK_OPT_BOOT
+        | ZX_CLOCK_OPT_MAPPABLE;
 
     // v1 clock update flags
     ZX_CLOCK_UPDATE_OPTION_VALUE_VALID = 1 << 0;
@@ -751,10 +768,31 @@ multiconst!(u64, [
     // Additional v2 clock update flags
     ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID = 1 << 3;
     ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID = ZX_CLOCK_UPDATE_OPTION_VALUE_VALID;
+    ZX_CLOCK_UPDATE_OPTION_BOTH_VALUES_VALID =
+        ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID | ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID;
+
+    ZX_CLOCK_UPDATE_OPTIONS_ALL = ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID
+        | ZX_CLOCK_UPDATE_OPTION_RATE_ADJUST_VALID
+        | ZX_CLOCK_UPDATE_OPTION_ERROR_BOUND_VALID
+        | ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID;
 
     ZX_CLOCK_ARGS_VERSION_1 = 1 << 58;
     ZX_CLOCK_ARGS_VERSION_2 = 2 << 58;
+
+    // Special clock error values
+    ZX_CLOCK_UNKNOWN_ERROR = 0xFFFFFFFFFFFFFFFF;
 ]);
+
+// Clock rate adjustment limits
+multiconst!(i32, [
+    ZX_CLOCK_UPDATE_MIN_RATE_ADJUST = -1000;
+    ZX_CLOCK_UPDATE_MAX_RATE_ADJUST = 1000;
+]);
+
+/// Encodes a version number into the options bitfield for clock syscalls.
+pub const fn zx_clock_args_version(n: u64) -> u64 {
+    (n << ZX_CLOCK_ARGS_VERSION_SHIFT) & ZX_CLOCK_ARGS_VERSION_MASK
+}
 
 // from //zircon/system/public/zircon/syscalls/exception.h
 multiconst!(u32, [
@@ -801,13 +839,15 @@ impl Debug for PadByte {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_clock_create_args_v1_t {
     pub backstop_time: zx_time_t,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_clock_rate_t {
     pub synthetic_ticks: u32,
     pub reference_ticks: u32,
@@ -815,6 +855,7 @@ pub struct zx_clock_rate_t {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_clock_transformation_t {
     pub reference_offset: i64,
     pub synthetic_offset: i64,
@@ -823,6 +864,7 @@ pub struct zx_clock_transformation_t {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_clock_details_v1_t {
     pub options: u64,
     pub backstop_time: zx_time_t,
@@ -834,11 +876,14 @@ pub struct zx_clock_details_v1_t {
     pub last_rate_adjust_update_ticks: zx_ticks_t,
     pub last_error_bounds_update_ticks: zx_ticks_t,
     pub generation_counter: u32,
-    padding1: [PadByte; 4],
+    // Public so that in-tree producers (for example the kernel's clock
+    // dispatcher) can build this record with a struct literal.
+    pub padding1: [PadByte; 4],
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_clock_update_args_v1_t {
     pub rate_adjust: i32,
     padding1: [PadByte; 4],
@@ -848,6 +893,7 @@ pub struct zx_clock_update_args_v1_t {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_clock_update_args_v2_t {
     pub rate_adjust: i32,
     padding1: [PadByte; 4],

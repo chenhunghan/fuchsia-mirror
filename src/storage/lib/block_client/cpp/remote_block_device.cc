@@ -74,6 +74,10 @@ zx_status_t RemoteBlockDevice::VolumeQuerySlices(
   if (zx_status_t status = response.status; status != ZX_OK) {
     return status;
   }
+  if (response.response_count > slices_count ||
+      response.response_count > fuchsia_storage_block::wire::kMaxSliceRequests) {
+    return ZX_ERR_IO;
+  }
   std::copy_n(response.response.data(), response.response_count, out_ranges);
   *out_ranges_count = response.response_count;
   return ZX_OK;

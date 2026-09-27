@@ -78,7 +78,13 @@ impl<T> Queue<T> {
 }
 
 /// Maximum amount to read for an async socket read.
-const ASYNC_READ_BUFSIZE: u64 = 65536;
+// LINT.IfChange
+const ASYNC_READ_BUFSIZE: u64 = 256 * 1024;
+// LINT.ThenChange(
+//     //src/developer/ffx/lib/target/src/target_connector.rs,
+//     //src/developer/remote-control/fdomain-runner/src/main.rs,
+//     //src/developer/remote-control/runner/src/main.rs
+// )
 
 /// Wraps the various FIDL Event types that can be produced by an FDomain
 #[derive(Debug)]

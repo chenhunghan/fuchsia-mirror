@@ -179,7 +179,7 @@ impl JournalReader {
             // Read the next block's worth, verify its checksum, and append it to |buf|.
             let mut buffer = self.handle.allocate_buffer(bs).await;
             assert!(block_size.is_aligned(self.read_offset));
-            let bytes_read = self.handle.read(self.read_offset, buffer.as_mut()).await?;
+            let bytes_read = self.handle.read_aligned(self.read_offset, buffer.as_mut()).await?;
             if bytes_read != bs {
                 if self.eof_ok {
                     return Ok(());

@@ -31,9 +31,14 @@ macro_rules! ptrs {(
                             extern "system" fn $name($(_: $param_ty),*) {
                                 panic!("function pointer `{}` not loaded", stringify!($name))
                             }
-                            let name = ::std::ffi::CStr::from_bytes_with_nul_unchecked(
-                                concat!("vk", stringify!($name), "\0").as_bytes());
-                            let val = f(name);
+                            const NAME: &::std::ffi::CStr =
+                                match ::std::ffi::CStr::from_bytes_with_nul(
+                                    concat!("vk", stringify!($name), "\0").as_bytes(),
+                                ) {
+                                    Ok(name) => name,
+                                    Err(_) => panic!("invalid Vulkan symbol name"),
+                                };
+                            let val = f(NAME);
                             if val.is_null() {
                                 ::std::mem::transmute($name as *const ())
                             } else {

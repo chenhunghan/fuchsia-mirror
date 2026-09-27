@@ -6,6 +6,7 @@ use crate::signals::{SignalEvent, SignalEventNotify, SignalEventValue};
 use crate::task::CurrentTask;
 use crate::time::interval_timer::{IntervalTimer, IntervalTimerHandle};
 use crate::time::{Timeline, TimerWakeup};
+use starnix_logging::log_warn;
 use starnix_sync::{LockDepMutex, TimerTableStateLock};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::signals::SIGALRM;
@@ -154,6 +155,19 @@ impl TimerTable {
         match self.state.lock().timers.get(&id) {
             Some(itimer) => Ok(itimer.clone()),
             None => error!(EINVAL),
+        }
+    }
+
+    /// Disarms and deletes all POSIX timers, preserving interval timers.
+    pub fn reset_for_exec(&self, current_task: &CurrentTask) {
+        // Drop the table lock before disarming timers to avoid holding the lock during
+        // asynchronous timer cancellation. Note that `next_timer_id` is intentionally not reset,
+        // matching Linux behavior where timer ID allocation continues sequentially across execve.
+        let timers = std::mem::take(&mut self.state.lock().timers);
+        for (_, timer) in timers {
+            if let Err(err) = timer.disarm(current_task) {
+                log_warn!("Failed to disarm POSIX timer on exec: {err:?}");
+            }
         }
     }
 }

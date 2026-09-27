@@ -12,6 +12,7 @@ use fidl::endpoints::{DiscoverableProtocolMarker, Responder, ServerEnd};
 use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_driver_development as fdd;
 use fidl_fuchsia_driver_framework as fdf;
+use fidl_fuchsia_driver_host as fdh;
 use fidl_fuchsia_driver_index as fdi;
 use fuchsia_async as fasync;
 use fuchsia_component::client::connect_to_protocol;
@@ -308,7 +309,7 @@ impl DriverDevelopmentService {
                 .map(|t| fdd::ThreadInfo {
                     koid: Some(t.koid),
                     name: Some(t.name),
-                    scheduler_role: Some(t.scheduler_role),
+                    scheduler_role: (!t.scheduler_role.is_empty()).then_some(t.scheduler_role),
                     ..Default::default()
                 })
                 .collect();
@@ -316,12 +317,80 @@ impl DriverDevelopmentService {
             let dispatchers = process_info
                 .dispatchers
                 .into_iter()
-                .map(|d| fdd::DispatcherInfo {
-                    driver: Some(d.driver),
-                    name: Some(d.name),
-                    options: Some(d.options),
-                    scheduler_role: Some(d.scheduler_role),
-                    ..Default::default()
+                .map(|d| {
+                    let state = match d.state {
+                        fdh::DispatcherState::Running => Some(fdd::DispatcherState::Running),
+                        fdh::DispatcherState::ShuttingDown => {
+                            Some(fdd::DispatcherState::ShuttingDown)
+                        }
+                        fdh::DispatcherState::Shutdown => Some(fdd::DispatcherState::Shutdown),
+                        fdh::DispatcherState::Destroyed => Some(fdd::DispatcherState::Destroyed),
+                        _ => None,
+                    };
+                    let queued_tasks = d
+                        .queued_tasks
+                        .into_iter()
+                        .map(|t| fdd::QueuedTaskInfo {
+                            ptr: Some(t.ptr),
+                            handler: Some(t.handler),
+                            initiating_dispatcher: Some(t.initiating_dispatcher),
+                            initiating_dispatcher_name: if t.initiating_dispatcher_name.is_empty() {
+                                None
+                            } else {
+                                Some(t.initiating_dispatcher_name)
+                            },
+                            initiating_driver: Some(t.initiating_driver),
+                            initiating_driver_url: if t.initiating_driver_url.is_empty() {
+                                None
+                            } else {
+                                Some(t.initiating_driver_url)
+                            },
+                            ..Default::default()
+                        })
+                        .collect();
+                    let non_inlined = d.debug_stats.non_inlined;
+                    let debug_stats = fdd::DispatcherDebugStats {
+                        num_total_requests: Some(d.debug_stats.num_total_requests),
+                        num_inlined_requests: Some(d.debug_stats.num_inlined_requests),
+                        non_inlined: Some(fdd::NonInlinedRequestStats {
+                            allow_sync_calls: Some(non_inlined.allow_sync_calls),
+                            parallel_dispatch: Some(non_inlined.parallel_dispatch),
+                            task: Some(non_inlined.task),
+                            unknown_thread: Some(non_inlined.unknown_thread),
+                            reentrant: Some(non_inlined.reentrant),
+                            channel_wait_not_yet_registered: Some(
+                                non_inlined.channel_wait_not_yet_registered,
+                            ),
+                            no_thread_migration: Some(non_inlined.no_thread_migration),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    fdd::DispatcherInfo {
+                        driver: Some(d.driver),
+                        name: Some(d.name),
+                        options: Some(d.options),
+                        scheduler_role: Some(d.scheduler_role),
+                        dispatcher_ptr: Some(d.dispatcher_ptr),
+                        driver_ptr: Some(d.driver_ptr),
+                        synchronized: Some(d.synchronized),
+                        allow_sync_calls: Some(d.allow_sync_calls),
+                        state,
+                        destroy_context: if d.destroy_context.is_empty() {
+                            None
+                        } else {
+                            Some(d.destroy_context)
+                        },
+                        destroy_user_initiated: if d.has_destroy_user_initiated {
+                            Some(d.destroy_user_initiated)
+                        } else {
+                            None
+                        },
+                        debug_stats: Some(debug_stats),
+                        queued_tasks: Some(queued_tasks),
+                        num_queued_tasks: Some(d.num_queued_tasks),
+                        ..Default::default()
+                    }
                 })
                 .collect();
 

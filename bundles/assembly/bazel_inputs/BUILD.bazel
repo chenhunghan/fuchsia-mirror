@@ -93,8 +93,3 @@ prebuilt_package(
     name = "testing_support.bootfs_files_package",
     archive = "@gn_targets//bundles/assembly/bazel_inputs:testing_support.bootfs_files_package",
 )
-
-prebuilt_package(
-    name = "starnix_support.bootfs_files_package",
-    archive = "@gn_targets//bundles/assembly/bazel_inputs:starnix_support.bootfs_files_package",
-)

@@ -15,8 +15,6 @@ use fidl_fuchsia_developer_ffx::{self as ffx};
 use fuchsia_async::TimeoutExt;
 use futures::future::{BoxFuture, LocalBoxFuture};
 use futures::{FutureExt, Stream, StreamExt, pin_mut};
-use netext::IsLocalAddr;
-use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -619,6 +617,7 @@ enum ResolutionTarget {
     Addr(SocketAddr),
     Usb(u32),
     Vsock(u32),
+    Uart(String),
     TestMock(Box<dyn Fn() -> Result<Connection> + Send + Sync>),
     TestMockAsync(Box<dyn Fn() -> BoxFuture<'static, Result<Connection>> + Send + Sync>),
 }
@@ -629,29 +628,10 @@ impl Debug for ResolutionTarget {
             Self::Addr(arg0) => f.debug_tuple("Addr").field(arg0).finish(),
             Self::Usb(arg0) => f.debug_tuple("Usb").field(arg0).finish(),
             Self::Vsock(arg0) => f.debug_tuple("Vsock").field(arg0).finish(),
+            Self::Uart(arg0) => f.debug_tuple("Uart").field(arg0).finish(),
             Self::TestMock(_) => f.debug_tuple("TestMock").field(&"..").finish(),
             Self::TestMockAsync(_) => f.debug_tuple("TestMockAsync").field(&"..").finish(),
         }
-    }
-}
-
-fn sort_socket_addrs(a1: &SocketAddr, a2: &SocketAddr) -> Ordering {
-    match (a1.ip().is_link_local_addr(), a2.ip().is_link_local_addr()) {
-        (true, true) | (false, false) => Ordering::Equal,
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-    }
-}
-
-fn sort_addrs(&a1: &TargetAddr, a2: &TargetAddr) -> Ordering {
-    match (a1, a2) {
-        (TargetAddr::VSockCtx(_), TargetAddr::VSockCtx(_)) => Ordering::Equal,
-        (TargetAddr::UsbCtx(_), TargetAddr::UsbCtx(_)) => Ordering::Equal,
-        (TargetAddr::VSockCtx(_), _) => Ordering::Less,
-        (_, TargetAddr::VSockCtx(_)) => Ordering::Greater,
-        (TargetAddr::UsbCtx(_), _) => Ordering::Less,
-        (_, TargetAddr::UsbCtx(_)) => Ordering::Greater,
-        (TargetAddr::Net(a), TargetAddr::Net(b)) => sort_socket_addrs(&a, &b),
     }
 }
 
@@ -660,6 +640,7 @@ fn sort_addrs(&a1: &TargetAddr, a2: &TargetAddr) -> Ordering {
 // - any USB address
 // - any link-local V6 address
 // - any other network address
+// - any UART address
 fn choose_address_from_addresses(
     nodename: &Option<String>,
     addresses: &[TargetAddr],
@@ -672,7 +653,7 @@ fn choose_address_from_addresses(
         addresses
             .iter()
             .cloned()
-            .min_by(sort_addrs)
+            .min_by(TargetAddr::compare_by_priority)
             .expect("Address list mysteriously became empty!"),
     )
 }
@@ -686,6 +667,7 @@ impl From<TargetAddr> for ResolutionTarget {
             }
             TargetAddr::VSockCtx(cid) => Self::Vsock(cid),
             TargetAddr::UsbCtx(cid) => Self::Usb(cid),
+            TargetAddr::Uart(endpoint) => Self::Uart(endpoint),
         }
     }
 }
@@ -734,6 +716,9 @@ impl ResolutionTarget {
             }
             ResolutionTarget::Vsock(cid) => {
                 format!("vsock:cid:{cid}")
+            }
+            ResolutionTarget::Uart(endpoint) => {
+                format!("uart:{endpoint}")
             }
             ResolutionTarget::TestMock(_) | ResolutionTarget::TestMockAsync(_) => {
                 format!("mock_target")
@@ -835,6 +820,20 @@ impl Resolution {
 
     pub fn vsock_cid(&self) -> Option<u32> {
         if let ResolutionTarget::Vsock(cid) = &self.target { Some(*cid) } else { None }
+    }
+
+    /// Returns the target UART endpoint if this resolution represents a serial connection.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(endpoint)` containing the UART endpoint string,
+    /// or `None` if this target resolves over a network or USB/VSOCK connection.
+    pub fn uart_endpoint(&self) -> Option<String> {
+        if let ResolutionTarget::Uart(endpoint) = &self.target {
+            Some(endpoint.clone())
+        } else {
+            None
+        }
     }
 
     pub fn target_spec(&self) -> String {
@@ -962,6 +961,13 @@ impl Resolution {
                             format!("{:?}", e),
                         ))
                     })?
+                }
+                ResolutionTarget::Uart(_) => {
+                    return Err(crate::error::FfxTargetCrateError::Knock(
+                        crate::KnockError::Critical(crate::KnockCriticalError::TargetError(
+                            "UART connector not yet implemented".to_string(),
+                        )),
+                    ));
                 }
                 ResolutionTarget::TestMock(f) => f()?,
                 ResolutionTarget::TestMockAsync(f) => f().await?,
@@ -1106,6 +1112,7 @@ impl TryFromEnvContext for Resolution {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::cmp::Ordering;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
     #[fuchsia::test]
@@ -1169,7 +1176,7 @@ mod test {
         ];
 
         for case in cases {
-            let got = sort_socket_addrs(&case.a1, &case.a2);
+            let got = TargetAddr::compare_socket_addrs_by_priority(&case.a1, &case.a2);
             assert_eq!(
                 got, case.want_res,
                 "TestCase: {0}. Results differ: {1:?}, {2:?}",

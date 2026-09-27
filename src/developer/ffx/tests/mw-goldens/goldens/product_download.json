@@ -1,126 +1,117 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "MachineOutput_for_Null",
-  "oneOf": [
-    {
-      "description": "CommandStatus is returned to indicate exit status of a command. The Ok variant is optional, and is intended for use with commands that return no other data so there is some indication of correct execution.",
-      "type": "object",
-      "oneOf": [
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "MachineOutput",
+    "oneOf": [
         {
-          "description": "Successful execution with an optional informational string.",
-          "type": "object",
-          "required": [
-            "ok"
-          ],
-          "properties": {
-            "ok": {
-              "type": "object",
-              "properties": {
-                "message": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+            "description": "CommandStatus is returned to indicate exit status of\na command. The Ok variant is optional, and is intended\nfor use with commands that return no other data so there\nis some indication of correct execution.",
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "const": "command_status"
                 }
-              }
-            }
-          },
-          "additionalProperties": false
+            },
+            "oneOf": [
+                {
+                    "description": "Successful execution with an optional informational string.",
+                    "type": "object",
+                    "properties": {
+                        "ok": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "required": [
+                        "ok"
+                    ]
+                },
+                {
+                    "description": "Unexpected error with string.",
+                    "type": "object",
+                    "properties": {
+                        "unexpected_error": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "message"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "unexpected_error"
+                    ]
+                },
+                {
+                    "description": "A known kind of error that can be reported usefully to the user",
+                    "type": "object",
+                    "properties": {
+                        "user_error": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "message"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "user_error"
+                    ]
+                }
+            ],
+            "required": [
+                "type"
+            ]
         },
         {
-          "description": "Unexpected error with string.",
-          "type": "object",
-          "required": [
-            "unexpected_error"
-          ],
-          "properties": {
-            "unexpected_error": {
-              "type": "object",
-              "required": [
-                "message"
-              ],
-              "properties": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
                 "message": {
-                  "type": "string"
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "type": {
+                    "type": "string",
+                    "const": "notice"
                 }
-              }
-            }
-          },
-          "additionalProperties": false
+            },
+            "required": [
+                "type"
+            ]
         },
         {
-          "description": "A known kind of error that can be reported usefully to the user",
-          "type": "object",
-          "required": [
-            "user_error"
-          ],
-          "properties": {
-            "user_error": {
-              "type": "object",
-              "required": [
-                "message"
-              ],
-              "properties": {
-                "message": {
-                  "type": "string"
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "const": "data"
                 }
-              }
-            }
-          },
-          "additionalProperties": false
+            },
+            "required": [
+                "type"
+            ]
         }
-      ],
-      "required": [
-        "type"
-      ],
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": [
-            "command_status"
-          ]
-        }
-      }
-    },
-    {
-      "type": "object",
-      "required": [
-        "type"
-      ],
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": [
-            "notice"
-          ]
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "message": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    {
-      "type": "object",
-      "required": [
-        "type"
-      ],
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": [
-            "data"
-          ]
-        }
-      }
-    }
-  ]
+    ]
 }

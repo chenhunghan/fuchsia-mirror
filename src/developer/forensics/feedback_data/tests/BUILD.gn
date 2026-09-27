@@ -45,9 +45,6 @@ cc_test_executable("data_provider_unittest_exe") {
     "//third_party/rapidjson",
     "//zircon/system/ulib/zx",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 cc_test_executable("inspect_data_budget_unittest_exe") {
@@ -65,9 +62,6 @@ cc_test_executable("inspect_data_budget_unittest_exe") {
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 cc_test_executable("log_buffer_unittest_exe") {

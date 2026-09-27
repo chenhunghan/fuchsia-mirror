@@ -4,15 +4,15 @@
 
 group("tools") {
   deps = [
+    "generate_sampler_configs($host_toolchain)",
     "inspect-hierarchy-analyzer($host_toolchain)",
-    "merge_sampler_configs($host_toolchain)",
   ]
 }
 
 group("tests") {
   testonly = true
   deps = [
+    "generate_sampler_configs:tests($host_toolchain)",
     "inspect-hierarchy-analyzer:tests($host_toolchain)",
-    "merge_sampler_configs:tests($host_toolchain)",
   ]
 }

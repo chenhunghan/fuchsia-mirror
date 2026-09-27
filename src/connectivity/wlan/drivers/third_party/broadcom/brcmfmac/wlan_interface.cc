@@ -627,6 +627,19 @@ void WlanInterface::GetApfPacketFilterEnabled(GetApfPacketFilterEnabledCompleter
   completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
 }
 
+void WlanInterface::QueryRssiMonitorSupport(QueryRssiMonitorSupportCompleter::Sync& completer) {
+  completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
+}
+
+void WlanInterface::StartRssiMonitor(StartRssiMonitorRequestView request,
+                                     StartRssiMonitorCompleter::Sync& completer) {
+  completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
+}
+
+void WlanInterface::StopRssiMonitor(StopRssiMonitorCompleter::Sync& completer) {
+  completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
+}
+
 void WlanInterface::GetScheduledScanEnabled(GetScheduledScanEnabledCompleter::Sync& completer) {
   completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
 }

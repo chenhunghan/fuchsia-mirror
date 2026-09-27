@@ -141,18 +141,7 @@ func runValidate(args []string) error {
 		return fmt.Errorf("failed to parse %s: %w", readmePath, err)
 	}
 
-	root := *projectRoot
-	if root == "" {
-		dir := filepath.Dir(readmePath)
-		if idx := strings.Index(dir, "tools/check-licenses/assets/readmes/"); idx != -1 {
-			root = dir[idx+len("tools/check-licenses/assets/readmes/"):]
-		} else if idx := strings.Index(dir, "vendor/google/tools/check-licenses/assets/readmes/"); idx != -1 {
-			root = dir[idx+len("vendor/google/tools/check-licenses/assets/readmes/"):]
-		} else {
-			root = dir
-		}
-	}
-
+	root := readme_fuchsia.ResolveProjectRoot(*projectRoot, readmePath)
 	errs := readme_fuchsia.Validate(root, readmes)
 	if *allowMissingLicense && len(errs) > 0 {
 		var filteredErrs []error

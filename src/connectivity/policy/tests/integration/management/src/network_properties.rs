@@ -26,7 +26,7 @@ use log::info;
 use net_declare::fidl_ip_v6;
 use net_types::ip::{Ip, Ipv4};
 use netstack_testing_common::realms::{
-    self, Manager, ManagerConfig, Netstack, NetstackExt, SocketProxyType,
+    self, Manager, ManagerConfig, Netstack3, NetstackExt, SocketProxyType,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
@@ -176,16 +176,15 @@ async fn watch_default_and_record_properties<F, R>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_track_socket_marks<N: Netstack, M: Manager>(name: &str) {
+async fn test_track_socket_marks<M: Manager>(name: &str) {
     use fnp_properties::{PropertyInterest, PropertyUpdate};
 
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             ..Default::default()
         },
@@ -317,9 +316,8 @@ async fn test_track_socket_marks<N: Netstack, M: Manager>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_track_dns_changes<N: Netstack, M: Manager>(name: &str) -> Result<(), anyhow::Error> {
+async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Error> {
     const NDP_DNS_SERVER1: fnet::Ipv6Address = fidl_ip_v6!("2001:db8::1");
     const NDP_DNS_SERVER2: fnet::Ipv6Address = fidl_ip_v6!("2001:db8::2");
     const NDP_DNS_SERVER3: fnet::Ipv6Address = fidl_ip_v6!("2001:db8::3");
@@ -328,11 +326,11 @@ async fn test_track_dns_changes<N: Netstack, M: Manager>(name: &str) -> Result<(
     const DNS_SERVER_LIST: [fnet::Ipv6Address; 3] =
         [NDP_DNS_SERVER1, NDP_DNS_SERVER2, NDP_DNS_SERVER3];
 
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             ..Default::default()
         },
@@ -537,16 +535,13 @@ async fn test_track_dns_changes<N: Netstack, M: Manager>(name: &str) -> Result<(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_network_token_correlation<N: Netstack, M: Manager>(
-    name: &str,
-) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+async fn test_network_token_correlation<M: Manager>(name: &str) -> Result<(), anyhow::Error> {
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             ..Default::default()
         },
@@ -647,16 +642,15 @@ const TEST_NETWORK_ID_2: u32 = 3;
 const TEST_MARK_2: u32 = 456;
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_network_registry_dns_propagation<N: Netstack, M: Manager>(
+async fn test_network_registry_dns_propagation<M: Manager>(
     name: &str,
 ) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             ..Default::default()
         },
@@ -782,14 +776,13 @@ async fn test_network_registry_dns_propagation<N: Netstack, M: Manager>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_network_registry_socket_marks_propagation<N: Netstack, M: Manager>(name: &str) {
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) {
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             ..Default::default()
         },
@@ -960,16 +953,15 @@ async fn test_network_registry_socket_marks_propagation<N: Netstack, M: Manager>
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_network_registry_fuchsia_priority<N: Netstack, M: Manager>(
+async fn test_network_registry_fuchsia_priority<M: Manager>(
     name: &str,
 ) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             ..Default::default()
         },
@@ -1115,16 +1107,15 @@ async fn test_network_registry_fuchsia_priority<N: Netstack, M: Manager>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_network_token_peer_closed_on_removal<N: Netstack, M: Manager>(
+async fn test_network_token_peer_closed_on_removal<M: Manager>(
     name: &str,
 ) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             ..Default::default()
         },
@@ -1223,16 +1214,15 @@ async fn test_network_token_peer_closed_on_removal<N: Netstack, M: Manager>(
 
 /// Tests that `PropertyWatcher` tracks DNS configuration changes when the default network switches.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_track_dns_changes_default_switch<N: Netstack, M: Manager>(name: &str) {
+async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
     use fnp_properties::{PropertyInterest, PropertyUpdate};
 
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             ..Default::default()
         },
@@ -1426,14 +1416,13 @@ async fn test_track_dns_changes_default_switch<N: Netstack, M: Manager>(name: &s
 
 /// Tests that removing a network while a client is watching properties emits `NETWORK_GONE`.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_network_removal_reports_network_gone<N: Netstack, M: Manager>(name: &str) {
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+async fn test_network_removal_reports_network_gone<M: Manager>(name: &str) {
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             ..Default::default()
         },
@@ -1573,17 +1562,16 @@ async fn test_network_removal_reports_network_gone<N: Netstack, M: Manager>(name
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(M, Manager)]
-async fn test_reachability_monitor_default_network_validation<N: Netstack, M: Manager>(name: &str) {
+async fn test_reachability_monitor_default_network_validation<M: Manager>(name: &str) {
     const TEST_NETWORK_ID: u32 = 123;
     const TEST_MARK: u32 = 321;
 
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::Fake,
             extra_known_service_providers: Vec::new(),
         },

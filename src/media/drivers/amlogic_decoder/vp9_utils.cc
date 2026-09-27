@@ -9,11 +9,16 @@
 #include <zircon/assert.h>
 #include <zircon/compiler.h>
 
+#include <atomic>
+#include <cinttypes>
+
 #include "macros.h"
 
 namespace amlogic_decoder {
 
-std::vector<uint32_t> TryParseSuperframeHeader(const uint8_t* data, uint32_t frame_size) {
+std::vector<uint32_t> TryParseSuperframeHeader(const uint8_t* data_param, uint32_t frame_size) {
+  // prevent compiler re-reads, so that syntactic reads represent real reads
+  const volatile uint8_t* data = data_param;
   std::vector<uint32_t> frame_sizes;
   if (frame_size < 1)
     return frame_sizes;
@@ -25,41 +30,24 @@ std::vector<uint32_t> TryParseSuperframeHeader(const uint8_t* data, uint32_t fra
   if ((superframe_header & 0xe0) != 0xc0)
     return frame_sizes;
   uint8_t bytes_per_framesize = ((superframe_header >> 3) & 3) + 1;
+  ZX_DEBUG_ASSERT(bytes_per_framesize >= 1 && bytes_per_framesize <= 4);
   uint8_t superframe_count = (superframe_header & 7) + 1;
-  uint32_t superframe_index_size = 2 + bytes_per_framesize * superframe_count;
+  uint32_t superframe_index_size = 2 + (bytes_per_framesize * superframe_count);
   if (superframe_index_size > frame_size)
     return frame_sizes;
   if (data[frame_size - superframe_index_size] != superframe_header) {
     return frame_sizes;
   }
-  const uint8_t* index_data = &data[frame_size - superframe_index_size + 1];
-  uint32_t total_size = 0;
+  const volatile uint8_t* index_data = &data[frame_size - superframe_index_size + 1];
+  uint64_t total_size = 0;
   for (uint32_t i = 0; i < superframe_count; i++) {
-    uint32_t sub_frame_size;
-    switch (bytes_per_framesize) {
-      case 1:
-        sub_frame_size = index_data[i];
-        break;
-      case 2:
-        sub_frame_size = reinterpret_cast<const uint16_t*>(index_data)[i];
-        break;
-      case 3:
-        sub_frame_size = 0;
-        for (uint32_t j = 0; j < 3; ++j) {
-          sub_frame_size |= static_cast<uint32_t>(index_data[i * 3 + j]) << (j * 8);
-        }
-        break;
-      case 4:
-        sub_frame_size = reinterpret_cast<const uint32_t*>(index_data)[i];
-        break;
-      default:
-        zxlogf(ERROR, "Unsupported bytes_per_framesize: %d", bytes_per_framesize);
-        frame_sizes.clear();
-        return frame_sizes;
+    uint32_t sub_frame_size = 0;
+    for (uint32_t j = 0; j < bytes_per_framesize; ++j) {
+      sub_frame_size |= static_cast<uint32_t>(index_data[(i * bytes_per_framesize) + j]) << (j * 8);
     }
     total_size += sub_frame_size;
     if (total_size > frame_size) {
-      zxlogf(ERROR, "Total superframe size too large: %u > %u", total_size, frame_size);
+      zxlogf(ERROR, "Total superframe size too large: %" PRIu64 " > %u", total_size, frame_size);
       frame_sizes.clear();
       return frame_sizes;
     }
@@ -118,6 +106,12 @@ void SplitSuperframe(const uint8_t* data, uint32_t frame_size, std::vector<uint8
       superframe_byte_sizes->push_back(size + kVp9AmlvHeaderSize);
     }
   }
+  // input "data" is volatile assuming a broken or hostile client, so make sure the payload copies
+  // above really happen prior to any potential downstream payload parsing, in case the caller might
+  // (now or someday) assume that because output_vector items aren't in volatile input buffer space,
+  // that this means no further downstream TOCTOU avoidance is necessary; with this fence, that
+  // potential caller assumption would be ok
+  std::atomic_thread_fence(std::memory_order_seq_cst);
   if (like_secmem) {
     ZX_DEBUG_ASSERT(output - output_vector->data() + frame_size - total_frame_bytes ==
                     static_cast<int64_t>(output_vector->size()));

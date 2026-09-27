@@ -142,7 +142,7 @@
                 "fuchsia.hardware.google.nanohub.DisplayDevice",
                 "fuchsia.hardware.qualcomm.fastrpc.SecureFastRpc",
                 "fuchsia.hardware.sockettunnel.Device",
-                "fuchsia.net.policy.socketproxy.StarnixNetworks",
+                "fuchsia.net.policy.socketproxy.NetworkRegistry",
                 "fuchsia.net.stack.Stack",
                 "fuchsia.net.tun.Control",
                 "fuchsia.power.battery.BatteryManager",

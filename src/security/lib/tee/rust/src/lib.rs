@@ -128,7 +128,8 @@ impl TeeContext {
     }
 
     pub fn new_session(&mut self) -> Result<TeeSession, u32> {
-        let mut session: TEEC_Session = unsafe { mem::zeroed() };
+        let mut session =
+            TEEC_Session { imp: teec_session_impl { session_id: 0, application_channel: 0 } };
 
         let mut return_origin: u32 = 0;
         let result = unsafe {

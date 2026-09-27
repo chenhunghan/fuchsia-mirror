@@ -448,6 +448,7 @@ impl<'a> TextUi<'a> {
         let lines_to_overwrite = inner.overwrite_line_count;
         if lines_to_overwrite > 0 {
             clear_rows(inner.output, lines_to_overwrite)?;
+            inner.output.flush()?;
         }
         inner.overwrite_line_count = 0;
         Ok(())

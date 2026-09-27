@@ -1,0 +1,43 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "ihda_controller_bind",
+    composite_name: "intel_hda",
+    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
+    program: {
+        compat: "driver/intel-hda.so",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        allowed_scheduler_roles: [ "fuchsia.media.audio.drivers.intel-hda.controller" ],
+    },
+    use: [
+        {
+            name: "pci",
+            service: "fuchsia.hardware.pci.Service",
+            primary: true,
+            bind: {
+                pci: {
+                    vid: "fuchsia.pci.BIND_PCI_VID.INTEL",
+                    did: [
+                        "0x02C8", // Intel 10th Gen (Cometlake)
+                        "0x2668", // Standard (Spec Rev 1.0a; 2010-06-17)
+                        "0x9CA0", // Intel Broadwell PCH
+                        "0x9D70", // Intel 6th Gen (Skylake) PCH-U/Y I/O Datasheet
+                        "0x9D71", // Intel 7th Gen (Kabylake) PCH-U/Y I/O Datasheet
+                        "0x9DC8", // Cannon Point-LP High Definition Audio Controller
+                        "0xa0c8", // Intel 11th Gen (Tigerlake)
+                        "0xA170", // Intel 100/C230 PCH Spec
+                        "0xA1F0", // Intel 200/C400 PCH Spec
+                    ],
+                },
+            },
+        },
+        { protocol: "fuchsia.scheduler.RoleManager" },
+        { service: "fuchsia.hardware.acpi.Service" },
+        {
+            name: "acpi",
+            availability: "optional",
+            bind: { protocol: "fuchsia.acpi.BIND_PROTOCOL.DEVICE" },
+        },
+    ],
+}

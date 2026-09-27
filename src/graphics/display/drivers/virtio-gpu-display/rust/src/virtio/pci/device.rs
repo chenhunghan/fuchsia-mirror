@@ -2,16 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(https://fxbug.dev/504722357): Remove this in favor of more granular
-// attributes when the Rust port is completed.
-#![allow(dead_code)]
-
+use core::array;
 use fidl_next_fuchsia_hardware_pci as fidl_pci;
-use log::{info, warn};
+use fuchsia_async::{OnInterrupt, Task};
+use futures::StreamExt;
 use mmio::region::MmioRegion;
 use mmio::vmo::VmoMemory;
 use std::num::NonZero;
-use zx::Bti;
 
 use super::capabilities::VirtioPciCapabilities;
 use super::common_configuration::{VirtioPciCommonConfiguration, *};
@@ -44,6 +41,15 @@ pub struct VirtioPciDevice {
 
     /// The configured virtqueues for the device.
     queues: Box<[VirtioPciQueue]>,
+
+    /// Signaled whenever the device issues a queue notification interrupt.
+    interrupt_receiver: futures::channel::mpsc::UnboundedReceiver<()>,
+
+    /// Forwards hardware interrupts to [`Self::interrupt_receiver`].
+    ///
+    /// The driver must keep the task alive to receive interrupts.
+    #[expect(dead_code)]
+    interrupt_task: Task<()>,
 }
 
 impl VirtioPciDevice {
@@ -69,7 +75,7 @@ impl VirtioPciDevice {
         }
         let queue = &mut self.queues[queue_index as usize];
 
-        let buffer_ref = VirtioBufferRef::new(&buffer);
+        let buffer_ref = VirtioBufferRef::new(buffer);
 
         // SAFETY: The method keeps the ranges alive until it returns. The
         // method only returns after the buffers are returned.
@@ -86,12 +92,65 @@ impl VirtioPciDevice {
                 break returned_buffer_info.written_bytes;
             }
 
-            // TODO(https://fxbug.dev/504722357): Integrate with MSI-X receiver.
-            // let _ = self.interrupt_receiver.next().await;
+            // Intentionally ignoring the value. The channel conveys that the
+            // device may have returned a buffer, which the loop checks above.
+            let _ = self.interrupt_receiver.next().await;
         };
 
         Ok(written_bytes)
     }
+
+    /// Spawns a task that forwards `interrupt` firings to `interrupt_sender`.
+    ///
+    /// The task acknowledges each interrupt, so the device can issue the next
+    /// one.
+    fn start_interrupt_task(
+        interrupt: zx::Interrupt,
+        interrupt_sender: futures::channel::mpsc::UnboundedSender<()>,
+    ) -> Task<()> {
+        // [`OnInterrupt`] is not Unpin.
+        let mut interrupt_stream = Box::pin(OnInterrupt::new(interrupt));
+
+        Task::local(async move {
+            while let Some(Ok(_interrupt_timestamp)) = interrupt_stream.as_mut().next().await {
+                // Intentionally ignoring the failure. A failure means that the
+                // device was dropped, and this task will stop shortly.
+                let _ = interrupt_sender.unbounded_send(());
+
+                if let Err(status) =
+                    std::pin::Pin::get_ref(interrupt_stream.as_ref()).as_ref().ack()
+                {
+                    log::error!("Failed to acknowledge a queue interrupt: {:?}", status);
+                }
+            }
+        })
+    }
+}
+
+/// The MSI-X vectors used by a virtio device on the PCI transport.
+// @cite(virtio): sec="4.1.5.1.2" title="MSI-X Vector Configuration"
+struct VirtioPciMsixVectors {
+    /// Receives the interrupts issued on each MSI-X vector.
+    pub interrupts: [zx::Interrupt; Self::COUNT],
+}
+
+impl VirtioPciMsixVectors {
+    /// Number of distinct MSI-X vectors used for all device notifications.
+    pub const COUNT: usize = 2;
+
+    /// The vector that the device uses to report configuration changes.
+    pub const CONFIGURATION_CHANGE_VECTOR: u16 = 0;
+
+    /// The vector that the device uses to report returned queue buffers.
+    pub const QUEUE_NOTIFICATION_VECTOR: u16 = 1;
+
+    /// Vector value that disables a device's interrupts.
+    ///
+    /// The device reports that it could not configure a vector by setting the
+    /// vector's register to this value.
+    // @cite(virtio): sec="4.1.5.1.2" title="MSI-X Vector Configuration"
+    // @alias(virtio): theirs="VIRTIO_MSI_NO_VECTOR"
+    pub const INVALID: u16 = 0xffff;
 }
 
 /// Builder pattern instantiation for [`VirtioPciDevice`].
@@ -101,7 +160,8 @@ impl VirtioPciDevice {
 /// applicable to all devices that use the PCI transport.
 pub struct VirtioPciDeviceBuilder {
     pci: fidl_next::Client<fidl_pci::Device>,
-    bti: Bti,
+    bti: zx::Bti,
+    msix_vectors: VirtioPciMsixVectors,
 
     configuration: VirtioPciCommonConfiguration<MmioRegion<VmoMemory>>,
     notifications: VirtioPciNotifications,
@@ -132,11 +192,13 @@ impl VirtioPciDeviceBuilder {
 
         let pci = pci.spawn();
         let bti = Self::get_pci_bti(&pci).await?;
+        let msix_vectors = Self::get_pci_interrupts(&pci).await?;
         let capabilities = VirtioPciCapabilities::new(&pci).await?;
 
         let mut builder = Self {
             pci: pci.clone(),
             bti,
+            msix_vectors,
 
             configuration: capabilities.common_configuration,
             notifications: capabilities.notifications,
@@ -190,13 +252,14 @@ impl VirtioPciDeviceBuilder {
         let offered_features = self.offered_features.unwrap();
 
         if !offered_features.uses_virtio1_standard() {
-            warn!("Refusing to operate device without virtio 1.0+ standard support");
+            log::warn!("Refusing to operate device without virtio 1.0+ standard support");
             self.set_driver_terminated();
             return Err(zx::Status::NOT_SUPPORTED);
         }
         accepted_features.set_uses_virtio1_standard(true);
 
         self.write_accepted_features(accepted_features)?;
+        self.initialize_transport()?;
         self.initialize_virtqueues()?;
 
         Ok(())
@@ -235,6 +298,16 @@ impl VirtioPciDeviceBuilder {
         // @cite(virtio): sec="3.1" title="Device Initialization"
         self.finish_virtio_initialization()?;
 
+        let (interrupt_sender, interrupt_receiver) = futures::channel::mpsc::unbounded();
+
+        // The configuration change vector is not used yet.
+        // TODO(https://fxbug.dev/504722357): Report configuration changes to
+        // the device type-specific driver code.
+        let [_configuration_change_interrupt, queue_notification_interrupt] =
+            self.msix_vectors.interrupts;
+        let interrupt_task =
+            VirtioPciDevice::start_interrupt_task(queue_notification_interrupt, interrupt_sender);
+
         Ok(VirtioPciDevice {
             pci: self.pci,
             bti: self.bti,
@@ -244,6 +317,9 @@ impl VirtioPciDeviceBuilder {
             notifications: self.notifications,
 
             queues: self.queues.into_boxed_slice(),
+
+            interrupt_receiver,
+            interrupt_task,
         })
     }
 
@@ -251,7 +327,7 @@ impl VirtioPciDeviceBuilder {
     ///
     /// The returned BTI is suitable for pinning pages in physical memory
     /// addressable by the PCI device.
-    async fn get_pci_bti(pci: &fidl_next::Client<fidl_pci::Device>) -> Result<Bti, zx::Status> {
+    async fn get_pci_bti(pci: &fidl_next::Client<fidl_pci::Device>) -> Result<zx::Bti, zx::Status> {
         /// [`fuchsia.hardware.pci/Device.GetBti()`] argument referencing a BTI
         /// that produces physical addresses in the PCI device's addressable
         /// space.
@@ -265,6 +341,64 @@ impl VirtioPciDeviceBuilder {
         let bti = get_bti_response.bti;
         debug_assert!(!bti.is_invalid(), "GetBti() returned invalid BTI");
         Ok(bti)
+    }
+
+    /// Configures the PCI device to issue interrupts using MSI-X vectors.
+    ///
+    /// Returns Zircon receivers for the configured MSI-X vectors.
+    ///
+    /// All error conditions are logged.
+    // @cite(virtio): sec="4.1.5.1.2" title="MSI-X Vector Configuration"
+    async fn get_pci_interrupts(
+        pci: &fidl_next::Client<fidl_pci::Device>,
+    ) -> Result<VirtioPciMsixVectors, zx::Status> {
+        // MSI-X interrupts are signaled via memory writes (MMIO registers in
+        // interrupt controllers). The PCI device must be allowed to be a bus
+        // transaction initiator, so it can issue writes.
+        pci.set_bus_mastering(true)
+            .await
+            .map_err(|error| {
+                log::warn!("Failed to enable PCI bus mastering: {:?}", error);
+                zx::Status::INTERNAL
+            })?
+            .map_err(|status| {
+                log::warn!("PCI bus rejected enabling bus mastering: {:?}", status);
+                zx::Status::INTERNAL
+            })?;
+
+        pci.set_interrupt_mode(fidl_pci::InterruptMode::MsiX, VirtioPciMsixVectors::COUNT as u32)
+            .await
+            .map_err(|error| {
+                log::warn!("Failed to switch the PCI device to MSI-X interrupts: {:?}", error);
+                zx::Status::INTERNAL
+            })?
+            .map_err(|status| {
+                log::warn!("PCI bus rejected MSI-X interrupts: {:?}", status);
+                zx::Status::INTERNAL
+            })?;
+
+        let mut interrupts: [zx::Interrupt; VirtioPciMsixVectors::COUNT] =
+            array::from_fn(|_vector_index| zx::Interrupt::invalid());
+        for (vector_index, interrupt) in interrupts.iter_mut().enumerate() {
+            let map_interrupt_response = pci
+                .map_interrupt(vector_index as u32)
+                .await
+                .map_err(|error| {
+                    log::warn!("Failed to map MSI-X vector {}: {:?}", vector_index, error);
+                    zx::Status::INTERNAL
+                })?
+                .map_err(|status| {
+                    log::warn!(
+                        "PCI bus rejected mapping MSI-X vector {}: {:?}",
+                        vector_index,
+                        status
+                    );
+                    zx::Status::INTERNAL
+                })?;
+            *interrupt = map_interrupt_response.interrupt;
+        }
+
+        Ok(VirtioPciMsixVectors { interrupts })
     }
 
     /// Drives a virtio device through reset and early initialization.
@@ -357,7 +491,7 @@ impl VirtioPciDeviceBuilder {
         expected_device_status.set_driver_found(true);
 
         if expected_device_status != device_status {
-            warn!(
+            log::warn!(
                 "Unexpected virtio device status during feature negotiation: {:?}",
                 device_status
             );
@@ -399,9 +533,10 @@ impl VirtioPciDeviceBuilder {
         // @cite(virtio): sec="3.1" title="Device Initialization"
         device_status = DeviceStatus(self.configuration.device_status().read().value());
         if !device_status.feature_negotiation_complete() {
-            warn!(
+            log::warn!(
                 "virtio device does not support offered features {:#x} {:?}",
-                feature_bits.0, feature_bits
+                feature_bits.0,
+                feature_bits
             );
 
             device_status.set_driver_terminated(true);
@@ -410,6 +545,33 @@ impl VirtioPciDeviceBuilder {
         }
 
         self.accepted_features = Some(feature_bits);
+        Ok(())
+    }
+
+    /// Performs transport-specific initialization.
+    ///
+    /// The device must have completed feature negotiation.
+    ///
+    /// On failure, sets [`DeviceStatus::driver_terminated`] to true, signaling
+    /// that the driver will abandon this device.
+    fn initialize_transport(&mut self) -> Result<(), zx::Status> {
+        // The bus-specific part of step 7 in the specification.
+        // @cite(virtio): sec="3.1" title="Device Initialization"
+        // @cite(virtio): sec="4.1.5.1.2" title="MSI-X Vector Configuration"
+        self.configuration.configuration_change_msix_vector_mut().write(
+            ConfigurationChangeMsixVector(VirtioPciMsixVectors::CONFIGURATION_CHANGE_VECTOR),
+        );
+
+        // Devices report that they ran out of MSI-X resources by leaving the
+        // vector register set to the invalid vector value.
+        // @cite(virtio): sec="4.1.5.1.2" title="MSI-X Vector Configuration"
+        if self.configuration.configuration_change_msix_vector().read().0
+            == VirtioPciMsixVectors::INVALID
+        {
+            log::warn!("virtio device rejected the configuration change MSI-X vector");
+            self.set_driver_terminated();
+            return Err(zx::Status::IO);
+        }
         Ok(())
     }
 
@@ -432,7 +594,7 @@ impl VirtioPciDeviceBuilder {
 
             let queue_capacity_raw = self.configuration.configured_queue_capacity().read().value();
             let Some(queue_capacity) = NonZero::<u16>::new(queue_capacity_raw) else {
-                warn!("virtqueue {} is disabled (capacity set to 0)", queue_index);
+                log::warn!("virtqueue {} is disabled (capacity set to 0)", queue_index);
                 self.set_driver_terminated();
                 return Err(zx::Status::IO_DATA_LOSS);
             };
@@ -478,6 +640,18 @@ impl VirtioPciDeviceBuilder {
                 .configured_queue_device_area_address_high_mut()
                 .write(ConfiguredQueueDeviceAreaAddressHigh((device_addr >> 32) as u32));
 
+            // @cite(virtio): sec="4.1.5.1.2" title="MSI-X Vector Configuration"
+            self.configuration
+                .configured_queue_msix_vector_mut()
+                .write(ConfiguredQueueMsixVector(VirtioPciMsixVectors::QUEUE_NOTIFICATION_VECTOR));
+            if self.configuration.configured_queue_msix_vector().read().0
+                == VirtioPciMsixVectors::INVALID
+            {
+                log::warn!("virtio device rejected the MSI-X vector for queue {}", queue_index);
+                self.set_driver_terminated();
+                return Err(zx::Status::IO);
+            }
+
             self.configuration.configured_queue_enabled_mut().write(ConfiguredQueueEnabled(1));
             self.queues.push(pci_queue);
         }
@@ -500,7 +674,7 @@ impl VirtioPciDeviceBuilder {
         expected_device_status.set_feature_negotiation_complete(true);
 
         if expected_device_status != device_status {
-            warn!(
+            log::warn!(
                 "Unexpected virtio device status after device-specific initialization: {:?}",
                 device_status
             );

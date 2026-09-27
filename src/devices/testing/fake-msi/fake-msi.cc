@@ -43,7 +43,7 @@ zx_status_t Msi::get_info(zx_handle_t /*handle*/, uint32_t topic, void* buffer, 
   info->target_data = 0xC0FE;
   info->base_irq_id = 1024;
   info->num_irq = irq_count_;
-  info->interrupt_count = ids_in_use_.size();
+  info->interrupt_count = static_cast<uint32_t>(ids_in_use_.size());
   return ZX_OK;
 }
 

@@ -7,6 +7,7 @@ use crate::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};
 use crate::hooks::HooksHandle;
 use crate::log::*;
 use crate::metrics;
+use crate::object_handle::LayerObject;
 use crate::object_store::allocator::{Allocator, Hold, Reservation};
 use crate::object_store::directory::Directory;
 use crate::object_store::graveyard::Graveyard;
@@ -18,7 +19,7 @@ use crate::object_store::transaction::{
     TRANSACTION_METADATA_MAX_AMOUNT, Transaction, WriteGuard, lock_keys,
 };
 use crate::object_store::volume::{VOLUMES_DIRECTORY, root_volume};
-use crate::object_store::{NewChildStoreOptions, ObjectStore, StoreOptions};
+use crate::object_store::{DataObjectHandle, NewChildStoreOptions, ObjectStore, StoreOptions};
 use crate::range::RangeExt;
 use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::{Context, Error, anyhow, bail};
@@ -28,8 +29,10 @@ use fuchsia_async as fasync;
 use fuchsia_async::condition::Condition;
 use fuchsia_inspect::{Inspector, LazyNode, NumericProperty as _, UintProperty};
 use fuchsia_sync::Mutex;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use futures::{FutureExt, Stream};
-use fxfs_crypto::Crypt;
+use fxfs_crypto::{Crypt, UnwrappedKey};
 use fxfs_trace::{TraceFutureExt, trace_future_args};
 use static_assertions::const_assert;
 use std::pin::pin;
@@ -71,11 +74,21 @@ const CLEAN_TRANSFER_BUFFER_INTERVAL: Duration = Duration::from_secs(60);
 pub type WakeLease = zx::NullableHandle;
 
 #[cfg(not(target_os = "fuchsia"))]
-pub type WakeLease = fasync::emulated_handle::Handle;
+pub type WakeLease = fuchsia_emulated_handle::Handle;
 
 pub trait PowerManager: Send + Sync {
     /// Returns a stream of battery status changes (true if using battery).
-    fn watch_battery(self: Arc<Self>) -> futures::stream::BoxStream<'static, (bool, WakeLease)>;
+    fn watch_battery(self: Arc<Self>) -> BoxStream<'static, (bool, WakeLease)>;
+}
+
+/// Services registration of layer files with a platform-specific layer pager.
+#[async_trait]
+pub trait LayerPager: Send + Sync + 'static {
+    async fn open_layer(
+        &self,
+        handle: DataObjectHandle<ObjectStore>,
+        unwrapped_key: Option<UnwrappedKey>,
+    ) -> Result<Arc<dyn LayerObject>, Error>;
 }
 
 /// Holds information on an Fxfs Filesystem
@@ -84,8 +97,7 @@ pub struct Info {
     pub used_bytes: u64,
 }
 
-pub type PostCommitHook =
-    Option<Box<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>;
+pub type PostCommitHook = Option<Box<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>;
 
 pub struct Options {
     /// True if the filesystem is read-only.
@@ -306,6 +318,7 @@ pub struct FxFilesystemBuilder {
     on_new_allocator: Option<Box<dyn Fn(Arc<Allocator>) + Send + Sync>>,
     on_new_store: Option<Box<dyn Fn(&ObjectStore) + Send + Sync>>,
     fsck_after_every_transaction: bool,
+    layer_pager: Option<Arc<dyn LayerPager>>,
 }
 
 impl FxFilesystemBuilder {
@@ -318,6 +331,7 @@ impl FxFilesystemBuilder {
             on_new_allocator: None,
             on_new_store: None,
             fsck_after_every_transaction: false,
+            layer_pager: None,
         }
     }
 
@@ -438,6 +452,11 @@ impl FxFilesystemBuilder {
         self
     }
 
+    pub fn layer_pager(mut self, layer_pager: Option<Arc<dyn LayerPager>>) -> Self {
+        self.layer_pager = layer_pager;
+        self
+    }
+
     /// Constructs an `FxFilesystem` object with the specified settings.
     pub async fn open(self, device: DeviceHolder) -> Result<OpenFxFilesystem, Error> {
         let read_only = self.options.read_only;
@@ -498,6 +517,7 @@ impl FxFilesystemBuilder {
                 options: filesystem_options,
                 in_flight_transactions: AtomicU64::new(0),
                 transaction_limit_event: Event::new(),
+                layer_pager: self.layer_pager,
                 _stores_node: metrics::register_fs(move || {
                     let weak = weak.clone();
                     Box::pin(async move {
@@ -609,12 +629,14 @@ pub struct FxFilesystem {
     // limit.
     transaction_limit_event: Event,
 
+    // The "stores" node in the Inspect tree.
+    _stores_node: LazyNode,
+
+    layer_pager: Option<Arc<dyn LayerPager>>,
+
     // NOTE: This *must* go last so that when users take the device from a closed filesystem, the
     // filesystem has dropped all other members first (Rust drops members in declaration order).
     device: DeviceHolder,
-
-    // The "stores" node in the Inspect tree.
-    _stores_node: LazyNode,
 }
 
 #[fxfs_trace::trace]
@@ -629,6 +651,10 @@ impl FxFilesystem {
 
     pub fn root_parent_store(&self) -> Arc<ObjectStore> {
         self.objects.root_parent_store()
+    }
+
+    pub fn layer_pager(&self) -> Option<&Arc<dyn LayerPager>> {
+        self.layer_pager.as_ref()
     }
 
     pub async fn close(&self) -> Result<(), Error> {
@@ -1814,7 +1840,8 @@ mod tests {
                 {
                     // Check it has the contents we expect.
                     let mut buffer = test_file.allocate_buffer(4096).await;
-                    let bytes = test_file.read(0, buffer.as_mut()).await.expect("read failed");
+                    let bytes =
+                        test_file.read_aligned(0, buffer.as_mut()).await.expect("read failed");
                     if bytes == 4096 {
                         let expected = [0xed; 4096];
                         assert_eq!(buffer.to_vec(), expected);
@@ -1885,7 +1912,7 @@ mod tests {
                     .expect("open_object failed");
                     let mut buffer = test_file.allocate_buffer(4096).await;
                     assert_eq!(
-                        test_file.read(0, buffer.as_mut()).await.expect("read failed"),
+                        test_file.read_aligned(0, buffer.as_mut()).await.expect("read failed"),
                         4096
                     );
                     let expected = [0x37; 4096];
@@ -2193,7 +2220,7 @@ mod tests {
                 .expect("open failed");
             let mut buffer = test_file.allocate_buffer(8192).await;
             assert_eq!(
-                test_file.read(0, buffer.as_mut()).await.expect("read failed"),
+                test_file.read_aligned(0, buffer.as_mut()).await.expect("read failed"),
                 8192,
                 "short read"
             );
@@ -2295,7 +2322,7 @@ mod tests {
                 .expect("open failed");
         let mut read_buf =
             test_file.allocate_buffer(EXISTING_FILE_RANGE.length().unwrap() as usize).await;
-        test_file.read(0, read_buf.as_mut()).await.expect("read failed");
+        test_file.read_aligned(0, read_buf.as_mut()).await.expect("read failed");
         let data = read_buf.to_vec();
         assert_eq!(data, [0xf0; 4096]);
         fs.close().await.expect("closed");

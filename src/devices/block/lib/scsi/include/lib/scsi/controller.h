@@ -5,6 +5,7 @@
 #ifndef SRC_DEVICES_BLOCK_LIB_SCSI_INCLUDE_LIB_SCSI_CONTROLLER_H_
 #define SRC_DEVICES_BLOCK_LIB_SCSI_INCLUDE_LIB_SCSI_CONTROLLER_H_
 
+#include <fidl/fuchsia.hardware.inlineencryption/cpp/wire.h>
 #include <lib/driver/component/cpp/driver_base.h>
 #include <lib/fit/function.h>
 #include <lib/zircon-internal/thread_annotations.h>
@@ -1005,6 +1006,9 @@ class ScsiRequest {
     return {immediate_data_.data(), immediate_data_length_};
   }
   bool is_write() const { return is_write_; }
+  const block_server::internal::InlineCryptoOptions& inline_crypto() const {
+    return inline_crypto_;
+  }
 
  private:
   friend class BlockDevice;
@@ -1025,6 +1029,7 @@ class ScsiRequest {
   uint8_t immediate_data_length_;
 
   bool is_write_;
+  block_server::internal::InlineCryptoOptions inline_crypto_ = {};
   bool completed_ = false;
 
   BlockDevice* parent_ = nullptr;
@@ -1069,6 +1074,13 @@ class Controller {
   // from any thread (synchronously during `ExecuteCommandsAsync` or asynchronously from an
   // interrupt/dispatcher thread).
   virtual void ExecuteCommandsAsync(uint8_t target, uint16_t lun, std::span<ScsiRequest> batch) = 0;
+
+  // Whether inline encryption is supported by the controller.
+  virtual bool SupportsInlineEncryption() const { return false; }
+
+  // Serves the fuchsia.hardware.inlineencryption.Device protocol for a block device child.
+  virtual void ServeInlineEncryption(
+      fidl::ServerEnd<fuchsia_hardware_inlineencryption::Device> server_end) {}
 
   // Test whether the target-lun is ready.
   zx_status_t TestUnitReady(uint8_t target, uint16_t lun);

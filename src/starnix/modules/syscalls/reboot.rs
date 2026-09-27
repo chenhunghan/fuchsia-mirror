@@ -172,10 +172,13 @@ fn shutdown_and_block(
 
     if let Err(err) = result {
         if err.code == EINTR {
-            // Linux expects `sys_reboot` to never return. If we return `Err(EINTR)`
-            // after receiving `SIGKILL` during container teardown, Android `init`
-            // will abort and re-enter `reboot()`, causing a deadlock that blocks
-            // component teardown from concluding inside Starnix.
+            // Linux expects `sys_reboot` to never return. While unmaskable
+            // signals like SIGKILL typically terminate the task before returning
+            // from this method, we keep this as a safeguard to ensure a clean
+            // `Exit(0)` on teardown instead of `SIGKILL` and to prevent Android
+            // `init` from ever observing `EINTR` in edge cases (e.g. cgroup
+            // freeze or ptrace), which would cause `init` to abort and re-enter
+            // `reboot()`, deadlocking container teardown.
             // Thus, we manually terminate the thread group.
             current_task.thread_group().kill(ExitStatus::Exit(0), None);
             return Ok(());

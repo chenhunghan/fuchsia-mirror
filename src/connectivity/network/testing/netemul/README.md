@@ -60,7 +60,7 @@ interacting with their constituent components (in particular the netstack).
 Refer to [this example test][sandbox-test] (see the
 [component manifest][sandbox-test-manifest] and
 [test source][sandbox-test-source]) that uses the Netemul Sandbox to create two
-hermetic test realms containing [Netstack2 components][netstack.cml], both
+hermetic test realms containing [Netstack3 components][netstack.cml], both
 connected to the same virtual network over virtual interfaces. The test also
 uses the [`RealmUdpSocket` trait][RealmUdpSocket] to create UDP sockets with
 each hermetic netstack and bind each of them to an address assigned to its
@@ -293,7 +293,7 @@ using the runner itself) if we have a need for it: https://fxbug.dev/42168724.
 [sandbox-test]: /src/connectivity/network/testing/netemul/doc/sandbox-test
 [sandbox-test-manifest]: /src/connectivity/network/testing/netemul/doc/sandbox-test/meta/sandbox-test.cml
 [sandbox-test-source]: /src/connectivity/network/testing/netemul/doc/sandbox-test/src/lib.rs
-[netstack.cml]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/network/netstack/meta/netstack_debug.cml
+[netstack.cml]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/network/netstack3/meta/netstack3_debug.cml
 [documentation]: https://fuchsia-docs.firebaseapp.com/rust/netemul/index.html
 [RealmUdpSocket]: https://fuchsia-docs.firebaseapp.com/rust/netemul/trait.RealmUdpSocket.html
 [`fuchsia.netemul/ManagedRealm`]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/network/testing/netemul/fidl/netemul.fidl;l=176

@@ -10,6 +10,7 @@
 //! remote targets.
 
 use nix::libc;
+use std::num::NonZeroU32;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileTypeExt;
 use std::pin::Pin;
@@ -167,7 +168,10 @@ impl AsyncWrite for AsyncUart {
 /// If `path` refers to a character device, acquires an exclusive advisory file lock (`flock`),
 /// configures the serial terminal for raw mode at the specified `baud` rate, and wraps the
 /// descriptor in a non-blocking [`AsyncUart`].
-pub async fn connect_uart_stream(path: &str, baud: u32) -> Result<UartStream, ConnectionError> {
+pub async fn connect_uart_stream(
+    path: &str,
+    baud: NonZeroU32,
+) -> Result<UartStream, ConnectionError> {
     // Acts as the entrypoint for target streams; this will be expanded in
     // downstream changes to dispatch across additional stream types (such as TCP).
     connect_uart_stream_file(path, baud).await
@@ -261,7 +265,7 @@ mod linux {
 
     const ASYNC_LOW_LATENCY: libc::c_int = 0x2000;
 
-    pub fn configure_tty(fd: BorrowedFd<'_>, baud: u32) -> Result<(), ConnectionError> {
+    pub fn configure_tty(fd: BorrowedFd<'_>, baud: NonZeroU32) -> Result<(), ConnectionError> {
         let raw_fd = fd.as_raw_fd();
         // SAFETY: isatty is a standard POSIX query syscall on a valid open descriptor guaranteed by BorrowedFd.
         if unsafe { libc::isatty(raw_fd) } == 0 {
@@ -282,7 +286,7 @@ mod linux {
         Ok(())
     }
 
-    fn set_termios2_raw(fd: RawFd, baud: u32) -> Result<(), ConnectionError> {
+    fn set_termios2_raw(fd: RawFd, baud: NonZeroU32) -> Result<(), ConnectionError> {
         // SAFETY: std::mem::zeroed is safe to initialize a termios2 struct since it contains only primitive integers/arrays.
         let mut term: libc::termios2 = unsafe { std::mem::zeroed() };
 
@@ -301,8 +305,8 @@ mod linux {
         // With O_NONBLOCK, VMIN=1 ensures read() returns EAGAIN instead of 0 (EOF) when empty.
         term.c_cc[libc::VMIN] = 1;
         term.c_cc[libc::VTIME] = 0;
-        term.c_ispeed = baud;
-        term.c_ospeed = baud;
+        term.c_ispeed = baud.get();
+        term.c_ospeed = baud.get();
 
         // SAFETY: libc::ioctl TCSETS2 is a standard tty configuration operation. We pass a valid raw fd and a read-only reference to term.
         if unsafe { libc::ioctl(fd, libc::TCSETS2, &term) } < 0 {
@@ -337,14 +341,17 @@ mod linux {
 mod non_linux {
     use super::*;
 
-    pub fn configure_tty(_fd: BorrowedFd<'_>, _baud: u32) -> Result<(), ConnectionError> {
+    pub fn configure_tty(_fd: BorrowedFd<'_>, _baud: NonZeroU32) -> Result<(), ConnectionError> {
         Err(ConnectionError::TtyConfigureFailed {
             error: "Physical TTY configuration is only supported on Linux".to_string(),
         })
     }
 }
 
-async fn connect_uart_stream_file(path: &str, baud: u32) -> Result<UartStream, ConnectionError> {
+async fn connect_uart_stream_file(
+    path: &str,
+    baud: NonZeroU32,
+) -> Result<UartStream, ConnectionError> {
     let p = std::path::Path::new(path);
     let metadata = tokio::fs::metadata(p).await.map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => ConnectionError::PathNotFound { path: path.to_string() },
@@ -434,7 +441,11 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_connect_uart_stream_nonexistent_path() {
-        let res = connect_uart_stream("/tmp/nonexistent_uart_test_path_12345", 115200).await;
+        let res = connect_uart_stream(
+            "/tmp/nonexistent_uart_test_path_12345",
+            NonZeroU32::new(115200).unwrap(),
+        )
+        .await;
         assert!(matches!(res, Err(ConnectionError::PathNotFound { .. })));
     }
 
@@ -485,7 +496,7 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
         let server_task = spawn_mock_handshake_server(listener);
 
-        let mut client = connect_uart_stream(&sock_path_str, 115200)
+        let mut client = connect_uart_stream(&sock_path_str, NonZeroU32::new(115200).unwrap())
             .await
             .expect("connect to socket should succeed");
 

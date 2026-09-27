@@ -223,7 +223,7 @@ zx_status_t Nelson::Spi0Init() {
   auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, spi_0_dev),
       MakeSpiCompositeNodeSpec(
-          fidl_arena, "spi_0", /* gpio_pin */ GPIO_SOC_SPI_A_SS0,
+          fidl_arena, "spi-0", /* gpio_pin */ GPIO_SOC_SPI_A_SS0,
           /* gpio_name */ "gpio-cs-0",
           /* register_id */ bind_fuchsia_amlogic_platform::NAME_REGISTER_SPICC0_RESET));
   if (!result.ok()) {
@@ -354,7 +354,7 @@ zx_status_t Nelson::Spi1Init() {
   auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, spi_1_dev),
       MakeSpiCompositeNodeSpec(
-          fidl_arena, "spi_1", /* gpio_pin */ GPIO_SOC_SPI_B_SS0,
+          fidl_arena, "spi-1", /* gpio_pin */ GPIO_SOC_SPI_B_SS0,
           /* gpio_name */ "gpio-cs-0",
           /* register_id */ bind_fuchsia_amlogic_platform::NAME_REGISTER_SPICC1_RESET));
   if (!result.ok()) {

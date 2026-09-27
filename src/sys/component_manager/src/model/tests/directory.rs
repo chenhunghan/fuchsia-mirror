@@ -175,6 +175,6 @@ async fn open_requests_go_to_the_same_directory_connection() {
     // `c` should only get one open call after we drain any requests.
     test.mock_runner.wait_for_url("test:///c").await;
     c.stop().await.unwrap();
-    open_rx.try_next().unwrap();
-    open_rx.try_next().unwrap_err();
+    open_rx.try_recv().unwrap();
+    open_rx.try_recv().unwrap_err();
 }

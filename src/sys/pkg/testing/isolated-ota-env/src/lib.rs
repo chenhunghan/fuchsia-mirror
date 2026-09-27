@@ -8,7 +8,6 @@ use anyhow::{Context, Error};
 use async_trait::async_trait;
 use fidl::endpoints::{ClientEnd, DiscoverableProtocolMarker, Proxy, ServerEnd};
 use fidl_fuchsia_io as fio;
-use fidl_fuchsia_io::DirectoryProxy;
 use fidl_fuchsia_paver::PaverRequestStream;
 use fidl_fuchsia_pkg_ext::RepositoryConfigs;
 use fuchsia_async as fasync;
@@ -30,9 +29,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
-pub const GLOBAL_SSL_CERTS_PATH: &str = "/config/ssl";
 const EMPTY_REPO_PATH: &str = "/pkg/empty-repo";
-const TEST_CERTS_PATH: &str = "/pkg/data/ssl";
 const TEST_REPO_URL: &str = "fuchsia-pkg://integration.test.fuchsia.com";
 
 pub enum OmahaState {
@@ -51,7 +48,6 @@ pub struct TestParams {
     pub expected_blobfs_contents: BTreeSet<Hash>,
     pub paver: Arc<MockPaverService>,
     pub repo_config_dir: TempDir,
-    pub ssl_certs: DirectoryProxy,
     pub update_merkle: Hash,
     pub version: String,
     pub update_url_source: UpdateUrlSource,
@@ -197,18 +193,12 @@ impl<R> TestEnvBuilder<R> {
 
     /// Turn this |TestEnvBuilder| into a |TestEnv|
     pub async fn build(mut self) -> Result<TestEnv<R>, Error> {
-        let (repo_config, served_repo, ssl_certs, expected_blobfs_contents, merkle) =
+        let (repo_config, served_repo, expected_blobfs_contents, merkle) =
             if let Some(repo_config) = self.repo_config {
-                // Use the provided repo config. Assume that this means we'll actually want to use
-                // real SSL certificates, and that we don't need to host our own repository.
+                // Use the provided repo config, meaning we don't need to host our own repository.
                 (
                     repo_config,
                     None,
-                    fuchsia_fs::directory::open_in_namespace(
-                        GLOBAL_SSL_CERTS_PATH,
-                        fio::PERM_READABLE,
-                    )
-                    .unwrap(),
                     BTreeSet::new(),
                     Hash::from_str(
                         "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -274,14 +264,7 @@ impl<R> TestEnvBuilder<R> {
                 // will expect to see the update package's blobs in blobfs.
                 let mut packages = vec![update.into_package()];
                 packages.append(&mut self.packages);
-                (
-                    config,
-                    Some(served_repo),
-                    fuchsia_fs::directory::open_in_namespace(TEST_CERTS_PATH, fio::PERM_READABLE)
-                        .unwrap(),
-                    expected_blobfs_contents,
-                    update_merkle,
-                )
+                (config, Some(served_repo), expected_blobfs_contents, update_merkle)
             };
 
         let dir = tempfile::tempdir()?;
@@ -302,7 +285,6 @@ impl<R> TestEnvBuilder<R> {
             paver: Arc::new(self.paver.build()),
             _repo: served_repo,
             repo_config_dir: dir,
-            ssl_certs,
             update_merkle: merkle,
             version: self.version,
             test_executor: self.test_executor.expect("test executor must be set"),
@@ -319,7 +301,6 @@ pub struct TestEnv<R> {
     paver: Arc<MockPaverService>,
     _repo: Option<ServedRepository>,
     repo_config_dir: tempfile::TempDir,
-    ssl_certs: DirectoryProxy,
     update_merkle: Hash,
     board: String,
     version: String,
@@ -391,7 +372,6 @@ impl<R> TestEnv<R> {
             expected_blobfs_contents: self.expected_blobfs_contents,
             paver: self.paver,
             repo_config_dir: self.repo_config_dir,
-            ssl_certs: self.ssl_certs,
             update_merkle: self.update_merkle,
             version: self.version,
             update_url_source,

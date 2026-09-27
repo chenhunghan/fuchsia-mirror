@@ -791,6 +791,15 @@ impl<B: SplitByteSliceMut> Ipv4PacketRaw<B> {
             internet_checksum::update(self.hdr_prefix.hdr_checksum, &old_bytes, addr.bytes());
         self.hdr_prefix.dst_ip = addr;
     }
+
+    /// Set the total length of the IPv4 packet and update the header checksum accordingly.
+    pub fn set_total_len_and_update_checksum(&mut self, total_len: u16) {
+        let old_bytes = self.hdr_prefix.total_len.as_bytes();
+        let new_len = U16::new(total_len);
+        self.hdr_prefix.hdr_checksum =
+            internet_checksum::update(self.hdr_prefix.hdr_checksum, old_bytes, new_len.as_bytes());
+        self.hdr_prefix.total_len = new_len;
+    }
 }
 
 /// A records parser for IPv4 options.

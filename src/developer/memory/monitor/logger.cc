@@ -52,25 +52,25 @@ Logger::Logger(async_dispatcher_t* dispatcher, std::optional<monitor::HighWater*
   FX_CHECK(config->normal_capture_delay_s() > 0);
 }
 
-void Logger::SetPressureLevel(pressure_signaler::Level l) {
+void Logger::SetPressureLevel(PressureLevel l) {
   switch (l) {
-    case pressure_signaler::kImminentOOM:
+    case kImminentOOM:
       duration_ = zx::sec(config_->imminent_oom_capture_delay_s());
       capture_high_water_ = true;
       break;
-    case pressure_signaler::kCritical:
+    case kCritical:
       duration_ = zx::sec(config_->critical_capture_delay_s());
       capture_high_water_ = false;
       break;
-    case pressure_signaler::kWarning:
+    case kWarning:
       duration_ = zx::sec(config_->warning_capture_delay_s());
       capture_high_water_ = false;
       break;
-    case pressure_signaler::kNormal:
+    case kNormal:
       duration_ = zx::sec(config_->normal_capture_delay_s());
       capture_high_water_ = false;
       break;
-    case pressure_signaler::kNumLevels:
+    case kNumLevels:
       break;
   }
   if (config_->capture_on_pressure_change()) {

@@ -9,6 +9,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/subcommands"
@@ -265,5 +266,33 @@ func TestPolicyCommand_Execute_AllProjectsMustHaveAReadme(t *testing.T) {
 	expectedConfigPath := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "policy_exceptions", "AllProjectsMustHaveAReadme", "bar.json")
 	if _, err := os.Stat(expectedConfigPath); os.IsNotExist(err) {
 		t.Errorf("Expected config file to be created at %s", expectedConfigPath)
+	}
+
+	// Test virtual README path resolves to logical project root (prebuilt/third_party/gn_prev)
+	fVirtual := flag.NewFlagSet("test_virtual_readme_policy", flag.ContinueOnError)
+	cmd.SetFlags(fVirtual)
+	fVirtual.Parse([]string{"add", "-bug", "b/123", "AllProjectsMustHaveALicense", "tools/check-licenses/assets/readmes/prebuilt/third_party/gn_prev/README.fuchsia"})
+	if status := cmd.Execute(ctx, fVirtual); status != subcommands.ExitSuccess {
+		t.Errorf("Expected ExitSuccess for virtual README path, got %v", status)
+	}
+	expectedVirtualConfig := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "policy_exceptions", "AllProjectsMustHaveALicense", "gn_prev.json")
+	if data, err := os.ReadFile(expectedVirtualConfig); err != nil {
+		t.Errorf("Expected config file to be created at %s: %v", expectedVirtualConfig, err)
+	} else if !strings.Contains(string(data), `"prebuilt/third_party/gn_prev"`) {
+		t.Errorf("Expected config to contain logical root \"prebuilt/third_party/gn_prev\", got:\n%s", string(data))
+	}
+
+	// Test //-prefixed non-existent prebuilt path normalizes cleanly relative to FuchsiaDir
+	fDoubleSlash := flag.NewFlagSet("test_double_slash_policy", flag.ContinueOnError)
+	cmd.SetFlags(fDoubleSlash)
+	fDoubleSlash.Parse([]string{"add", "-bug", "b/123", "AllProjectsMustHaveALicense", "//prebuilt/third_party/ovmf"})
+	if status := cmd.Execute(ctx, fDoubleSlash); status != subcommands.ExitSuccess {
+		t.Errorf("Expected ExitSuccess for //-prefixed prebuilt path, got %v", status)
+	}
+	expectedDoubleSlashConfig := filepath.Join(tempDir, "tools", "check-licenses", "assets", "configs", "policy_exceptions", "AllProjectsMustHaveALicense", "ovmf.json")
+	if data, err := os.ReadFile(expectedDoubleSlashConfig); err != nil {
+		t.Errorf("Expected config file to be created at %s: %v", expectedDoubleSlashConfig, err)
+	} else if !strings.Contains(string(data), `"prebuilt/third_party/ovmf"`) {
+		t.Errorf("Expected config to contain logical root \"prebuilt/third_party/ovmf\", got:\n%s", string(data))
 	}
 }

@@ -105,6 +105,10 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
         Self { source, chunks: Mutex::new(chunks), event: Event::new() }
     }
 
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
     /// Returns a reference to the chunk (up to `CHUNK_SIZE` bytes) containing `offset`.  If the
     /// data is already cached, this does not require reading from `source`.
     /// `offset` must be less than the size of `source`.
@@ -190,7 +194,7 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
             - read_start) as usize;
 
         let mut read_buf = self.source.allocate_buffer(aligned_len).await;
-        let amount_read = self.source.read(read_start, read_buf.as_mut()).await?;
+        let amount_read = self.source.read_aligned(read_start, read_buf.as_mut()).await?;
         ensure!(amount_read >= len, anyhow!(FxfsError::Internal).context("Short read"));
 
         log::debug!("COH {}: Read {len}@{read_start}", self.source.object_id());
@@ -271,6 +275,7 @@ impl<S: ReadObjectHandle> ObjectHandle for CachingObjectHandle<S> {
 #[cfg(test)]
 mod tests {
     use super::{CHUNK_SIZE, CachingObjectHandle};
+    use crate::errors::FxfsError;
     use crate::object_handle::{ObjectHandle, ReadObjectHandle};
     use anyhow::{Error, anyhow, ensure};
     use async_trait::async_trait;
@@ -343,7 +348,14 @@ mod tests {
 
     #[async_trait]
     impl ReadObjectHandle for FakeSource {
-        async fn read(&self, _offset: u64, mut buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+        async fn read_aligned(
+            &self,
+            offset: u64,
+            mut buf: MutableBufferRef<'_>,
+        ) -> Result<usize, Error> {
+            let block_size = self.block_size();
+            ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
+            ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
             ensure!(self.allow_reads.load(Ordering::SeqCst), anyhow!("Received unexpected read"));
             let counter = self.counter.fetch_add(1, Ordering::Relaxed);
             self.wait_for_start().await;

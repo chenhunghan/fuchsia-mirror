@@ -20,10 +20,10 @@ save considerable time when iterating during development, especially when
 updating build definitions, so use them when interacting directly with
 the user.
 
-To run a test, run `fx test <name of test>`. You can list
-available tests with `fx test --dry`. You can get JSON output by adding the
-arguments `--logpath -`. Run `fx test --help` for more
-information.
+To run a test, run `fx test <name of test>`. `fx test` handles starting an
+emulator and package repository automatically. You can list available tests
+with `fx test --dry`. You can get JSON output by adding the arguments
+`--logpath -`. Run `fx test --help` for more information.
 
 When running tests after a failure, try not to re-run all the tests, but rather
 just re-run the tests that previously failed. In order to understand what tests
@@ -215,7 +215,9 @@ for iteration. It is usually a bit faster than running `fx build`.
 
 ### Testing
 
-`fx test` wraps building, running a package server, and running actual tests.
+`fx test` automatically handles building, starting an emulator (if not already
+running), managing the package repository, and running actual tests. You do not
+need to manually start an emulator or package server beforehand.
 
 When running `fx test` give your shell command tool longer wait intervals than
 the default. Consider waiting 2+ minutes at minimum each time you test.

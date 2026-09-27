@@ -4,6 +4,7 @@
 
 """Host unit tests for the zero_function test harness library."""
 
+import time
 import unittest
 from typing import Any
 from unittest import mock
@@ -12,6 +13,7 @@ import fuchsia_base_test
 from honeydew.transports.ffx import errors as ffx_errors
 from mobly import records
 from testusb import TestResult, TestStatus
+from usb_lib import usb_config
 from zero_function import (
     ALL_SUPPORTED_TEST_IDS,
     KNOWN_TEST_DEVICES,
@@ -115,6 +117,7 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         super().setUp()
+        self.mock_set_usb_config = mock.MagicMock()
         self._patchers = [
             mock.patch.object(
                 fuchsia_base_test.FuchsiaBaseTest,
@@ -137,7 +140,9 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 "parse_usb_config_functions",
                 return_value=["sourcesink"],
             ),
-            mock.patch.object(zf_mod, "set_usb_config"),
+            mock.patch.object(
+                zf_mod, "set_usb_config", self.mock_set_usb_config
+            ),
             mock.patch.object(
                 zf_mod,
                 "find_usb_device_node",
@@ -164,7 +169,10 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
         test_instance = ZeroFunctionBaseTest(configs)
         test_instance.user_params = user_params or {}
         test_instance.log_path = "/tmp"
-        test_instance.dut = mock.MagicMock()
+        dut = mock.MagicMock()
+        # serial_number() is an async Honeydew API awaited by setup_class.
+        dut.serial_number = mock.AsyncMock(return_value="test_serial")
+        test_instance.dut = dut
         test_instance.current_test_info = mock.MagicMock()
         test_instance.current_test_info.name = "test_mock"
         return test_instance
@@ -176,6 +184,35 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
             test_instance, "teardown_class", wraps=test_instance.teardown_class
         ):
             await test_instance.teardown_class()
+
+    async def test_teardown_class_restores_initial_functions(self) -> None:
+        """Verifies teardown_class restores initial functions without reboot flag."""
+        test_instance = self._create_test_instance()
+        test_instance._initial_functions = ["cdc", "adb"]
+        mock_controller = mock.MagicMock()
+        test_instance.driver_controller = mock_controller
+
+        await test_instance.teardown_class()
+
+        self.mock_set_usb_config.assert_called_once_with(
+            test_instance.dut, "cdc,adb"
+        )
+        mock_controller.unload_driver.assert_called_once()
+
+    async def test_teardown_class_raises_if_restore_fails(self) -> None:
+        """Verifies teardown_class propagates error if set_usb_config fails."""
+        test_instance = self._create_test_instance()
+        test_instance._initial_functions = ["cdc", "adb"]
+        mock_controller = mock.MagicMock()
+        test_instance.driver_controller = mock_controller
+
+        self.mock_set_usb_config.side_effect = RuntimeError("Dispatch failed")
+        try:
+            with self.assertRaises(RuntimeError):
+                await test_instance.teardown_class()
+            mock_controller.unload_driver.assert_called_once()
+        finally:
+            self.mock_set_usb_config.side_effect = None
 
     async def test_on_fail_delegates_to_super(self) -> None:
         """Verifies on_fail sets failure flag and delegates to super."""
@@ -306,6 +343,8 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
             test_instance.assert_testusb_success(results)
             mock_fail.assert_called_once()
 
+    @mock.patch.object(time, "sleep")
+    @mock.patch.object(time, "monotonic")
     @mock.patch.object(zf_mod, "USBTestIoctlBackend")
     @mock.patch.object(ZeroFunctionBaseTest, "execute_testusb")
     @mock.patch.object(ZeroFunctionBaseTest, "assert_testusb_success")
@@ -314,15 +353,26 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
         mock_assert: mock.MagicMock,
         mock_exec: mock.MagicMock,
         mock_backend_cls: mock.MagicMock,
+        mock_monotonic: mock.MagicMock,
+        mock_sleep: mock.MagicMock,
     ) -> None:
         """Verifies execute_testusb_timed runs batches until completion."""
+        current_time = 0.0
+
+        def fake_monotonic() -> float:
+            nonlocal current_time
+            t = current_time
+            current_time += 10.0
+            return t
+
+        mock_monotonic.side_effect = fake_monotonic
         test_instance = self._create_test_instance()
         mock_exec.return_value = []
         test_instance.execute_testusb_timed(
             dev_node="/dev/bus/usb/001/002",
             test_ids=[0],
             mode="sourcesink",
-            duration_sec=0.01,
+            duration_sec=5.0,
             iterations_per_batch=1,
         )
         self.assertGreaterEqual(mock_exec.call_count, 1)
@@ -448,6 +498,63 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 ffx_errors.FfxCommandError, "DEVICE_UNREACHABLE"
             ):
                 await test_instance.setup_class()
+
+
+class UsbConfigTest(unittest.TestCase):
+    """Tests set_usb_config serial dispatch, error handling, and recovery."""
+
+    def test_set_usb_config_missing_serial_raises_without_ssh_fallback(
+        self,
+    ) -> None:
+        dut = mock.MagicMock()
+        dut.serial = None
+
+        with self.assertRaises(RuntimeError) as ctx:
+            usb_config.set_usb_config(dut, "sourcesink")
+        self.assertIn(
+            "Failed to dispatch USB config 'sourcesink'", str(ctx.exception)
+        )
+        dut.ffx.run_ssh_cmd.assert_not_called()
+
+    def test_set_usb_config_dispatch_failure_raises_without_reboot(
+        self,
+    ) -> None:
+        dut = mock.MagicMock()
+        dut.serial.send.side_effect = OSError("Serial write error")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            usb_config.set_usb_config(dut, "cdc,adb")
+        self.assertIn(
+            "Failed to dispatch USB config 'cdc,adb'", str(ctx.exception)
+        )
+        dut.reboot.assert_not_called()
+        dut.ffx.run_ssh_cmd.assert_not_called()
+
+    def test_set_usb_config_success(self) -> None:
+        dut = mock.MagicMock()
+        dut.serial.read.return_value = "[usb-cli:DONE]"
+
+        usb_config.set_usb_config(dut, "cdc,adb")
+        dut.serial.send.assert_called_once_with("usb-cli set-config cdc,adb")
+        dut.reboot.assert_not_called()
+        dut.ffx.run_ssh_cmd.assert_not_called()
+
+    def test_get_usb_config_uses_serial_only(self) -> None:
+        dut = mock.MagicMock()
+        dut.serial.read.return_value = '{"functions": ["cdc"]} [usb-cli:DONE]'
+
+        res = usb_config.get_usb_config(dut)
+        self.assertIn('"functions": ["cdc"]', res)
+        dut.serial.send.assert_called_once_with("usb-cli get-config")
+        dut.ffx.run_ssh_cmd.assert_not_called()
+
+    def test_get_usb_config_missing_serial_raises(self) -> None:
+        dut = mock.MagicMock()
+        dut.serial = None
+
+        with self.assertRaises(RuntimeError):
+            usb_config.get_usb_config(dut)
+        dut.ffx.run_ssh_cmd.assert_not_called()
 
 
 if __name__ == "__main__":

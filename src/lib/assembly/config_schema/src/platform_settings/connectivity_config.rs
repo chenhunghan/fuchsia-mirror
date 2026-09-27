@@ -47,9 +47,6 @@ pub struct PlatformNetworkConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub networking: Option<NetworkingConfig>,
 
-    #[serde(skip_serializing_if = "crate::common::is_default")]
-    pub netstack_version: NetstackVersion,
-
     #[walk_paths]
     #[schemars(schema_with = "crate::option_path_schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,9 +60,6 @@ pub struct PlatformNetworkConfig {
     /// Number of threads used by Netstack3.
     ///
     /// Platform default will be used if unspecified.
-    ///
-    /// NOTE: An error will be thrown if this is set and Netstack2 is selected
-    /// as the system netstack.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub netstack_thread_count: Option<NetstackThreadCount>,
 
@@ -113,6 +107,7 @@ pub struct PlatformNetworkConfig {
 
 #[derive(Debug, Serialize, Copy, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(try_from = "u8")]
+#[schemars(!try_from)]
 pub struct NetstackThreadCount(NonZeroU8);
 
 impl TryFrom<u8> for NetstackThreadCount {
@@ -136,16 +131,6 @@ impl NetstackThreadCount {
         let Self(v) = self;
         v.get()
     }
-}
-
-/// Network stack version to use.
-#[derive(Debug, Default, Copy, Clone, Deserialize, Serialize, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum NetstackVersion {
-    Netstack2,
-    #[default]
-    Netstack3,
-    NetstackMigration,
 }
 
 /// Which networking type to use (standard or basic).

@@ -16,7 +16,7 @@ use pin_init::pin_init;
 use zx_status::Status;
 
 #[cfg(console_enabled)]
-use crate::console_rust::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
 
 /// HPET Timer Register structure
 #[repr(C)]

@@ -625,11 +625,8 @@ mod tests {
         beacon_count: u32,
     ) {
         for _ in 0..beacon_count / super::state::ASSOCIATION_STATUS_TIMEOUT_BEACON_COUNT {
-            let (_, timed_event, _) = mock_objects
-                .time_stream
-                .try_next()
-                .unwrap()
-                .expect("Should have scheduled a timed event");
+            let (_, timed_event, _) =
+                mock_objects.time_stream.try_recv().expect("Should have scheduled a timed event");
             mlme.handle_timeout(timed_event.event).await;
             assert_eq!(mock_objects.fake_device_state.lock().wlan_queue.len(), 0);
             mock_objects
@@ -658,11 +655,8 @@ mod tests {
         .await;
 
         // One more timeout to trigger the auto deauth
-        let (_, timed_event, _) = mock_objects
-            .time_stream
-            .try_next()
-            .unwrap()
-            .expect("Should have scheduled a timed event");
+        let (_, timed_event, _) =
+            mock_objects.time_stream.try_recv().expect("Should have scheduled a timed event");
 
         // Verify that triggering event at deadline causes deauth
         mlme.handle_timeout(timed_event.event).await;
@@ -748,11 +742,8 @@ mod tests {
         .await;
 
         // Verify more timer is scheduled
-        let (_, timed_event2, _) = mock_objects
-            .time_stream
-            .try_next()
-            .unwrap()
-            .expect("Should have scheduled a timed event");
+        let (_, timed_event2, _) =
+            mock_objects.time_stream.try_recv().expect("Should have scheduled a timed event");
 
         // Verify that triggering event at new deadline causes deauth
         mlme.handle_timeout(timed_event2.event).await;

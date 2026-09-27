@@ -1,0 +1,59 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/devicetree/devicetree.gni")
+import("//build/devicetree/devicetree_visitor.gni")
+import("//build/test.gni")
+
+group("tests") {
+  deps = [ ":power-supply-visitor-test" ]
+  testonly = true
+}
+
+devicetree_visitor("power-supply-visitor") {
+  sources = [
+    "power-supply-visitor.cc",
+    "power-supply-visitor.h",
+  ]
+  deps = [
+    "//sdk/lib/driver/component/cpp:node",
+    "//sdk/lib/driver/devicetree/manager:node",
+    "//sdk/lib/driver/devicetree/visitors:common-types",
+    "//sdk/lib/driver/devicetree/visitors:registration",
+    "//sdk/lib/driver/logging/cpp",
+    "//src/devices/bind/fuchsia:fuchsia_cpp",
+  ]
+  public_deps = [ "//sdk/lib/driver/devicetree/visitors:property-parser" ]
+}
+
+test("power-supply-visitor-test-bin") {
+  sources = [ "test/power-supply-visitor-test.cc" ]
+  deps = [
+    ":power-supply-visitor.static",
+    "//sdk/lib/driver/devicetree/testing:visitor-test-helper",
+    "//sdk/lib/driver/devicetree/visitors:registry",
+    "//sdk/lib/driver/devicetree/visitors/default/bind-property",
+    "//src/devices/bind/fuchsia:fuchsia_cpp",
+    "//src/lib/fxl/test:gtest_main",
+  ]
+}
+
+dtb("power-supply-dtb") {
+  sources = [ "test/dts/power-supply.dts.S" ]
+}
+
+resource("power-supply-dtb-file") {
+  sources = get_target_outputs(":power-supply-dtb")
+  outputs = [ "test-data/power-supply.dtb" ]
+  deps = [ ":power-supply-dtb" ]
+}
+
+fuchsia_unittest_package("power-supply-visitor-test") {
+  component_name = "power-supply-visitor-test"
+  deps = [
+    ":power-supply-dtb-file",
+    ":power-supply-visitor-test-bin",
+  ]
+}

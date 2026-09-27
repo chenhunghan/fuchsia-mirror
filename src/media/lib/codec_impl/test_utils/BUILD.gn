@@ -9,9 +9,10 @@ config("test_utils_include_config") {
 source_set("test_utils") {
   testonly = true
 
+  public = [ "fake_codec_adapter.h" ]
   sources = [ "fake_codec_adapter.cc" ]
 
   public_configs = [ ":test_utils_include_config" ]
 
-  deps = [ "//src/media/lib/codec_impl" ]
+  public_deps = [ "//src/media/lib/codec_impl:codec_impl_dynamic" ]
 }

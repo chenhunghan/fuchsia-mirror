@@ -39,6 +39,7 @@ cc_test_executable("codec_adapter_sw_test_bin") {
   sources = [ "codec_adapter_sw_test.cc" ]
 
   deps = [
+    ":test_codec_packets",
     "//src/lib/fxl/test:gtest_main",
     "//src/media/codec/codecs/sw:codec_adapter_sw",
   ]

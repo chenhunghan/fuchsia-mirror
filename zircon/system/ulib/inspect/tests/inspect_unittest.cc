@@ -418,6 +418,10 @@ void CheckStats(const inspect::Hierarchy* hierarchy, const inspect::InspectStats
       hierarchy->node().get_property<inspect::UintPropertyValue>("failed_allocations");
   ASSERT_TRUE(failed_allocations_value != nullptr);
   ASSERT_EQ(expected->failed_allocations, failed_allocations_value->value());
+  auto peak_bytes_requested_value =
+      hierarchy->node().get_property<inspect::UintPropertyValue>("peak_bytes_requested");
+  ASSERT_TRUE(peak_bytes_requested_value != nullptr);
+  ASSERT_EQ(expected->peak_bytes_requested, peak_bytes_requested_value->value());
 }
 
 TEST(Inspect, CreateStatsNode) {
@@ -440,6 +444,7 @@ TEST(Inspect, CreateStatsNode) {
   expected.allocated_blocks = 4u;
   expected.deallocated_blocks = 0u;
   expected.failed_allocations = 0u;
+  expected.peak_bytes_requested = 176u;
   CheckStats(&hierarchy, &expected);
 
   for (int i = 0; i < 100; i++) {
@@ -456,6 +461,7 @@ TEST(Inspect, CreateStatsNode) {
   expected.allocated_blocks = 304u;
   expected.deallocated_blocks = 0u;
   expected.failed_allocations = 0u;
+  expected.peak_bytes_requested = 6576u;
   CheckStats(&hierarchy, &expected);
 
   for (int i = 101; i < 128; i++) {
@@ -472,6 +478,8 @@ TEST(Inspect, CreateStatsNode) {
   expected.allocated_blocks = 381u;
   expected.deallocated_blocks = 2u;
   expected.failed_allocations = 2u;
+  expected.peak_bytes_requested = 8224u;
+  CheckStats(&hierarchy, &expected);
 }
 
 TEST(Inspect, WeakInspector) {
@@ -523,6 +531,7 @@ TEST(Inspect, CreateStatsNodeCopy) {
   expected.allocated_blocks = 4u;
   expected.deallocated_blocks = 0u;
   expected.failed_allocations = 0u;
+  expected.peak_bytes_requested = 176u;
   CheckStats(&hierarchy, &expected);
 }
 

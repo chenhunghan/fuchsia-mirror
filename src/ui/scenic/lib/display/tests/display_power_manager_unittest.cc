@@ -4,213 +4,184 @@
 
 #include "src/ui/scenic/lib/display/display_power_manager.h"
 
-#include <fidl/fuchsia.hardware.display/cpp/fidl.h>
-#include <lib/async/default.h>
-#include <lib/async/time.h>
+#include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <lib/inspect/cpp/hierarchy.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/inspect/cpp/reader.h>
 
 #include <cstdint>
-#include <thread>
-#include <unordered_set>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
-
-#include "src/lib/testing/loop_fixture/real_loop_fixture.h"
-#include "src/ui/scenic/lib/display/display_manager.h"
-#include "src/ui/scenic/lib/display/tests/mock_display_coordinator.h"
 
 namespace display::test {
 
 namespace {
 
-constexpr uint32_t kMaxDisplayLayersCount = 2;
 using PowerMode = fuchsia_ui_display_singleton::PowerMode;
+
+// The newest entry of the `display_power_events` inspect node.
+struct InspectedPowerEvent {
+  // The power mode, plus "_ERROR_<status>" if the request failed.
+  std::string name;
+  int64_t boot_ns = 0;
+  int64_t mono_ns = 0;
+};
 
 struct DisplayPowerInfo {
   PowerMode power_mode = PowerMode::kOn;
-  int64_t timestamp;
+  int64_t mono_ns = 0;
 };
 
-class DisplayPowerManagerMockTest : public gtest::RealLoopFixture {
+class DisplayPowerManagerTest : public ::testing::Test {
  public:
-  DisplayPowerManagerMockTest() {
-    display_manager_ = std::make_unique<DisplayManager>([] {});
-    display_power_manager_ =
-        std::make_unique<DisplayPowerManager>(*display_manager_, inspector_.GetRoot());
-  }
+  DisplayPowerManagerTest()
+      : display_power_manager_(inspector_.GetRoot(),
+                               [this](fuchsia_hardware_display_types::PowerMode mode) {
+                                 requested_modes_.push_back(mode);
+                                 return next_status_;
+                               }) {}
 
-  DisplayManager* display_manager() { return display_manager_.get(); }
-  DisplayPowerManager* display_power_manager() { return display_power_manager_.get(); }
-  Display* display() { return display_manager()->default_display(); }
-  DisplayPowerInfo GetLastDisplayPowerInspectValue() {
+  DisplayPowerManager* display_power_manager() { return &display_power_manager_; }
+
+  InspectedPowerEvent GetLastInspectedPowerEvent() {
     auto result = inspect::ReadFromVmo(inspector_.DuplicateVmo());
     EXPECT_TRUE(result.is_ok());
     auto hierarchy = result.take_value();
     const auto& power_node = hierarchy.children()[0];
     EXPECT_EQ("display_power_events", power_node.name());
 
-    DisplayPowerInfo info;
+    InspectedPowerEvent event;
     if (power_node.children().empty()) {
-      return info;
+      return event;
     }
-    const auto& property = power_node.children().back().node().properties()[0];
-    const auto& name = property.name();
-    EXPECT_TRUE(name == "on" || name == "off" || name == "doze" || name == "doze_suspend");
-    if (name == "on") {
+    const auto& node = power_node.children().back().node();
+
+    // The name comes from the "<name>_mono_ns" property, not from the unsuffixed "<name>"
+    // property, which names no timeline and is slated for removal.
+    constexpr std::string_view kMonoSuffix = "_mono_ns";
+    for (const auto& property : node.properties()) {
+      const std::string& property_name = property.name();
+      if (property_name.ends_with(kMonoSuffix)) {
+        event.name = property_name.substr(0, property_name.size() - kMonoSuffix.size());
+        event.mono_ns = property.Get<inspect::IntPropertyValue>().value();
+        break;
+      }
+    }
+    EXPECT_FALSE(event.name.empty());
+    EXPECT_NE(event.mono_ns, 0);
+
+    const auto* boot = node.get_property<inspect::IntPropertyValue>(event.name + "_boot_ns");
+    EXPECT_NE(boot, nullptr);
+    if (boot) {
+      event.boot_ns = boot->value();
+    }
+    EXPECT_NE(event.boot_ns, 0);
+
+    return event;
+  }
+
+  // Piggybacks on `GetLastInspectedPowerEvent()`.
+  DisplayPowerInfo GetLastDisplayPowerInfo() {
+    InspectedPowerEvent event = GetLastInspectedPowerEvent();
+    DisplayPowerInfo info;
+    info.mono_ns = event.mono_ns;
+    EXPECT_TRUE(event.name == "on" || event.name == "off" || event.name == "doze" ||
+                event.name == "doze_suspend");
+    if (event.name == "on") {
       info.power_mode = PowerMode::kOn;
-    } else if (name == "off") {
+    } else if (event.name == "off") {
       info.power_mode = PowerMode::kOff;
-    } else if (name == "doze") {
+    } else if (event.name == "doze") {
       info.power_mode = PowerMode::kDoze;
-    } else if (name == "doze_suspend") {
+    } else if (event.name == "doze_suspend") {
       info.power_mode = PowerMode::kDozeSuspend;
     }
-    info.timestamp = property.Get<inspect::IntPropertyValue>().value();
-    EXPECT_NE(info.timestamp, 0);
     return info;
   }
 
+ protected:
+  // What the closure received, and what it returns next.
+  std::vector<fuchsia_hardware_display_types::PowerMode> requested_modes_;
+  zx_status_t next_status_ = ZX_OK;
+
  private:
   inspect::Inspector inspector_;
-  std::unique_ptr<DisplayManager> display_manager_;
-  std::unique_ptr<DisplayPowerManager> display_power_manager_;
+  DisplayPowerManager display_power_manager_;
 };
 
-TEST_F(DisplayPowerManagerMockTest, Ok) {
-  const display::WireDisplayId kDisplayId = {.value = 1};
-  const uint32_t kDisplayWidth = 1024;
-  const uint32_t kDisplayHeight = 768;
-
-  auto [coordinator_client, coordinator_server] =
-      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
-  auto [listener_client, listener_server] =
-      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
-
-  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
-                                                   std::move(listener_server));
-
-  display_manager()->SetDefaultDisplayForTests(
-      std::make_shared<Display>(kDisplayId, kDisplayWidth, kDisplayHeight, kMaxDisplayLayersCount));
-
-  MockDisplayCoordinator mock_display_coordinator(WireDisplayInfo{});
-  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client),
-                                dispatcher());
-  mock_display_coordinator.set_set_display_power_mode_result(ZX_OK);
-
-  RunLoopUntilIdle();
-  auto power_info_1 = GetLastDisplayPowerInspectValue();
-  EXPECT_EQ(power_info_1.power_mode, PowerMode::kOn);
-  auto last_power_timestamp = power_info_1.timestamp;
-  {
-    bool callback_executed = false;
-    std::thread set_display_power_thread([&callback_executed, this] {
-      display_power_manager()->SetPowerMode(PowerMode::kOff,
-                                            [&callback_executed](fit::result<zx_status_t> result) {
-                                              callback_executed = true;
-                                              EXPECT_TRUE(result.is_ok());
-                                            });
-    });
-
-    RunLoopUntil([&callback_executed] { return callback_executed; });
-    auto power_info_2 = GetLastDisplayPowerInspectValue();
-    EXPECT_EQ(power_info_2.power_mode, PowerMode::kOff);
-    EXPECT_GT(power_info_2.timestamp, last_power_timestamp);
-    last_power_timestamp = power_info_2.timestamp;
-    set_display_power_thread.join();
-    EXPECT_FALSE(mock_display_coordinator.display_power_on());
-  }
-
-  {
-    bool callback_executed = false;
-    std::thread set_display_power_thread([&callback_executed, this] {
-      display_power_manager()->SetPowerMode(PowerMode::kOn,
-                                            [&callback_executed](fit::result<zx_status_t> result) {
-                                              callback_executed = true;
-                                              EXPECT_TRUE(result.is_ok());
-                                            });
-    });
-
-    RunLoopUntil([&callback_executed] { return callback_executed; });
-    auto power_info_3 = GetLastDisplayPowerInspectValue();
-    EXPECT_EQ(power_info_3.power_mode, PowerMode::kOn);
-    EXPECT_GT(power_info_3.timestamp, last_power_timestamp);
-    set_display_power_thread.join();
-    EXPECT_TRUE(mock_display_coordinator.display_power_on());
-  }
+TEST_F(DisplayPowerManagerTest, PowerModeGeneratesVsyncs) {
+  EXPECT_TRUE(PowerModeGeneratesVsyncs(PowerMode::kOn));
+  EXPECT_TRUE(PowerModeGeneratesVsyncs(PowerMode::kDoze));
+  EXPECT_TRUE(PowerModeGeneratesVsyncs(PowerMode::kDozeSuspend));
+  EXPECT_FALSE(PowerModeGeneratesVsyncs(PowerMode::kOff));
 }
 
-TEST_F(DisplayPowerManagerMockTest, NoDisplay) {
-  auto [coordinator_client, coordinator_server] =
-      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
-  auto [listener_client, listener_server] =
-      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+TEST_F(DisplayPowerManagerTest, Ok) {
+  EXPECT_EQ(display_power_manager()->current_power_mode(), PowerMode::kOn);
 
-  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
-                                                   std::move(listener_server));
+  bool callback_1_executed = false;
+  display_power_manager()->SetPowerMode(PowerMode::kOff,
+                                        [&callback_1_executed](fit::result<zx_status_t> result) {
+                                          callback_1_executed = true;
+                                          EXPECT_TRUE(result.is_ok());
+                                        });
+  EXPECT_TRUE(callback_1_executed);
+  EXPECT_EQ(requested_modes_, std::vector{fuchsia_hardware_display_types::PowerMode::kOff});
+  EXPECT_EQ(display_power_manager()->current_power_mode(), PowerMode::kOff);
+  auto power_info_1 = GetLastDisplayPowerInfo();
+  EXPECT_EQ(power_info_1.power_mode, PowerMode::kOff);
+  const auto last_power_mono_ns = power_info_1.mono_ns;
 
-  display_manager()->SetDefaultDisplayForTests(nullptr);
-
-  MockDisplayCoordinator mock_display_coordinator(WireDisplayInfo{});
-  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client),
-                                dispatcher());
-
-  RunLoopUntilIdle();
-
-  {
-    bool callback_executed = false;
-    std::thread set_display_power_thread([&callback_executed, this] {
-      display_power_manager()->SetPowerMode(PowerMode::kOff,
-                                            [&callback_executed](fit::result<zx_status_t> result) {
-                                              callback_executed = true;
-                                              ASSERT_TRUE(result.is_error());
-                                              EXPECT_EQ(result.error_value(), ZX_ERR_NOT_FOUND);
-                                            });
-    });
-
-    RunLoopUntil([&callback_executed] { return callback_executed; });
-    set_display_power_thread.join();
-  }
+  bool callback_2_executed = false;
+  display_power_manager()->SetPowerMode(PowerMode::kOn,
+                                        [&callback_2_executed](fit::result<zx_status_t> result) {
+                                          callback_2_executed = true;
+                                          EXPECT_TRUE(result.is_ok());
+                                        });
+  EXPECT_TRUE(callback_2_executed);
+  EXPECT_EQ(requested_modes_, (std::vector{fuchsia_hardware_display_types::PowerMode::kOff,
+                                           fuchsia_hardware_display_types::PowerMode::kOn}));
+  EXPECT_EQ(display_power_manager()->current_power_mode(), PowerMode::kOn);
+  auto power_info_2 = GetLastDisplayPowerInfo();
+  EXPECT_EQ(power_info_2.power_mode, PowerMode::kOn);
+  EXPECT_GT(power_info_2.mono_ns, last_power_mono_ns);
 }
 
-TEST_F(DisplayPowerManagerMockTest, NotSupported) {
-  const display::WireDisplayId kDisplayId = {.value = 1};
-  const uint32_t kDisplayWidth = 1024;
-  const uint32_t kDisplayHeight = 768;
+TEST_F(DisplayPowerManagerTest, NoDisplay) {
+  next_status_ = ZX_ERR_NOT_FOUND;
 
-  auto [coordinator_client, coordinator_server] =
-      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
-  auto [listener_client, listener_server] =
-      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+  bool callback_executed = false;
+  display_power_manager()->SetPowerMode(PowerMode::kOff,
+                                        [&callback_executed](fit::result<zx_status_t> result) {
+                                          callback_executed = true;
+                                          ASSERT_TRUE(result.is_error());
+                                          EXPECT_EQ(result.error_value(), ZX_ERR_NOT_FOUND);
+                                        });
+  EXPECT_TRUE(callback_executed);
+  EXPECT_EQ(requested_modes_, std::vector{fuchsia_hardware_display_types::PowerMode::kOff});
+  EXPECT_EQ(display_power_manager()->current_power_mode(), PowerMode::kOn);
+  auto power_event = GetLastInspectedPowerEvent();
+  EXPECT_EQ(power_event.name, "off_ERROR_ZX_ERR_NOT_FOUND");
+}
 
-  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
-                                                   std::move(listener_server));
+TEST_F(DisplayPowerManagerTest, NotSupported) {
+  next_status_ = ZX_ERR_NOT_SUPPORTED;
 
-  display_manager()->SetDefaultDisplayForTests(
-      std::make_shared<Display>(kDisplayId, kDisplayWidth, kDisplayHeight, kMaxDisplayLayersCount));
-
-  MockDisplayCoordinator mock_display_coordinator(WireDisplayInfo{});
-  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client),
-                                dispatcher());
-  mock_display_coordinator.set_set_display_power_mode_result(ZX_ERR_NOT_SUPPORTED);
-
-  RunLoopUntilIdle();
-
-  {
-    bool callback_executed = false;
-    std::thread set_display_power_thread([&callback_executed, this] {
-      display_power_manager()->SetPowerMode(PowerMode::kOff,
-                                            [&callback_executed](fit::result<zx_status_t> result) {
-                                              callback_executed = true;
-                                              EXPECT_TRUE(result.is_error());
-                                              EXPECT_EQ(result.error_value(), ZX_ERR_NOT_SUPPORTED);
-                                            });
-    });
-
-    RunLoopUntil([&callback_executed] { return callback_executed; });
-    set_display_power_thread.join();
-  }
+  bool callback_executed = false;
+  display_power_manager()->SetPowerMode(PowerMode::kOff,
+                                        [&callback_executed](fit::result<zx_status_t> result) {
+                                          callback_executed = true;
+                                          ASSERT_TRUE(result.is_error());
+                                          EXPECT_EQ(result.error_value(), ZX_ERR_NOT_SUPPORTED);
+                                        });
+  EXPECT_TRUE(callback_executed);
+  EXPECT_EQ(requested_modes_, std::vector{fuchsia_hardware_display_types::PowerMode::kOff});
+  EXPECT_EQ(display_power_manager()->current_power_mode(), PowerMode::kOn);
+  auto power_event = GetLastInspectedPowerEvent();
+  EXPECT_EQ(power_event.name, "off_ERROR_ZX_ERR_NOT_SUPPORTED");
 }
 
 }  // namespace

@@ -34,6 +34,7 @@
 #include <lib/sdmmc/hw.h>
 #include <zircon/errors.h>
 
+#include <atomic>
 #include <memory>
 #include <optional>
 
@@ -980,6 +981,109 @@ TEST_P(SdmmcBlockDeviceTest, SendCmd12OnCommandFailureWhenAutoCmd12) {
   EXPECT_STATUS(client->FifoTransaction(&requests[0], 1), ZX_ERR_IO);
 
   EXPECT_EQ(sdmmc_.command_counts().at(SDMMC_STOP_TRANSMISSION), 10);
+}
+
+TEST_P(SdmmcBlockDeviceTest, ReadRetryWithRecoveryPolling) {
+  ASSERT_OK(StartDriverForMmc());
+
+  zx::result<std::unique_ptr<block_client::RemoteBlockDevice>> client_result =
+      GetRemoteBlockDeviceForBlockServer("user");
+  ASSERT_OK(client_result);
+  auto client = std::move(client_result.value());
+
+  fzl::VmoMapper mapper;
+  const size_t vmo_size =
+      fbl::round_up<size_t, size_t>(FakeSdmmcDevice::kBlockSize, zx_system_get_page_size());
+  zx::vmo vmo;
+  ASSERT_OK(mapper.CreateAndMap(vmo_size, ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, nullptr, &vmo));
+
+  storage::Vmoid owned_vmoid;
+  EXPECT_OK(client->BlockAttachVmo(vmo, &owned_vmoid));
+  vmoid_t vmoid = owned_vmoid.TakeId();
+
+  FillSdmmc(1, 0x400);
+
+  const uint32_t initial_read_count = sdmmc_.command_counts().contains(SDMMC_READ_MULTIPLE_BLOCK)
+                                          ? sdmmc_.command_counts().at(SDMMC_READ_MULTIPLE_BLOCK)
+                                          : 0;
+  const uint32_t initial_stop_count = sdmmc_.command_counts().contains(SDMMC_STOP_TRANSMISSION)
+                                          ? sdmmc_.command_counts().at(SDMMC_STOP_TRANSMISSION)
+                                          : 0;
+  const uint32_t initial_send_status_count = sdmmc_.command_counts().contains(SDMMC_SEND_STATUS)
+                                                 ? sdmmc_.command_counts().at(SDMMC_SEND_STATUS)
+                                                 : 0;
+
+  constexpr uint32_t kReadRetries = 2;
+  constexpr uint32_t kStopTransmissionRetriesPerRecovery = 2;
+  constexpr uint32_t kSendStatusRetriesPerRecovery = 2;
+
+  // Make READ_MULTIPLE_BLOCK fail twice, succeeding on the 3rd attempt (retried multiple times).
+  std::atomic<uint32_t> read_attempts = 0;
+  sdmmc_.set_command_callback(SDMMC_READ_MULTIPLE_BLOCK, [&](const sdmmc_req_t& req) {
+    if (++read_attempts <= kReadRetries) {
+      return ZX_ERR_IO;
+    }
+    return ZX_OK;
+  });
+
+  // Make StopTransmission fail twice per recovery before succeeding, retrying multiple times.
+  std::atomic<uint32_t> stop_transmission_attempts = 0;
+  sdmmc_.set_command_callback(SDMMC_STOP_TRANSMISSION, [&](const sdmmc_req_t& req) {
+    if (++stop_transmission_attempts % (kStopTransmissionRetriesPerRecovery + 1) != 0) {
+      return ZX_ERR_IO;
+    }
+    return ZX_OK;
+  });
+
+  // Make WaitForState report a non-TRAN state twice per recovery before reporting TRAN, retrying
+  // multiple times.
+  std::atomic<uint32_t> send_status_attempts = 0;
+  sdmmc_.set_command_callback(SDMMC_SEND_STATUS, [&](uint32_t out_response[4]) {
+    if (++send_status_attempts % (kSendStatusRetriesPerRecovery + 1) != 0) {
+      out_response[0] = MMC_STATUS_CURRENT_STATE_DATA;
+    } else {
+      out_response[0] = MMC_STATUS_CURRENT_STATE_TRAN;
+    }
+  });
+
+  BlockFifoRequest request = {
+      .command = {.opcode = BLOCK_OPCODE_READ},
+      .vmoid = vmoid,
+      .length = 1,
+      .vmo_offset = 0,
+      .dev_offset = 0x400,
+  };
+  EXPECT_OK(client->FifoTransaction(&request, 1));
+
+  ASSERT_NO_FATAL_FAILURE(CheckVmo(mapper, 1, 0));
+
+  constexpr uint32_t kExpectedReadAttempts = kReadRetries + 1;
+  constexpr uint32_t kExpectedStopTransmissionAttempts =
+      kReadRetries * (kStopTransmissionRetriesPerRecovery + 1);
+  constexpr uint32_t kExpectedSendStatusAttempts =
+      kReadRetries * (kSendStatusRetriesPerRecovery + 1);
+
+  EXPECT_EQ(read_attempts.load(), kExpectedReadAttempts);
+  EXPECT_EQ(stop_transmission_attempts.load(), kExpectedStopTransmissionAttempts);
+  EXPECT_EQ(send_status_attempts.load(), kExpectedSendStatusAttempts);
+
+  EXPECT_EQ(sdmmc_.command_counts().at(SDMMC_READ_MULTIPLE_BLOCK),
+            initial_read_count + kExpectedReadAttempts);
+  EXPECT_EQ(sdmmc_.command_counts().at(SDMMC_STOP_TRANSMISSION),
+            initial_stop_count + kExpectedStopTransmissionAttempts);
+  EXPECT_EQ(sdmmc_.command_counts().at(SDMMC_SEND_STATUS),
+            initial_send_status_count + kExpectedSendStatusAttempts);
+
+  inspect::InspectTestHelper inspector;
+  inspector.ReadInspect(block_device_->inspect());
+  const inspect::Hierarchy* root = inspector.hierarchy().GetByPath({"sdmmc_core"});
+  ASSERT_NOT_NULL(root);
+  const auto* io_retries = root->node().get_property<inspect::UintPropertyValue>("io_retries");
+  ASSERT_NOT_NULL(io_retries);
+  EXPECT_EQ(io_retries->value(), kReadRetries);
+  const auto* io_errors = root->node().get_property<inspect::UintPropertyValue>("io_errors");
+  ASSERT_NOT_NULL(io_errors);
+  EXPECT_EQ(io_errors->value(), 0);
 }
 
 TEST_P(SdmmcBlockDeviceTest, Trim) {

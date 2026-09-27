@@ -340,7 +340,7 @@ async fn bt_init_component_topology() {
         .await
         .expect("Failed adding temp storage route to SecureStore component");
 
-    // Add the bt-init configuration capabilities to the realm.
+    // Add the bt-init and bt-gap configuration capabilities to the realm.
     // `fuchsia.bluetooth.FastPairProvider` is disabled as all tests don't require it.
     // `fuchsia.bluetooth.Rfcomm` is enabled as it's typically started by default.
     builder
@@ -358,10 +358,58 @@ async fn bt_init_component_topology() {
         .await
         .unwrap();
     builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.AutostartSnoop".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.LePrivacy".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.LeBackgroundScanning".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(false)),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.LeSecurityMode".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::String("Mode1".into())),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.BredrConnectable".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.bluetooth.BredrSecurityMode".parse().unwrap(),
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::String("Mode4".into())),
+        }))
+        .await
+        .unwrap();
+    builder
         .add_route(
             Route::new()
                 .capability(Capability::configuration("fuchsia.bluetooth.FastPairProvider"))
                 .capability(Capability::configuration("fuchsia.bluetooth.Rfcomm"))
+                .capability(Capability::configuration("fuchsia.bluetooth.AutostartSnoop"))
+                .capability(Capability::configuration("fuchsia.bluetooth.LePrivacy"))
+                .capability(Capability::configuration("fuchsia.bluetooth.LeBackgroundScanning"))
+                .capability(Capability::configuration("fuchsia.bluetooth.LeSecurityMode"))
+                .capability(Capability::configuration("fuchsia.bluetooth.BredrConnectable"))
+                .capability(Capability::configuration("fuchsia.bluetooth.BredrSecurityMode"))
                 .from(Ref::self_())
                 .to(&bt_init),
         )

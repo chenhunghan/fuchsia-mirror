@@ -141,7 +141,8 @@ impl FileIo for InternalFile {
             .align_range_outwards(&(offset..offset + buffer.len() as u64))
             .unwrap();
         let mut buf = handle.allocate_buffer((aligned.end - aligned.start) as usize).await;
-        let bytes = handle.read(aligned.start, buf.as_mut()).await.map_err(map_to_status)?;
+        let bytes =
+            handle.read_aligned(aligned.start, buf.as_mut()).await.map_err(map_to_status)?;
         let end = std::cmp::min(offset + buffer.len() as u64, aligned.start + bytes as u64);
         if end > offset {
             let target_range = (offset - aligned.start) as usize..(end - aligned.start) as usize;

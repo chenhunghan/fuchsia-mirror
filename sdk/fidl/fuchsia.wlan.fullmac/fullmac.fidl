@@ -331,6 +331,10 @@ closed protocol WlanFullmacImplIfc {
     strict SignalReport(struct {
         ind WlanFullmacSignalReportIndication;
     }) -> ();
+    /// Report that the monitored RSSI crossed a configured threshold.
+    strict OnRssiThresholdBreached(table {
+        1: cur_rssi_dbm int8;
+    });
     /// Report that an EAPoL frame was received.
     strict EapolInd(table {
         /// The address of the sender. Required.
@@ -415,8 +419,12 @@ open protocol WlanFullmacImpl {
     strict QueryTelemetrySupport() -> (table {
         1: resp fuchsia.wlan.stats.TelemetrySupport;
     }) error zx.Status;
+    // We may want to consolidate these offload support queries if more appear.
     flexible QueryApfPacketFilterSupport() -> (table {
         1: resp fuchsia.wlan.common.ApfPacketFilterSupport;
+    }) error zx.Status;
+    flexible QueryRssiMonitorSupport() -> (table {
+        1: resp fuchsia.wlan.common.RssiMonitorSupport;
     }) error zx.Status;
 
     // MLME operations
@@ -616,6 +624,22 @@ open protocol WlanFullmacImpl {
     flexible GetApfPacketFilterEnabled() -> (table {
         1: enabled bool;
     }) error zx.Status;
+
+    /// Configures a monitoring threshold for connection RSSI.
+    ///
+    /// When an RSSI is detected less than `min_rssi_dbm` or above `max_rssi_dbm`
+    /// it is reported by WlanFullmacImplIfc::OnRssiThresholdBreached.
+    ///
+    /// Calling StartRssiMonitor multiple times will replace the monitoring
+    /// threshold with the latest provided values.
+    ///
+    /// RSSI monitoring halts when StopRssiMonitor is called, or automatically
+    /// on connection loss.
+    flexible StartRssiMonitor(table {
+        1: min_rssi_dbm int8;
+        2: max_rssi_dbm int8;
+    }) -> () error zx.Status;
+    flexible StopRssiMonitor() -> () error zx.Status;
 };
 
 service Service {

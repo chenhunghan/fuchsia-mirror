@@ -5,6 +5,7 @@
 import("//build/python/python_library.gni")
 
 python_library("openwrt_access_point") {
+  testonly = true
   library_name = "openwrt_access_point"
   source_root = "."
   sources = [
@@ -29,5 +30,8 @@ python_library("openwrt_access_point") {
     "lib/uci_radio_options.py",
   ]
 
-  library_deps = [ "//src/testing/end_to_end/libs" ]
+  library_deps = [
+    "//src/testing/end_to_end/libs",
+    "//src/testing/end_to_end/mobly_controller/iperf",
+  ]
 }

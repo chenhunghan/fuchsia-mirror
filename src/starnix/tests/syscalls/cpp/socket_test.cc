@@ -1349,6 +1349,25 @@ TEST_F(BpfTest, SoAttachFilter) {
   SendPacketAndCheckReceived(AF_INET6, kTestDstPortIpv4, false);
 }
 
+TEST_F(BpfTest, SoAttachFilterBpfLen) {
+  static sock_filter filter_code[] = {
+      BPF_STMT(BPF_LDX | BPF_W | BPF_LEN, 0),
+      BPF_STMT(BPF_LD | BPF_W | BPF_LEN, 0),
+      BPF_STMT(BPF_RET | BPF_A, 0),
+  };
+
+  static const sock_fprog filter = {
+      sizeof(filter_code) / sizeof(filter_code[0]),
+      filter_code,
+  };
+
+  ASSERT_EQ(
+      setsockopt(packet_socket_fd_.get(), SOL_SOCKET, SO_ATTACH_FILTER, &filter, sizeof(filter)),
+      0);
+
+  SendPacketAndCheckReceived(AF_INET, 1234, true);
+}
+
 TEST(IpTables, IpTablesAdminCap) {
   if (!test_helper::HasCapability(CAP_NET_ADMIN)) {
     GTEST_SKIP() << "Need CAP_NET_ADMIN to access iptables";
@@ -1821,8 +1840,9 @@ TEST_F(ScmCredentialsTest, ZombiePidForgeryFails) {
   fbl::unique_fd pid_fd(static_cast<int>(syscall(SYS_pidfd_open, zombie_pid, 0u)));
   ASSERT_THAT(pid_fd.get(), SyscallSucceeds());
 
+  // The child's SIGCHLD can interrupt the wait, so retry on EINTR.
   pollfd pfd = {.fd = pid_fd.get(), .events = POLLIN};
-  ASSERT_EQ(poll(&pfd, 1, -1), 1);
+  ASSERT_THAT(HANDLE_EINTR(poll(&pfd, 1, -1)), SyscallSucceedsWithValue(1));
   EXPECT_EQ(pfd.revents, POLLIN);
 
   // Without CAP_SYS_ADMIN, it should fail with EPERM (forgery not allowed).

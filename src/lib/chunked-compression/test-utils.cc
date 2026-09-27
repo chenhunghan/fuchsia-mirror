@@ -9,7 +9,8 @@
 #include <initializer_list>
 
 #include <fbl/array.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
+
+#include "src/lib/chunked-compression/chunked-archive.h"
 
 namespace chunked_compression {
 namespace test_utils {

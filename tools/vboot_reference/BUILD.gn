@@ -186,7 +186,10 @@ executable("futility") {
 
 config("internal_config") {
   visibility = [ "./*" ]
-  configs = [ "//build/config:Wno-unterminated-string-initialization" ]
+  configs = [
+    "//build/config:Wno-call-graph-section-no-prototype",
+    "//build/config:Wno-unterminated-string-initialization",
+  ]
   include_dirs = [
     "$vboot_dir/firmware/2lib/include",
     "$vboot_dir/firmware/bdb",

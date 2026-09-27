@@ -78,15 +78,15 @@ struct CompareConfig {
   int start_column = 0;
 
   // One (1) plus the index of the last row that will be compared against the
-  // golden image in the captured image. So the rows within range [start_row,
-  // end_row) in the compared image will be used for comparison.
+  // golden image in the captured image. So the rows within range [`start_row`,
+  // `end_row`) in the compared image will be used for comparison.
   //
   // Must be equal to or greater than `start_row`.
   int end_row = 0;
 
   // One (1) plus the index of the last column that will be compared against the
   // golden image in the captured image. So the columns within range
-  // [start_column, end_column) in the compared image will be used for
+  // [`start_column`, `end_column`) in the compared image will be used for
   // comparison.
   //
   // Must be equal to or greater than `start_column`.
@@ -293,8 +293,8 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
     realm_root_ = std::nullopt;
 #endif  // FAKE_DISPLAY
 
-    // Create the SysmemAllocator.
-    // Create the SysmemAllocator.
+    // Create the `SysmemAllocator`.
+    // Create the `SysmemAllocator`.
     auto [client_end, server_end] = fidl::Endpoints<fuchsia_sysmem2::Allocator>::Create();
     zx_status_t status =
         fdio_service_connect("/svc/fuchsia.sysmem2.Allocator", server_end.TakeChannel().release());
@@ -366,7 +366,7 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
   display::Display::VsyncCallbackId vsync_callback_id_{};
 
   // Run promise on this test case's executor.
-  // Return true if result is_ok().
+  // Return true if result `is_ok()`.
   bool RunPromise(fpromise::promise<> promise) {
     return integration_tests::RunPromise(
         *executor_, [this](bool& done) { RunLoopUntil([&done] { return done; }); },
@@ -406,7 +406,7 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
     auto& display_coordinator = raw_display_coordinator();
 
     // Get the latest applied config stamp. This will be used to compare against the config
-    // stamp in the OnSync callback function used by the display. If the two stamps match,
+    // stamp in the `OnSync` callback function used by the display. If the two stamps match,
     // then we know that the vsync has completed and it is safe to do readbacks.
     const auto config_stamp_result = display_coordinator.sync()->GetLatestCommittedConfigStamp();
     ASSERT_TRUE(config_stamp_result.ok())
@@ -414,12 +414,13 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
         << config_stamp_result.status_string();
     display::WireConfigStamp pending_config_stamp = config_stamp_result->stamp;
 
-    // The callback will switch this bool to |true| if the two configs match. It is initialized
-    // to |false| and blocks the main thread below.
+    // The callback will switch this bool to true if the two configs match. It is initialized
+    // to false and blocks the main thread below.
     bool configs_are_equal = false;
-    auto vsync_callback_id = display->AddVsyncCallback(
-        [&pending_config_stamp, &configs_are_equal](
-            zx::time timestamp, display::WireConfigStamp displayed_config_stamp) {
+    auto vsync_callback_id =
+        display->AddVsyncCallback([&pending_config_stamp, &configs_are_equal](
+                                      display::DisplayId, zx::time timestamp,
+                                      display::WireConfigStamp displayed_config_stamp) {
           if (pending_config_stamp.value == displayed_config_stamp.value &&
               displayed_config_stamp.value != fuchsia_hardware_display::kInvalidConfigStampValue) {
             configs_are_equal = true;
@@ -446,7 +447,7 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
   //
   // TODO(https://fxbug.dev/42076499): Instead of providing hardcoded pixel type for
   // capture buffer, tests should let display driver make decision for the
-  // capture buffer format, and use the sysmem format in BufferCollectionInfo
+  // capture buffer format, and use the sysmem format in `BufferCollectionInfo`
   // for capture-and-golden comparison.
   fpromise::result<fidl::SyncClient<fuchsia_sysmem2::BufferCollection>, zx_status_t> SetupCapture(
       allocation::GlobalBufferCollectionId collection_id, fuchsia_images2::PixelFormat pixel_type,
@@ -604,12 +605,12 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
     display_compositor->ReleaseBufferCollection(collection_id, BufferCollectionUsage::kClientImage);
   }
 
-  // Captures the pixel values on the display and reads them into |read_values|.
+  // Captures the pixel values on the display and reads them into `read_values`.
   void CaptureDisplayOutput(display::CoordinatorProxy& display_coordinator,
                             const fuchsia_sysmem2::BufferCollectionInfo& collection_info,
                             allocation::GlobalImageId capture_image_id,
                             std::vector<uint8_t>* read_values, bool release_capture_image = true) {
-    // Make sure the config from the DisplayCompositor has been completely applied first before
+    // Make sure the config from the `DisplayCompositor` has been completely applied first before
     // attempting to capture pixels from the display. This only matters for the real display.
     WaitOnVSync();
 
@@ -708,11 +709,11 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
     // The AMLogic display engine always use formats with 3 bytes per pixel for
     // captured images.
     // TODO(https://fxbug.dev/42076192): This should not be hardcoded, instead sysmem
-    // should calculate it from sysmem BufferCollectionInfo of allocated capture
+    // should calculate it from sysmem `BufferCollectionInfo` of allocated capture
     // buffer.
     constexpr uint32_t kCaptureImageBytesPerPixel = 3;
     // TODO(https://fxbug.dev/42076192): This should not be hardcoded, instead sysmem
-    // should read it from the sysmem BufferCollectionInfo of allocated capture
+    // should read it from the sysmem `BufferCollectionInfo` of allocated capture
     // buffer.
     constexpr uint32_t kCaptureImageRowByteAlignment = 64;
     const int capture_stride = static_cast<int>(
@@ -724,7 +725,7 @@ class DisplayCompositorPixelTest : public gtest::RealLoopFixture {
     const uint32_t input_image_bytes_per_pixel =
         ImageFormatStrideBytesPerWidthPixel(pixel_format_and_modifier);
     // TODO(https://fxbug.dev/42076192): This should not be hardcoded, instead sysmem
-    // should read it from the sysmem BufferCollectionInfo of allocated input
+    // should read it from the sysmem `BufferCollectionInfo` of allocated input
     // image buffer.
     constexpr uint32_t kInputImageRowByteAlignment = 64;
     const int expected_stride = static_cast<int>(
@@ -859,7 +860,7 @@ VK_TEST_P(DisplayCompositorParameterizedPixelTest, FullscreenRectangleTest) {
   const uint64_t kTextureCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -971,7 +972,7 @@ VK_TEST_P(DisplayCompositorParameterizedPixelTest, FullscreenRectangleTest) {
   }();
   EXPECT_TRUE(images_are_same);
 
-  // Manually clean up the capture since we didn't in CaptureDisplayOutput.
+  // Manually clean up the capture since we didn't in `CaptureDisplayOutput`.
   const display::WireImageId fidl_capture_image_id = capture_image_id.ToFidl();
   const fidl::OneWayStatus release_result =
       display_coordinator.sync()->ReleaseImage(fidl_capture_image_id);
@@ -996,7 +997,7 @@ VK_TEST_P(DisplayCompositorParameterizedPixelTest, ColorConversionTest) {
   const uint64_t kCompareCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -1082,7 +1083,7 @@ VK_TEST_P(DisplayCompositorParameterizedPixelTest, ColorConversionTest) {
 }
 
 // Renders a fullscreen blue rectangle to the provided display using a solid color rect
-// instead of an image. Use the NullRenderer to confirm this is being rendered through
+// instead of an image. Use the `NullRenderer` to confirm this is being rendered through
 // the display hardware.
 //
 // TODO(https://fxbug.dev/42076344): Currently this test is skipped on all of the
@@ -1100,7 +1101,7 @@ VK_TEST_P(DisplayCompositorParameterizedPixelTest, FullscreenSolidColorRectangle
   const uint64_t kCompareCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -1190,7 +1191,7 @@ VK_TEST_P(DisplayCompositorParameterizedPixelTest, SetMinimumRGBTest) {
   const uint64_t kCompareCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -1309,7 +1310,7 @@ VK_TEST_P(DisplayCompositorFallbackParameterizedPixelTest, SoftwareRenderingTest
   const uint64_t kTextureCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -1490,13 +1491,13 @@ VK_TEST_P(DisplayCompositorFallbackParameterizedPixelTest, SoftwareRenderingTest
                        display->height_in_px(), display->width_in_px());
                    EXPECT_TRUE(images_are_same);
 
-                   // Make sure that the vmo_host has the right amount of blue and red colors, so
+                   // Make sure that the `vmo_host` has the right amount of blue and red colors, so
                    // that we know that even if the display matches the render target, that its not
                    // just because both are black or some other wrong colors.
                    uint32_t num_blue = 0, num_red = 0;
                    uint32_t num_pixels = num_bytes / 4;
                    for (uint32_t i = 0; i < num_pixels; i++) {
-                     // |vmo_host| has BGRA sequence in pixel values.
+                     // `vmo_host` has BGRA sequence in pixel values.
                      if (vmo_host[4 * i] == 255U) {
                        num_blue++;
                      } else if (vmo_host[4 * i + 2] == 255U) {
@@ -1532,7 +1533,7 @@ VK_TEST_P(DisplayCompositorTransparencyPixelTest, OverlappingTransparencyTest) {
   const uint64_t kTextureCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -1693,7 +1694,7 @@ VK_TEST_P(DisplayCompositorTransparencyPixelTest, OverlappingTransparencyTest) {
                                               display->height_in_px(), display->width_in_px());
         EXPECT_TRUE(images_are_same);
 
-        // Make sure that the vmo_host has the right amount of blue and red colors, so
+        // Make sure that the `vmo_host` has the right amount of blue and red colors, so
         // that we know that even if the display matches the render target, that its not
         // just because both are black or some other wrong colors.
         uint32_t num_blue = 0, num_red = 0, num_overlap = 0;
@@ -1765,7 +1766,7 @@ INSTANTIATE_TEST_SUITE_P(PixelFormats, DisplayCompositorParameterizedTest,
 //       100% blue or white.
 //
 // NOTE: the name is a misnomer, after the test was rewritten to use a flat display list instead
-//       of an UberStruct scene.
+//       of an `UberStruct` scene.
 //
 // - - - - - - - - - -     where i: rgba(137, 137, 255, 255)
 // - B W - - B i j W -           j: rgba(225, 225, 255, 255)
@@ -1789,7 +1790,7 @@ VK_TEST_P(DisplayCompositorParameterizedTest, MultipleParentPixelTest) {
   const uint64_t kTextureCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -1888,8 +1889,8 @@ VK_TEST_P(DisplayCompositorParameterizedTest, MultipleParentPixelTest) {
 
   auto render_frame_result = display_compositor->RenderFrame(
       1, zx::time(1), render_data_list, {}, {}, {}, [](const scheduling::Timestamps&) {},
-      // NOTE: this is somewhat redundant, since we also pass enable_direct_to_display=false into
-      // the DisplayCompositor constructor.  But, no harm is done.
+      // NOTE: this is somewhat redundant, since we also pass `enable_direct_to_display=false` into
+      // the `DisplayCompositor` constructor.  But, no harm is done.
       DisplayCompositor::RenderFrameTestArgs{.force_gpu_composition = true});
   EXPECT_EQ(render_frame_result, DisplayCompositor::RenderFrameResult::kGpuComposition);
   renderer->WaitIdle();
@@ -1927,13 +1928,13 @@ VK_TEST_P(DisplayCompositorParameterizedTest, MultipleParentPixelTest) {
         }();
         EXPECT_TRUE(images_are_same);
 
-        // Manually clean up the capture since we didn't in CaptureDisplayOutput.
+        // Manually clean up the capture since we didn't in `CaptureDisplayOutput`.
         const display::WireImageId fidl_capture_image_id = capture_image_id.ToFidl();
         const fidl::OneWayStatus result =
             display_coordinator.sync()->ReleaseImage(fidl_capture_image_id);
         EXPECT_TRUE(result.ok()) << "Failed to call FIDL ReleaseImage: " << result.status_string();
 
-        // |vmo_host| has BGRA sequence in pixel values.
+        // `vmo_host` has BGRA sequence in pixel values.
         auto get_pixel = [&display, display_bytes_per_row](const uint8_t* vmo_host, uint32_t x,
                                                            uint32_t y) -> uint32_t {
           EXPECT_LT(x, display->width_in_px());
@@ -1947,7 +1948,7 @@ VK_TEST_P(DisplayCompositorParameterizedTest, MultipleParentPixelTest) {
           return (b << 24) | (g << 16) | (r << 8) | a;
         };
 
-        // Pack a BGRA pixel into a uint32_t.
+        // Pack a BGRA pixel into a `uint32_t`.
         auto make_bgra_pixel = [](uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
           return (b << 24) | (g << 16) | (r << 8) | a;
         };
@@ -1993,7 +1994,7 @@ VK_TEST_P(DisplayCompositorParameterizedTest, MultipleParentPixelTest) {
           for (uint32_t y = 0; y < display->height_in_px(); y++) {
             const uint32_t i = y * display_width_including_padding + x;
 
-            // |vmo_host| has BGRA sequence in pixel values.
+            // `vmo_host` has BGRA sequence in pixel values.
             auto b = vmo_host[(i * 4)];
             auto g = vmo_host[(i * 4) + 1];
             auto r = vmo_host[(i * 4) + 2];
@@ -2040,7 +2041,7 @@ VK_TEST_P(DisplayCompositorParameterizedTest, ImageFlipRotate180DegreesPixelTest
   const uint64_t kTextureCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -2159,7 +2160,7 @@ VK_TEST_P(DisplayCompositorParameterizedTest, ImageFlipRotate180DegreesPixelTest
         const uint32_t kWhiteColorBgra = 0xFFFFFFFF;
         const uint32_t kBlueColorBgra = 0xFF0000FF;
         for (uint32_t i = 0; i < num_pixels; i += 4) {
-          // |vmo_host| has BGRA sequence in pixel values.
+          // `vmo_host` has BGRA sequence in pixel values.
           uint32_t bgra = 0;
           switch (render_target_pixel_format_type) {
             case fuchsia_images2::PixelFormat::kR8G8B8A8:
@@ -2228,7 +2229,7 @@ VK_TEST_F(DisplayCompositorPixelTest, SwitchDisplayMode) {
   const uint64_t kTextureCollectionId = allocation::GenerateUniqueBufferCollectionId();
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =
@@ -2268,7 +2269,7 @@ VK_TEST_F(DisplayCompositorPixelTest, SwitchDisplayMode) {
                        kTextureWidth, kTextureHeight, /*rgba=*/{0U, 255U, 0U, 255U});
 
   // Import the texture to the engine. Set blue/green to 0.2, which when converted to an
-  // unnormalized uint8 value in the range [0,255] will be 51U.
+  // unnormalized uint8 value in the range [0,255] will be `51U`.
   ImageMetadata image_metadatas[2];
   for (uint32_t i = 0; i < 2; i++) {
     image_metadatas[i] = {.collection_id = kTextureCollectionId,
@@ -2291,7 +2292,7 @@ VK_TEST_F(DisplayCompositorPixelTest, SwitchDisplayMode) {
   // Set up display render targets.
   //
   // Other tests use the buffer collection info to obtain the pixel format when comparing the
-  // captured display contents to the expected values, but here we always use kDisplayPixelFormat.
+  // captured display contents to the expected values, but here we always use `kDisplayPixelFormat`.
   fuchsia_sysmem2::BufferCollectionInfo unused_render_target_info;
   DisplayInfo display_info{
       .dimensions = glm::uvec2(display->width_in_px(), display->height_in_px()),
@@ -2443,11 +2444,11 @@ VK_TEST_F(DisplayCompositorPixelTest, SwitchDisplayMode) {
       << "Failed to call FIDL ReleaseImage: " << release_image_result.status_string();
 }
 
-// Tests that the DisplayCompositor can render an empty scene (black background) correctly.
+// Tests that the `DisplayCompositor` can render an empty scene (black background) correctly.
 VK_TEST_F(DisplayCompositorPixelTest, EmptySceneLayerTest) {
   SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
 
-  // Create a display realm and DisplayCompositor.
+  // Create a display realm and `DisplayCompositor`.
   auto renderer = NewNullRenderer();
   auto display_compositor = std::make_shared<flatland::DisplayCompositor>(
       dispatcher(), display_manager_->coordinator_proxy(), renderer,
@@ -2458,7 +2459,7 @@ VK_TEST_F(DisplayCompositorPixelTest, EmptySceneLayerTest) {
   const auto kPixelFormat = fuchsia_images2::PixelFormat::kB8G8R8A8;
   const uint64_t kCaptureCollectionId = allocation::GenerateUniqueBufferCollectionId();
 
-  // Set up buffer collection and image for display_coordinator capture.
+  // Set up buffer collection and image for `display_coordinator` capture.
   allocation::GlobalImageId capture_image_id = allocation::GenerateUniqueImageId();
   fuchsia_sysmem2::BufferCollectionInfo capture_info;
   auto capture_collection_result =

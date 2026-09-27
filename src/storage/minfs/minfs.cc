@@ -513,12 +513,17 @@ zx::result<> CheckSuperblock(const Superblock& info, uint32_t max_blocks) {
 
   TransactionLimits limits(info);
   if ((info.flags & kMinfsFlagFVM) == 0) {
-    if (info.dat_block + info.block_count != max_blocks) {
+    uint64_t total_blocks;
+    if (!safemath::CheckAdd(info.dat_block, info.block_count).AssignIfValid(&total_blocks) ||
+        total_blocks != max_blocks) {
       FX_LOGS(ERROR) << "too large for device";
       return zx::error(ZX_ERR_IO_DATA_INTEGRITY);
     }
 
-    if (info.dat_block - info.integrity_start_block < limits.GetMinimumJournalBlocks()) {
+    uint64_t integrity_blocks;
+    if (!safemath::CheckSub(info.dat_block, info.integrity_start_block)
+             .AssignIfValid(&integrity_blocks) ||
+        integrity_blocks < limits.GetMinimumJournalBlocks()) {
       FX_LOGS(ERROR) << "journal too small";
       return zx::error(ZX_ERR_BAD_STATE);
     }
@@ -1715,7 +1720,11 @@ zx::result<> Mkfs(const MountOptions& options, Bcache* bc) {
 
 zx::result<> Minfs::ReadDat(blk_t bno, void* data) {
 #ifdef __Fuchsia__
-  return bc_->Readblk(Info().dat_block + bno, data);
+  blk_t dev_offset;
+  if (!safemath::CheckAdd(Info().dat_block, bno).AssignIfValid(&dev_offset)) {
+    return zx::error(ZX_ERR_OUT_OF_RANGE);
+  }
+  return bc_->Readblk(dev_offset, data);
 #else
   return ReadBlk(bno, offsets_.DatStartBlock(), offsets_.DatBlockCount(), Info().block_count, data);
 #endif
@@ -1820,12 +1829,16 @@ zx::result<zx::vmo> Minfs::LoadVnodeVmo(VnodeIterator iterator, uint64_t block_c
     uint64_t count = iterator.GetContiguousBlockCount(block_count);
     if (block) {
       ValidateBno(block);
+      blk_t dev_offset;
+      if (!safemath::CheckAdd(block, data_start_block).AssignIfValid(&dev_offset)) {
+        return zx::error(ZX_ERR_OUT_OF_RANGE);
+      }
       fs::internal::BorrowedBuffer buffer(load_vnode_vmo_vmoid_.get());
       builder.Add(
           storage::Operation{
               .type = storage::OperationType::kRead,
               .vmo_offset = iterator.file_block(),
-              .dev_offset = block + data_start_block,
+              .dev_offset = dev_offset,
               .length = count,
           },
           &buffer);

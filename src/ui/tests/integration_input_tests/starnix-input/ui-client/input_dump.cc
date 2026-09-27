@@ -126,7 +126,24 @@ void relay_events(int epoll_fd, size_t num_of_events) {
 }
 
 int open_device(int epoll_fd, const std::string& device_path) {
-  int device_fd = ENSURE(open, device_path.c_str(), O_RDONLY);
+  int device_fd = -1;
+  // Mouse device may be lazily registered upon the first mouse event.
+  // Retry if the device node is not yet present.
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    device_fd = open(device_path.c_str(), O_RDONLY);
+    if (device_fd >= 0) {
+      break;
+    }
+    if (errno == ENOENT) {
+      errno = 0;
+      usleep(20000);  // 20ms
+      continue;
+    }
+    break;
+  }
+  if (device_fd < 0) {
+    device_fd = ENSURE(open, device_path.c_str(), O_RDONLY);
+  }
   epoll_event epoll_params = {.events = EPOLLIN, .data = {.fd = device_fd}};
   ENSURE(epoll_ctl, epoll_fd, EPOLL_CTL_ADD, device_fd, &epoll_params);
   return device_fd;

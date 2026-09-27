@@ -24,6 +24,8 @@ impl InspectType for UintLinearHistogramProperty {
     }
 }
 
+crate::impl_inspect_type_internal_histogram!(UintLinearHistogramProperty);
+
 impl UintLinearHistogramProperty {
     pub(crate) fn new(
         name: Cow<'_, str>,

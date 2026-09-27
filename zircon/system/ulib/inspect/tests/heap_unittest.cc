@@ -394,4 +394,54 @@ TEST(Heap, UpdateHeaderSize) {
                          dump(heap));
 }
 
+TEST(Heap, PeakBytesRequested) {
+  auto vmo = MakeVmo(4096);
+  ASSERT_TRUE(!!vmo);
+  Heap heap(std::move(vmo));
+
+  EXPECT_EQ(0u, heap.PeakBytesRequested());
+
+  BlockIndex b1, b2;
+  EXPECT_OK(heap.Allocate(100, &b1));
+  EXPECT_EQ(128u, heap.PeakBytesRequested());
+
+  EXPECT_OK(heap.Allocate(200, &b2));
+  EXPECT_EQ(128u + 256u, heap.PeakBytesRequested());
+
+  // Freeing blocks should NOT decrease bytes requested.
+  heap.Free(b1);
+  EXPECT_EQ(128u + 256u, heap.PeakBytesRequested());
+  heap.Free(b2);
+  EXPECT_EQ(128u + 256u, heap.PeakBytesRequested());
+
+  // Re-allocating within previous peak does not increase peak.
+  BlockIndex b_temp;
+  EXPECT_OK(heap.Allocate(200, &b_temp));
+  EXPECT_EQ(128u + 256u, heap.PeakBytesRequested());
+  heap.Free(b_temp);
+  EXPECT_EQ(128u + 256u, heap.PeakBytesRequested());
+
+  // A loop of allocating and freeing maintains a constant peak.
+  for (int i = 0; i < 100; i++) {
+    BlockIndex b;
+    EXPECT_OK(heap.Allocate(16, &b));
+    heap.Free(b);
+  }
+  EXPECT_EQ(128u + 256u, heap.PeakBytesRequested());
+
+  // Fill the 4096-byte heap with two 2048-byte blocks.
+  BlockIndex b3, b4;
+  EXPECT_OK(heap.Allocate(2048, &b3));
+  EXPECT_OK(heap.Allocate(2048, &b4));
+  EXPECT_EQ(4096u, heap.PeakBytesRequested());
+
+  // Allocation failure due to VMO capacity should still increment bytes requested.
+  BlockIndex b5;
+  EXPECT_EQ(ZX_ERR_NO_MEMORY, heap.Allocate(2048, &b5));
+  EXPECT_EQ(4096u + 2048u, heap.PeakBytesRequested());
+
+  heap.Free(b3);
+  heap.Free(b4);
+}
+
 }  // namespace

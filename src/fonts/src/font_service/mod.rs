@@ -19,23 +19,23 @@ use self::typeface::{Collection as TypefaceCollection, Typeface, TypefaceInfoAnd
 use anyhow::{Context as _, Error, format_err};
 use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_fonts::{self as fonts, CacheMissPolicy};
+use fidl_fuchsia_fonts_experimental as fonts_exp;
 use fidl_fuchsia_fonts_ext::{
     FontFamilyInfoExt, RequestExt, TypefaceRequestExt, TypefaceResponseExt,
 };
 use fidl_fuchsia_intl::LocaleId;
+use fuchsia_async as fasync;
 use fuchsia_component::server::{ServiceFs, ServiceObj};
+use fuchsia_trace as trace;
 use futures::prelude::*;
 use itertools::Itertools;
 use log::{debug, error, warn};
-use lru_cache::LruCache;
+use lru::LruCache;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::iter;
 use std::sync::Arc;
 use unicase::UniCase;
-use {
-    fidl_fuchsia_fonts_experimental as fonts_exp, fuchsia_async as fasync, fuchsia_trace as trace,
-};
 
 pub use asset::{AssetId, AssetLoader};
 pub use builder::FontServiceBuilder;
@@ -201,9 +201,9 @@ where
             // Skip logging this too often.
             let mut guard = self.rate_limited_logs.borrow_mut();
             let formatter_str = format!("{:?}", TypefaceRequestFormatter(&request));
-            if !guard.contains_key(&formatter_str) {
+            if !guard.contains(&formatter_str) {
                 warn!("Unfulfilled request {}", formatter_str);
-                guard.insert(formatter_str, ());
+                guard.put(formatter_str, ());
             }
         }
 

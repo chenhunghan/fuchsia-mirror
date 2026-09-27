@@ -2,8 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use core::num::NonZeroUsize;
+
 use fuchsia_sync::Mutex;
-use lru_cache::LruCache;
+use lru::LruCache;
 use storage_device::Device;
 use storage_device::buffer::Buffer;
 
@@ -14,6 +16,7 @@ pub struct BlockCache {
 
 impl BlockCache {
     pub fn new(capacity: usize, block_size: usize) -> Self {
+        let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
         Self { cache: Mutex::new(LruCache::new(capacity)), block_size }
     }
 
@@ -44,6 +47,6 @@ impl BlockCache {
             return;
         }
         let mut cache = self.cache.lock();
-        cache.insert(block_addr, data);
+        cache.put(block_addr, data);
     }
 }

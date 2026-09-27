@@ -46,6 +46,14 @@ enum class ActivityType : uint8_t {
   kReceivePacket,
 };
 
+// The class of controller crash indicated by a vendor HCI event.
+enum class CrashEventType : uint8_t {
+  // Controller firmware core dump.
+  kCoreDump,
+  // BQR Root Inflammation quality report.
+  kRootInflammation,
+};
+
 class BtHciBroadcom final : public fdf::DriverBase2,
                             public fidl::WireServer<fuchsia_power_broker::ElementRunner>,
                             public fidl::WireServer<fuchsia_hardware_bluetooth::Vendor> {
@@ -137,8 +145,8 @@ class BtHciBroadcom final : public fdf::DriverBase2,
   // states.
   void NoteActivity(ActivityType activity);
 
-  // Called when a core dump HCI event is received.
-  void NoteCoreDump();
+  // Called when a vendor HCI event indicating a controller crash is received.
+  void NoteCrashEvent(CrashEventType type);
 
   fpromise::promise<void, zx_status_t> LoadFirmware(bool fast_download);
 
@@ -200,6 +208,8 @@ class BtHciBroadcom final : public fdf::DriverBase2,
   std::optional<inspect::ComponentInspector> component_inspector_;
   inspect::UintProperty core_dump_count_;
   std::optional<zx::time> last_core_dump_time_;
+  inspect::UintProperty root_inflammation_count_;
+  std::optional<zx::time> last_root_inflammation_time_;
 
   fidl::ServerBindingGroup<fuchsia_hardware_bluetooth::Vendor> vendor_binding_group_;
 };

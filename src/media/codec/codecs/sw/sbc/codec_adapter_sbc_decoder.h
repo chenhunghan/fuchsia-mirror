@@ -48,8 +48,6 @@ class CodecAdapterSbcDecoder : public CodecAdapterSW<fit::deferred_action<fit::c
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
 
-  void CoreCodecStopStream() override;
-
  protected:
   // Processes input in a loop. Should only execute on input_processing_thread_.
   // Loops for the lifetime of a stream.
@@ -91,7 +89,7 @@ class CodecAdapterSbcDecoder : public CodecAdapterSW<fit::deferred_action<fit::c
   InputLoopStatus CreateContext(const fuchsia::media::FormatDetails& format_details);
 
   // Attempts to decode input packet. Reports failures through `events_`.
-  InputLoopStatus DecodeInput(CodecPacket* input_packet);
+  InputLoopStatus DecodeInput(const CodecPacket* input_packet);
 
   // Extract PCM format from SBC codec info bytes
   static fuchsia::media::PcmFormat DecodeCodecInfo(const std::vector<uint8_t>& oob_bytes);
@@ -113,6 +111,7 @@ class CodecAdapterSbcDecoder : public CodecAdapterSW<fit::deferred_action<fit::c
   const CodecBuffer* output_buffer_ = nullptr;
   // Offset into the output buffer we're decoding into.
   size_t output_offset_ = 0;
+  std::optional<fuchsia::media::FormatDetails> last_format_details_;
 };
 
 #endif  // SRC_MEDIA_CODEC_CODECS_SW_SBC_CODEC_ADAPTER_SBC_DECODER_H_

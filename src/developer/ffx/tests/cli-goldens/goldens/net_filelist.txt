@@ -226,10 +226,6 @@ ffx/net/if/mld/set.golden
 ffx/net/if/remove.golden
 ffx/net/log.golden
 ffx/net/log/set-packets.golden
-ffx/net/migration.golden
-ffx/net/migration/clear.golden
-ffx/net/migration/get.golden
-ffx/net/migration/set.golden
 ffx/net/neigh.golden
 ffx/net/neigh/add.golden
 ffx/net/neigh/clear.golden

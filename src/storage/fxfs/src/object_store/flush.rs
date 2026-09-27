@@ -8,7 +8,7 @@ use crate::errors::FxfsError;
 use crate::filesystem::{FlushReason, ForceMajor};
 use crate::log::*;
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
-use crate::lsm_tree::{LSMTree, layers_from_handles};
+use crate::lsm_tree::{LSMTree, layer_from_handle};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle};
 use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::object_manager::{ObjectManager, ReservationUpdate};
@@ -21,6 +21,7 @@ use crate::object_store::{
 };
 use crate::serialized_types::{LATEST_VERSION, Version, VersionedLatest};
 use anyhow::{Context, Error, anyhow};
+use fxfs_crypto::UnwrappedKey;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
@@ -180,19 +181,25 @@ impl ObjectStore {
             }
         }?;
 
-        let new_object_tree_layer = if let Some((raw_id, key, unwrapped_key)) = id_and_key {
+        let (new_object_tree_layer, unwrapped_key) = if let Some((raw_id, key, unwrapped_key)) =
+            id_and_key
+        {
             let object_id = ReservedId::new(parent_store, raw_id);
-            ObjectStore::create_object_with_key(
+            let handle = ObjectStore::create_object_with_key(
                 parent_store,
                 &mut transaction,
                 object_id,
                 handle_options,
                 key,
-                unwrapped_key,
+                UnwrappedKey::new(unwrapped_key.clone()),
             )
-            .await?
+            .await?;
+            (handle, Some(unwrapped_key))
         } else {
-            ObjectStore::create_object(parent_store, &mut transaction, handle_options, None).await?
+            let handle =
+                ObjectStore::create_object(parent_store, &mut transaction, handle_options, None)
+                    .await?;
+            (handle, None)
         };
         let writer = DirectWriter::new(&new_object_tree_layer, txn_options).await;
         let new_object_tree_layer_object_id = new_object_tree_layer.object_id();
@@ -216,7 +223,7 @@ impl ObjectStore {
         .context("Failed to flush tree")?;
 
         // Finalise the compaction.
-        let mut new_layers = layers_from_handles([new_object_tree_layer]).await?;
+        let mut new_layers = vec![layer_from_handle(new_object_tree_layer, unwrapped_key).await?];
         new_layers.extend(layers_to_keep.iter().map(|l| (*l).clone()));
 
         new_store_info.layers = Vec::new();

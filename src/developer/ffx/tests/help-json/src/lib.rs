@@ -163,6 +163,39 @@ mod tests {
         }
     }
 
+    #[fixture(base_fixture)]
+    #[fuchsia::test]
+    async fn test_unknown_subtool_machine_format(ctx: TestContext) {
+        // Tests that `ffx --machine json <unknown_tool>` produces valid JSON error output.
+        let output = ctx
+            .isolate()
+            .ffx(&["--machine", "json", "does-not-exist-baz-foo-bar"])
+            .await
+            .expect("ffx executes");
+        assert!(!output.status.success());
+
+        // The output should be a valid JSON representation of SerializableError::Help
+        let parsed: serde_json::Value = serde_json::from_str(&output.stdout).expect("parsing json");
+        assert_eq!(parsed["type"], "help");
+        assert_ne!(parsed["code"], 0);
+        // verify output string is present
+        let msg = parsed["output"].as_str().expect("output string");
+        assert!(msg.contains("Unknown ffx tool"));
+    }
+
+    #[fixture(base_fixture)]
+    #[fuchsia::test]
+    async fn test_unknown_subtool_non_machine_format(ctx: TestContext) {
+        // Tests that `ffx unknown-subtool-xyz` errors out without JSON output when --machine is NOT provided.
+        let output = ctx.isolate().ffx(&["unknown-subtool-xyz"]).await.expect("ffx executes");
+        assert!(!output.status.success());
+        // Because no --machine json was specified, this error shouldn't be dumped as JSON
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&output.stdout).is_err(),
+            "Expected non-JSON output"
+        );
+    }
+
     /// Parses `ffx commands` into lists of builtin and external command names.
     /// Based on the output structure like:
     ///

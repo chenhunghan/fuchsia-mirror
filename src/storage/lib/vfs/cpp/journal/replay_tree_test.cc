@@ -4,12 +4,11 @@
 
 #include "src/storage/lib/vfs/cpp/journal/replay_tree.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
-
 #include <cstdint>
 
 #include <gtest/gtest.h>
 
+#include "src/storage/lib/block_protocol/block-fifo.h"
 #include "src/storage/lib/operation/operation.h"
 
 namespace fs {

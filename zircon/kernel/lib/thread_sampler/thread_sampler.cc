@@ -242,6 +242,11 @@ zx::result<> sampler::ThreadSampler::SampleThread(zx_koid_t pid, zx_koid_t tid,
   // This amount of bytes _should_ be safe because SampleThread is only called during
   // Thread::Current::ProcessPendingSignals which occurs directly before returning to usermode. At
   // this point, the stack will be shallow.
+  //
+  // That argument only holds while the buffer stays in this frame, which is why SampleThread is
+  // declared __NO_INLINE.  Inlined into a caller on the exception path, these 512 bytes would be
+  // allocated on entry to every exception, at whatever depth it is taken, and whether or not a
+  // sampling session is running.
   vaddr_t bt[kMaxUserBacktraceSize]{};
 
   vaddr_t fp = 0;

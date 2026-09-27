@@ -48,7 +48,7 @@ rustc_binary(
 ### Rule 2.3: Visibility Scoping
 
 - **Package-Level Visibility:** Avoid setting default visibility on the package level (`package(default_visibility = [...])`).
-- **Target-Level Visibility:** Set target-level `visibility` as restrictively as possible on individual targets (e.g., restrict visibility to specific packages that require access rather than `"//visibility:public"`) to prevent unintended dependencies across packages.
+- **Target-Level Visibility:** Set target-level `visibility` as restrictively as possible on individual targets (e.g., restrict visibility to specific packages that require access rather than `"//visibility:public"`) to prevent unintended dependencies across packages. See the [`determining-bazel-visibility`](../.agent/skills/determining_bazel_visibility/SKILL.md) skill for detailed discovery commands and package grouping rules.
 
 ---
 
@@ -137,7 +137,7 @@ go_binary_host_tool(
 
 ### Rule 2.8: Host Test Suite & Registration
 
-- **Package Test Suite:** Migrated test targets SHOULD be grouped under a package-level `"tests"` `test_suite()` target with `visibility` restricted to the parent/ancestor directory containing the root `test_suite()` (e.g., `visibility = ["//tools:__pkg__"]` or `visibility = ["//build/tools:__pkg__"]`).
+- **Package Test Suite:** Migrated test targets SHOULD be grouped under a package-level `"tests"` `test_suite()` target with `visibility` restricted to the parent/ancestor directory containing the root `test_suite()` (e.g., `visibility = ["//tools:__pkg__"]` or `visibility = ["//build/tools:__pkg__"]`). See the [`determining-bazel-visibility`](../.agent/skills/determining_bazel_visibility/SKILL.md) skill for detailed visibility guidelines.
 - **Root Host Tests Registration:** When migrating host tests, `"//{directory_path}:tests"` MUST be added to the parent/ancestor `"host_tests"` `test_suite()` target (e.g., the `//tools:host_tests` `test_suite()` target in `//tools/BUILD.bazel` or `//build/tools:host_tests` in `//build/tools/BUILD.bazel`) so the tests are automatically included in centralized CI test suites.
 - **Do Not Duplicate in GN:** Migrated Bazel host tests should be Bazel-only. They are automatically included in CI/CQ when added to the parent `test_suite()` target above. Do NOT add them to GN `group("tests")`, and ensure any old GN test references for migrated tests are removed from `group("tests_no_e2e")` in `//tools/BUILD.gn` (or equivalent in `//build/tools/BUILD.gn`).
 - **Reviewer Check for Test Parity:** Reviewers must ensure all tests removed from `BUILD.gn` have matching definitions in a `BUILD.bazel` file that is included in a Bazel `test_suite()` named `"tests"`. Tests defined in GN that cannot yet be migrated must remain in GN.

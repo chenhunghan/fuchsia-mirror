@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -11,4 +13,15 @@ exports_files(
         "use.shard.cml",
     ],
     visibility = ["//visibility:public"],
+)
+
+# Require dependent components to include logsink capabilities in their
+# component manifests.
+#
+# NOTE: this is enforced by GN only. See the stub in
+# //build/bazel/rules/components/expect_includes.bzl.
+expect_includes(
+    name = "client_includes",
+    includes = ["client.shard.cml"],
+    visibility = ["//:__subpackages__"],
 )

@@ -7,6 +7,8 @@
 #include <lib/zx/vmar.h>
 #include <zircon/process.h>
 
+#include <limits>
+
 namespace inspect {
 namespace internal {
 
@@ -49,6 +51,14 @@ zx_status_t Heap::Allocate(size_t min_size, BlockIndex* out_block) {
   if (min_fit_order >= kNumOrders) {
     return ZX_ERR_INVALID_ARGS;
   }
+
+  size_t block_size = internal::OrderToSize(min_fit_order);
+  outstanding_bytes_requested_ =
+      (std::numeric_limits<size_t>::max() - outstanding_bytes_requested_ >= block_size)
+          ? (outstanding_bytes_requested_ + block_size)
+          : std::numeric_limits<size_t>::max();
+  max_outstanding_bytes_requested_ =
+      std::max(max_outstanding_bytes_requested_, outstanding_bytes_requested_);
 
   // Iterate through the orders until we find a free block with order >=
   // what is needed.
@@ -95,6 +105,10 @@ zx_status_t Heap::Allocate(size_t min_size, BlockIndex* out_block) {
 
 void Heap::Free(BlockIndex block_index) {
   auto* block = GetBlock(block_index);
+  size_t block_size = internal::OrderToSize(GetOrder(block));
+  outstanding_bytes_requested_ = (outstanding_bytes_requested_ >= block_size)
+                                     ? (outstanding_bytes_requested_ - block_size)
+                                     : 0;
   BlockIndex buddy_index = Buddy(block_index, GetOrder(block));
   auto* buddy = GetBlock(buddy_index);
 

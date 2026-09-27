@@ -257,11 +257,11 @@ impl Default for ObjectReferenceCount {
 }
 
 impl ObjectReferenceCount {
-    /// Returns true if the client's view of the reference count is either one or transitioning to
-    /// one.
+    /// Returns true if the reference count is non-zero, or if the client's view of the
+    /// reference count is either one or transitioning to one.
     fn has_ref(&self) -> bool {
         match self {
-            Self::NoRef(_) => false,
+            Self::NoRef(n) => *n > 0,
             Self::WaitingAck(_) | Self::HasRef(_) => true,
         }
     }
@@ -494,7 +494,7 @@ impl<R: RefReleaser> Releasable for RefGuard<R> {
 /// Type alias for the specific guards for strong references.
 pub type StrongRefGuard = RefGuard<StrongRefReleaser>;
 /// Type alias for the specific guards for weak references.
-type WeakRefGuard = RefGuard<WeakRefReleaser>;
+pub type WeakRefGuard = RefGuard<WeakRefReleaser>;
 
 impl BinderObject {
     /// Creates a new BinderObject. It is the responsibility of the caller to sent a `BR_ACQUIRE`
@@ -541,6 +541,40 @@ impl BinderObject {
         self.state.lock()
     }
 
+    /// If the object is waiting for an ack for an increase of the strong or weak reference count,
+    /// but the reference count has dropped back to 0, cancels the pending increase by transitioning
+    /// to `NoRef(0)`.
+    ///
+    /// If cancelling the pending increase unblocks a deferred decrement for the opposing
+    /// reference count (e.g. strong_count was waiting for weak_count's ack before emitting
+    /// ReleaseRef), applies the deferred decrement and returns the unblocked command.
+    ///
+    /// Returns `Some((unblocked_command, has_no_ref))` if cancelled, or `None` otherwise.
+    pub fn cancel_transient_refcount(&self, is_acquire: bool) -> Option<(Option<Command>, bool)> {
+        let mut state = self.lock();
+        let ref_count = if is_acquire { &mut state.strong_count } else { &mut state.weak_count };
+        if !ref_count.is_waiting_ack() || ref_count.count() != 0 {
+            return None;
+        }
+
+        *ref_count = ObjectReferenceCount::NoRef(0);
+        let unblocked_command = if state.weak_count.apply_deferred_inc() {
+            Some(Command::IncRef(self.local))
+        } else if !state.strong_count.is_waiting_ack() && !state.weak_count.is_waiting_ack() {
+            if state.strong_count.apply_deferred_dec() {
+                Some(Command::ReleaseRef(self.local))
+            } else if state.weak_count.apply_deferred_dec() {
+                Some(Command::DecRef(self.local))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let has_no_ref = !state.strong_count.has_ref() && !state.weak_count.has_ref();
+        Some((unblocked_command, has_no_ref))
+    }
+
     /// Returns whether the object has any reference, or is waiting for an acknowledgement from the
     /// owning process. The object cannot be removed from the object table has long as this is
     /// true.
@@ -560,7 +594,7 @@ impl BinderObject {
         StrongRefGuard::new(Arc::clone(self))
     }
 
-    /// Increments the strong reference count of the binder object. Fails is the current strong
+    /// Increments the strong reference count of the binder object. Fails if the current strong
     /// count is 0.
     pub fn inc_strong_checked(self: &Arc<Self>) -> Result<StrongRefGuard, Errno> {
         let mut state = self.lock();
@@ -635,7 +669,7 @@ impl BinderObject {
                 }
             }
 
-            // Forget this object if we have just remove the last reference to it.
+            // Forget this object if we have just removed the last reference to it.
             if did_decrease
                 && !object_state.strong_count.has_ref()
                 && !object_state.weak_count.has_ref()

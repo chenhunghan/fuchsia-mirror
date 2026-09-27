@@ -22,14 +22,14 @@
             service: "fuchsia.hardware.clock.Service",
             from: "#clock-controller-ff63c000",
             to: "#video-decoder-ffd00000",
-            constraints: { id: 65543 },
+            constraints: { clock_id: 65543 },
         },
         {
             name: "clock-dos-vdec",
             service: "fuchsia.hardware.clock.Service",
             from: "#clock-controller-ff63c000",
             to: "#video-decoder-ffd00000",
-            constraints: { id: 65541 },
+            constraints: { clock_id: 65541 },
         },
         {
             name: "pdev",

@@ -12,6 +12,7 @@
 #include <lib/media/codec_impl/codec_adapter.h>
 #include <lib/media/codec_impl/codec_diagnostics.h>
 #include <lib/zx/bti.h>
+#include <zircon/compiler.h>
 
 #include <optional>
 #include <random>
@@ -60,7 +61,7 @@ class CodecAdapterVp9 : public AmlogicCodecAdapter, public Vp9Decoder::FrameData
   void CoreCodecStartStream() override;
   void CoreCodecQueueInputFormatDetails(
       const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
-  void CoreCodecQueueInputPacket(CodecPacket* packet) override;
+  void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
   void CoreCodecStopStream() override;
   void CoreCodecResetStreamAfterCurrentFrame() override;
@@ -159,9 +160,9 @@ class CodecAdapterVp9 : public AmlogicCodecAdapter, public Vp9Decoder::FrameData
 
   std::optional<fuchsia_sysmem2::BufferCollectionInfo> output_buffer_collection_info_;
 
-  std::vector<const CodecBuffer*> all_output_buffers_;
-  std::vector<CodecPacket*> all_output_packets_;
-  std::vector<uint32_t> free_output_packets_;
+  std::vector<const CodecBuffer*> all_output_buffers_ __TA_GUARDED(lock_);
+  std::vector<CodecPacket*> all_output_packets_ __TA_GUARDED(lock_);
+  std::vector<uint32_t> free_output_packets_ __TA_GUARDED(lock_);
 
   uint32_t min_buffer_count_[kPortCount] = {};
   uint32_t max_buffer_count_[kPortCount] = {};

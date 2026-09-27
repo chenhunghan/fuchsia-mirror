@@ -19,6 +19,7 @@
 #include <pretty/hexdump.h>
 
 #include "sdmmc-root-device.h"
+#include "src/lib/backoff/exponential_backoff.h"
 
 namespace {
 
@@ -253,19 +254,24 @@ zx_status_t SdmmcDevice::SdmmcSendStatus(uint32_t* status) {
 }
 
 zx_status_t SdmmcDevice::SdmmcStopTransmission(uint32_t* status) {
-  zx_status_t st;
+  zx_status_t st = ZX_OK;
+  backoff::ExponentialBackoff backoff(kInitialRetryWaitDuration, kRetryWaitMultiplier,
+                                      kMaxRetryWaitDuration);
   for (uint32_t i = 0; i < kTryAttempts; i++) {
     sdmmc_req_t req = {};
     req.cmd_idx = SDMMC_STOP_TRANSMISSION;
     req.arg = 0;
     req.cmd_flags = SDMMC_STOP_TRANSMISSION_FLAGS;
     req.suppress_error_messages = i < (kTryAttempts - 1);
-    uint32_t response[4];
+    uint32_t response[4] = {};
     if ((st = Request(req, response)) == ZX_OK) {
       if (status) {
         *status = response[0];
       }
       break;
+    }
+    if (i < kTryAttempts - 1) {
+      zx::nanosleep(zx::deadline_after(backoff.GetNext()));
     }
   }
   return st;
@@ -273,17 +279,24 @@ zx_status_t SdmmcDevice::SdmmcStopTransmission(uint32_t* status) {
 
 zx_status_t SdmmcDevice::SdmmcWaitForState(uint32_t desired_state) {
   uint32_t current_state = 0;
+  backoff::ExponentialBackoff backoff(kInitialRetryWaitDuration, kRetryWaitMultiplier,
+                                      kMaxRetryWaitDuration);
   for (uint32_t i = 0; i < kTryAttempts; i++) {
     sdmmc_req_t req = {};
     req.cmd_idx = SDMMC_SEND_STATUS;
     req.arg = RcaArg();
     req.cmd_flags = SDMMC_SEND_STATUS_FLAGS;
     req.suppress_error_messages = i < (kTryAttempts - 1);
-    uint32_t response[4];
+    uint32_t response[4] = {};
     zx_status_t st = Request(req, response);
-    current_state = MMC_STATUS_CURRENT_STATE(response[0]);
-    if (st == ZX_OK && current_state == desired_state) {
-      return ZX_OK;
+    if (st == ZX_OK) {
+      current_state = MMC_STATUS_CURRENT_STATE(response[0]);
+      if (current_state == desired_state) {
+        return ZX_OK;
+      }
+    }
+    if (i < kTryAttempts - 1) {
+      zx::nanosleep(zx::deadline_after(backoff.GetNext()));
     }
   }
   fdf::error("Failed to wait for state {} (got state {}).", desired_state, current_state);

@@ -10,7 +10,7 @@ use handoff::PhysHandoff;
 use lazy_init::LazyInit;
 
 #[cfg(console_enabled)]
-use crate::console_rust::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
 
 // System-wide ACPI parser.
 static GLOBAL_ACPI_PARSER: LazyInit<acpi_lite::AcpiParser<'static>> = LazyInit::uninit();

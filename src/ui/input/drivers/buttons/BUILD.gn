@@ -12,6 +12,10 @@ fuchsia_driver_dml("buttons-dml") {
   driver_name = "buttons"
 }
 
+fuchsia_driver_dml_cpp_parser("buttons-metadata") {
+  dml_label = ":buttons-dml"
+}
+
 driver_bind_rules("buttons-bind") {
   dml_label = ":buttons-dml"
   bind_output = "buttons.bindbc"
@@ -61,8 +65,10 @@ source_set("common") {
 
   public_deps = [
     ":buttons-config",
+    ":buttons-metadata",
     "//sdk/fidl/fuchsia.buttons:fuchsia.buttons_cpp",
     "//sdk/fidl/fuchsia.driver.compat:fuchsia.driver.compat_cpp",
+    "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
     "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_cpp",
     "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_cpp",
     "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_cpp",

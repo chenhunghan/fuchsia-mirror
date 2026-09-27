@@ -15,6 +15,7 @@ use fidl::endpoints::{DiscoverableProtocolMarker as _, ServerEnd};
 use fidl_contrib::ProtocolConnector;
 use fidl_contrib::protocol_connector::ConnectedProtocol;
 use fidl_fuchsia_component_resolution as fcomponent_resolution;
+use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_metrics::{
     MetricEvent, MetricEventLoggerFactoryMarker, MetricEventLoggerProxy, ProjectSpec,
@@ -22,6 +23,7 @@ use fidl_fuchsia_metrics::{
 use fidl_fuchsia_pkg as fpkg;
 use fidl_fuchsia_pkg_http as fpkg_http;
 use fidl_fuchsia_pkg_internal as fpkg_internal;
+use fidl_fuchsia_pkg_resolution as fpkg_resolution;
 use fidl_fuchsia_update::CommitStatusProviderMarker;
 use fuchsia_async as fasync;
 use fuchsia_async::Task;
@@ -341,6 +343,23 @@ async fn main_inner() -> Result<(), Error> {
             )
             .context("adding fuchsia.pkg.garbagecollector/Manager to /svc")?;
     }
+    // Forward fuchsia.fxfs.BlobReader connections directly to fshost, establishing pkg-cache as the
+    // intermediary for blob reading requests.
+    {
+        let () = svc_dir
+            .add_entry(
+                ffxfs::BlobReaderMarker::PROTOCOL_NAME,
+                vfs::service::endpoint(|_scope, channel| {
+                    if let Err(error) = fuchsia_component::client::connect_channel_to_protocol::<
+                        ffxfs::BlobReaderMarker,
+                    >(channel.into_zx_channel())
+                    {
+                        error!(error:?; "Failed to forward fuchsia.fxfs/BlobReader to fshost");
+                    }
+                }),
+            )
+            .context("adding fuchsia.fxfs/BlobReader proxy to /svc")?;
+    }
     let base_package_resolver = base_package_resolver::Resolver::new(
         Arc::clone(&base_index),
         authenticator.clone(),
@@ -468,6 +487,7 @@ async fn main_inner() -> Result<(), Error> {
             .context("adding fuchsia.pkg/PackageResolver-full to /svc")?;
     }
     {
+        let full_package_resolver = Arc::clone(&full_package_resolver);
         let () = svc_dir
             .add_entry(
                 format!("{}-full", fcomponent_resolution::ResolverMarker::PROTOCOL_NAME),
@@ -483,6 +503,20 @@ async fn main_inner() -> Result<(), Error> {
                 }),
             )
             .context("adding fuchsia.component.resolution/Resolver-full to /svc")?;
+    }
+    {
+        let () = svc_dir
+            .add_entry(
+                fpkg_resolution::PackageResolverMarker::PROTOCOL_NAME,
+                vfs::service::host(move |stream: fpkg_resolution::PackageResolverRequestStream| {
+                    Arc::clone(&full_package_resolver)
+                        .serve_toolbox_resolver_request_stream(stream)
+                        .unwrap_or_else(|e: anyhow::Error| {
+                            error!("serving fuchsia.pkg.resolution/PackageResolver: {e:#}")
+                        })
+                }),
+            )
+            .context("adding fuchsia.pkg.resolution/PackageResolver to /svc")?;
     }
 
     let base_package_entry = |name: &'static str| {

@@ -20,6 +20,7 @@ impl RcuReadScope {
     ///
     /// This function acquires a read lock on the RCU state machine. The read lock is held until the
     /// scope is dropped.
+    #[inline]
     pub fn new() -> Self {
         rcu_read_lock();
         Self { _marker: PhantomData }
@@ -27,6 +28,7 @@ impl RcuReadScope {
 }
 
 impl Drop for RcuReadScope {
+    #[inline]
     fn drop(&mut self) {
         rcu_read_unlock();
     }

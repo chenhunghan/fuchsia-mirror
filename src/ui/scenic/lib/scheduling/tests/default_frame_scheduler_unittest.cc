@@ -29,7 +29,7 @@ class FrameSchedulerTest : public ::gtest::TestLoopFixture {
     vsync_timing_ = std::make_shared<VsyncTiming>();
 
     // Set up default vsync values.
-    // Needs to be big enough so that FrameScheduler can always fit a latch point
+    // Needs to be big enough so that `FrameScheduler` can always fit a latch point
     // in the frame.
     const auto vsync_interval = zx::msec(100);
     vsync_timing_->AddVsyncInterval(vsync_interval);
@@ -77,10 +77,10 @@ class FrameSchedulerTest : public ::gtest::TestLoopFixture {
     frame_presented_callback_.reset();
   }
 
-  // This function runs a single frame through the scheduler_, updater, and renderer. It performs a
-  // positive test for timing behavior, confirming that the requested update (triggered at
-  // |presentation_time|) is not triggered before |early_time|, but has been triggered after
-  // |update_time|.
+  // This function runs a single frame through the `scheduler_`, updater, and renderer. It performs
+  // a positive test for timing behavior, confirming that the requested update (triggered at
+  // `presentation_time`) is not triggered before `early_time`, but has been triggered after
+  // `update_time`.
   void SingleRenderTest(zx::time presentation_time, zx::time early_time, zx::time update_time) {
     constexpr SessionId kSessionId = 1;
 
@@ -177,10 +177,10 @@ TEST_F(FrameSchedulerTest, PresentBiggerThanNextVsync_ShouldBeScheduledAfterNext
 }
 
 TEST_F(FrameSchedulerTest, SinglePresent_ShouldGetSingleRenderCallExactlyOnTime) {
-  // Set the LastVsyncTime arbitrarily in the future.
+  // Set the `LastVsyncTime` arbitrarily in the future.
   //
   // We want to test our ability to schedule a frame "next time" given an arbitrary start,
-  // vs in a certain duration from Now() = 0, so this makes that distinction clear.
+  // vs in a certain duration from `Now()` = 0, so this makes that distinction clear.
   const auto vsync_interval = vsync_timing_->vsync_interval();
   const zx::time early_time = vsync_timing_->last_vsync_time() + vsync_interval * 6;
   const zx::time update_time = vsync_timing_->last_vsync_time() + vsync_interval * 7;
@@ -214,8 +214,8 @@ TEST_F(FrameSchedulerTest, PresentsForTheSameFrame_ShouldGetSquashedAndSingleRen
 }
 
 TEST_F(FrameSchedulerTest, SquashedPresents_ShouldScheduleForInitialPresent) {
-  // Schedule two updates. The first with a later requested_presentation_time than the second. They
-  // should be squashed.
+  // Schedule two updates. The first with a later `requested_presentation_time` than the second.
+  // They should be squashed.
   constexpr SessionId kSessionId = 1;
   ScheduleUpdate(kSessionId,
                  zx::time(static_cast<zx_time_t>(
@@ -429,7 +429,7 @@ TEST_F(FrameSchedulerTest, FailedUpdateWithRender_ShouldNotCrash) {
   EXPECT_EQ(on_frame_presented_call_count_, 0u);
   EXPECT_NO_FATAL_FAILURE(FireFramePresentedCallback());
   EXPECT_EQ(on_frame_presented_call_count_, 1u);
-  // TODO(): The session with the failed update should not receive an OnFramePresented call.
+  // TODO(): The session with the failed update should not receive an `OnFramePresented` call.
   EXPECT_EQ(last_latched_times_.size(), 2u);
   EXPECT_TRUE(last_latched_times_.count(kSessionId1));
   EXPECT_TRUE(last_latched_times_.count(kSessionId2));
@@ -443,7 +443,7 @@ TEST_F(FrameSchedulerTest, NoOpUpdateWithSecondPendingUpdate_ShouldBeRescheduled
   ScheduleUpdate(kSessionId, Now() + vsync_timing_->vsync_interval());
   // Schedule a second update with an offset of 4ms beyond the vsync interval.
   // This offset is chosen to be greater than the maximum vsync snapping threshold
-  // (kMaxSnapThreshold = 3ms), preventing the scheduler from snapping the target
+  // (`kMaxSnapThreshold` = 3ms), preventing the scheduler from snapping the target
   // presentation time back to the vsync interval and coalescing the updates.
   ScheduleUpdate(kSessionId, Now() + (vsync_timing_->vsync_interval() + zx::msec(4)));
 
@@ -521,8 +521,8 @@ TEST_F(FrameSchedulerTest, SinglePredictedPresentation_ShouldBeReasonable) {
 
 TEST_F(FrameSchedulerTest, ArbitraryPredictedPresentation_ShouldBeReasonable) {
   // The main and only difference between this test and
-  // "SinglePredictedPresentation_ShouldBeReasonable" above is that we advance the clock before
-  // asking for a prediction, to ensure that GetPredictions() works in a more general sense.
+  // `SinglePredictedPresentation_ShouldBeReasonable` above is that we advance the clock before
+  // asking for a prediction, to ensure that `GetPredictions()` works in a more general sense.
 
   // Advance the clock to vsync1.
   zx::time vsync0 = vsync_timing_->last_vsync_time();
@@ -598,7 +598,7 @@ TEST_F(FrameSchedulerTest, InfinitelyLargePredictionRequest_ShouldBeTruncated) {
   }
 }
 
-// Tests whether the OnPresented is called at the correct times with the correct
+// Tests whether the `OnPresented` is called at the correct times with the correct
 // data.
 TEST_F(FrameSchedulerTest, SessionUpdater_OnPresented_Test) {
   constexpr SessionId kSessionId1 = 1;
@@ -742,13 +742,34 @@ TEST_F(FrameSchedulerTest, RenderContinuously_ShouldCauseRenders_WithoutSchedule
   EXPECT_FALSE(frame_presented_callback_.has_value());
 }
 
+TEST_F(FrameSchedulerTest, ForceRenderFrameRendersWithoutUpdates) {
+  constexpr SessionId kSessionId = 1;
+
+  ScheduleUpdate(kSessionId, Now());
+  RunLoopFor(zx::duration(vsync_timing_->vsync_interval()));
+  EXPECT_TRUE(frame_presented_callback_.has_value());
+  FireFramePresentedCallback();
+  RunLoopFor(zx::duration(vsync_timing_->vsync_interval()));
+  EXPECT_FALSE(frame_presented_callback_.has_value());
+  EXPECT_EQ(update_sessions_call_count_, 1u);
+
+  scheduler_.ForceRenderFrame();
+  RunLoopUntilIdle();
+  EXPECT_TRUE(frame_presented_callback_.has_value());
+  EXPECT_EQ(update_sessions_call_count_, 2u);
+
+  FireFramePresentedCallback();
+  RunLoopFor(zx::duration(vsync_timing_->vsync_interval()));
+  EXPECT_FALSE(frame_presented_callback_.has_value());
+}
+
 TEST_F(FrameSchedulerTest, ScheduleAsap_ShouldBeScheduledAsap) {
   constexpr SessionId kSessionId = 1;
 
   EXPECT_EQ(update_sessions_call_count_, 0u);
   EXPECT_FALSE(frame_presented_callback_.has_value());
 
-  // Schedule an update for the next vsync, with schedule_asap=true.
+  // Schedule an update for the next vsync, with `schedule_asap=true`.
   // It should be scheduled immediately because it IS within the next vsync interval.
   const zx::duration vsync_interval = vsync_timing_->vsync_interval();
   zx::time next_vsync_time = vsync_timing_->last_vsync_time() + vsync_interval;
@@ -870,7 +891,7 @@ TEST_F(FrameSchedulerTest, ScheduleAsap_WhenNowExceedsPredictedTarget_ShouldClam
       });
 
   // Advance clock to a time past the next vsync.
-  // vsync_interval = 100ms. last_vsync = 0. next_vsync = 100ms.
+  // `vsync_interval` = 100ms. `last_vsync` = 0. `next_vsync` = 100ms.
   // We advance to 120ms.
   zx::time past_vsync_time =
       vsync_timing_->last_vsync_time() + vsync_timing_->vsync_interval() + zx::msec(20);
@@ -881,15 +902,15 @@ TEST_F(FrameSchedulerTest, ScheduleAsap_WhenNowExceedsPredictedTarget_ShouldClam
   local_scheduler.ScheduleUpdateForSession(zx::time(0), kIdPair, /*squashable=*/true,
                                            /*schedule_asap=*/true);
 
-  // Trigger MaybeRenderFrame.
+  // Trigger `MaybeRenderFrame`.
   RunLoopUntilIdle();
 
-  // Verify target_presentation_time was correctly picked as next_vsync (100ms).
+  // Verify `target_presentation_time` was correctly picked as `next_vsync` (100ms).
   // Even though we are at 120ms, the scheduler uses the known vsync timing.
   zx::time expected_target = vsync_timing_->last_vsync_time() + vsync_timing_->vsync_interval();
   EXPECT_EQ(captured_presentation_time, expected_target);
 
-  // Verify wakeup_time was clamped to target_time (since now=120 > target=100).
+  // Verify `wakeup_time` was clamped to `target_time` (since now=120 > target=100).
   ASSERT_TRUE(presented_callback);
   presented_callback(CreateTimestamps());
   EXPECT_EQ(captured_latched_time, expected_target);
@@ -900,13 +921,13 @@ TEST_F(FrameSchedulerTest, ScheduleAsapWithFutureTime_ShouldScheduleForFuture) {
   const zx::time now = Now();
   const zx::duration vsync_interval = vsync_timing_->vsync_interval();
 
-  // Schedule a frame for 5 vsyncs in the future, but with schedule_asap=true.
+  // Schedule a frame for 5 vsyncs in the future, but with `schedule_asap=true`.
   // This should NOT be scheduled immediately because the requested time is far in the future.
   const zx::time future_time = now + vsync_interval * 5;
 
   ScheduleUpdate(kSessionId, future_time, /*squashable=*/true, /*schedule_asap=*/true);
 
-  // Run loop for a short time (less than future_time). Should NOT render yet.
+  // Run loop for a short time (less than `future_time`). Should NOT render yet.
   RunLoopFor(vsync_interval * 2);
   EXPECT_EQ(update_sessions_call_count_, 0u);
   EXPECT_FALSE(frame_presented_callback_.has_value());
@@ -923,13 +944,13 @@ TEST_F(FrameSchedulerTest, ScheduleAsapWithImmediateTime_ShouldScheduleASAP) {
   const zx::duration vsync_interval = vsync_timing_->vsync_interval();
 
   // Schedule a frame for "now" (which is within the current vsync interval), with
-  // schedule_asap=true. This SHOULD be scheduled immediately.
+  // `schedule_asap=true`. This SHOULD be scheduled immediately.
   const zx::time immediate_time = now;
 
   ScheduleUpdate(kSessionId, immediate_time, /*squashable=*/true, /*schedule_asap=*/true);
 
   // It should run immediately (or at least very soon), not waiting for a full latch point if we are
-  // "ASAP". However, the test fixture's "Now()" simulates time. Check that it's scheduled.
+  // "ASAP". However, the test fixture's `Now()` simulates time. Check that it's scheduled.
   RunLoopUntilIdle();
   EXPECT_EQ(update_sessions_call_count_, 1u);
   EXPECT_TRUE(frame_presented_callback_.has_value());
@@ -938,7 +959,7 @@ TEST_F(FrameSchedulerTest, ScheduleAsapWithImmediateTime_ShouldScheduleASAP) {
 TEST_F(FrameSchedulerTest, ScheduleAsapWithZeroTime_ShouldScheduleASAP) {
   constexpr SessionId kSessionId = 1;
 
-  // Schedule a frame for time 0, with schedule_asap=true.
+  // Schedule a frame for time 0, with `schedule_asap=true`.
   // This SHOULD be scheduled immediately.
   ScheduleUpdate(kSessionId, zx::time(0), /*squashable=*/true, /*schedule_asap=*/true);
 

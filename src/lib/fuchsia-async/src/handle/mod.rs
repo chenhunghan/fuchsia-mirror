@@ -9,10 +9,7 @@ mod zircon;
 pub use zircon::*;
 
 #[cfg(not(target_os = "fuchsia"))]
-mod emulated;
-
-#[cfg(not(target_os = "fuchsia"))]
-pub use emulated::*;
+pub use fuchsia_emulated_handle::*;
 
 /// invoke_for_handle_types!{mmm} calls the macro `mmm!` with two arguments: one is the name of a
 /// Zircon handle, the second is one of:
@@ -21,7 +18,7 @@ pub use emulated::*;
 ///   * Stub for handle types that have not yet had a Fuchsia API implemented in the zircon crate
 ///
 /// To make a handle available everywhere, a polyfill must be implemented in
-/// crate::handle::emulated.
+/// fuchsia-emulated-handle.
 #[macro_export]
 macro_rules! invoke_for_handle_types {
     ($x:ident) => {

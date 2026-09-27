@@ -23,6 +23,7 @@ import("//build/rust/rust_auxiliary_args.gni")
 template("rust_aux_deps") {
   _deps_target = "${target_name}.deps"
   _deps_output = "${target_gen_dir}/${_deps_target}"
+
   generated_file(_deps_target) {
     forward_variables_from(invoker,
                            [
@@ -47,6 +48,7 @@ template("rust_aux_deps") {
   }
 
   _transdeps_target = "${target_name}.transdeps"
+
   generated_file(_transdeps_target) {
     forward_variables_from(invoker,
                            [
@@ -139,10 +141,8 @@ template("rust_auxiliary") {
     _rustdoc_parts_dir = "$target_gen_dir/${target_name}.doc.parts"
   }
 
-  _define_rustdoc =
-      !(defined(invoker.disable_rustdoc) && invoker.disable_rustdoc) &&
-      !(defined(invoker.disable_rustdoc_binary) &&
-        invoker.disable_rustdoc_binary) && include_rustdoc
+  _define_rustdoc = !(defined(invoker.disable_rustdoc) &&
+                      invoker.disable_rustdoc) && include_rustdoc
   if (_define_rustdoc) {
     not_needed(invoker, [ "define_rustdoc_test_override" ])
   }
@@ -172,6 +172,7 @@ template("rust_auxiliary") {
     _aux_deps_target = "${target_name}.deps"
     _deps_rmeta_output = "${target_gen_dir}/${_aux_deps_target}.deps"
     _transdeps_output = "${target_gen_dir}/${_aux_deps_target}.transdeps"
+
     rust_aux_deps(_aux_deps_target) {
       forward_variables_from(invoker,
                              [
@@ -464,7 +465,6 @@ template("rust_auxiliary") {
                  "rustdoc_args",
                ])
     not_needed([
-                 "_crate_name",
                  "_invoker_deps",
                  "_rustdoc_parts_dir",
                  "rustflags",
@@ -506,12 +506,6 @@ template("rust_auxiliary") {
 
     assert(invoker.crate_type != "lib",
            "always explicitly rlib in our build system")
-    _can_have_reverse_deps =
-        invoker.crate_type == "rlib" || invoker.crate_type == "proc-macro"
-    if (_can_have_reverse_deps) {
-      _rlib_path = rebase_path(invoker.rlib_path, root_build_dir)
-      _searchdir_path = rebase_path(invoker.searchdir_path, root_build_dir)
-    }
 
     if (defined(invoker.sources)) {
       _sources = invoker.sources
@@ -540,10 +534,7 @@ template("rust_auxiliary") {
           original_label = get_label_info(":${_original_target_name}",
                                           "label_with_toolchain")
           rustdoc_out_dir = rebase_path(_rustdoc_out_dir, root_build_dir)
-          if (_can_have_reverse_deps) {
-            extern = "--extern=${_crate_name}=${_rlib_path}"
-            searchdir = "-Ldependency=${_searchdir_path}"
-          }
+          crate_name = _crate_name
           rustdoc_parts_dir = rebase_path(_rustdoc_parts_dir, root_build_dir)
           target_is_fuchsia = is_fuchsia
           target = current_target_tuple

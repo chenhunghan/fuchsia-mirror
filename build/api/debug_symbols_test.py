@@ -773,7 +773,6 @@ with open(args.out_file, "wt") as f:
         self.assertDictEqual(
             exported_debug_symbols[0],
             {
-                "breakpad": ".build-id/42/0000000000.sym",
                 "debug": ".build-id/42/0000000000.debug",
                 "elf_build_id": "420000000000",
                 "label": "//some:label_1",
@@ -784,7 +783,6 @@ with open(args.out_file, "wt") as f:
         self.assertDictEqual(
             exported_debug_symbols[1],
             {
-                "breakpad": ".build-id/42/0000000001.sym",
                 "debug": ".build-id/42/0000000001.debug",
                 "elf_build_id": "420000000001",
                 "label": "//some:label_2",
@@ -807,7 +805,6 @@ with open(args.out_file, "wt") as f:
         self.assertDictEqual(
             exported_debug_symbols[3],
             {
-                "breakpad": ".build-id/42/0000000003.sym",
                 "debug": ".build-id/42/0000000003.debug",
                 "elf_build_id": "420000000003",
                 "label": "//some:label_4",
@@ -818,7 +815,6 @@ with open(args.out_file, "wt") as f:
         self.assertDictEqual(
             exported_debug_symbols[4],
             {
-                "breakpad": ".build-id/42/0000000004.sym",
                 "debug": ".build-id/42/0000000004.debug",
                 "elf_build_id": "420000000004",
                 "label": "//some:label_5",
@@ -829,7 +825,6 @@ with open(args.out_file, "wt") as f:
         self.assertDictEqual(
             exported_debug_symbols[5],
             {
-                "breakpad": ".build-id/42/0000000005.sym",
                 "debug": ".build-id/42/0000000005.debug",
                 "elf_build_id": "420000000005",
                 "label": "//some:label_6",
@@ -941,19 +936,35 @@ with open(args.out_file, "wt") as f:
             ],
         )
 
+        exported_debug_symbols_path = output_dir / "debug_symbols.json"
+        self.assertTrue(exported_debug_symbols_path.is_file())
+        with exported_debug_symbols_path.open("rt") as f:
+            exported_debug_symbols = json.load(f)
+
+        self.assertEqual(len(exported_debug_symbols), 16)
+
         for bin_index in range(16):
-            dst_file = output_dir / (
-                ".build-id/42/00000000%02x.sym" % bin_index
-            )
+            rel_sym_path = ".build-id/42/00000000%02x.sym" % bin_index
+            dst_file = output_dir / rel_sym_path
             src_file = self._root / f"debug_{bin_index + 1}.so"
             if bin_index in (3, 4):
                 # No breakpad file for non-Fuchsia binaries and for pre-existing one.
                 self.assertFalse(
                     dst_file.exists(), msg=f"breakpad_file={dst_file}"
                 )
+                self.assertNotIn(
+                    "breakpad",
+                    exported_debug_symbols[bin_index],
+                    msg=f"bin_index={bin_index}",
+                )
             else:
                 self.assertTrue(
                     dst_file.exists(), msg=f"breakpad_file={dst_file}"
+                )
+                self.assertEqual(
+                    exported_debug_symbols[bin_index].get("breakpad"),
+                    rel_sym_path,
+                    msg=f"bin_index={bin_index}",
                 )
                 if bin_index in (2,):
                     self.assertEqual(

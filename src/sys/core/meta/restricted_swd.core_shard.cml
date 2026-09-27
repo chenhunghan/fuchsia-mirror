@@ -18,11 +18,5 @@
             as: "fuchsia.pkg.http.Client",
             to: "#pkg-resolver",
         },
-        {
-            directory: "google-root-ssl-certificates",
-            from: "parent",
-            as: "swd-root-ssl-certificates",
-            to: "#system-update",
-        },
     ],
 }

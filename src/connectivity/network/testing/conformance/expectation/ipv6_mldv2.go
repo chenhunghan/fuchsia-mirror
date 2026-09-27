@@ -6,7 +6,7 @@ package expectation
 
 import "go.fuchsia.dev/fuchsia/src/connectivity/network/testing/conformance/expectation/outcome"
 
-var ipv6Mldv2ExpectationsNS3 map[AnvlCaseNumber]outcome.Outcome = map[AnvlCaseNumber]outcome.Outcome{
+var ipv6Mldv2Expectations map[AnvlCaseNumber]outcome.Outcome = map[AnvlCaseNumber]outcome.Outcome{
 	{1, 1}:  AnvlSkip, // Router test, but this is the host suite.
 	{1, 2}:  Fail,
 	{2, 1}:  AnvlSkip, // Router test, but this is the host suite.

@@ -20,6 +20,10 @@ Bazel rule attribute definitions (`attr.string(default = ...)`) do not accept
 """
 
 load(
+    "@fuchsia_rules_common//:utils.bzl",
+    "get_runfiles_shared_lib_binary_info",
+)
+load(
     "@fuchsia_rules_common//debug_symbols:debug_symbols.bzl",
     "FUCHSIA_DEBUG_SYMBOLS_ATTRS",
 )
@@ -62,20 +66,14 @@ def _fx_packaged_binary_impl(ctx):
             dest = ctx.attr.install_root + ctx.attr.binary_name,
             unstripped_file = target_in,
         ),
-    ]
-
-    # TODO(https://fxbug.dev/532024842): Find a better way to propagate shared libs for packaging.
-    # default_runfiles.files is a depset, so sort for deterministic ordering.
-    sorted_files = sorted(ctx.attr.binary[DefaultInfo].default_runfiles.files.to_list(), key = lambda x: x.path)
-    for f in sorted_files:
-        if f.basename == target_in.basename:
-            continue
-        if f.basename.endswith(".so") or ".so." in f.basename:
-            lib_dest = ctx.attr.shared_lib_dest + "/" + f.basename
-            unstripped_binaries.append(make_fuchsia_unstripped_binary_info(
-                dest = lib_dest,
-                unstripped_file = f,
-            ))
+    ] + get_runfiles_shared_lib_binary_info(
+        # TODO(https://fxbug.dev/532024842): Consider collecting from @rules_cc providers instead.
+        runfiles = ctx.attr.binary[DefaultInfo].default_runfiles,
+        shared_lib_dest = ctx.attr.shared_lib_dest,
+        exclude_libs = [
+            target_in.basename,
+        ],
+    )
 
     return [
         DefaultInfo(files = depset([target_in])),

@@ -56,7 +56,7 @@ impl InstanceDetails {
     }
 }
 
-#[derive(FfxTool)]
+#[derive(Debug, FfxTool)]
 pub struct ShowTool {
     #[command]
     cmd: ShowCommand,
@@ -82,7 +82,15 @@ impl FfxMain for ShowTool {
             .client
             .get_instance(&instance.project, &instance.zone, &instance.name)
             .await
-            .map_err(|e| user_error!("{e}"))?;
+            .map_err(|e| user_error!("{e}"))?
+            .ok_or_else(|| {
+                user_error!(
+                    "Instance '{}' not found in project '{}' zone '{}'.",
+                    instance.name,
+                    instance.project,
+                    instance.zone
+                )
+            })?;
 
         let serial_endpoint = gce.serial_endpoint();
         let details =

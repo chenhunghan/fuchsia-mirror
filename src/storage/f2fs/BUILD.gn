@@ -107,6 +107,7 @@ static_library("f2fs") {
       "//sdk/lib/sys/cpp",
       "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_cpp",
       "//src/storage/lib/block_client/cpp",
+      "//zircon/system/ulib/trace",
       "//zircon/system/ulib/zircon-internal",
       "//zircon/system/ulib/zx",
     ]

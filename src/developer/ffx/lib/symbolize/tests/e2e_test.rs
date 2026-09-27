@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use ffx_e2e_emu::IsolatedEmulator;
-use ffx_symbolize::{MappingDetails, MappingFlags, ResolveError, Symbolizer};
+use ffx_symbolize::{AddressType, MappingDetails, MappingFlags, ResolveError, Symbolizer};
 use log::info;
 use symbolize_test_utils::{Module, SymbolizationTestOutputs};
 
@@ -20,7 +20,7 @@ async fn symbolize_fn_ptr() {
     let mut symbolizer = Symbolizer::with_context(emu.env_context()).unwrap();
     symbolize_and_validate_result(&outputs, &mut symbolizer);
     symbolizer.reset();
-    let invalid_location_one = symbolizer.resolve_addr(outputs.fn_one_addr);
+    let invalid_location_one = symbolizer.resolve_addr(outputs.fn_one_addr, AddressType::Exact);
     assert!(invalid_location_one.is_err());
     symbolizer.reset();
     symbolize_and_validate_result(&outputs, &mut symbolizer);
@@ -56,7 +56,7 @@ fn symbolize_and_validate_result(outputs: &SymbolizationTestOutputs, symbolizer:
     }
 
     info!("resolving addresses...");
-    let symbol_one = symbolizer.resolve_addr(outputs.fn_one_addr).unwrap();
+    let symbol_one = symbolizer.resolve_addr(outputs.fn_one_addr, AddressType::Exact).unwrap();
     assert_eq!(symbol_one.len(), 1);
     let location_one = &symbol_one[0];
     assert_eq!(location_one.function, "print_fn_ptr_bin::to_be_symbolized_one()");
@@ -70,7 +70,36 @@ fn symbolize_and_validate_result(outputs: &SymbolizationTestOutputs, symbolizer:
     );
     assert_eq!(location_one.library, None);
 
-    let symbol_two = symbolizer.resolve_addr(outputs.fn_two_addr).unwrap();
+    // Verify AddressType::Return and AddressType::Exact behavior on fn_one:
+    // fn_one_addr is (entry_point + 1).
+    // Resolving fn_one_addr with Return subtracts 1, giving entry_point, which
+    // resolves to fn_one:
+    let symbol_one_ret = symbolizer.resolve_addr(outputs.fn_one_addr, AddressType::Return).unwrap();
+    assert_eq!(symbol_one_ret[0].function, "print_fn_ptr_bin::to_be_symbolized_one()");
+
+    // Resolving entry_point directly (fn_one_addr - 1) with Exact preserves the
+    // address and resolves to fn_one:
+    let fn_one_entry = outputs.fn_one_addr - 1;
+    let symbol_one_entry_exact = symbolizer.resolve_addr(fn_one_entry, AddressType::Exact).unwrap();
+    assert_eq!(symbol_one_entry_exact[0].function, "print_fn_ptr_bin::to_be_symbolized_one()");
+
+    // Resolving entry_point (fn_one_addr - 1) with Return subtracts 1, leaving
+    // the function boundaries:
+    let symbol_one_entry_ret = symbolizer.resolve_addr(fn_one_entry, AddressType::Return);
+    match symbol_one_entry_ret {
+        Ok(locs) => {
+            if !locs.is_empty() {
+                assert_ne!(locs[0].function, "print_fn_ptr_bin::to_be_symbolized_one()");
+            }
+        }
+        Err(err) => {
+            assert!(
+                err == ResolveError::SymbolNotFound || err == ResolveError::NoOverlappingModule
+            );
+        }
+    }
+
+    let symbol_two = symbolizer.resolve_addr(outputs.fn_two_addr, AddressType::Exact).unwrap();
     assert_eq!(symbol_two.len(), 1);
     let location_two = &symbol_two[0];
     assert_eq!(location_two.function, "print_fn_ptr_bin::to_be_symbolized_two()");
@@ -84,14 +113,15 @@ fn symbolize_and_validate_result(outputs: &SymbolizationTestOutputs, symbolizer:
     );
     assert_eq!(location_two.library, None);
 
-    let libc_symbol = symbolizer.resolve_addr(outputs.libc_addr).unwrap();
+    let libc_symbol = symbolizer.resolve_addr(outputs.libc_addr, AddressType::Exact).unwrap();
     assert_eq!(libc_symbol.len(), 1);
     let libc_location = &libc_symbol[0];
     assert_eq!(libc_location.function, "open(const char*, int)");
     assert_eq!(libc_location.file_and_line.as_ref().unwrap().0, "../../sdk/lib/fdio/unistd.cc");
     assert_eq!(libc_location.library.as_ref().unwrap(), "libfdio.so");
 
-    let symbol_sys_inc = symbolizer.resolve_addr(outputs.fn_sys_inc_addr).unwrap();
+    let symbol_sys_inc =
+        symbolizer.resolve_addr(outputs.fn_sys_inc_addr, AddressType::Exact).unwrap();
     assert_eq!(symbol_sys_inc.len(), 1);
     let sys_inc_location = &symbol_sys_inc[0];
     assert!(sys_inc_location.function.ends_with("zx_channel_create"));
@@ -102,12 +132,12 @@ fn symbolize_and_validate_result(outputs: &SymbolizationTestOutputs, symbolizer:
     assert_eq!(sys_inc_location.library.as_ref().unwrap(), "<vDSO>");
 
     assert_eq!(
-        symbolizer.resolve_addr(outputs.heap_addr).unwrap_err(),
+        symbolizer.resolve_addr(outputs.heap_addr, AddressType::Exact).unwrap_err(),
         ResolveError::NoOverlappingModule
     );
 
     assert_eq!(
-        symbolizer.resolve_addr(outputs.no_symbol_addr).unwrap_err(),
+        symbolizer.resolve_addr(outputs.no_symbol_addr, AddressType::Exact).unwrap_err(),
         ResolveError::SymbolNotFound
     );
 }
@@ -155,7 +185,21 @@ async fn symbolize_unresolved() {
         .unwrap();
 
     assert_eq!(
-        symbolizer.resolve_addr(FAKE_START_ADDRESS + FAKE_SIZE / 2).unwrap_err(),
+        symbolizer
+            .resolve_addr(FAKE_START_ADDRESS + FAKE_SIZE / 2, AddressType::Exact)
+            .unwrap_err(),
+        ResolveError::SymbolFileUnavailable
+    );
+    assert_eq!(
+        symbolizer
+            .resolve_addr(FAKE_START_ADDRESS + FAKE_SIZE / 2, AddressType::Return)
+            .unwrap_err(),
+        ResolveError::SymbolFileUnavailable
+    );
+    assert_eq!(
+        symbolizer
+            .resolve_addr(FAKE_START_ADDRESS + FAKE_SIZE / 2, AddressType::Unknown)
+            .unwrap_err(),
         ResolveError::SymbolFileUnavailable
     );
 }

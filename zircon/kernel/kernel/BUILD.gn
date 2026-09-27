@@ -242,6 +242,7 @@ kernel_rust_mod("kernel-rs") {
   output_name = "kernel"
   source_root = "mod.rs"
   sources = [
+    "align.rs",
     "bits.rs",
     "deadline.rs",
     "event.rs",

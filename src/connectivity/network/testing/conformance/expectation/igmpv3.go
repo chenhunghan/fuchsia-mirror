@@ -8,7 +8,7 @@ import (
 	"go.fuchsia.dev/fuchsia/src/connectivity/network/testing/conformance/expectation/outcome"
 )
 
-var igmpv3ExpectationsNS3 map[AnvlCaseNumber]outcome.Outcome = map[AnvlCaseNumber]outcome.Outcome{
+var igmpv3Expectations map[AnvlCaseNumber]outcome.Outcome = map[AnvlCaseNumber]outcome.Outcome{
 	{1, 1}: AnvlSkip, // Router test, but this is the host suite.
 	{1, 2}: Pass,
 	{2, 1}: Pass,

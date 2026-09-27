@@ -214,5 +214,110 @@ TEST_F(VnodeCacheTest, VnodeActivation) {
   ASSERT_FALSE(raw_pointer->IsActive());
 }
 
+TEST_F(VnodeCacheTest, PageUseAfterFree) {
+  Dir *test_dir_ptr = &vnode<Dir>();
+
+  std::string child_name = "uaf_dir";
+  FileTester::CreateChild(test_dir_ptr, S_IFDIR, child_name);
+
+  fbl::RefPtr<fs::Vnode> test_vnode;
+  FileTester::Lookup(test_dir_ptr, child_name, &test_vnode);
+  fbl::RefPtr<VnodeF2fs> test_f2fs_vnode = fbl::RefPtr<VnodeF2fs>::Downcast(std::move(test_vnode));
+
+  LockedPage locked_page;
+  ASSERT_EQ(test_f2fs_vnode->GrabLockedPage(0, &locked_page), ZX_OK);
+  fbl::RefPtr<Page> page = locked_page.release();
+
+  // Flush dirty vnodes so that test_f2fs_vnode is clean and removed from dirty_list_.
+  fs_->SyncFs();
+
+  auto raw_pointer = test_f2fs_vnode.get();
+  const ino_t target_ino = raw_pointer->Ino();
+  ASSERT_EQ(test_f2fs_vnode->Close(), ZX_OK);
+  test_f2fs_vnode.reset();
+
+  // Even though all direct VnodeF2fs handles have been released, holding an active Page
+  // must keep the vnode active and prevent it from being evicted/destroyed.
+  ASSERT_TRUE(raw_pointer->IsActive());
+
+  {
+    fs::SharedLock lock(f2fs::GetGlobalLock());
+    fs_->GetVCache().Shrink();
+  }
+
+  // The vnode must still be present in the cache.
+  fbl::RefPtr<VnodeF2fs> lookup_vnode;
+  ASSERT_EQ(fs_->GetVCache().Lookup(target_ino, &lookup_vnode), ZX_OK);
+  ASSERT_EQ(lookup_vnode.get(), raw_pointer);
+  lookup_vnode.reset();
+
+  // Operating on the Page must be safe and not cause UAF.
+  page->SetDirty();
+  ASSERT_EQ(&page->GetVnode(), raw_pointer);
+  ASSERT_EQ(&page->GetFileCache(), &raw_pointer->GetFileCache());
+
+  // Release the page reference.
+  page.reset();
+
+  // Checkpoint to flush dirty directory pages and clear dirty_list_.
+  fs_->SyncFs();
+
+  // Now the vnode should be inactive since no pages or handles reference it.
+  ASSERT_FALSE(raw_pointer->IsActive());
+
+  // Shrink should now safely evict the inactive vnode.
+  {
+    fs::SharedLock lock(f2fs::GetGlobalLock());
+    fs_->GetVCache().Shrink();
+  }
+  ASSERT_EQ(fs_->GetVCache().Lookup(target_ino, &lookup_vnode), ZX_ERR_NOT_FOUND);
+}
+
+TEST_F(VnodeCacheTest, PageDowngradeDeadlockAvoidance) {
+  Dir *test_dir_ptr = &vnode<Dir>();
+
+  std::string child_name = "deadlock_dir";
+  FileTester::CreateChild(test_dir_ptr, S_IFDIR, child_name);
+
+  fbl::RefPtr<fs::Vnode> test_vnode;
+  FileTester::Lookup(test_dir_ptr, child_name, &test_vnode);
+  fbl::RefPtr<VnodeF2fs> test_f2fs_vnode = fbl::RefPtr<VnodeF2fs>::Downcast(std::move(test_vnode));
+
+  LockedPage locked_page;
+  ASSERT_EQ(test_f2fs_vnode->GrabLockedPage(0, &locked_page), ZX_OK);
+  fbl::RefPtr<Page> page = locked_page.release();
+
+  // Flush dirty vnodes so that test_f2fs_vnode is clean and removed from dirty_list_.
+  fs_->SyncFs();
+
+  auto raw_pointer = test_f2fs_vnode.get();
+  const ino_t target_ino = raw_pointer->Ino();
+  ASSERT_EQ(test_f2fs_vnode->Close(), ZX_OK);
+  // Release direct vnode handle. The only remaining strong reference keeping the vnode alive
+  // is the active Page (page->vnode_).
+  test_f2fs_vnode.reset();
+  ASSERT_TRUE(raw_pointer->IsActive());
+
+  // Under high memory pressure, dropping the last vnode reference during Page::Downgrade()
+  // triggers VnodeF2fs::RecycleNode() -> CleanupCache() -> EvictCleanPages().
+  // EvictCleanPages() requires exclusive tree_lock_.
+  // Verify that Downgrade() drops tree_lock_ before the vnode reference is destroyed,
+  // avoiding a re-entrant deadlock.
+  fs_->SetMemoryPressure(MemoryPressure::kHigh);
+  page.reset();
+  fs_->SetMemoryPressure(MemoryPressure::kUnknown);
+
+  // Now the vnode should be inactive and its clean page evicted.
+  ASSERT_FALSE(raw_pointer->IsActive());
+
+  // Shrink should safely evict the inactive vnode.
+  {
+    fs::SharedLock lock(f2fs::GetGlobalLock());
+    fs_->GetVCache().Shrink();
+  }
+  fbl::RefPtr<VnodeF2fs> lookup_vnode;
+  ASSERT_EQ(fs_->GetVCache().Lookup(target_ino, &lookup_vnode), ZX_ERR_NOT_FOUND);
+}
+
 }  // namespace
 }  // namespace f2fs

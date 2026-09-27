@@ -318,7 +318,11 @@ impl Editor {
             ColumnWidth::Fixed(cols) => cols,
             ColumnWidth::AnsiCursor => self.get_columns_ansi(reader, writer),
             ColumnWidth::Auto => {
-                let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+                let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+                // SAFETY: TIOCGWINSZ expects writable `winsize` storage. `ws` is initialized,
+                // correctly aligned, and exclusively borrowed for this synchronous call, which
+                // does not retain the pointer. Its unsigned integer fields accept any returned
+                // bit patterns, and fields left untouched on failure retain their initial values.
                 if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0
                     && ws.ws_col > 0
                 {

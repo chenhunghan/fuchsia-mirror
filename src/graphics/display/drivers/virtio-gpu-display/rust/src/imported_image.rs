@@ -2,10 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(https://fxbug.dev/504722357): Remove this in favor of more granular
-// attributes when the Rust port is completed.
-#![expect(dead_code)]
-
 use crate::virtio_gpu_abi::{ResourceFormat, ResourceId};
 use std::num::NonZero;
 use zx_sys::zx_paddr_t;
@@ -14,8 +10,15 @@ use zx_sys::zx_paddr_t;
 #[derive(Debug)]
 pub struct ImportedImage {
     physical_address: u64,
+
+    // Retained for future feature support.
+    #[expect(dead_code)]
     resource_format: ResourceFormat,
+
+    // Retained for future buffer operations.
+    #[expect(dead_code)]
     stride: NonZero<u32>,
+
     virtio_resource_id: ResourceId,
 
     /// Keeps the image's memory pinned.
@@ -26,34 +29,36 @@ impl ImportedImage {
     /// Creates an instance without an associated virtio resource ID.
     ///
     /// `bti` must be valid for the duration of the call. `image_vmo` must point to
-    /// a valid VMO whose size is at least `image_vmo_offset` + `image_size`.
+    /// a valid VMO whose size is at least `image_vmo_offset` + `image_size_bytes`.
     /// `resource_format` must be a known format.
+    ///
+    /// All error conditions are logged.
     pub fn new(
         bti: &zx::Bti,
         image_vmo: &zx::Vmo,
         image_vmo_offset: u64,
-        image_size: NonZero<u64>,
+        image_size_bytes: NonZero<u64>,
         resource_format: ResourceFormat,
         stride: NonZero<u32>,
     ) -> Result<Self, zx::Status> {
         debug_assert!(!bti.is_invalid());
         debug_assert!(resource_format.is_known());
 
-        let mut physical_addresses: Vec<zx_paddr_t> = vec![0];
+        let mut physical_addresses: [zx_paddr_t; 1] = [0];
         let page_size = zx::system_get_page_size() as u64;
         debug_assert_eq!(image_vmo_offset % page_size, 0);
-        let pinned_size = (image_size.get() + page_size - 1) / page_size * page_size;
+        let pinned_size_bytes = (image_size_bytes.get() + page_size - 1) / page_size * page_size;
         let pmt = bti
             .pin(
                 zx::BtiOptions::PERM_READ | zx::BtiOptions::CONTIGUOUS,
                 image_vmo,
                 image_vmo_offset,
-                pinned_size,
+                pinned_size_bytes,
                 &mut physical_addresses,
             )
-            .map_err(|e| {
-                log::error!("Failed to pin image VMO: {:?}", e);
-                e
+            .map_err(|status| {
+                log::warn!("Failed to pin image VMO: {:?}", status);
+                status
             })?;
 
         let physical_address = physical_addresses[0] as u64;
@@ -74,17 +79,19 @@ impl ImportedImage {
         self.virtio_resource_id
     }
 
+    // Retained for future feature support.
     #[expect(dead_code)]
     pub fn resource_format(&self) -> ResourceFormat {
         self.resource_format
     }
 
+    // Retained for future feature support.
     #[expect(dead_code)]
     pub fn stride(&self) -> NonZero<u32> {
         self.stride
     }
 
-    /// See `virtio_resource_id()` for details.
+    /// See [`Self::virtio_resource_id()`] for details.
     ///
     /// `virtio_resource_id` must be attached while it is used in this instance.
     pub fn set_virtio_resource_id(&mut self, id: ResourceId) {

@@ -11,7 +11,6 @@ use discovery::{
 use ffx_config::EnvironmentContext;
 use ffx_diagnostics::NotificationType;
 use fho::{FfxContext, Result};
-use fidl_fuchsia_developer_ffx as ffx;
 use futures::channel::mpsc::{self, UnboundedSender};
 use manual_targets::watcher::ManualTargetEvent;
 use std::future::Future;
@@ -98,7 +97,7 @@ pub(crate) fn build_discovery_stream(
     if sources.contains(DiscoverySources::MDNS) {
         let mdns_sender = sender.clone();
         let ns_clone = notifier_sender.clone();
-        config.set_mdns_event_handler(move |res: ffx::MdnsEventType| {
+        config.set_mdns_event_handler(move |res: discovery::MdnsEventType| {
             ns_clone.info(format!(
                 "Got MDNS event: {}",
                 ffx_diagnostics_formatting::format_mdns_event(&res)

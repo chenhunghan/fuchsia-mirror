@@ -255,27 +255,10 @@ template("rustc_artifact") {
       # rustdoc should not be data_dep'd for third party crates
       include_rustdoc_first_party = true
 
-      if (crate_type == "bin") {
+      if (crate_type != "rlib" && crate_type != "proc-macro" &&
+          !defined(invoker.disable_rustdoc)) {
         # search index size, mostly.
-        disable_rustdoc_binary = true
-      }
-
-      if (crate_type == "rlib" || crate_type == "proc-macro") {
-        if (defined(invoker.output_dir)) {
-          searchdir_path = invoker.output_dir
-        } else {
-          searchdir_path =
-              get_label_info(":${_actual_target_name}", "target_out_dir")
-          if (rust_one_rlib_per_dir) {
-            searchdir_path += "/" + _actual_target_name
-          }
-        }
-
-        _output_name = invoker.crate_name
-        if (defined(invoker.output_name)) {
-          _output_name = invoker.output_name
-        }
-        rlib_path = "${searchdir_path}/lib${_output_name}.rlib"
+        disable_rustdoc = true
       }
     }
   } else {

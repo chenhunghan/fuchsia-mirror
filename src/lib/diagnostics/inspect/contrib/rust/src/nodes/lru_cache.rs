@@ -4,8 +4,9 @@
 
 use fuchsia_inspect::Node;
 use fuchsia_inspect_derive::Unit;
-use lru_cache::LruCache;
+use lru::LruCache;
 use std::hash::Hash;
+use std::num::NonZeroUsize;
 
 use crate::nodes::NodeTimeExt;
 
@@ -18,7 +19,10 @@ pub struct LruCacheNode<T: Unit + Eq + Hash> {
 
 impl<T: Unit + Eq + Hash> LruCacheNode<T> {
     pub fn new(node: Node, capacity: usize) -> Self {
-        Self { node, items: LruCache::new(std::cmp::max(capacity, 1)) }
+        Self {
+            node,
+            items: LruCache::new(NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN)),
+        }
     }
 
     /// Insert |item| into `LruCacheNode`.
@@ -32,15 +36,15 @@ impl<T: Unit + Eq + Hash> LruCacheNode<T> {
         match self.items.get_mut(&item) {
             Some(entry) => entry.index,
             None => {
-                let index = if self.items.len() < self.items.capacity() {
+                let index = if self.items.len() < self.items.cap().get() {
                     self.items.len()
                 } else {
-                    self.items.remove_lru().map(|entry| entry.1.index).unwrap_or(0)
+                    self.items.pop_lru().map(|entry| entry.1.index).unwrap_or(0)
                 };
                 let child = self.node.create_child(index.to_string());
                 NodeTimeExt::<zx::BootTimeline>::record_time(&child, "@time");
                 let data = item.inspect_create(&child, "data");
-                self.items.insert(item, CacheItem { index, _node: child, _data: data });
+                self.items.put(item, CacheItem { index, _node: child, _data: data });
                 index
             }
         }

@@ -253,19 +253,15 @@ impl<T> ValueStrategy for Vec<T> {
 
 impl<T: TryConvert> TryConvert for Vec<T> {
     fn try_convert(value: ConfigValue) -> Result<Self, ConfigError> {
-        value
-            .value
-            .and_then(|val| match val.as_array() {
-                Some(v) => {
-                    let result: Vec<T> = v
-                        .iter()
-                        .filter_map(|i| T::try_convert(ConfigValue::from(Some(i.clone()))).ok())
-                        .collect();
-                    if !result.is_empty() { Some(result) } else { None }
-                }
-                None => T::try_convert(ConfigValue::from(Some(val))).map(|x| vec![x]).ok(),
-            })
-            .ok_or(ConfigError::KeyNotFound)
+        let val = value.value.ok_or(ConfigError::KeyNotFound)?;
+        match val {
+            Value::Array(v) => {
+                let result: Result<Vec<T>, _> =
+                    v.into_iter().map(|i| T::try_convert(ConfigValue::from(Some(i)))).collect();
+                result
+            }
+            val => T::try_convert(ConfigValue::from(Some(val))).map(|x| vec![x]),
+        }
     }
 }
 
@@ -353,6 +349,19 @@ mod tests {
             _ => {
                 panic!("Expected KeyNotFound, got {err:?}")
             }
+        }
+    }
+
+    #[test]
+    fn test_vec_conversion_propagates_error() {
+        let value = ConfigValue::from(json!(["1", "invalid", "3"]));
+        // Assuming usize::try_convert requires parsable strings or actual integers
+        // We can test TryConvert config to Vec<usize>
+        let result = Vec::<usize>::try_convert(value);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ConfigError::ConversionFailed { to, .. } => assert_eq!(to, "usize"),
+            _ => panic!("Expected ConversionFailed"),
         }
     }
 }

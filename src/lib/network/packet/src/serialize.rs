@@ -5,7 +5,6 @@
 //! Serialization.
 
 use std::cmp;
-use std::convert::Infallible as Never;
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
@@ -92,8 +91,8 @@ impl<A> Either<A, A> {
     }
 }
 
-impl<A> Either<A, Never> {
-    /// Returns the `A` value in an `Either<A, Never>`.
+impl<A> Either<A, !> {
+    /// Returns the `A` value in an `Either<A, !>`.
     #[inline]
     pub fn into_a(self) -> A {
         match self {
@@ -102,8 +101,8 @@ impl<A> Either<A, Never> {
     }
 }
 
-impl<B> Either<Never, B> {
-    /// Returns the `B` value in an `Either<Never, B>`.
+impl<B> Either<!, B> {
+    /// Returns the `B` value in an `Either<!, B>`.
     #[inline]
     pub fn into_b(self) -> B {
         match self {
@@ -874,13 +873,13 @@ impl<C: SerializationContext> PacketBuilder<C> for () {
     }
 }
 
-impl NestablePacketBuilder for Never {
+impl NestablePacketBuilder for ! {
     fn constraints(&self) -> PacketConstraints {
         match *self {}
     }
 }
 
-impl<C: SerializationContext> PacketBuilder<C> for Never {
+impl<C: SerializationContext> PacketBuilder<C> for ! {
     fn serialize(
         &self,
         _context: &mut C,
@@ -1248,9 +1247,9 @@ pub trait BufferProvider<Input, Output> {
 ///
 /// The following implementations of `BufferAlloc` are provided:
 /// - Any `FnOnce(usize) -> Result<O, E>` implements `BufferAlloc<O, Error = E>`
-/// - `()` implements `BufferAlloc<Never, Error = ()>` (an allocator which
+/// - `()` implements `BufferAlloc<!, Error = ()>` (an allocator which
 ///   always fails)
-/// - [`new_buf_vec`] implements `BufferAlloc<Buf<Vec<u8>>, Error = Never>` (an
+/// - [`new_buf_vec`] implements `BufferAlloc<Buf<Vec<u8>>, Error = !>` (an
 ///   allocator which infallibly heap-allocates `Vec`s)
 ///
 /// [Two blanket implementations]: trait.BufferProvider.html#implementors
@@ -1273,11 +1272,11 @@ impl<O, E, F: FnOnce(usize) -> Result<O, E>> BufferAlloc<O> for F {
     }
 }
 
-impl BufferAlloc<Never> for () {
+impl BufferAlloc<!> for () {
     type Error = ();
 
     #[inline]
-    fn alloc(self, _len: usize) -> Result<Never, ()> {
+    fn alloc(self, _len: usize) -> Result<!, ()> {
         Err(())
     }
 }
@@ -1285,14 +1284,14 @@ impl BufferAlloc<Never> for () {
 /// Allocates a new `Buf<Vec<u8>>`.
 ///
 /// `new_buf_vec(len)` is shorthand for `Ok(Buf::new(vec![0; len], ..))`. It
-/// implements [`BufferAlloc<Buf<Vec<u8>>, Error = Never>`], and, thanks to a
-/// blanket impl, [`BufferProvider<I, Either<I, Buf<Vec<u8>>>, Error = Never>`]
+/// implements [`BufferAlloc<Buf<Vec<u8>>, Error = !>`], and, thanks to a
+/// blanket impl, [`BufferProvider<I, Either<I, Buf<Vec<u8>>>, Error = !>`]
 /// for all `I: BufferMut`, and `BufferProvider<Buf<Vec<u8>>, Buf<Vec<u8>>,
-/// Error = Never>`.
+/// Error = !>`.
 ///
-/// [`BufferAlloc<Buf<Vec<u8>>, Error = Never>`]: BufferAlloc
-/// [`BufferProvider<I, Either<I, Buf<Vec<u8>>>, Error = Never>`]: BufferProvider
-pub fn new_buf_vec(len: usize) -> Result<Buf<Vec<u8>>, Never> {
+/// [`BufferAlloc<Buf<Vec<u8>>, Error = !>`]: BufferAlloc
+/// [`BufferProvider<I, Either<I, Buf<Vec<u8>>>, Error = !>`]: BufferProvider
+pub fn new_buf_vec(len: usize) -> Result<Buf<Vec<u8>>, !> {
     Ok(Buf::new(vec![0; len], ..))
 }
 
@@ -1321,11 +1320,11 @@ impl<O: ShrinkBuffer, E, F: FnOnce(usize) -> Result<O, E>> LayoutBufferAlloc<O> 
     }
 }
 
-impl LayoutBufferAlloc<Never> for () {
+impl LayoutBufferAlloc<!> for () {
     type Error = ();
 
     #[inline]
-    fn layout_alloc(self, _prefix: usize, _body: usize, _suffix: usize) -> Result<Never, ()> {
+    fn layout_alloc(self, _prefix: usize, _body: usize, _suffix: usize) -> Result<!, ()> {
         Err(())
     }
 }
@@ -1602,7 +1601,7 @@ pub trait Serializer<C: SerializationContext>: NestableSerializer + Sized {
         self,
         context: &mut C,
         constraints: PacketConstraints,
-    ) -> Result<Either<Self::Buffer, Buf<Vec<u8>>>, (SerializeError<Never>, Self)>
+    ) -> Result<Either<Self::Buffer, Buf<Vec<u8>>>, (SerializeError<!>, Self)>
     where
         Self::Buffer: ReusableBuffer,
     {
@@ -1676,7 +1675,7 @@ pub trait Serializer<C: SerializationContext>: NestableSerializer + Sized {
     fn serialize_vec_outer(
         self,
         context: &mut C,
-    ) -> Result<Either<Self::Buffer, Buf<Vec<u8>>>, (SerializeError<Never>, Self)>
+    ) -> Result<Either<Self::Buffer, Buf<Vec<u8>>>, (SerializeError<!>, Self)>
     where
         Self::Buffer: ReusableBuffer,
     {
@@ -1709,7 +1708,7 @@ pub trait Serializer<C: SerializationContext>: NestableSerializer + Sized {
     fn serialize_vec_outer_no_reuse(
         &self,
         context: &mut C,
-    ) -> Result<Buf<Vec<u8>>, SerializeError<Never>> {
+    ) -> Result<Buf<Vec<u8>>, SerializeError<!>> {
         self.serialize_new_buf(context, PacketConstraints::UNCONSTRAINED, new_buf_vec)
     }
 }
@@ -2613,7 +2612,7 @@ mod tests {
     use test_case::test_case;
     use test_util::{assert_geq, assert_leq};
 
-    fn dirty_buf_alloc(len: usize) -> Result<Buf<Vec<u8>>, Never> {
+    fn dirty_buf_alloc(len: usize) -> Result<Buf<Vec<u8>>, !> {
         Ok(Buf::new(vec![0xAA; len], ..))
     }
 
@@ -3622,7 +3621,7 @@ mod tests {
     struct ScatterGatherProvider;
 
     impl<B: BufferMut> BufferProvider<B, ScatterGatherBuf<B>> for ScatterGatherProvider {
-        type Error = Never;
+        type Error = !;
 
         fn alloc_no_reuse(
             self,

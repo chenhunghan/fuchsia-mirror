@@ -1,0 +1,104 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "resource",
+)
+load("@rules_rust//rust:defs.bzl", "rust_lint_config")
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_package(
+    name = "starnix_support.bootfs_files_package",
+    package_name = "starnix_support.bootfs_files_package",
+    resources = [":starnix_profiles_resource"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+resource(
+    name = "starnix_profiles_resource",
+    src = "starnix.profiles",
+    dest = "config/profiles/starnix.profiles",
+)
+
+# Bazel `lint_config` replaces the default lint configs instead of appending to
+# them like GN does, so the defaults from //build/config/rust/lints are spelled
+# out here.
+#
+# Lints applied to all Starnix code, including tests: clippy_warn_default plus
+# the Starnix-specific lints.
+_STARNIX_CLIPPY_TEST = {
+    "all": "allow",
+    "await_holding_lock": "warn",
+    "clear_with_drain": "warn",
+    "confusing_method_to_numeric_cast": "warn",
+    "correctness": "warn",
+    "expect_fun_call": "warn",
+    "fn_to_numeric_cast_with_truncation": "warn",
+    "into_iter_on_ref": "warn",
+    "large_enum_variant": "warn",
+    "large_futures": "warn",
+    "missing_safety_doc": "warn",
+    "or_fun_call": "warn",
+    "unnecessary_mut_passed": "warn",
+    "wildcard_imports": "warn",
+}
+
+# Lints applied to non-test Starnix code: additionally clippy_warn_production.
+_STARNIX_CLIPPY_COMMON = _STARNIX_CLIPPY_TEST | {
+    "collection_is_never_read": "warn",
+    "needless_collect": "warn",
+    "perf": "warn",
+    "redundant_clone": "warn",
+    "set_contains_or_insert": "warn",
+    "unnecessary_lazy_evaluations": "warn",
+}
+
+_STARNIX_RUSTC_LINTS = {
+    "deref_nullptr": "deny",
+    "invalid_value": "deny",
+    "mismatched_lifetime_syntaxes": "allow",
+    "missing_unsafe_on_extern": "warn",
+    "non_local_definitions": "allow",
+    "renamed_and_removed_lints": "allow",
+    "rustdoc::redundant_explicit_links": "allow",
+    "unknown_lints": "allow",
+    "unsafe_attr_outside_unsafe": "warn",
+    "unused_crate_dependencies": "warn",
+    "unused_must_use": "deny",
+}
+
+rust_lint_config(
+    name = "starnix_clippy_lints",
+    clippy = select({
+        "@platforms//cpu:riscv64": _STARNIX_CLIPPY_COMMON,
+        "//conditions:default": _STARNIX_CLIPPY_COMMON | {
+            "undocumented_unsafe_blocks": "warn",
+        },
+    }),
+    rustc = _STARNIX_RUSTC_LINTS,
+    visibility = ["//src/starnix:__subpackages__"],
+)
+
+# Lint config for Starnix test targets. Unlike GN, where test code does not get
+# the production lints, Bazel `rustc_library(with_unit_tests = True)` applies
+# the library's `lint_config` to its test target as well. Test targets that
+# trip production-only lints can instead be declared with an explicit
+# `rustc_test` that uses this config.
+rust_lint_config(
+    name = "starnix_clippy_lints_test",
+    clippy = select({
+        "@platforms//cpu:riscv64": _STARNIX_CLIPPY_TEST,
+        "//conditions:default": _STARNIX_CLIPPY_TEST | {
+            "undocumented_unsafe_blocks": "warn",
+        },
+    }),
+    rustc = _STARNIX_RUSTC_LINTS,
+    visibility = ["//src/starnix:__subpackages__"],
+)

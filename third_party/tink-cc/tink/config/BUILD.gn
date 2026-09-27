@@ -27,7 +27,6 @@ source_set("tink_fips") {
   ]
   public_deps = [
     "//third_party/abseil-cpp/absl/base:core_headers",
-    "//third_party/boringssl:crypto",
     "//third_party/tink-cc/tink/internal:fips_utils",
     "//third_party/tink-cc/tink/internal:registry_impl",
     "//third_party/tink-cc/tink/util:status",

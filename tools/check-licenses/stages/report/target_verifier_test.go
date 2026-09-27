@@ -330,3 +330,36 @@ func TestTargetComplianceVerifier_DirectoryTargetIgnoresUnrelatedFileErrors(t *t
 		t.Fatalf("Expected 0 findings for dirB, got %d: %+v", len(v.Findings), v.Findings)
 	}
 }
+
+func TestTargetComplianceVerifier_VirtualReadmeMissingLicenseMatchesProjectTarget(t *testing.T) {
+	tempDir := t.TempDir()
+	projDir := filepath.Join(tempDir, "prebuilt", "third_party", "bar")
+	os.MkdirAll(projDir, 0755)
+	binFile := filepath.Join(projDir, "bin")
+	os.WriteFile(binFile, []byte("binary"), 0644)
+
+	virtualReadme := filepath.Join(tempDir, "tools", "check-licenses", "assets", "readmes", "prebuilt", "third_party", "bar", "README.fuchsia")
+	complianceErr := pipeline.ComplianceError{
+		CheckName: "AllProjectsMustHaveALicense",
+		Project:   projDir,
+		FilePath:  virtualReadme,
+		Issue:     "Project has no recognized license files.",
+	}
+
+	parentDir := filepath.Join(tempDir, "prebuilt", "third_party")
+	// Verify project directory, parent directory, file target, and virtual README target
+	// all match the project-scope error and preserve the virtual README FilePath.
+	for _, target := range []string{projDir, parentDir, binFile, virtualReadme} {
+		v := NewTargetComplianceVerifier(tempDir, nil, target)
+		if err := v.Run(context.Background(), nil, []pipeline.ComplianceError{complianceErr}); err == nil {
+			t.Fatalf("Expected error for target %s, got nil", target)
+		}
+		if len(v.Findings) != 1 {
+			t.Fatalf("Expected 1 finding for target %s, got %d", target, len(v.Findings))
+		}
+		expectedRelReadme := "tools/check-licenses/assets/readmes/prebuilt/third_party/bar/README.fuchsia"
+		if v.Findings[0].FilePath != expectedRelReadme {
+			t.Errorf("Expected finding FilePath %q for target %s, got %q", expectedRelReadme, target, v.Findings[0].FilePath)
+		}
+	}
+}

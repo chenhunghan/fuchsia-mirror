@@ -72,6 +72,7 @@ class MockPinImpl : public fdf::WireServer<fuchsia_hardware_pinimpl::PinImpl> {
     fuchsia_hardware_pin::Pull pull;
     uint64_t alt_function = UINT64_MAX;
     uint64_t drive_strength = UINT64_MAX;
+    std::optional<uint64_t> power_source = std::nullopt;
     fuchsia_hardware_gpio::InterruptMode interrupt_mode;
     bool has_interrupt = false;
   };
@@ -173,28 +174,39 @@ class MockPinImpl : public fdf::WireServer<fuchsia_hardware_pinimpl::PinImpl> {
 
   void Configure(fuchsia_hardware_pinimpl::wire::PinImplConfigureRequest* request,
                  fdf::Arena& arena, ConfigureCompleter::Sync& completer) override {
-    if (request->pin > kMaxInitStepPinIndex) {
-      return completer.buffer(arena).ReplyError(ZX_ERR_NOT_FOUND);
+    const uint32_t pin = request->pin;
+
+    if (pin > kMaxInitStepPinIndex) {
+      completer.buffer(arena).ReplyError(ZX_ERR_NOT_FOUND);
+      return;
     }
 
-    if (request->config.has_pull()) {
-      pin_state_internal(request->pin).pull = request->config.pull();
+    PinState& pin_state = pin_state_internal(pin);
+    const fuchsia_hardware_pin::wire::Configuration& config = request->config;
+
+    if (config.has_pull()) {
+      pin_state.pull = config.pull();
     }
 
-    if (request->config.has_function()) {
-      pin_state_internal(request->pin).alt_function = request->config.function();
+    if (config.has_function()) {
+      pin_state.alt_function = config.function();
     }
 
-    if (request->config.has_drive_strength_ua()) {
-      pin_state_internal(request->pin).drive_strength = request->config.drive_strength_ua();
+    if (config.has_drive_strength_ua()) {
+      pin_state.drive_strength = config.drive_strength_ua();
     }
 
-    auto new_config = fuchsia_hardware_pin::wire::Configuration::Builder(arena)
-                          .pull(pin_state_internal(request->pin).pull)
-                          .function(pin_state_internal(request->pin).alt_function)
-                          .drive_strength_ua(pin_state_internal(request->pin).drive_strength)
-                          .Build();
-    completer.buffer(arena).ReplySuccess(new_config);
+    auto builder = fuchsia_hardware_pin::wire::Configuration::Builder(arena)
+                       .pull(pin_state.pull)
+                       .function(pin_state.alt_function)
+                       .drive_strength_ua(pin_state.drive_strength);
+
+    if (config.has_power_source()) {
+      pin_state.power_source = config.power_source();
+      builder.power_source(config.power_source());
+    }
+
+    completer.buffer(arena).ReplySuccess(builder.Build());
   }
 
   std::optional<fdf::ServerBinding<fuchsia_hardware_pinimpl::PinImpl>> binding_;
@@ -254,6 +266,10 @@ class GpioTestEnvironment : public fdf_testing::Environment {
     generic_metadata_ = fuchsia_driver_metadata::Dictionary{{.entries = std::move(entries)}};
   }
 
+  void SetGenericMetadata(fuchsia_driver_metadata::Dictionary dict) {
+    generic_metadata_ = std::move(dict);
+  }
+
   void SetSchedulerRoleName(fuchsia_scheduler::RoleName role_name) {
     role_name_ = std::move(role_name);
   }
@@ -300,6 +316,13 @@ class GpioTest : public ::testing::Test {
     driver_test().RunInEnvironmentTypeContext(
         [pins = std::move(pins)](GpioTestEnvironment& env) mutable {
           env.InitGeneric(std::move(pins));
+        });
+  }
+
+  void SetGenericMetadata(fuchsia_driver_metadata::Dictionary dict) {
+    driver_test().RunInEnvironmentTypeContext(
+        [dict = std::move(dict)](GpioTestEnvironment& env) mutable {
+          env.SetGenericMetadata(std::move(dict));
         });
   }
 
@@ -1401,6 +1424,7 @@ TEST_F(GpioTest, DoubleGetInterruptAndRelease) {
 TEST_F(GpioTest, TestPinStates) {
   fuchsia_hardware_pinimpl::DevicePinStates dev_states;
   dev_states.name() = "my-device";
+  dev_states.id() = 100;
 
   // default state: Configure Pin 1 to Pull Up
   fuchsia_hardware_pinimpl::PinState default_state;
@@ -1475,6 +1499,44 @@ TEST_F(GpioTest, TestPinStates) {
   EXPECT_TRUE(driver_test().StopDriver().is_ok());
 }
 
+TEST_F(GpioTest, TestPinStatesCustomId) {
+  fuchsia_hardware_pinimpl::DevicePinStates dev_states_1;
+  dev_states_1.name() = "dev-1";
+  dev_states_1.id() = 1234;
+
+  fuchsia_hardware_pinimpl::DevicePinStates dev_states_2;
+  dev_states_2.name() = "dev-2";
+  dev_states_2.id() = 5678;
+
+  SetPinMetadata({{.controller_id = 99,
+                   .device_pin_states = {{std::move(dev_states_1), std::move(dev_states_2)}}}});
+
+  EXPECT_TRUE(driver_test()
+                  .StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+                    gpio_config::Config config{{.enable_suspend = false}};
+                    args.config(config.ToVmo());
+                  })
+                  .is_ok());
+
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    std::vector<fuchsia_driver_framework::NodeProperty2> props_1 =
+        node.children().at("gpio").children().at("dev-1").GetProperties();
+    ASSERT_EQ(props_1.size(), 3ul);
+    EXPECT_EQ(props_1[0].key(), bind_fuchsia::ID);
+    ASSERT_TRUE(props_1[0].value().int_value().has_value());
+    EXPECT_EQ(props_1[0].value().int_value().value(), 1234ul);
+
+    std::vector<fuchsia_driver_framework::NodeProperty2> props_2 =
+        node.children().at("gpio").children().at("dev-2").GetProperties();
+    ASSERT_EQ(props_2.size(), 3ul);
+    EXPECT_EQ(props_2[0].key(), bind_fuchsia::ID);
+    ASSERT_TRUE(props_2[0].value().int_value().has_value());
+    EXPECT_EQ(props_2[0].value().int_value().value(), 5678ul);
+  });
+
+  EXPECT_TRUE(driver_test().StopDriver().is_ok());
+}
+
 TEST_F(GpioTest, GenericMetadataTest) {
   SetGenericPinMetadata({{
       {{.pin = 1, .name = "pin-1", .id = 42}},
@@ -1513,6 +1575,103 @@ TEST_F(GpioTest, GenericMetadataTest) {
     ASSERT_TRUE(pin2_properties[0].value().int_value().has_value());
     EXPECT_EQ(pin2_properties[0].value().int_value().value(), 2ul);
   });
+
+  EXPECT_TRUE(driver_test().StopDriver().is_ok());
+}
+
+// Verifies that setting the power source in the metadata results in the pin being configured with
+// the correct power source.
+TEST_F(GpioTest, GenericMetadataPowerSource) {
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries = {
+      {"pins._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"pins.0.pin", fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"pins.0.name", fuchsia_driver_metadata::DictionaryValue::WithStr("pin-1")},
+      {"pins.0.power_source", fuchsia_driver_metadata::DictionaryValue::WithInt64(2)},
+  };
+
+  SetGenericMetadata(fuchsia_driver_metadata::Dictionary{{.entries = std::move(entries)}});
+
+  EXPECT_TRUE(driver_test()
+                  .StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+                    gpio_config::Config config{{.enable_suspend = false}};
+                    args.config(config.ToVmo());
+                  })
+                  .is_ok());
+
+  EXPECT_EQ(pin_state(1).power_source, 2ul);
+
+  EXPECT_TRUE(driver_test().StopDriver().is_ok());
+}
+
+// Verifies that setting the power source in the metadata results in the pin being configured with
+// the correct power source across multiple device pin states.
+TEST_F(GpioTest, GenericMetadataPinStatesPowerSource) {
+  constexpr uint64_t kDefaultStatePowerSource = 3ul;
+  constexpr std::string_view kSleepStateName = "sleep";
+  constexpr uint64_t kSleepStatePowerSource = 4ul;
+
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries = {
+      {"pins._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"pins.0.pin", fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"pins.0.name", fuchsia_driver_metadata::DictionaryValue::WithStr("pin-1")},
+
+      {"device_pin_states._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"device_pin_states.0.name", fuchsia_driver_metadata::DictionaryValue::WithStr("my-device")},
+      {"device_pin_states.0.states._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(2)},
+
+      // Default state configuration.
+      {"device_pin_states.0.states.0.name",
+       fuchsia_driver_metadata::DictionaryValue::WithStr("default")},
+      {"device_pin_states.0.states.0.pins._count",
+       fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"device_pin_states.0.states.0.pins.0.pin",
+       fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"device_pin_states.0.states.0.pins.0.call.pin_config.power_source",
+       fuchsia_driver_metadata::DictionaryValue::WithInt64(kDefaultStatePowerSource)},
+
+      // Sleep state configuration.
+      {"device_pin_states.0.states.1.name",
+       fuchsia_driver_metadata::DictionaryValue::WithStr(std::string(kSleepStateName))},
+      {"device_pin_states.0.states.1.pins._count",
+       fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"device_pin_states.0.states.1.pins.0.pin",
+       fuchsia_driver_metadata::DictionaryValue::WithInt64(1)},
+      {"device_pin_states.0.states.1.pins.0.call.pin_config.power_source",
+       fuchsia_driver_metadata::DictionaryValue::WithInt64(kSleepStatePowerSource)},
+  };
+
+  SetGenericMetadata(fuchsia_driver_metadata::Dictionary{{.entries = std::move(entries)}});
+
+  EXPECT_TRUE(driver_test()
+                  .StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+                    gpio_config::Config config{{.enable_suspend = true}};
+                    args.config(config.ToVmo());
+                  })
+                  .is_ok());
+
+  // Pin should be in default state. Verify the power source is set to the default state's value.
+  EXPECT_EQ(pin_state(1).power_source, kDefaultStatePowerSource);
+
+  zx::result client_end =
+      driver_test().Connect<fuchsia_hardware_pin::PinStatesService::Device>("my-device");
+  ASSERT_TRUE(client_end.is_ok());
+
+  fidl::WireClient<fuchsia_hardware_pin::PinStates> client(
+      *std::move(client_end), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  // Switch to sleep state.
+  client->SelectState(fidl::StringView::FromExternal(kSleepStateName))
+      .ThenExactlyOnce(
+          [&](fidl::WireUnownedResult<fuchsia_hardware_pin::PinStates::SelectState>& result) {
+            ASSERT_TRUE(result.ok());
+            ASSERT_TRUE(result->is_ok());
+            driver_test().runtime().Quit();
+          });
+  driver_test().runtime().Run();
+  driver_test().runtime().ResetQuit();
+
+  // Verify the power source has changed to the sleep state's value.
+  EXPECT_EQ(pin_state(1).power_source, kSleepStatePowerSource);
 
   EXPECT_TRUE(driver_test().StopDriver().is_ok());
 }

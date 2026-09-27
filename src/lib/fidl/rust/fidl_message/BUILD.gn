@@ -42,6 +42,7 @@ rustc_library("fidl_message") {
   sources = [ "src/lib.rs" ]
   edition = "2024"
   visibility = [
+    ":*",
     "//src/developer/ffx/lib/discovery/*",
     "//src/developer/ffx/lib/usb_driver_api/*",
     "//src/developer/ffx/tools/usb_driver/*",

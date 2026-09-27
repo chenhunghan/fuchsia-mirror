@@ -1,0 +1,56 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "ti-lp8556",
+    composite_name: "backlight",
+    include: [
+        "driver/platform-device.shard.cml",
+        "driver_component/driver.shard.cml",
+    ],
+    program: {
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+    },
+    capabilities: [
+        {
+            service: [
+                "fuchsia.hardware.backlight.Service",
+                "fuchsia.hardware.power.sensor.Service",
+            ],
+        },
+    ],
+    use: [
+        {
+            name: "i2c",
+            service: "fuchsia.hardware.i2c.Service",
+            primary: true,
+            bind: { service: "fuchsia.hardware.i2c.Service" },
+        },
+        {
+            name: "pdev",
+            bind: {
+                protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                one_of: [
+                    {
+                        vid: "fuchsia.ti.platform.BIND_PLATFORM_DEV_VID.TI",
+                        pid: "fuchsia.ti.platform.BIND_PLATFORM_DEV_PID.LP8556",
+                        did: "fuchsia.ti.platform.BIND_PLATFORM_DEV_DID.BACKLIGHT",
+                    },
+                    {
+                        compat: "ti,lp8556",
+                        vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                    },
+                ],
+            },
+        },
+    ],
+    expose: [
+        {
+            service: [
+                "fuchsia.hardware.backlight.Service",
+                "fuchsia.hardware.power.sensor.Service",
+            ],
+            from: "self",
+        },
+    ],
+}

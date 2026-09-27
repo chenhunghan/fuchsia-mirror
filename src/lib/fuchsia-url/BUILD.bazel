@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fuchsia-url",
+    srcs = [
+        "src/boot.rs",
+        "src/builtin_url.rs",
+        "src/errors.rs",
+        "src/fuchsia_pkg_absolute_component_url.rs",
+        "src/fuchsia_pkg_absolute_package_url.rs",
+        "src/fuchsia_pkg_component_url.rs",
+        "src/fuchsia_pkg_package_url.rs",
+        "src/fuchsia_pkg_pinned_absolute_package_url.rs",
+        "src/fuchsia_pkg_unpinned_absolute_package_url.rs",
+        "src/generic.rs",
+        "src/host.rs",
+        "src/lib.rs",
+        "src/parse.rs",
+        "src/path.rs",
+        "src/relative_component_url.rs",
+        "src/relative_package_url.rs",
+        "src/repository_url.rs",
+        "src/resource.rs",
+        "src/test.rs",
+    ],
+    crate_name = "fuchsia_url",
+    edition = "2024",
+    test_deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+    visibility = [
+        "//build/assembly:__subpackages__",
+        "//src/developer/ffx:__subpackages__",
+        "//src/diagnostics/archivist:__subpackages__",
+        "//src/fonts:__subpackages__",
+        "//src/lib/assembly:__subpackages__",
+        "//src/security/lib/scrutiny:__subpackages__",
+        "//src/starnix:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//tools/lib/cm_fidl_analyzer:__subpackages__",
+        "//tools/pkgstats:__subpackages__",
+        "//tools/test_list_tool:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//third_party/rust_crates/vendor:percent-encoding",
+        "//third_party/rust_crates/vendor:proptest",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)

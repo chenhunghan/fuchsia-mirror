@@ -677,6 +677,24 @@ mod test {
             flags: MapFlags::empty(),
         };
         assert_eq!(Map::new(schema, "test").err(), Some(MapError::InvalidParam));
+
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_HASH,
+            key_size: 8,
+            value_size: 0xffff_fff0,
+            max_entries: 0xffff_fff8,
+            flags: MapFlags::empty(),
+        };
+        assert_eq!(Map::new(schema, "test").err(), Some(MapError::InvalidParam));
+
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_HASH,
+            key_size: 8,
+            value_size: 0x1_0000,
+            max_entries: 0x8000_0000,
+            flags: MapFlags::empty(),
+        };
+        assert_eq!(Map::new(schema, "test").err(), Some(MapError::NoMemory));
     }
 
     #[fuchsia::test]
@@ -689,6 +707,24 @@ mod test {
             flags: MapFlags::NoPrealloc,
         };
         assert_eq!(Map::new(schema, "test").err(), Some(MapError::InvalidParam));
+
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_LPM_TRIE,
+            key_size: 5,
+            value_size: 0xffff_ffd0,
+            max_entries: 0xffff_fff8,
+            flags: MapFlags::NoPrealloc,
+        };
+        assert_eq!(Map::new(schema, "test").err(), Some(MapError::InvalidParam));
+
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_LPM_TRIE,
+            key_size: 8,
+            value_size: 0x1_0000,
+            max_entries: 0x8000_0000,
+            flags: MapFlags::NoPrealloc,
+        };
+        assert_eq!(Map::new(schema, "test").err(), Some(MapError::NoMemory));
     }
 
     #[fuchsia::test]
@@ -803,5 +839,42 @@ mod test {
             let map_fidl = map.share().expect("Failed to share map");
             let _: PinnedMap = Map::new_shared(map_fidl).expect("Failed to initialize shared map");
         }
+    }
+
+    #[fuchsia::test]
+    fn test_hash_map_get_next_key() {
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_HASH,
+            key_size: 4,
+            value_size: 4,
+            max_entries: 4,
+            flags: MapFlags::empty(),
+        };
+
+        let map = Map::new(schema, "test").unwrap();
+        let missing_key = u32::MAX.to_ne_bytes();
+
+        // Empty map returns InvalidKey for both None and a non-existent key.
+        assert_eq!(map.get_next_key(None), Err(MapError::InvalidKey));
+        assert_eq!(map.get_next_key(Some(&missing_key)), Err(MapError::InvalidKey));
+
+        let k1 = 1u32.to_ne_bytes();
+        let k2 = 2u32.to_ne_bytes();
+        let mut val = [1, 2, 3, 4];
+        map.update(&k1, (&mut val).into(), 0).unwrap();
+        map.update(&k2, (&mut val).into(), 0).unwrap();
+
+        let first = map.get_next_key(None).unwrap();
+        assert!(first.as_slice() == k1 || first.as_slice() == k2);
+
+        // Non-existent key returns the first key.
+        assert_eq!(map.get_next_key(Some(&missing_key)), Ok(first.clone()));
+
+        let second = map.get_next_key(Some(&first)).unwrap();
+        assert!(second.as_slice() == k1 || second.as_slice() == k2);
+        assert_ne!(first, second);
+
+        // Last key returns InvalidKey.
+        assert_eq!(map.get_next_key(Some(&second)), Err(MapError::InvalidKey));
     }
 }

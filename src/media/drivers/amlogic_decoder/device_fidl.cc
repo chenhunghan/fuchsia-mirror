@@ -5,14 +5,22 @@
 #include "device_fidl.h"
 
 #include <lib/media/codec_impl/codec_admission_control.h>
+#include <lib/sync/cpp/completion.h>
 #include <threads.h>
 
 #include "device_ctx.h"
 
 namespace amlogic_decoder {
 
-DeviceFidl::DeviceFidl(DeviceCtx* device) : device_(device) {
-  // Nothing else to do here.
+DeviceFidl::DeviceFidl(DeviceCtx* device) : device_(device) {}
+
+void DeviceFidl::InitializeClosureQueue() {
+  libsync::Completion completion;
+  device_->driver()->PostToSharedFidl([this, &completion]() {
+    closure_queue_.SetDispatcher(device_->driver()->shared_fidl_loop()->dispatcher());
+    completion.Signal();
+  });
+  completion.Wait();
 }
 
 DeviceFidl::~DeviceFidl() {
@@ -23,12 +31,10 @@ DeviceFidl::~DeviceFidl() {
   // post work which will run on shared_fidl_thread() before ~DeviceFidl()
   // runs on shared_fidl_thread().
   ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
+  closure_queue_.StopAndClear();
 }
 
 void DeviceFidl::ConnectChannelBoundCodecFactory(zx::channel request) {
-  auto factory = std::make_unique<LocalCodecFactory>(device_);
-  factory->SetErrorHandler(
-      [this, raw_factory_ptr = factory.get()] { DeleteFactory(raw_factory_ptr); });
   // Any destruction of "this" is also posted over to shared_fidl_thread(), and
   // will run after the work posted here runs.
   //
@@ -36,15 +42,16 @@ void DeviceFidl::ConnectChannelBoundCodecFactory(zx::channel request) {
   // factories_ only being touched from that thread, and secondarily to avoid
   // taking a dependency on Bind() working from a different thread (both in
   // Bind() and in DeviceFidl code).
-  device_->driver()->PostToSharedFidl(
-      [this, factory = std::move(factory), server_endpoint = std::move(request)]() mutable {
-        ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
-        LocalCodecFactory* raw_factory_ptr = factory.get();
-        auto insert_result = factories_.insert(std::make_pair(raw_factory_ptr, std::move(factory)));
-        // insert success
-        ZX_DEBUG_ASSERT(insert_result.second);
-        insert_result.first->second->Bind(std::move(server_endpoint));
-      });
+  closure_queue_.Enqueue([this, server_endpoint = std::move(request)]() mutable {
+    ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
+    auto factory = std::make_unique<LocalCodecFactory>(device_);
+    LocalCodecFactory* raw_factory_ptr = factory.get();
+    factory->SetErrorHandler([this, raw_factory_ptr] { DeleteFactory(raw_factory_ptr); });
+    auto insert_result = factories_.insert(std::make_pair(raw_factory_ptr, std::move(factory)));
+    // insert success
+    ZX_DEBUG_ASSERT(insert_result.second);
+    insert_result.first->second->Bind(std::move(server_endpoint));
+  });
 }
 
 void DeviceFidl::BindCodecImpl(std::unique_ptr<CodecImpl> codec) {

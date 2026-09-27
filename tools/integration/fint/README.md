@@ -110,8 +110,8 @@ given build configuration and don't change between builds.
 Most of the `static.proto` fields correspond directly to specific GN arguments,
 such as `base_packages`, or to GN files to include (for example, `board`
 is a path to a file under `//boards` to import in the args passed to `gn gen`).
-Other fields like `include_host_tests` determine which Ninja targets `fint
-build` should build.
+Other fields like `include_default_ninja_target` determine which Ninja targets
+`fint build` should build.
 
 The `static` input is sometimes referred to as just the "fint parameters" or
 "fint params" since it's the more prominent of the two input files: it's the

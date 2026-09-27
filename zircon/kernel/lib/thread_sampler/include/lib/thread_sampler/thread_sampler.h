@@ -9,6 +9,7 @@
 
 #include <arch.h>
 #include <lib/zx/result.h>
+#include <zircon/compiler.h>
 #include <zircon/errors.h>
 #include <zircon/syscalls/sampler.h>
 #include <zircon/types.h>
@@ -178,8 +179,13 @@ class ThreadSampler {
 
   // Given information about a thread and its registers, walk its userstack and write out a sample
   // if sampling is enabled.
-  zx::result<> SampleThread(zx_koid_t pid, zx_koid_t tid, GeneralRegsSource source,
-                            const void* gregs, uint64_t session_id)
+  //
+  // Must stay out of line: this puts a 512 byte backtrace buffer on the kernel stack (see the
+  // definition), and it is reached only when a sampling session is running.  Inlined into a caller
+  // on the exception path, that buffer would be charged to every exception's frame rather than to
+  // this shallow-stack call site.
+  __NO_INLINE zx::result<> SampleThread(zx_koid_t pid, zx_koid_t tid, GeneralRegsSource source,
+                                        const void* gregs, uint64_t session_id)
       TA_EXCL(ThreadSamplerLock::Get());
 
  private:

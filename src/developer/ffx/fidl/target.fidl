@@ -38,6 +38,9 @@ type TargetAddrInfo = strict union {
     1: ip TargetIp;
     2: ip_port TargetIpPort;
     3: vsock TargetVSockCtx;
+    /// A UART serial connection endpoint, represented by a TTY device path
+    /// (e.g. "/dev/ttyUSB0") or a UNIX domain socket path, up to 1024 bytes.
+    4: uart string:1024;
 };
 
 // TODO(awdavies): Add more target states once they're more well defined.

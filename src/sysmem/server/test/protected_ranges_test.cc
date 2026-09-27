@@ -207,6 +207,7 @@ class ProtectedRangesTest : public ::testing::Test,
   std::mt19937_64 prng_{seed_};
 
   bool sim_fail_ = true;
+  std::vector<TestRange> zeroed_calls_;
 };
 
 void ProtectedRangesTest::CheckInterOpInvariants() {
@@ -507,6 +508,7 @@ void ProtectedRangesTest::ZeroProtectedSubRange(bool is_covering_range_explicit,
                                                 const protected_ranges::Range& range) {
   CheckIntraOpInvariants();
   TestRange test_range = ConvertRangeFrom(range);
+  zeroed_calls_.push_back(test_range);
   auto covering_range_lower = lower_ranges_.upper_bound(
       TestRange::BeginLength(test_range.begin(), std::numeric_limits<uint64_t>::max()));
   if (covering_range_lower != lower_ranges_.begin()) {
@@ -813,4 +815,56 @@ TEST_F(ProtectedRangesTest, Repro105541) {
   CheckInterOpInvariants();
 
   // TearDown() will call CheckInvariants(); CheckLeaks().
+}
+
+TEST_F(ProtectedRangesTest, MergeZeroesGap) {
+  sim_fail_ = false;
+  CheckInterOpInvariants();
+
+  // Set max range count to 3, which makes max_logical_range_count = 2 (since is_mod_available_ is
+  // true).
+  SetMaxRangeCount(3);
+  protected_ranges_.reset();
+  protected_ranges_.emplace(this, /*disable_dynamic=*/false);
+
+  // Clear zeroed calls
+  zeroed_calls_.clear();
+
+  // Add range 1 at [4 * range_granularity_, range_granularity_) (highest address)
+  Add(TestRange::BeginLength(4 * range_granularity_, range_granularity_));
+  EXPECT_EQ(zeroed_calls_.size(), 1u);
+  EXPECT_EQ(zeroed_calls_[0].begin(), 4 * range_granularity_);
+  EXPECT_EQ(zeroed_calls_[0].length(), range_granularity_);
+
+  // Add range 2 at [2 * range_granularity_, range_granularity_)
+  Add(TestRange::BeginLength(2 * range_granularity_, range_granularity_));
+  EXPECT_EQ(zeroed_calls_.size(), 2u);
+  EXPECT_EQ(zeroed_calls_[1].begin(), 2 * range_granularity_);
+  EXPECT_EQ(zeroed_calls_[1].length(), range_granularity_);
+
+  zeroed_calls_.clear();
+
+  // Add range 3 at [0, range_granularity_) (lowest address)
+  // This will exceed max_logical_range_count (2), triggering DoOpMergeRanges for one of the gaps.
+  Add(TestRange::BeginLength(0, range_granularity_));
+
+  // Verify that at least one of the gaps ([range_granularity_, range_granularity_) or
+  // [3 * range_granularity_, range_granularity_)) has been zeroed due to merge.
+  bool gap1_zeroed = false;
+  bool gap2_zeroed = false;
+  for (const auto& call : zeroed_calls_) {
+    if (call.begin() == range_granularity_ && call.length() == range_granularity_) {
+      gap1_zeroed = true;
+    }
+    if (call.begin() == 3 * range_granularity_ && call.length() == range_granularity_) {
+      gap2_zeroed = true;
+    }
+  }
+  EXPECT_TRUE(gap1_zeroed || gap2_zeroed);
+
+  CheckInterOpInvariants();
+  while (!upper_ranges_.empty()) {
+    RemoveRandomRange();
+  }
+  CheckInterOpInvariants();
 }

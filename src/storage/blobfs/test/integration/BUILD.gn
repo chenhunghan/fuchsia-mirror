@@ -150,6 +150,7 @@ test("blobfs_component_runner_test") {
     "//src/storage/blobfs",
     "//src/storage/blobfs/test:test_utils",
     "//src/storage/lib/block_client/cpp:fake_device",
+    "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_cpp",
     "//zircon/system/ulib/id_allocator",
     "//zircon/system/ulib/zx",
   ]

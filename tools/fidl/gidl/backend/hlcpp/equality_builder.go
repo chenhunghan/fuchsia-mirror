@@ -48,6 +48,12 @@ func (b *equalityCheckBuilder) createAndAssignVar(val string) string {
 	return varName
 }
 
+func (b *equalityCheckBuilder) createAndAssignConstVar(val string) string {
+	varName := b.varSeq.next()
+	b.write("[[maybe_unused]] const auto& %s = %s;\n", varName, val)
+	return varName
+}
+
 func (b *equalityCheckBuilder) construct(typename string, fmtStr string, args ...any) string {
 	return fmt.Sprintf("%s(%s)", typename, fmt.Sprintf(fmtStr, args...))
 }
@@ -245,6 +251,23 @@ func (b *equalityCheckBuilder) visitList(actualExpr string, expectedValue []ir.V
 	}
 	if _, ok := decl.(*mixer.VectorDecl); ok {
 		b.assertEquals(fmt.Sprintf("%s.size()", actualVar), fmt.Sprintf("%d", len(expectedValue)))
+	}
+	if elemDecl, ok := decl.Elem().(mixer.PrimitiveDeclaration); ok && elemDecl.Subtype() != fidlgen.Bool && len(expectedValue) > 0 {
+		b.write("{\n")
+		valueBuilder := newCppValueBuilder()
+		valueVar := valueBuilder.visit(expectedValue, decl)
+		b.write(valueBuilder.String())
+		expectedVar := b.createAndAssignConstVar(valueVar)
+		expectedAccess := expectedVar
+		if decl.IsNullable() {
+			expectedAccess = fmt.Sprintf("%s.value()", expectedVar)
+		}
+		b.write(`for (size_t i = 0; i < %[1]s.size(); ++i) {
+	ASSERT_EQ(%[1]s[i], %[2]s[i]);
+}
+}
+`, actualVar, expectedAccess)
+		return
 	}
 	for i, item := range expectedValue {
 		lhs := fmt.Sprintf("%s[%d]", actualVar, i)

@@ -15,7 +15,7 @@ use super::{
     rust_power_get_cpu_state, rust_power_opp_get, rust_power_opp_get_domain_count,
     rust_power_opp_set, rust_power_reboot, rust_power_shutdown,
 };
-use crate::console_rust::console::{CMD_AVAIL_ALWAYS, CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_ALWAYS, CMD_AVAIL_NORMAL, CmdArgs, static_command};
 use core::ffi::{CStr, c_int};
 use debug::dprintf;
 use zx_status::Status;

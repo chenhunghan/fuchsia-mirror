@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use ffx_symbolize::MappingDetails;
+use ffx_symbolize::{AddressType, MappingDetails};
 use std::collections::HashMap;
 use std::fmt;
 use thiserror::Error;
@@ -37,8 +37,22 @@ pub struct ModuleWithMmapDetails {
     pub mmaps: Vec<MappingDetails>,
 }
 
+/// Details of an individual backtrace frame, including its instruction address
+/// and address classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BacktraceDetails(pub u64);
+pub struct BacktraceDetails {
+    /// Program counter address.
+    pub address: u64,
+    /// Classification of the address (e.g. exact or return address).
+    pub address_type: AddressType,
+}
+
+impl BacktraceDetails {
+    /// Creates a new `BacktraceDetails` with the given address and type.
+    pub fn new(address: u64, address_type: AddressType) -> Self {
+        Self { address, address_type }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawSample {
@@ -88,4 +102,24 @@ pub enum SymbolizeError {
 
     #[error("Invalid mapping record.")]
     InvalidMappingRecord,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backtrace_details_construction() {
+        let bt_exact = BacktraceDetails::new(0x1000, AddressType::Exact);
+        assert_eq!(bt_exact.address, 0x1000);
+        assert_eq!(bt_exact.address_type, AddressType::Exact);
+
+        let bt_return = BacktraceDetails::new(0x2000, AddressType::Return);
+        assert_eq!(bt_return.address, 0x2000);
+        assert_eq!(bt_return.address_type, AddressType::Return);
+
+        let bt_unknown = BacktraceDetails::new(0x3000, AddressType::Unknown);
+        assert_eq!(bt_unknown.address, 0x3000);
+        assert_eq!(bt_unknown.address_type, AddressType::Unknown);
+    }
 }

@@ -26,12 +26,12 @@ use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use futures::{FutureExt as _, SinkExt as _, StreamExt as _, TryFutureExt as _};
 use heck::ToSnakeCase as _;
 use log::info;
-use net_declare::fidl_subnet;
+use net_declare::{fidl_ip, fidl_subnet};
 use net_types::ip::{GenericOverIp, Ip, IpVersion, IpVersionMarker, Ipv4, Ipv6};
 use netemul::{RealmTcpListener as _, RealmUdpSocket as _};
 use netstack_testing_common::ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
-use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestRealmExt as _, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 use test_case::test_case;
 
@@ -977,6 +977,7 @@ pub(crate) struct Subnets {
 /// Ports expected for traffic arriving on a given interface. `src` is the
 /// expected source port for incoming traffic, and `dst` is the expected
 /// destination port for incoming traffic.
+#[derive(Clone, Copy)]
 pub(crate) struct Ports {
     pub src: u16,
     pub dst: u16,
@@ -994,6 +995,12 @@ pub(crate) trait TestIpExt: ping::FuchsiaIpExt + packet_formats::ip::IpExt {
     /// defined for the purpose of exercising inverse subnet and address range
     /// match.
     const OTHER_SUBNET: fnet::Subnet;
+    /// A multicast IP address.
+    const MULTICAST_ADDR: fnet::IpAddress;
+    /// A multicast subnet.
+    const MULTICAST_SUBNET_WITH_PREFIX: fnet::Subnet;
+    /// Joins the multicast group defined by [`Self::MULTICAST_ADDR`].
+    fn join_multicast(socket: &fasync::net::UdpSocket, iface_addr: fnet::IpAddress, iface_id: u32);
 }
 
 impl TestIpExt for Ipv4 {
@@ -1001,6 +1008,20 @@ impl TestIpExt for Ipv4 {
     const SERVER_ADDR_WITH_PREFIX: fnet::Subnet = fidl_subnet!("192.0.2.2/24");
     const OTHER_ADDR_WITH_PREFIX: fnet::Subnet = fidl_subnet!("192.0.2.3/24");
     const OTHER_SUBNET: fnet::Subnet = fidl_subnet!("192.0.3.0/24");
+    const MULTICAST_ADDR: fnet::IpAddress = fidl_ip!("224.1.2.3");
+    const MULTICAST_SUBNET_WITH_PREFIX: fnet::Subnet = fidl_subnet!("224.0.0.0/4");
+
+    fn join_multicast(
+        socket: &fasync::net::UdpSocket,
+        iface_addr: fnet::IpAddress,
+        _iface_id: u32,
+    ) {
+        let fnet_ext::IpAddress(multicast_ip) = Self::MULTICAST_ADDR.into();
+        let std::net::IpAddr::V4(multicast_v4) = multicast_ip else { unreachable!() };
+        let fnet_ext::IpAddress(iface_ip) = iface_addr.into();
+        let std::net::IpAddr::V4(iface_v4) = iface_ip else { unreachable!() };
+        socket.as_ref().join_multicast_v4(&multicast_v4, &iface_v4).expect("join multicast v4");
+    }
 }
 
 impl TestIpExt for Ipv6 {
@@ -1008,6 +1029,18 @@ impl TestIpExt for Ipv6 {
     const SERVER_ADDR_WITH_PREFIX: fnet::Subnet = fidl_subnet!("2001:db8::2/64");
     const OTHER_ADDR_WITH_PREFIX: fnet::Subnet = fidl_subnet!("2001:db8::3/64");
     const OTHER_SUBNET: fnet::Subnet = fidl_subnet!("2001:db81::/64");
+    const MULTICAST_ADDR: fnet::IpAddress = fidl_ip!("ff0e::1");
+    const MULTICAST_SUBNET_WITH_PREFIX: fnet::Subnet = fidl_subnet!("ff00::/8");
+
+    fn join_multicast(
+        socket: &fasync::net::UdpSocket,
+        _iface_addr: fnet::IpAddress,
+        iface_id: u32,
+    ) {
+        let fnet_ext::IpAddress(multicast_ip) = Self::MULTICAST_ADDR.into();
+        let std::net::IpAddr::V6(multicast_v6) = multicast_ip else { unreachable!() };
+        socket.as_ref().join_multicast_v6(&multicast_v6, iface_id).expect("join multicast v6");
+    }
 }
 
 pub(crate) struct TestNet<'a> {
@@ -2528,4 +2561,253 @@ async fn inverted_ip_matcher_matches_other_ip_version<I: TestIpExt>(name: &str) 
             },
         )
         .await;
+}
+
+#[netstack_test]
+#[variant(I, Ip)]
+#[test_case(IpHook::LocalEgress; "local_egress")]
+#[test_case(IpHook::Egress; "egress")]
+#[test_case(IpHook::Ingress; "ingress")]
+#[test_case(IpHook::LocalIngress; "local_ingress")]
+async fn multicast_loopback_filter<I: TestIpExt>(name: &str, hook: IpHook) {
+    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
+    let network = sandbox.create_network("net").await.expect("create network");
+    let _packet_capture = network.start_capture(name).await.expect("starting packet capture");
+
+    let mut net =
+        TestNet::new::<I>(&sandbox, &network, name, Some(hook), None /* nat_hook */).await;
+
+    net.client
+        .interface
+        .add_subnet_route(I::MULTICAST_SUBNET_WITH_PREFIX)
+        .await
+        .expect("add client multicast route");
+    net.server
+        .interface
+        .add_subnet_route(I::MULTICAST_SUBNET_WITH_PREFIX)
+        .await
+        .expect("add server multicast route");
+
+    let loopback_id = net
+        .client
+        .realm
+        .loopback_properties()
+        .await
+        .expect("get loopback properties")
+        .expect("loopback properties should exist")
+        .id
+        .get();
+    let loopback_ifindex = u32::try_from(loopback_id).unwrap();
+
+    let fnet_ext::IpAddress(multicast_ip) = I::MULTICAST_ADDR.into();
+    let unspecified_ip = match I::VERSION {
+        IpVersion::V4 => std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        IpVersion::V6 => std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+    };
+
+    let server_sock = fasync::net::UdpSocket::bind_in_realm(
+        &net.server.realm,
+        std::net::SocketAddr::new(unspecified_ip, 0),
+    )
+    .await
+    .expect("bind server socket");
+    I::join_multicast(
+        &server_sock,
+        I::SERVER_ADDR_WITH_PREFIX.addr,
+        u32::try_from(net.server.interface.id()).unwrap(),
+    );
+    let server_port = server_sock.local_addr().expect("get server addr").port();
+    let multicast_addr = std::net::SocketAddr::new(multicast_ip, server_port);
+
+    let client_recv_sock = fasync::net::UdpSocket::bind_in_realm(
+        &net.client.realm,
+        std::net::SocketAddr::new(unspecified_ip, server_port),
+    )
+    .await
+    .expect("bind client recv socket");
+    I::join_multicast(
+        &client_recv_sock,
+        I::CLIENT_ADDR_WITH_PREFIX.addr,
+        u32::try_from(net.client.interface.id()).unwrap(),
+    );
+
+    let client_options = fposix_socket::SocketCreationOptions {
+        marks: Some(fidl_fuchsia_net::Marks {
+            mark_1: Some(CLIENT_SOCKET_MARK),
+            mark_2: Some(CLIENT_UID),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let client_sock = fasync::net::UdpSocket::bind_in_realm_with_options(
+        &net.client.realm,
+        std::net::SocketAddr::new(unspecified_ip, 0),
+        client_options,
+    )
+    .await
+    .expect("bind client socket");
+    let client_port = client_sock.local_addr().expect("get client addr").port();
+    let client_socket_cookie = client_sock.cookie();
+
+    let mut buf = [0u8; 1024];
+
+    // 1. Verify packet is delivered with no filtering rules.
+    const HELLO_PAYLOAD: &[u8] = b"hello multicast";
+    let _ = client_sock.send_to(HELLO_PAYLOAD, multicast_addr).await.expect("send to multicast");
+    let (received_len, _from) = server_sock.recv_from(&mut buf).await.expect("recv from multicast");
+    assert_eq!(&buf[..received_len], HELLO_PAYLOAD);
+    let (received_len, _from) =
+        client_recv_sock.recv_from(&mut buf).await.expect("recv loopback multicast");
+    assert_eq!(&buf[..received_len], HELLO_PAYLOAD);
+
+    // 2. Install Accept rule with EbpfMatcher on traffic.
+    let matcher = EbpfMatcher::new();
+    let ports = Ports { src: client_port, dst: server_port };
+    let matcher_state = match hook {
+        IpHook::LocalEgress | IpHook::Egress => {
+            net.client
+                .install_rule_for_outgoing_traffic::<I, _>(
+                    LOW_RULE_PRIORITY,
+                    &matcher,
+                    ports,
+                    Action::Accept,
+                )
+                .await
+        }
+        IpHook::Ingress | IpHook::LocalIngress => {
+            net.client
+                .install_rule_for_incoming_traffic::<I, _>(
+                    LOW_RULE_PRIORITY,
+                    &matcher,
+                    ports,
+                    Action::Accept,
+                )
+                .await
+        }
+        IpHook::Forwarding => unreachable!(),
+    };
+
+    let _ = client_sock.send_to(HELLO_PAYLOAD, multicast_addr).await.expect("send to multicast");
+    let (received_len, _from) = server_sock.recv_from(&mut buf).await.expect("recv from multicast");
+    assert_eq!(&buf[..received_len], HELLO_PAYLOAD);
+    let (received_len, _from) =
+        client_recv_sock.recv_from(&mut buf).await.expect("recv loopback multicast");
+    assert_eq!(&buf[..received_len], HELLO_PAYLOAD);
+
+    // For LocalEgress, the hook runs once on the outgoing interface before
+    // device routing. For Egress, the outgoing multicast packet is sent to both
+    // the external interface and the loopback interface (for local delivery);
+    // the loopback packet is processed last, so the eBPF program records the
+    // loopback interface ID with preserved socket metadata. For Ingress and
+    // LocalIngress, the looped-back packet is delivered with the ingress
+    // interface attributed to the outgoing multicast interface
+    // (net.client.interface.id()).
+    let expected_ifindex = match hook {
+        IpHook::LocalEgress | IpHook::Ingress | IpHook::LocalIngress => {
+            u32::try_from(net.client.interface.id()).unwrap()
+        }
+        IpHook::Egress => loopback_ifindex,
+        IpHook::Forwarding => unreachable!(),
+    };
+    // When a packet traverses the loopback device, SO_MARK is preserved while
+    // original socket information (UID and socket cookie) is not retained
+    // across the device layer. On Ingress and LocalIngress, early demux does
+    // not associate multicast packets with a single receiving socket, so uid is
+    // UNKNOWN_UID and cookie is 0.
+    let (expected_uid, expected_cookie) = match hook {
+        IpHook::LocalEgress | IpHook::Egress => (CLIENT_UID, client_socket_cookie),
+        IpHook::Ingress | IpHook::LocalIngress => (UNKNOWN_UID, 0),
+        IpHook::Forwarding => unreachable!(),
+    };
+
+    matcher_state.verify_matched_with_ifindex(
+        expected_ifindex,
+        I::VERSION,
+        CLIENT_SOCKET_MARK,
+        expected_uid,
+        expected_cookie,
+    );
+
+    // 3. Install Drop rule with EbpfMatcher on traffic.
+    let matcher_state = match hook {
+        IpHook::LocalEgress | IpHook::Egress => {
+            net.client
+                .install_rule_for_outgoing_traffic::<I, _>(
+                    HIGH_RULE_PRIORITY,
+                    &matcher,
+                    ports,
+                    Action::Drop,
+                )
+                .await
+        }
+        IpHook::Ingress | IpHook::LocalIngress => {
+            net.client
+                .install_rule_for_incoming_traffic::<I, _>(
+                    HIGH_RULE_PRIORITY,
+                    &matcher,
+                    ports,
+                    Action::Drop,
+                )
+                .await
+        }
+        IpHook::Forwarding => unreachable!(),
+    };
+
+    let _ = client_sock.send_to(HELLO_PAYLOAD, multicast_addr).await.expect("send to multicast");
+    match hook {
+        IpHook::LocalEgress | IpHook::Egress => {
+            // Outgoing drop blocks external multicast delivery as well.
+            match server_sock
+                .recv_from(&mut buf[..])
+                .map_ok(Some)
+                .on_timeout(NEGATIVE_CHECK_TIMEOUT.after_now(), || Ok(None))
+                .await
+                .expect("call recvfrom")
+            {
+                Some((bytes, from)) => {
+                    panic!(
+                        "server unexpectedly received packet {:?} from {:?}",
+                        &buf[..bytes],
+                        from
+                    )
+                }
+                None => {}
+            }
+        }
+        IpHook::Ingress | IpHook::LocalIngress => {
+            // Incoming drop on client only blocks the looped-back packet; server still receives it.
+            let (received_len, _from) =
+                server_sock.recv_from(&mut buf).await.expect("recv from multicast");
+            assert_eq!(&buf[..received_len], HELLO_PAYLOAD);
+        }
+        IpHook::Forwarding => unreachable!(),
+    }
+
+    // Verify looped-back packet is dropped on client side for all hooks.
+    if let Some((bytes, from)) = client_recv_sock
+        .recv_from(&mut buf[..])
+        .map_ok(Some)
+        .on_timeout(NEGATIVE_CHECK_TIMEOUT.after_now(), || Ok(None))
+        .await
+        .expect("call recvfrom")
+    {
+        panic!("client unexpectedly received packet {:?} from {:?}", &buf[..bytes], from)
+    }
+
+    matcher_state.verify_maybe_matched_with_ifindex(
+        expected_ifindex,
+        I::VERSION,
+        CLIENT_SOCKET_MARK,
+        expected_uid,
+        Some(expected_cookie),
+    );
+
+    // 4. Clear filter, verify connectivity is restored.
+    net.client.clear_filter().await;
+    let _ = client_sock.send_to(HELLO_PAYLOAD, multicast_addr).await.expect("send to multicast");
+    let (received_len, _from) = server_sock.recv_from(&mut buf).await.expect("recv from multicast");
+    assert_eq!(&buf[..received_len], HELLO_PAYLOAD);
+    let (received_len, _from) =
+        client_recv_sock.recv_from(&mut buf).await.expect("recv loopback multicast");
+    assert_eq!(&buf[..received_len], HELLO_PAYLOAD);
 }

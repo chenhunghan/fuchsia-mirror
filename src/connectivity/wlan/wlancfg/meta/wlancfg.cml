@@ -56,6 +56,13 @@
             ],
         },
         {
+            protocol: [
+                "fuchsia.power.broker.Topology",
+                "fuchsia.power.system.ActivityGovernor",
+            ],
+            availability: "optional",
+        },
+        {
             protocol: [ "fuchsia.tracing.provider.Registry" ],
 
             // Trace manager may be excluded from builds where tracing is not

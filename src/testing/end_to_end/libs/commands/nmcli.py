@@ -72,10 +72,17 @@ class LinuxNmcliCommand(LinuxCommand):
         )
         connections: list[Connection] = []
         for line in res.stdout.splitlines():
-            tokens = line.decode("utf-8").split(":", 3)
+            line_str = line.decode("utf-8").strip()
+            if not line_str:
+                continue
+            # Parse from the right because connection names can contain colons
+            # (e.g. 'Wired connection: 1'). Also unescape any escaped colons.
+            tokens = line_str.rsplit(":", 3)
+            if len(tokens) != 4:
+                continue
             connections.append(
                 Connection(
-                    name=tokens[0],
+                    name=tokens[0].replace(r"\:", ":"),
                     uuid=tokens[1],
                     type=tokens[2],
                     device=tokens[3],

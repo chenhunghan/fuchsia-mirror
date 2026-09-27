@@ -263,12 +263,12 @@ mod tests {
         drop(observer);
 
         // Verify request event was sent
-        let req_event = rx.try_next().unwrap().unwrap();
+        let req_event = rx.try_recv().unwrap();
         assert_eq!(req_event.setting, "TestSetting");
         assert!(matches!(req_event.direction, Direction::Request(_)));
 
         // Verify response event was sent on drop with Cancelled status
-        let resp_event = rx.try_next().unwrap().unwrap();
+        let resp_event = rx.try_recv().unwrap();
         assert_eq!(resp_event.setting, "TestSetting");
         if let Direction::Response(msg, status) = resp_event.direction {
             assert_eq!(msg, "Cancelled");

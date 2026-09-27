@@ -10,7 +10,7 @@ import random
 import tempfile
 
 import fuchsia_base_test
-from mobly import signals, test_runner
+from mobly import test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -39,13 +39,9 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def setup_class(self) -> None:
         await super().setup_class()
-        self._adb_supported = await self.dut.adb.is_supported()
-        if not self._adb_supported:
-            _LOGGER.info("ADB is not supported at runtime on this device")
-            return
-
-        self._serial = self.dut.serial_number
-        _LOGGER.info(f"Device serial number: {self._serial}")
+        # Ensure ADB is supported and enabled on this device before starting the test
+        # (raises NotSupportedError or NotEnabledError otherwise).
+        _ = self.dut.adb
 
         # Seed the random generator for reproducibility.
         # Allow seeding via user_params.
@@ -68,18 +64,13 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
         # Check if logcat is supported
         try:
-            await self.dut.adb.run(["logcat", "-d"])
+            self.dut.adb.run(["logcat", "-d"])
             self._commands.append(self._cmd_logcat)
             _LOGGER.info("ADB logcat is supported")
         except Exception as e:
             _LOGGER.warning(
                 f"ADB logcat is not supported: {e}. Skipping in random test."
             )
-
-    async def setup_test(self) -> None:
-        await super().setup_test()
-        if not self._adb_supported:
-            raise signals.TestSkip("ADB is not supported in this build")
 
     async def _test_logic(self, iteration: int) -> None:
         """Selects and runs a random ADB command."""
@@ -98,14 +89,14 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def _cmd_shell_echo(self) -> None:
         _LOGGER.info("Running: adb shell echo")
-        output = await self.dut.adb.run(["shell", "echo", "hello"])
+        output = self.dut.adb.run(["shell", "echo", "hello"])
         if "hello" not in output:
             raise Exception(f"Unexpected output: {output}")
 
     async def _cmd_reboot(self) -> None:
         _LOGGER.info("Running: adb reboot")
         self.dut.ffx.notify_intentional_disconnect()
-        await self.dut.adb.run(["reboot"])
+        self.dut.adb.run(["reboot"])
         _LOGGER.info("Waiting for device to go offline...")
         await asyncio.to_thread(self.dut.wait_for_offline)
         _LOGGER.info("Waiting for device to go online...")
@@ -115,7 +106,7 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def _cmd_root_unroot_toggle(self) -> None:
         _LOGGER.info("Running: adb root/unroot toggle")
-        output = await self.dut.adb.run(["shell", "id"])
+        output = self.dut.adb.run(["shell", "id"])
         if "uid=0(root)" in output:
             await self._unroot()
         else:
@@ -123,9 +114,8 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def _root(self) -> None:
         _LOGGER.info("Switching to root")
-        await self.dut.adb.run(["root"])
-        await self.dut.adb.run(["wait-for-device"])
-        output = await self.dut.adb.run(["shell", "id"])
+        self.dut.adb.root()
+        output = self.dut.adb.run(["shell", "id"])
         if "uid=0(root)" not in output:
             _LOGGER.warning(
                 f"adb root did not switch to root user. output: {output}"
@@ -133,9 +123,8 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def _unroot(self) -> None:
         _LOGGER.info("Switching to unroot")
-        await self.dut.adb.run(["unroot"])
-        await self.dut.adb.run(["wait-for-device"])
-        output = await self.dut.adb.run(["shell", "id"])
+        self.dut.adb.unroot()
+        output = self.dut.adb.run(["shell", "id"])
         if "uid=2000(shell)" not in output:
             raise Exception(f"Expected shell user (uid=2000) but got: {output}")
 
@@ -150,13 +139,13 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
                 f.write(content)
 
             try:
-                await self.dut.adb.run(["push", local_file, remote_file])
+                self.dut.adb.run(["push", local_file, remote_file])
 
                 # To test pull, we want to make sure we are pulling to a clean state.
                 # We can remove the local file first.
                 os.remove(local_file)
 
-                await self.dut.adb.run(["pull", remote_file, local_file])
+                self.dut.adb.run(["pull", remote_file, local_file])
                 with open(local_file, "r") as f_in:
                     pulled_content = f_in.read()
 
@@ -168,13 +157,13 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
                 # We only need to clean up remote file here.
                 # Local files in tmpdir are automatically cleaned up when exiting the 'with' block.
                 try:
-                    await self.dut.adb.run(["shell", "rm", "-f", remote_file])
+                    self.dut.adb.run(["shell", "rm", "-f", remote_file])
                 except Exception as e:
                     _LOGGER.warning(f"Failed to clean up remote file: {e}")
 
     async def _cmd_logcat(self) -> None:
         _LOGGER.info("Running: adb logcat -d")
-        output = await self.dut.adb.run(["logcat", "-d"])
+        output = self.dut.adb.run(["logcat", "-d"])
         # We just verify it returns something (or at least doesn't error)
         _LOGGER.info(
             f"Logcat returned {len(output)} chars of output (preview: {output[:100]}...)"

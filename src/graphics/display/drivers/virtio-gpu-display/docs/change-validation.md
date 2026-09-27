@@ -21,8 +21,9 @@ references one of the procedures defined in the following section.
 6. Take a screenshot. Check that it contains four colored squares, which may
    overlap.
 
-7. Check for errors and inconsistencies in the driver's output in the serial
-   logs.
+7. Check for errors and inconsistencies in the driver's own output. The driver
+   reports its activity below the default severity threshold, so this requires
+   the procedure for collecting the display driver's logs.
 
 8. Check for ERROR entries (software implementation errors) in the serial logs.
 
@@ -99,6 +100,52 @@ Tool dependencies:
   if the ffx connection to the emulator does not work.
 
 * `ffx log dump` requires a working ffx connection.
+
+### Collecting the display driver's logs
+
+The driver traces its activity, such as the FIDL calls it serves, at the DEBUG
+level. DEBUG is below the default severity threshold, so these entries are
+missing from the serial logs and from `ffx log dump` until the driver's minimum
+severity is lowered.
+
+Steps:
+
+1. Start streaming the driver's logs:
+   `ffx log --set-severity "bootstrap/**#DEBUG" --force-set-severity --tag
+   virtio-gpu-display-rust --severity debug`
+
+2. Reproduce the behavior under investigation while the command above runs.
+
+`ffx log` command arguments breakdown:
+
+* `--tag virtio-gpu-display-rust` selects the entries logged by the Rust
+  driver. The C++ driver uses the `virtio-gpu-display` tag.
+
+* `--set-severity` lowers the minimum severity emitted by the components
+  matching a selector; `--force-set-severity` passes the selector through
+  without filtering
+
+* `--severity debug` lowers the severity threshold applied to the entries that
+  `ffx log` displays
+
+Lowering the driver's minimum severity also routes the DEBUG entries to the
+serial log, so `grep --context=3 "virtio-gpu-display-rust"
+local/logs.qemu.serial` reports them after the steps above.
+
+Tool dependencies:
+
+* The `--set-severity` selector must cover the driver's component moniker. The
+  moniker names the PCI device that the driver binds to, and therefore depends
+  on the emulated PCI topology. `ffx component list | grep virtio-gpu-display`
+  prints it.
+
+* The driver's moniker is easily confused with the Display Coordinator's
+  moniker. The Display Coordinator binds to the node published by the display
+  driver, so its moniker extends the display driver's moniker with a
+  `virtio-gpu-display` segment. For example, a display driver at
+  `bootstrap/boot-drivers:PCI0.bus.00_04_0.00_04_0` is paired with a Display
+  Coordinator at
+  `bootstrap/base-drivers:PCI0.bus.00_04_0.00_04_0.virtio-gpu-display`.
 
 ### Obtaining a screenshot from the emulator
 

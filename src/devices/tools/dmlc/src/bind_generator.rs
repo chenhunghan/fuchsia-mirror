@@ -416,12 +416,14 @@ fn get_trigger(alt: &DmlBind) -> Result<Option<TriggerKind>, anyhow::Error> {
             Ok(None)
         }
     } else if let Some(rules) = &alt.rules {
-        if let Some(name_val) = rules.get("fuchsia.NAME") {
-            if !name_val.is_object() && !name_val.is_array() {
+        let mut sorted_rules: Vec<_> = rules.iter().collect();
+        sorted_rules.sort_unstable_by_key(|&(k, _)| k);
+        for (k, v) in sorted_rules {
+            if !v.is_object() && !v.is_array() {
                 return Ok(Some(TriggerKind::Rule(
-                    "fuchsia.NAME".to_string(),
-                    name_val.clone(),
-                    format!("fuchsia.NAME == {}", format_bind_val(name_val)?),
+                    k.clone(),
+                    v.clone(),
+                    format!("{} == {}", k, format_bind_val(v)?),
                 )));
             }
         }

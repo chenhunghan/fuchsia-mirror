@@ -331,6 +331,9 @@ pub struct Stats {
 
     /// Total number of failed allocations.
     pub failed_allocations: usize,
+
+    /// Peak number of bytes requested to be allocated.
+    pub peak_bytes_requested: usize,
 }
 
 pub struct LockedStateGuard<'a> {
@@ -368,6 +371,7 @@ impl<'a> LockedStateGuard<'a> {
             allocated_blocks: self.inner_lock.heap.total_allocated_blocks(),
             deallocated_blocks: self.inner_lock.heap.total_deallocated_blocks(),
             failed_allocations: self.inner_lock.heap.failed_allocations(),
+            peak_bytes_requested: self.inner_lock.heap.peak_bytes_requested(),
         }
     }
 
@@ -436,6 +440,14 @@ impl<'a> LockedStateGuard<'a> {
         new_parent: BlockIndex,
     ) -> Result<(), Error> {
         self.inner_lock.reparent(being_reparented, new_parent)
+    }
+
+    pub fn set_name<'b>(
+        &mut self,
+        block_index: BlockIndex,
+        name: impl Into<Cow<'b, str>>,
+    ) -> Result<(), Error> {
+        self.inner_lock.set_name(block_index, name)
     }
 
     /// Free a BUFFER_VALUE block.
@@ -1326,6 +1338,43 @@ impl InnerState {
         Ok(())
     }
 
+    fn set_name<'a>(
+        &mut self,
+        block_index: BlockIndex,
+        name: impl Into<Cow<'a, str>>,
+    ) -> Result<(), Error> {
+        if block_index == BlockIndex::ROOT {
+            return Err(Error::RenameRoot);
+        }
+
+        let block = self.heap.container.block_at(block_index);
+        if !block.block_type().is_some_and(|t| t.is_any_value()) {
+            return Err(Error::InvalidBlockType(block_index, block.block_type_raw()));
+        }
+
+        // All `*_VALUE` blocks have the same `HeaderFields` layout for `value_name_index`, so
+        // casting to `Node` will work regardless of the specific underlying value type.
+        let old_name_index = block.cast_unchecked::<Node>().name_index();
+        let name = name.into();
+        if self.string_reference_block_indexes.get(&name) == Some(&old_name_index) {
+            return Ok(());
+        }
+
+        let mut txn = Txn::new(self);
+        let new_name_index = txn.intern_and_ref_string(name)?;
+
+        if old_name_index != BlockIndex::EMPTY {
+            match txn.state.heap.container.block_at(old_name_index).block_type() {
+                Some(BlockType::StringReference) => txn.release_string_ref(old_name_index)?,
+                _ => txn.state.heap.free_block(old_name_index)?,
+            }
+        }
+
+        txn.block_mut::<Node>(block_index).set_name(new_name_index);
+        txn.commit();
+        Ok(())
+    }
+
     fn create_bool<'a>(
         &mut self,
         name: impl Into<Cow<'a, str>>,
@@ -1713,6 +1762,44 @@ mod tests {
         assert_eq!(a.child_count(), 1);
         assert_eq!(b.child_count(), 1);
         assert_eq!(c.child_count(), 0);
+    }
+
+    #[fuchsia::test]
+    fn test_set_name() {
+        let core_state = get_state(4096);
+        let mut state = core_state.try_lock().expect("lock state");
+
+        assert_eq!(state.set_name(BlockIndex::ROOT, "root"), Err(Error::RenameRoot));
+
+        let node_index = state.create_node("initial_name", BlockIndex::ROOT).unwrap();
+        let node = state.get_block::<Node>(node_index);
+        let initial_name_index = node.name_index();
+        assert_eq!(state.load_string(initial_name_index).unwrap(), "initial_name");
+
+        // Passing a non-value block (like the StringReference block itself) should return
+        // InvalidBlockType.
+        assert_matches!(
+            state.set_name(initial_name_index, "invalid"),
+            Err(Error::InvalidBlockType(_, _))
+        );
+
+        // If allocation fails during set_name, it should cleanly roll back any partial allocation
+        // and leave the node's original name intact.
+        let stats_before_failure = state.stats();
+        assert!(state.set_name(node_index, "a".repeat(8192)).is_err());
+        let node = state.get_block::<Node>(node_index);
+        assert_eq!(node.name_index(), initial_name_index);
+        assert_eq!(state.load_string(initial_name_index).unwrap(), "initial_name");
+        assert_eq!(state.get_block::<StringRef>(initial_name_index).reference_count(), 1);
+        assert_eq!(
+            state.stats().allocated_blocks - state.stats().deallocated_blocks,
+            stats_before_failure.allocated_blocks - stats_before_failure.deallocated_blocks
+        );
+
+        state.set_name(node_index, "new_name").unwrap();
+        let node = state.get_block::<Node>(node_index);
+        let new_name_index = node.name_index();
+        assert_eq!(state.load_string(new_name_index).unwrap(), "new_name");
     }
 
     #[fuchsia::test]
@@ -2871,6 +2958,7 @@ mod tests {
                                      // "link-name", _block2, "test" */
                 deallocated_blocks: 0,
                 failed_allocations: 0,
+                peak_bytes_requested: 144,
             }
         )
     }

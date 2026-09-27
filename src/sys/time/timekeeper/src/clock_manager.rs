@@ -2232,7 +2232,7 @@ mod tests {
         // sample at 5s, but missed that due to connectivity. We didn't run
         // for long enough to get to a 2nd sample, so we get no signals that
         // sampling completed.
-        assert_matches!(sample_signaler_rx.try_next(), Err(_));
+        assert_matches!(sample_signaler_rx.try_recv(), Err(_));
 
         // Allow getting a sample.
         let mut get_sample_fut = pin!(async move {
@@ -2252,7 +2252,7 @@ mod tests {
         );
 
         // This time around, we got a sample.
-        assert_matches!(sample_signaler_rx.try_next(), Ok(_));
+        assert_matches!(sample_signaler_rx.try_recv(), Ok(_));
 
         Ok(())
     }
@@ -2305,7 +2305,7 @@ mod tests {
             fasync::MonotonicDuration::from_micros(1),
         );
 
-        let res = rx.try_next().unwrap().unwrap();
+        let res = rx.try_recv().unwrap();
         assert!(res.is_ok());
         // Verify clock was not started because boot reference was below threshold.
         assert_eq!(clock.get_details().unwrap().backstop, BACKSTOP_TIME);

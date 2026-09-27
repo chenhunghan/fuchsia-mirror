@@ -2,6 +2,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -12,4 +22,116 @@ exports_files(
         "meta/sockettunnel.core_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+# google_display
+
+fx_package(
+    name = "google_display",
+    package_name = "google_display",
+    components = [
+        ":google_display_component",
+    ],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component(
+    name = "google_display_component",
+    compiled_manifest = ":google_display_manifest",
+    component_name = "google_display",
+)
+
+fx_component_manifest(
+    name = "google_display_manifest",
+    component_name = "google_display",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/display.cml",
+)
+
+# sockettunnel
+
+fx_package(
+    name = "sockettunnel",
+    package_name = "sockettunnel",
+    components = [
+        ":sockettunnel_component",
+    ],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component(
+    name = "sockettunnel_component",
+    compiled_manifest = ":sockettunnel_manifest",
+    component_name = "sockettunnel",
+)
+
+fx_component_manifest(
+    name = "sockettunnel_manifest",
+    component_name = "sockettunnel",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/sockettunnel.cml",
+)
+
+# google_nanohub
+
+fx_package(
+    name = "google_nanohub",
+    package_name = "google_nanohub",
+    components = [
+        ":google_nanohub_component",
+    ],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component(
+    name = "google_nanohub_component",
+    compiled_manifest = ":google_nanohub_manifest",
+    component_name = "google_nanohub",
+)
+
+fx_component_manifest(
+    name = "google_nanohub_manifest",
+    component_name = "google_nanohub",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/nanohub.cml",
+)
+
+# google_backlight
+
+fx_package(
+    name = "google_backlight",
+    package_name = "google_backlight",
+    components = [
+        ":google_backlight_component",
+    ],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component(
+    name = "google_backlight_component",
+    compiled_manifest = ":google_backlight_manifest",
+    component_name = "google_backlight",
+)
+
+fx_component_manifest(
+    name = "google_backlight_manifest",
+    component_name = "google_backlight",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+    ],
+    manifest = "meta/backlight.cml",
 )

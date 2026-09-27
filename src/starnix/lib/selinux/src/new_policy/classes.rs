@@ -53,7 +53,9 @@ pub enum ClassDefaultRange {
     TargetLow = 4,
     TargetHigh = 5,
     TargetLowHigh = 6,
-    UnknownUsedValue = 7,
+    /// The new range is the intersection of the source and target ranges: the greatest of the
+    /// two low levels, and the least of the two high levels.
+    Glblub = 7,
 }
 
 /// Set of rules for computing default security context fields for a class.

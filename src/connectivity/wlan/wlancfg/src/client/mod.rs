@@ -924,7 +924,7 @@ mod tests {
         );
 
         // A message should be sent to telemetry.
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::StartClientConnectionsRequest);
         });
 
@@ -952,7 +952,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut serve_fut), Poll::Pending);
 
         // A message should be sent to telemetry.
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::StopClientConnectionsRequest);
         });
 

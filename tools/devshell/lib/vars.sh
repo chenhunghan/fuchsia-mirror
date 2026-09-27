@@ -130,12 +130,19 @@ readonly NINJA_DIRTY_SOURCES_FILE="ninja_dirty_sources.log"
 readonly main_build_script="${FUCHSIA_DIR}/build/scripts/main_build.py"
 
 # If ResultStore is enabled, wrap builds with ResultStore tools.
-RESULTSTORE_ENABLED=0
+CONFIG_RESULTSTORE_ENABLED="none"
 readonly fx_resultstore_config="${FX_CONFIG_DIR}/resultstore"
 if [[ -f "$fx_resultstore_config" ]]; then
   # shellcheck source=/dev/null
   source "$fx_resultstore_config"
-  # This sets RESULTSTORE_ENABLED to 0 or 1.
+  # Unify and normalize into CONFIG_RESULTSTORE_ENABLED
+  if [[ -n "${resultstore:-}" ]]; then
+    CONFIG_RESULTSTORE_ENABLED="${resultstore}"
+  elif [[ "${RESULTSTORE_ENABLED:-0}" -eq 1 ]]; then
+    CONFIG_RESULTSTORE_ENABLED="all"
+  fi
+  unset RESULTSTORE_ENABLED
+  unset resultstore
 fi
 
 date="$(date +%Y%m%d-%H%M%S)"
@@ -207,8 +214,13 @@ function fx-wait-ignoring-signals {
   local orig_trap
   orig_trap=$(trap -p INT TERM HUP)
 
+  # Run in background to get PID, allowing us to forward signals.
+  ( trap - INT TERM HUP ; exec "$@" ) &
+  local child_pid=$!
+
   local sig_count=0
-  # Acknowledge signals but stay alive while waiting.
+  # Note: We pass SIGINT/SIGTERM/SIGHUP to the handler to keep the log messages
+  # consistent (with the 'SIG' prefix), but we must handle them correctly in kill.
   function _fx_signal_acknowledgement_handler {
     local sig="$1"
     sig_count=$((sig_count + 1))
@@ -217,25 +229,49 @@ function fx-wait-ignoring-signals {
     else
       echo >&2 "[${caller_name}] Received ${sig} again (${sig_count}). Still waiting for cleanup..."
     fi
+    # Forward the signal to the child PID.
+    # Note: In non-interactive bash scripts, job control (set -m) is disabled by
+    # default, so background commands ('cmd &') run in the caller's process group
+    # rather than creating a new process group. Therefore, ${child_pid} is not a
+    # process group leader and kill "-${sig}" "-${child_pid}" would fail with
+    # ESRCH. The child command (e.g. main_build.py via SignalManagedProcess)
+    # is responsible for managing its own child processes/process groups.
+    if kill -0 "${child_pid}" 2>/dev/null; then
+      kill "-${sig}" "${child_pid}" 2>/dev/null || true
+    fi
   }
   trap '_fx_signal_acknowledgement_handler SIGINT' INT
   trap '_fx_signal_acknowledgement_handler SIGTERM' TERM
   trap '_fx_signal_acknowledgement_handler SIGHUP' HUP
 
-  # Run the command in a subshell that restores default signal dispositions.
-  # This ensures the child doesn't inherit the 'ignore' disposition,
-  # which would prevent high-level languages (Python/Go) from seeing
-  # the signal.
-  ( trap - INT TERM HUP ; exec "$@" )
-  local status=$?
+  # Wait for child to exit. We must handle signals interrupting 'wait'.
+  # We call wait at least once. If it's interrupted, we loop as long as the
+  # child is alive.
+  local status=0
+  wait "${child_pid}"
+  status=$?
+  while kill -0 "${child_pid}" 2>/dev/null; do
+    wait "${child_pid}"
+    status=$?
+  done
+
+  # Try one last time to reap, in case it exited after we were interrupted
+  # but before we checked kill -0.
+  local final_status
+  wait "${child_pid}" 2>/dev/null
+  final_status=$?
+  if [[ ${final_status} -ne 127 ]]; then
+    status=${final_status}
+  fi
 
   # Restore original traps immediately so the shell is responsive during
   # its own exit and cleanup phase.
+  trap - INT TERM HUP
   if [[ -n "$orig_trap" ]]; then
     eval "$orig_trap"
-  else
-    trap - INT TERM HUP
   fi
+
+  unset -f _fx_signal_acknowledgement_handler
 
   return "$status"
 }
@@ -279,9 +315,14 @@ function recheck-fx-build-needs-auth() {
   fx-build-dir-if-present || return 1
 
   # The ResultStore service requires authentication.
-  if [[ "${RESULTSTORE_ENABLED}" -eq 1 ]]; then
-    return 0
-  fi
+  local rs_mode="${FX_BUILD_RESULTSTORE_OVERRIDE:-${CONFIG_RESULTSTORE_ENABLED}}"
+  case "${rs_mode,,}" in
+    none|false|0|no)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 
   # This RBE settings file is created at GN gen time.
   local -r rbe_settings_file="${FUCHSIA_BUILD_DIR}/rbe_settings.json"
@@ -1210,7 +1251,7 @@ function fx-run-build-command {
     "--build-dir" "${FUCHSIA_BUILD_DIR}"
     "--out-dir" "${FUCHSIA_OUT_DIR}"
     "--rbe=$(fx-rbe-enabled && echo true || echo false)"
-    "--resultstore=${RESULTSTORE_ENABLED}"
+    "--resultstore=${FX_BUILD_RESULTSTORE_OVERRIDE:-${CONFIG_RESULTSTORE_ENABLED}}"
     "--profile=${BUILD_PROFILE_ENABLED}"
     "--tui=${TUI_ENABLED:-0}"
 
@@ -1364,10 +1405,6 @@ function fx-filter-tui {
 function fx-resultstore-write-config {
   local path="$1"
   local val="$2"
-  local enabled=0
-  if [[ "$val" != "none" ]]; then
-    enabled=1
-  fi
 
   local -r tempfile="${path}.tmp"
   mkdir -p "$(dirname "${path}")"
@@ -1380,7 +1417,6 @@ function fx-resultstore-write-config {
 #   bazel: Enable uploading only for Bazel builds.
 #   none:  Disable all ResultStore uploading.
 #
-RESULTSTORE_ENABLED=${enabled}
 resultstore=${val}
 EOF
   # Only rewrite the config file if content has changed

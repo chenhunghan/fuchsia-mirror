@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use std::collections::hash_map::{self, HashMap};
-use std::convert::Infallible as Never;
 use std::fmt::{self, Debug, Display};
 use std::num::NonZeroU64;
 use std::ops::{Deref as _, DerefMut as _};
@@ -402,7 +401,7 @@ impl TxTask {
         Self { ctx, device_id, watcher, task_state }
     }
 
-    pub(crate) async fn run(self) -> Result<Never, TxTaskError> {
+    pub(crate) async fn run(self) -> Result<!, TxTaskError> {
         let Self { ctx, device_id, watcher, task_state } = self;
         tx_task(ctx, device_id, watcher, task_state).await
     }
@@ -510,7 +509,7 @@ pub(crate) async fn tx_task(
     device_id: DeviceId<BindingsCtx>,
     mut watcher: NeedsDataWatcher,
     mut task_state: TxTaskState,
-) -> Result<Never, TxTaskError> {
+) -> Result<!, TxTaskError> {
     let mut yield_fut = futures::future::OptionFuture::default();
     let mut suspension_handler = TransmitSuspensionHandler::new(&ctx, device_id.downgrade()).await;
 

@@ -67,7 +67,7 @@ _INVALID_SUITE_FUCHSIA_PERF = json.dumps(
         },
         {
             "label": "metric_2",
-            "test_suite": "fuchsia.my.benchmark",
+            "test_suite": "fuchsia.device.invalid.benchmark",
             "unit": "ms",
             "values": [5, 6, 7, 8],
         },
@@ -622,6 +622,11 @@ class CatapultConverterTest(unittest.TestCase):
             '"invalid_test_suite_name" does not match',
             str(exception_context.exception),
         )
+        self.assertIn(
+            f'Invalid test_suite field "fuchsia.device.invalid.benchmark":'
+            ' the prefix "fuchsia.device." is reserved',
+            str(exception_context.exception),
+        )
         subprocess_check_call.assert_not_called()
 
     def test_integration_with_real_catapult_binary(self) -> None:
@@ -705,6 +710,88 @@ class CatapultConverterTest(unittest.TestCase):
                 "--integration-internal-git-commit",
                 "756a290e1a199dd47141f2d4f34eb3539b954306",
             ]
+        )
+
+    def test_multi_device_builder_remaps_test_suites(self) -> None:
+        """Test that test_suite fields are remapped for the multi-device case."""
+        subprocess_check_call: mock.Mock = mock.Mock()
+        converter: publish.CatapultConverter = (
+            self.make_catapult_converter_for_test(
+                [self._test_fuchsia_perf_json],
+                self._expected_metrics_txt,
+                env={
+                    publish.ENV_PERF_PUBLISH_MULTI_DEVICE_BUILDER: "1",
+                    publish.ENV_FUCHSIA_DEVICE_TYPE: "Intel NUC Kit NUC11TNHv5",
+                },
+                subprocess_check_call=subprocess_check_call,
+            )
+        )
+
+        converter.run()
+
+        with open(self._expected_input_path, "r") as f:
+            input_data = json.load(f)
+            self.assertEqual(
+                input_data,
+                [
+                    {
+                        "label": "metric_1",
+                        "test_suite": "fuchsia.device.nuc11.my.benchmark",
+                        "unit": "ms",
+                        "values": [3],
+                    },
+                    {
+                        "label": "metric_2",
+                        "test_suite": "fuchsia.device.nuc11.my.benchmark",
+                        "unit": "ms",
+                        "values": [7],
+                    },
+                    {
+                        "label": "metric_3",
+                        "test_suite": "fuchsia.device.nuc11.my.benchmark",
+                        "unit": "ms",
+                        "values": [11],
+                    },
+                ],
+            )
+
+    def test_multi_device_builder_raises_error_if_device_type_missing(
+        self,
+    ) -> None:
+        """Test that an error is raised if FUCHSIA_DEVICE_TYPE is missing."""
+        subprocess_check_call: mock.Mock = mock.Mock()
+        with self.assertRaises(ValueError) as exception_context:
+            self.make_catapult_converter_for_test(
+                [self._test_fuchsia_perf_json],
+                self._expected_metrics_txt,
+                env={
+                    publish.ENV_PERF_PUBLISH_MULTI_DEVICE_BUILDER: "1",
+                },
+                subprocess_check_call=subprocess_check_call,
+            )
+        self.assertIn(
+            "FUCHSIA_DEVICE_TYPE env var must be set",
+            str(exception_context.exception),
+        )
+
+    def test_multi_device_builder_raises_error_if_device_type_unknown(
+        self,
+    ) -> None:
+        """Test that an error is raised if FUCHSIA_DEVICE_TYPE is unknown."""
+        subprocess_check_call: mock.Mock = mock.Mock()
+        with self.assertRaises(ValueError) as exception_context:
+            self.make_catapult_converter_for_test(
+                [self._test_fuchsia_perf_json],
+                self._expected_metrics_txt,
+                env={
+                    publish.ENV_PERF_PUBLISH_MULTI_DEVICE_BUILDER: "1",
+                    publish.ENV_FUCHSIA_DEVICE_TYPE: "some_new_device",
+                },
+                subprocess_check_call=subprocess_check_call,
+            )
+        self.assertIn(
+            "Unknown FUCHSIA_DEVICE_TYPE",
+            str(exception_context.exception),
         )
 
     def _init_file(self, filename: str, contents: str) -> str:

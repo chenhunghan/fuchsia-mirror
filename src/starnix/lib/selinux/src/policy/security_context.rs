@@ -7,7 +7,7 @@ use super::new::{CategorySetBuilder, Context, IdSpan, MlsLevel, MlsRange};
 use super::{CategoryId, RoleId, TypeId, UserId};
 use crate::NullessByteStr;
 use crate::new_policy::NewPolicy;
-use crate::new_policy::traits::{HasName, HasPolicyId};
+use crate::new_policy::traits::{HasName, HasPolicyId, PolicyId as _};
 
 use bstr::BString;
 
@@ -35,6 +35,10 @@ impl SecurityContext {
         low_level: MlsLevel,
         high_level: Option<MlsLevel>,
     ) -> Self {
+        // A range whose high level is equal to its low level describes a single level, so it is
+        // normalized to omit the high level, ensuring that such ranges compare equal to, and are
+        // serialized identically to, the equivalent single-level range.
+        let high_level = high_level.filter(|high_level| *high_level != low_level);
         let inner = Context::new(user, role, type_, MlsRange::new(low_level, high_level));
         Self { inner }
     }
@@ -155,29 +159,42 @@ impl SecurityContext {
     pub(super) fn validate(&self, policy_index: &PolicyIndex) -> Result<(), SecurityContextError> {
         let user = policy_index.users().get_by_id(self.user()).unwrap();
 
-        // Validation of the user/role/type relationships is skipped for the special "object_r"
-        // role, which is applied by default to non-process/socket-like resources.
-        if self.role() != policy_index.object_role() {
-            // Validate that the selected role is valid for this user.
-            if !user.roles().contains(self.role()) {
-                return Err(SecurityContextError::InvalidRoleForUser {
-                    role: policy_index.roles().get_by_id(self.role()).unwrap().name().into(),
-                    user: user.name().into(),
-                });
-            }
-
-            // Validate that the selected type is valid for this role.
-            let role = policy_index.roles().get_by_id(self.role()).unwrap();
-            if !role.types().contains(self.type_()) {
-                return Err(SecurityContextError::InvalidTypeForRole {
-                    type_: policy_index.types().get_by_id(self.type_()).unwrap().name().into(),
-                    role: role.name().into(),
+        // Check that the security context's levels are internally consistent: i.e., that the
+        // high level, if any, dominates the low level. This applies to every context, including
+        // those labelled with the special "object_r" role.
+        if let Some(high_level) = self.high_level() {
+            if !high_level.dominates(self.low_level()) {
+                return Err(SecurityContextError::InvalidSecurityRange {
+                    low: self.low_level().to_string(policy_index).into(),
+                    high: high_level.to_string(policy_index).into(),
                 });
             }
         }
 
-        // Check that the security context's MLS range is valid for the user (steps 1, 2,
-        // and 3 below).
+        // Validation of the user/role/type relationships is skipped for the special "object_r"
+        // role, which is applied by default to non-process/socket-like resources.
+        if self.role() == policy_index.object_role() {
+            return Ok(());
+        }
+
+        // Validate that the selected role is valid for this user.
+        if !user.roles().contains(self.role()) {
+            return Err(SecurityContextError::InvalidRoleForUser {
+                role: policy_index.roles().get_by_id(self.role()).unwrap().name().into(),
+                user: user.name().into(),
+            });
+        }
+
+        // Validate that the selected type is valid for this role.
+        let role = policy_index.roles().get_by_id(self.role()).unwrap();
+        if !role.types().contains(self.type_()) {
+            return Err(SecurityContextError::InvalidTypeForRole {
+                type_: policy_index.types().get_by_id(self.type_()).unwrap().name().into(),
+                role: role.name().into(),
+            });
+        }
+
+        // Check that the security context's MLS range is valid for the user.
         let valid_low = user.mls_range().low();
         let valid_high = user.mls_range().high().as_ref().unwrap_or(valid_low);
 
@@ -188,24 +205,17 @@ impl SecurityContext {
                 user: user.name().into(),
             });
         }
+
+        // 2. Check that the security context's high level is in the valid range for the user.
         if let Some(high_level) = self.high_level() {
-            // 2. Check that the security context's high level is in the valid range for the user.
             if !(valid_high.dominates(high_level) && high_level.dominates(valid_low)) {
                 return Err(SecurityContextError::InvalidLevelForUser {
                     level: high_level.to_string(policy_index).into(),
                     user: user.name().into(),
                 });
             }
-
-            // 3. Check that the security context's levels are internally consistent: i.e.,
-            //    that the high level dominates the low level.
-            if !high_level.dominates(self.low_level()) {
-                return Err(SecurityContextError::InvalidSecurityRange {
-                    low: self.low_level().to_string(policy_index).into(),
-                    high: high_level.to_string(policy_index).into(),
-                });
-            }
         }
+
         Ok(())
     }
 }
@@ -294,14 +304,16 @@ pub type CategorySpan = IdSpan<CategoryId>;
 impl IdSpan<CategoryId> {
     /// Returns `Vec<u8>` describing the category, or category range.
     fn to_string(&self, policy: &NewPolicy) -> Vec<u8> {
-        match self.low() == self.high() {
-            true => policy.categories().get_by_id(self.low()).unwrap().name().into(),
-            false => [
-                policy.categories().get_by_id(self.low()).unwrap().name(),
-                policy.categories().get_by_id(self.high()).unwrap().name(),
-            ]
-            .join(b".".as_ref()),
+        let low = policy.categories().get_by_id(self.low()).unwrap().name();
+        if self.low() == self.high() {
+            return low.into();
         }
+        let high = policy.categories().get_by_id(self.high()).unwrap().name();
+        // A span of just two categories is described as a pair of individual categories, rather
+        // than as a range.
+        let separator: &[u8] =
+            if self.high().as_u32() == self.low().as_u32() + 1 { b"," } else { b"." };
+        [low, high].join(separator)
     }
 }
 
@@ -563,7 +575,7 @@ mod tests {
             }
         };
         // Overlapping category ranges are merged.
-        assert_eq!(normalize("user0:object_r:type0:s1:c0.c1,c1"), "user0:object_r:type0:s1:c0.c1");
+        assert_eq!(normalize("user0:object_r:type0:s1:c0.c1,c1"), "user0:object_r:type0:s1:c0,c1");
         assert_eq!(
             normalize("user0:object_r:type0:s1:c0.c2,c1.c2"),
             "user0:object_r:type0:s1:c0.c2"
@@ -577,7 +589,7 @@ mod tests {
         // Category ranges are ordered by first element.
         assert_eq!(
             normalize("user0:object_r:type0:s1:c2.c3,c0"),
-            "user0:object_r:type0:s1:c0,c2.c3"
+            "user0:object_r:type0:s1:c0,c2,c3"
         );
     }
 
@@ -725,7 +737,7 @@ mod tests {
         assert_eq!(
             policy.validate_security_context(&context),
             Err(SecurityContextError::InvalidSecurityRange {
-                low: "s1:c0,c3.c4".into(),
+                low: "s1:c0,c3,c4".into(),
                 high: "s1".into()
             })
         );
@@ -752,7 +764,7 @@ mod tests {
             policy.validate_security_context(&context),
             Err(SecurityContextError::InvalidSecurityRange {
                 low: "s1:c0".into(),
-                high: "s0:c0.c1".into()
+                high: "s0:c0,c1".into()
             })
         );
 
@@ -774,7 +786,7 @@ mod tests {
         // the policy's low level: the security context's low level has a lower sensitivity
         // than the policy's low level.
         let context = policy
-            .parse_security_context(b"user1:object_r:type0:s0".into())
+            .parse_security_context(b"user1:subject_r:type0:s0".into())
             .expect("successfully parsed");
         assert_eq!(
             policy.validate_security_context(&context),
@@ -784,11 +796,12 @@ mod tests {
             })
         );
 
-        // Fails validation because the sensitivity is not valid for the user.
+        // Passes validation even though the level is outside the user's range, because the
+        // special "object_r" role is exempt from the user MLS range check.
         let context = policy
             .parse_security_context(b"user1:object_r:type0:s0".into())
             .expect("successfully parsed");
-        assert!(policy.validate_security_context(&context).is_err());
+        assert!(policy.validate_security_context(&context).is_ok());
 
         // Fails validation because the role is not valid for the user.
         let context = policy
@@ -820,7 +833,7 @@ mod tests {
             "user0:object_r:type0:s0-s1:c0.c4",
             "user0:object_r:type0:s1:c0,c3",
             "user0:object_r:type0:s0-s1:c0,c2,c4",
-            "user0:object_r:type0:s1:c0,c3.c4-s1:c0,c2.c4",
+            "user0:object_r:type0:s1:c0,c3,c4-s1:c0,c2.c4",
         ] {
             let security_context =
                 policy.parse_security_context(label.as_bytes().into()).expect("should succeed");

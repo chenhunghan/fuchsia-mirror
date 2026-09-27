@@ -18,7 +18,7 @@ pub use images_config::{
 
 pub use board_filesystem_config::{
     BoardFilesystemConfig, BuildSpecificSize, FlexibleSize, FxfsBlobFormat, GptMode,
-    PostProcessingScript, VBMetaDescriptor, VBMetaStyle, ZbiCompression,
+    PostProcessingScript, VBMetaDescriptor, VBMetaMode, VBMetaStyle, ZbiCompression,
 };
 
 pub use product_filesystem_config::{

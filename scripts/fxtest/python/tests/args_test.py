@@ -477,3 +477,74 @@ class TestArgs(unittest.TestCase):
                 ["--agent-debugging-mode", "--no-enable-debug-adapter"]
             )
             flags.validate()
+
+    def test_help_concise_vs_advanced(self) -> None:
+        """Tests that --help hides advanced options while --help-advanced shows them."""
+        import contextlib
+        import io
+
+        always_present_args = [
+            "--test-filter",
+            "--output",
+            "--help-advanced",
+        ]
+        advanced_optional_args = [
+            "--save-log-path-to-file",
+            "--ffx-usb-socket-path",
+            "--remote-suggestion-builder",
+        ]
+
+        help_buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(
+            help_buf
+        ):
+            args.parse_args(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        help_output = help_buf.getvalue()
+
+        # Core flags should be present in standard --help.
+        for flag in always_present_args:
+            self.assertIn(flag, help_output)
+
+        # Advanced/internal flags should be suppressed in standard --help.
+        for flag in advanced_optional_args:
+            self.assertNotIn(flag, help_output)
+
+        adv_buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(
+            adv_buf
+        ):
+            args.parse_args(["--help-advanced"])
+        self.assertEqual(cm.exception.code, 0)
+        adv_output = adv_buf.getvalue()
+
+        # Both core and advanced/internal flags should be present in --help-advanced.
+        for flag in always_present_args:
+            self.assertIn(flag, adv_output)
+        for flag in advanced_optional_args:
+            self.assertIn(flag, adv_output)
+
+    @mock.patch.dict(os.environ, {"COLUMNS": "80"})
+    def test_help_output_size_within_antigravity_limit(self) -> None:
+        """Tests that standard --help output does not exceed Antigravity's output limit."""
+        import contextlib
+        import io
+
+        help_buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(
+            help_buf
+        ):
+            args.parse_args(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        help_output = help_buf.getvalue()
+
+        # Antigravity truncates command output exceeding 8,192 bytes.
+        # Ensure concise --help stays under this limit.
+        antigravity_max_output_bytes = 8192
+        output_bytes = len(help_output.encode("utf-8"))
+        self.assertLess(
+            output_bytes,
+            antigravity_max_output_bytes,
+            f"--help output ({output_bytes} bytes) exceeds the Antigravity limit of "
+            f"{antigravity_max_output_bytes} bytes. Consider marking new flags with adv_help().",
+        )

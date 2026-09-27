@@ -136,9 +136,9 @@
     {
       "kind": "Switch",
       "optionality": "optional",
-      "long": "--nocompress",
+      "long": "--compressed",
       "short": null,
-      "description": "disable zstd compression during transfer. Defaults to false.",
+      "description": "keep the trace file compressed on the host. Defaults to false.",
       "hidden": false
     },
     {

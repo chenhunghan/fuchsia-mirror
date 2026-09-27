@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 #include <lib/driver/logging/cpp/logger.h>
-#include <lib/syslog/cpp/macros.h>
 
 #include <cstdarg>
 

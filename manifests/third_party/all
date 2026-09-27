@@ -99,7 +99,7 @@
     <project name="third_party/crashpad"
              path="third_party/crashpad/src"
              remote="https://fuchsia.googlesource.com/third_party/crashpad"
-             revision="8c9d9ef86a817e7bc4a0baa37f9cb8d3dd1d5584"
+             revision="65fe32cc58a1c07b2a62fbaed806e0f21bac037e"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="chromium/mini_chromium"
              path="third_party/mini_chromium/src"
@@ -115,7 +115,7 @@
              path="third_party/curl/src"
              remote="https://fuchsia.googlesource.com/third_party/curl"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="68720b4837284335b2d63cb358f8f6ce65f5bc55"/>
+             revision="01346829096c61b372692f6dc43ffa778c6caccd"/>
     <project name="third_party/github.com/google/emboss"
              path="third_party/github.com/google/emboss/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/emboss"
@@ -292,7 +292,7 @@
     <project name="llvm-project/libc"
              path="third_party/llvm-libc/src"
              remote="https://llvm.googlesource.com/llvm-project/libc"
-             revision="ed61acfcfa275ad928eb65ea7c1724f5372c2d10"/>
+             revision="b3b74ce2bc5d0f9dd46d90b8b867cdf5b7879484"/>
     <project name="third_party/luci-go"
              path="third_party/luci-go"
              revision="897c3b0c38036908e016300c70509509b13001a0"
@@ -332,7 +332,7 @@
              path="third_party/mobly/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/mobly"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="566695c3ac676d6c2a45d5c6ed5d4c9438480386"/>
+             revision="626b088f6a7318d32b7d2026d99337ce82b1c7ea"/>
     <project name="third_party/github.com/google/snippet-uiautomator"
              path="third_party/snippet-uiautomator/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/snippet-uiautomator"
@@ -407,7 +407,7 @@
              path="third_party/perfetto"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/perfetto"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="b23c67be1159e3f0b0657bd97be9e139e0d8ee2c" />
+             revision="18543368b264fea4b93212a54751d2c34fac8181" />
     <project name="third_party/pigweed"
              path="third_party/pigweed/src"
              remote="https://fuchsia.googlesource.com/third_party/pigweed.googlesource.com/pigweed/pigweed"
@@ -427,7 +427,7 @@
     <project name="protobuf-gn"
              path="build/secondary/third_party/protobuf"
              remote="https://fuchsia.googlesource.com/protobuf-gn"
-             revision="0180f6498baf432fa61f6ef3bf8a9b21515ceefd"
+             revision="bb281106dbf873323c07969d38ae85daf12c19f4"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="third_party/github.com/wolever/parameterized"
              path="third_party/parameterized/src"
@@ -462,7 +462,7 @@
     <project name="scudo"
              path="third_party/scudo/src"
              remote="https://llvm.googlesource.com/scudo"
-             revision="ba6900d35405f5e33dd5487442e7183f5c94e7e9"/>
+             revision="98b58403934c770e773d04336f13cde28be0e74a"/>
     <project name="gwp-asan"
              path="third_party/scudo/gwp_asan"
              remote="https://llvm.googlesource.com/gwp-asan"
@@ -500,7 +500,7 @@
              path="third_party/tink-cc/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/tink-crypto/tink-cc"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="a800cc4583ba761b89193d81b540aa78d3823c53"/>
+             revision="1d1a6cd23affa8f2d49f024d069b7dd723648e45"/>
     <project name="third_party/tpm2-tss"
              path="third_party/tpm2-tss/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/tpm2-software/tpm2-tss"
@@ -519,7 +519,7 @@
              path="third_party/openthread"
              remote="https://fuchsia.googlesource.com/third_party/openthread"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="4c4371fdbfaaf1d29113ff79d2fe51d9d5a3e728"/>
+             revision="fd72d6e7ff9196b95e22c1bf4f17129ae0f5951e"/>
     <project name="third_party/openweave-core"
              path="third_party/openweave-core"
              remote="https://fuchsia.googlesource.com/third_party/openweave-core"
@@ -549,7 +549,7 @@
     <project name="third_party/Vulkan-Loader"
              path="third_party/Vulkan-Loader/src"
              remote="https://fuchsia.googlesource.com/third_party/Vulkan-Loader"
-             revision="7cf17ccc5b95ba57cc766c9984d5cb2a0c76cc9c"
+             revision="9c200672adf2482f3bf50b68af06dcd8a35e8e57"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="third_party/Vulkan-ValidationLayers"
              path="third_party/Vulkan-ValidationLayers/src"
@@ -559,7 +559,7 @@
     <project name="third_party/Vulkan-Tools"
              path="third_party/Vulkan-Tools/src"
              remote="https://fuchsia.googlesource.com/third_party/Vulkan-Tools"
-             revision="87c74fda26302185db327ba20cc92d3da82a1eb8"
+             revision="cca8423eff2a228ca902d1217e54a6d0bdd727b0"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="third_party/Vulkan-Utility-Libraries"
              path="third_party/Vulkan-Utility-Libraries/src"
@@ -575,7 +575,7 @@
              path="third_party/zlib"
              remote="https://fuchsia.googlesource.com/third_party/zlib"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="270412940ecb3f1796deec45d594f4e69e165c89"/>
+             revision="903e73377f5a7097bd56c05e1a3aa64230fcc606"/>
     <project name="third_party/zstd"
              path="third_party/zstd/src"
              remote="https://fuchsia.googlesource.com/third_party/zstd"

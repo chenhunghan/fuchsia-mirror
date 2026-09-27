@@ -35,7 +35,7 @@
 #include "src/ui/lib/escher/util/trace_macros.h"
 #include "src/ui/lib/escher/vk/impl/descriptor_set_allocator.h"
 #include "src/ui/lib/escher/vk/impl/framebuffer.h"
-#include "src/ui/lib/escher/vk/impl/framebuffer_allocator.h"
+#include "src/ui/lib/escher/vk/impl/render_pass_cache.h"
 #include "src/ui/lib/escher/vk/pipeline_builder.h"
 #include "src/ui/lib/escher/vk/shader_program.h"
 #include "src/ui/lib/escher/vk/texture.h"
@@ -141,16 +141,15 @@ void CommandBuffer::BeginGraphicsOrComputeContext() {
   pipeline_state_.BeginGraphicsOrComputeContext();
 }
 
-void CommandBuffer::BeginRenderPass(const RenderPassInfo& info) {
+void CommandBuffer::BeginRenderPass(impl::FramebufferPtr framebuffer) {
   TRACE_DURATION("gfx", "CommandBuffer::BeginRenderPass");
   FX_DCHECK(!IsInRenderPass());
   FX_DCHECK(pipeline_state_.current_subpass() == 0);
+  FX_DCHECK(framebuffer);
 
-  framebuffer_ = escher_->framebuffer_allocator()->ObtainFramebuffer(
-      info, allow_renderpass_and_pipeline_creation_);
-  FX_CHECK(framebuffer_) << "Lazy render-pass "
-                         << (allow_renderpass_and_pipeline_creation_ ? "IS" : "IS NOT")
-                         << " allowed.";
+  framebuffer_ = std::move(framebuffer);
+  const auto& info = framebuffer_->render_pass_info();
+
   auto& render_pass = framebuffer_->render_pass();
   pipeline_state_.set_render_pass(render_pass.get());
   impl_->KeepAlive(framebuffer_.get());

@@ -8,8 +8,9 @@
 #include <zircon/assert.h>
 
 #include <fbl/array.h>
-#include <src/lib/chunked-compression/chunked-compressor.h>
-#include <src/lib/chunked-compression/chunked-decompressor.h>
+
+#include "src/lib/chunked-compression/chunked-compressor.h"
+#include "src/lib/chunked-compression/chunked-decompressor.h"
 
 namespace {
 

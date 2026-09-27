@@ -66,7 +66,7 @@ pub async fn install_update(
         VecAppSet::new(vec![App::builder().id(appid).version(version).cohort(cohort).build()]);
 
     let config = get_omaha_config(&current_version, &service_url).await;
-    install_update_with_http(updater, app_set, config, http_request::FuchsiaHyperHttpRequest::new())
+    install_update_with_http(updater, app_set, config, http_request::FuchsiaHttpRequest::new())
         .await
         .context("installing update via http(s)")
 }

@@ -86,7 +86,7 @@ zx::result<float> Shtv3Device::ReadTemperature() {
   }
 
   // Only read the temperature measurement, skip the CRC and humidity bytes.
-  zx::result<uint16_t> temp_data = zx::ok(0);
+  zx::result<uint16_t> temp_data = zx::ok(uint16_t{0});
   for (int i = 0; i < kMeasurementRetries; i++) {
     if ((temp_data = Read16()).is_ok()) {
       break;

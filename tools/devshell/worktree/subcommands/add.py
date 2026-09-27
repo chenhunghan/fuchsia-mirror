@@ -50,17 +50,16 @@ def run(args: Any, pool: WorktreePool) -> None:
             )
             sys.exit(1)
 
-    if getattr(args, "sync", False):
-        try:
-            run_jiri(
-                pool.jiri_root,
-                ["worktree", "sync", str(wt.path)],
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to sync worktree: {e}", file=sys.stderr)
-            wt.release_lease()
-            sys.exit(1)
+    try:
+        run_jiri(
+            pool.jiri_root,
+            ["worktree", "sync", str(wt.path)],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to sync worktree: {e}", file=sys.stderr)
+        wt.release_lease()
+        sys.exit(1)
 
     symlink_path = pool.worktrees_dir / task_name
     if symlink_path != wt.path:

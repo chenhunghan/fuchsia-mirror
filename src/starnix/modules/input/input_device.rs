@@ -335,7 +335,7 @@ impl InputDevice {
             }
         };
         input_file.init_inspect_status();
-        self.open_files.lock().push(Arc::downgrade(&input_file));
+        self.open_files.lock().on_file_opened(&input_file);
         Box::new(crate::input_file::ArcInputFile(input_file))
     }
 
@@ -511,9 +511,8 @@ mod test {
             device_registry_proxy,
             input_device.open_files.clone(),
             Default::default(),
-            Default::default(),
-            Some(input_device.inspect_status.clone()),
             None,
+            Some(input_device.inspect_status.clone()),
             None,
         );
 
@@ -562,10 +561,9 @@ mod test {
             device_registry_proxy,
             Default::default(),
             input_device.open_files.clone(),
-            Default::default(),
+            None,
             None,
             Some(input_device.inspect_status.clone()),
-            None,
         );
 
         let keyboad_listener = init_keyboard_listener(&mut keyboard_stream).await;
@@ -611,10 +609,9 @@ mod test {
             device_registry_proxy,
             Default::default(),
             input_device.open_files.clone(),
-            Default::default(),
+            None,
             None,
             Some(input_device.inspect_status.clone()),
-            None,
         );
 
         let _ = init_keyboard_listener(&mut keyboard_stream).await;
@@ -663,10 +660,9 @@ mod test {
             device_registry_proxy,
             Default::default(),
             Default::default(),
-            input_device.open_files.clone(),
+            Some(input_device.clone()),
             None,
             None,
-            Some(input_device.inspect_status.clone()),
         );
 
         let _ = init_keyboard_listener(&mut keyboard_stream).await;
@@ -2174,9 +2170,8 @@ mod test {
                 device_registry_proxy,
                 input_device.open_files.clone(),
                 Default::default(),
-                Default::default(),
-                Some(input_device.inspect_status.clone()),
                 None,
+                Some(input_device.inspect_status.clone()),
                 None,
             );
 

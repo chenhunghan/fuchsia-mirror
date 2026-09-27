@@ -15,6 +15,7 @@
 #include "src/lib/fxl/synchronization/thread_annotations.h"
 #include "src/ui/lib/escher/debug/debug_font.h"
 #include "src/ui/lib/escher/flatland/rectangle_compositor.h"
+#include "src/ui/lib/escher/vk/impl/framebuffer.h"
 #include "src/ui/scenic/lib/allocation/buffer_collection_importer.h"
 #include "src/ui/scenic/lib/allocation/id.h"
 #include "src/ui/scenic/lib/flatland/renderer/renderer.h"
@@ -171,10 +172,14 @@ class VkRenderer final : public Renderer {
       FXL_GUARDED_BY(lock_);
   std::pmr::unordered_map<GlobalBufferCollectionId, CollectionData> readback_collections_
       FXL_GUARDED_BY(lock_);
+  struct RenderTarget {
+    escher::ImagePtr image;
+    escher::impl::FramebufferPtr framebuffer;
+    escher::impl::FramebufferPtr color_conversion_framebuffer;
+  };
+
   std::pmr::unordered_map<GlobalImageId, escher::TexturePtr> texture_map_ FXL_GUARDED_BY(lock_);
-  std::pmr::unordered_map<GlobalImageId, escher::ImagePtr> render_target_map_ FXL_GUARDED_BY(lock_);
-  std::pmr::unordered_map<GlobalImageId, escher::TexturePtr> depth_target_map_
-      FXL_GUARDED_BY(lock_);
+  std::pmr::unordered_map<GlobalImageId, RenderTarget> render_target_map_ FXL_GUARDED_BY(lock_);
   std::pmr::unordered_map<GlobalImageId, escher::ImagePtr> readback_image_map_
       FXL_GUARDED_BY(lock_);
   std::pmr::set<GlobalImageId> pending_textures_ FXL_GUARDED_BY(lock_);

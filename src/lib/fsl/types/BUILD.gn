@@ -36,6 +36,9 @@ if (is_host) {
 source_set("types") {
   sources = [ "type_converters.cc" ]
   public = [ "type_converters.h" ]
-  visibility = [ "//src/lib/fsl/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/fsl/*",
+  ]
   public_deps = [ "//sdk/lib/fidl/hlcpp" ]
 }

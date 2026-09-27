@@ -111,7 +111,7 @@ bool ArchiveWriter::Write(int fd) {
     }
 
     directory_entry.name_offset = name_offset;
-    directory_entry.name_length = entry.dst_path.size();
+    directory_entry.name_length = static_cast<uint16_t>(entry.dst_path.size());
     directory_entry.data_offset = data_offset;
     directory_entry.data_length = data_length;
 

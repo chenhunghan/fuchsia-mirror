@@ -8,7 +8,7 @@ use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties};
 use crate::object_store::object_record::{
-    ChildValue, DirType, EncryptedCasefoldChild, EncryptedChild, ObjectAttributes,
+    BytesAndNodes, ChildValue, DirType, EncryptedCasefoldChild, EncryptedChild, ObjectAttributes,
     ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
 };
 use crate::object_store::transaction::{
@@ -817,12 +817,10 @@ impl<S: HandleOwner> Directory<S> {
                 return Err(anyhow!(FxfsError::Inconsistent));
             }
             transaction.add(store_id, Mutation::ObjectStore(mutation));
-            transaction.add(
+            transaction.merge_bytes_and_nodes(
                 store_id,
-                Mutation::merge_object(
-                    ObjectKey::project_usage(self.store().root_directory_object_id(), project_id),
-                    ObjectValue::BytesAndNodes { bytes: 0, nodes: 1 },
-                ),
+                ObjectKey::project_usage(self.store().root_directory_object_id(), project_id),
+                BytesAndNodes { bytes: 0, nodes: 1 },
             );
         }
         Ok(())
@@ -3023,9 +3021,15 @@ mod tests {
             ObjectStore::open_object(&child_dir2.owner(), oid, HandleOptions::default(), None)
                 .await
                 .expect("Open failed");
-        let mut buf = bar.allocate_buffer(TEST_DEVICE_BLOCK_SIZE as usize).await;
-        bar.read(0, buf.as_mut()).await.expect("read failed");
-        assert_eq!(buf.to_vec(), vec![0xaa; TEST_DEVICE_BLOCK_SIZE as usize]);
+        let mut buf = bar.allocate_buffer(bar.block_size().get() as usize).await;
+        assert_eq!(
+            bar.read_aligned(0, buf.as_mut()).await.expect("read failed"),
+            TEST_DEVICE_BLOCK_SIZE as usize
+        );
+        assert_eq!(
+            buf.as_ptr_slice().subslice(0..TEST_DEVICE_BLOCK_SIZE as usize).to_vec(),
+            vec![0xaa; TEST_DEVICE_BLOCK_SIZE as usize]
+        );
         fs.close().await.expect("Close failed");
     }
 
@@ -3872,11 +3876,16 @@ mod tests {
             )
             .await
             .expect("open failed");
-            let mut buf = directory.handle.store().device.allocate_buffer(10).await;
+            let mut buf = directory
+                .handle
+                .store()
+                .device
+                .allocate_buffer(directory.handle.block_size().get() as usize)
+                .await;
             assert_eq!(
                 directory
                     .handle
-                    .read(AttributeId::TEST_ID, 0, buf.as_mut())
+                    .read_aligned(AttributeId::TEST_ID, 0, buf.as_mut())
                     .await
                     .expect("read failed"),
                 3

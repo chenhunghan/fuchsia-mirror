@@ -537,7 +537,7 @@ mod tests {
 
         fn mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
             let slice = &mut self.data[self.committed..];
-            unsafe { MutPtrByteSlice::new(slice as *mut [u8]) }
+            MutPtrByteSlice::from(slice)
         }
 
         fn commit(&mut self, size: usize) -> Result<(), ChunkedArchiveError> {

@@ -52,7 +52,7 @@ zx_status_t Nelson::RamCtlInit() {
   auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, ramctl_dev),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "aml_ram", .parents2 = {}}}));
+                                   {.name = "aml-ram-ctl", .parents2 = {}}}));
   if (!result.ok()) {
     zxlogf(ERROR, "%s: AddCompositeNodeSpec RamCtl(ramctl_dev) request failed: %s", __func__,
            result.FormatDescription().data());

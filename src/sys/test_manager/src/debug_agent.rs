@@ -287,11 +287,11 @@ mod test {
         .await;
 
         // Expect to receive a stderr event.
-        match event_receiver.try_next() {
-            Ok(Some(Ok(SuiteEvents {
+        match event_receiver.try_recv() {
+            Ok(Ok(SuiteEvents {
                 timestamp: _,
                 payload: SuiteEventPayload::SuiteStderr(socket),
-            }))) => {
+            })) => {
                 let mut buffer: [u8; 256] = [0; 256];
                 let size = socket.read(&mut buffer).expect("read from socket");
                 assert_eq!(TEST_STDERR_SIZE, size);
@@ -299,13 +299,13 @@ mod test {
                     std::str::from_utf8(&buffer[0..TEST_STDERR_SIZE]).expect("convert [u8] to str");
                 assert_eq!(TEST_STDERR_TEXT, stderr_string);
             }
-            Ok(Some(Ok(_))) => {
+            Ok(Ok(_)) => {
                 assert!(false, "Expected SuiteStderr event, got other event");
             }
-            Ok(Some(Err(e))) => {
+            Ok(Err(e)) => {
                 assert!(false, "Expected event, got error {:?}", e);
             }
-            Ok(None) => {
+            Err(e) if e.is_closed() => {
                 assert!(false, "Expected event, got channel closed");
             }
             Err(e) => {

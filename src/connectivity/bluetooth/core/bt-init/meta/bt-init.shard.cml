@@ -59,11 +59,25 @@
         },
         { service: "fuchsia.hardware.bluetooth.Service" },
         {
+            config: "fuchsia.bluetooth.AutostartSnoop",
+            key: "autostart_snoop",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
+        {
             config: "fuchsia.bluetooth.FastPairProvider",
             key: "fastpair_provider_enabled",
             type: "bool",
             availability: "optional",
             default: false,
+        },
+        {
+            config: "fuchsia.bluetooth.Rfcomm",
+            key: "rfcomm_enabled",
+            type: "bool",
+            availability: "optional",
+            default: true,
         },
     ],
     offer: [
@@ -137,6 +151,18 @@
             to: [ "#bt-gap" ],
         },
         {
+            config: [
+                "fuchsia.bluetooth.BredrConnectable",
+                "fuchsia.bluetooth.BredrSecurityMode",
+                "fuchsia.bluetooth.LeBackgroundScanning",
+                "fuchsia.bluetooth.LePrivacy",
+                "fuchsia.bluetooth.LeSecurityMode",
+            ],
+            from: "parent",
+            to: [ "#bt-gap" ],
+            availability: "optional",
+        },
+        {
             protocol: [ "fuchsia.bluetooth.bredr.Profile" ],
             from: "#bt-gap",
             to: [ "#bt-rfcomm" ],
@@ -207,8 +233,4 @@
             from: "self",
         },
     ],
-    config: {
-        autostart_snoop: { type: "bool" },
-        rfcomm_enabled: { type: "bool" },
-    },
 }

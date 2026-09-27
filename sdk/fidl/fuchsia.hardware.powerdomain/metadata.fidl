@@ -6,12 +6,12 @@ library fuchsia.hardware.powerdomain;
 
 /// Represents a single power domain configuration for a device.
 type PowerDomain = table {
-    /// The hardware or resource ID of the power domain.
+    /// The unique node ID / global ID generated for the client referencing this domain.
     1: id uint32;
-    /// The unique node ID generated for the client referencing this domain.
-    2: node_id uint32;
     /// The name of the power domain reference (e.g., from "power-domain-names").
-    3: name string:MAX;
+    2: name string:MAX;
+    /// The hardware or resource ID of the power domain.
+    3: domain_id uint32;
 };
 
 /// The top-level metadata structure passed to drivers to describe their power domains.

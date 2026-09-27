@@ -396,6 +396,15 @@ pub trait BlockClient: Send + Sync {
 
     /// Returns true if the remote fifo is still connected.
     fn is_connected(&self) -> bool;
+
+    /// Connects to the device's Mapper protocol.
+    fn connect_mapper(
+        &self,
+        server_end: fidl::endpoints::ServerEnd<block::MapperMarker>,
+    ) -> impl Future<Output = Result<(), zx::Status>> + Send {
+        let _ = server_end.close_with_epitaph(zx::Status::NOT_SUPPORTED);
+        async { Err(zx::Status::NOT_SUPPORTED) }
+    }
 }
 
 struct Common {
@@ -701,6 +710,7 @@ impl Drop for Common {
 
 // RemoteBlockClient is a BlockClient that communicates with a real block device over FIDL.
 pub struct RemoteBlockClient {
+    remote: Mutex<Option<block::BlockProxy>>,
     session: block::SessionProxy,
     common: Common,
 }
@@ -713,7 +723,9 @@ impl RemoteBlockClient {
             remote.get_info().await.map_err(fidl_to_status)?.map_err(zx::Status::err_from_raw)?;
         let (session, server) = fidl::endpoints::create_proxy();
         let () = remote.open_session(server).map_err(fidl_to_status)?;
-        Self::from_session(info, session).await
+        let client = Self::from_session(info, session).await?;
+        *client.remote.lock() = Some(remote.clone());
+        Ok(client)
     }
 
     pub async fn from_session(
@@ -733,7 +745,11 @@ impl RemoteBlockClient {
             .map_err(fidl_to_status)?
             .map_err(zx::Status::err_from_raw)?;
         let vmo_id = VmoId::new(vmo_id.id);
-        Ok(RemoteBlockClient { session, common: Common::new(fifo, &info, temp_vmo, vmo_id) })
+        Ok(RemoteBlockClient {
+            remote: Mutex::new(None),
+            session,
+            common: Common::new(fifo, &info, temp_vmo, vmo_id),
+        })
     }
 }
 
@@ -786,6 +802,7 @@ impl BlockClient for RemoteBlockClient {
     }
 
     async fn close(&self) -> Result<(), zx::Status> {
+        let _ = self.remote.lock().take();
         let () = self
             .session
             .close()
@@ -813,6 +830,23 @@ impl BlockClient for RemoteBlockClient {
 
     fn is_connected(&self) -> bool {
         self.common.is_connected()
+    }
+
+    async fn connect_mapper(
+        &self,
+        server_end: fidl::endpoints::ServerEnd<block::MapperMarker>,
+    ) -> Result<(), zx::Status> {
+        let remote = self.remote.lock().clone();
+        if let Some(remote) = remote {
+            remote
+                .connect_mapper(server_end)
+                .await
+                .map_err(fidl_to_status)?
+                .map_err(zx::Status::err_from_raw)
+        } else {
+            let _ = server_end.close_with_epitaph(zx::Status::NOT_SUPPORTED);
+            Err(zx::Status::NOT_SUPPORTED)
+        }
     }
 }
 

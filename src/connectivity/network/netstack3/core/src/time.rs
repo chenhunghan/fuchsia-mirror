@@ -4,8 +4,6 @@
 
 //! Types for dealing with time and timers.
 
-use core::convert::Infallible as Never;
-
 use derivative::Derivative;
 use log::trace;
 use net_types::ip::{GenericOverIp, Ip, Ipv4, Ipv6};
@@ -107,11 +105,11 @@ where
     }
 }
 
-impl<'a, BT, L> CoreTimerContext<Never, BT> for CoreCtx<'a, BT, L>
+impl<'a, BT, L> CoreTimerContext<!, BT> for CoreCtx<'a, BT, L>
 where
     BT: BindingsTypes,
 {
-    fn convert_timer(dispatch_id: Never) -> <BT as netstack3_base::TimerBindingsTypes>::DispatchId {
+    fn convert_timer(dispatch_id: !) -> <BT as netstack3_base::TimerBindingsTypes>::DispatchId {
         match dispatch_id {}
     }
 }

@@ -390,28 +390,29 @@ static bool access_flags_from_flags(uint64_t mapping_flags, bool cache_coherent,
   return true;
 }
 
-bool MsdArmConnection::AddMapping(std::unique_ptr<GpuMapping> mapping) {
+bool MsdArmConnection::CreateMapping(uint64_t gpu_va, uint64_t page_offset, uint64_t size,
+                                     uint64_t flags, std::shared_ptr<MsdArmBuffer> buffer,
+                                     std::optional<uint64_t> pages_to_grow_on_fault) {
   // The rest of this code assumes that the CPU page size is a multiple of the GPU page size.
   const size_t page_size = zx_system_get_page_size();
   DASSERT(AddressSpace::is_mali_page_aligned(page_size));
   std::lock_guard<std::mutex> lock(address_lock_);
-  uint64_t gpu_va = mapping->gpu_va();
   if (!magma::is_page_aligned(gpu_va))
     return DRETF(false, "mapping not page aligned");
 
-  if (mapping->size() == 0)
+  if (size == 0)
     return DRETF(false, "empty mapping");
 
   uint64_t start_page = gpu_va / page_size;
-  if (mapping->size() > (1ul << AddressSpace::kVirtualAddressSize))
+  if (size > (1ul << AddressSpace::kVirtualAddressSize))
     return DRETF(false, "size too large");
 
-  uint64_t page_count = magma::round_up(mapping->size(), page_size) / page_size;
+  uint64_t page_count = magma::round_up(size, page_size) / page_size;
   if (start_page + page_count > ((1ul << AddressSpace::kVirtualAddressSize) / page_size))
     return DRETF(false, "virtual address too large");
 
   auto it = gpu_mappings_.upper_bound(gpu_va);
-  if (it != gpu_mappings_.end() && (gpu_va + mapping->size() > it->second->gpu_va()))
+  if (it != gpu_mappings_.end() && (gpu_va + size > it->second->gpu_va()))
     return DRETF(false, "Mapping overlaps existing mapping");
   // Find the mapping with the highest VA that's <= this.
   if (it != gpu_mappings_.begin()) {
@@ -420,20 +421,24 @@ bool MsdArmConnection::AddMapping(std::unique_ptr<GpuMapping> mapping) {
     if (it->second->gpu_va() + it->second->size() > gpu_va)
       return DRETF(false, "Mapping overlaps existing mapping");
   }
-  auto buffer = mapping->buffer().lock();
   DASSERT(buffer);
 
-  if (mapping->page_offset() + page_count > buffer->platform_buffer()->size() / page_size)
+  if (page_offset + page_count > buffer->platform_buffer()->size() / page_size)
     return DRETF(false, "Buffer size %lx too small for map start %lx count %lx",
-                 buffer->platform_buffer()->size(), mapping->page_offset(), page_count);
+                 buffer->platform_buffer()->size(), page_offset, page_count);
 
-  if (!access_flags_from_flags(mapping->flags(),
-                               owner_->NdtGetCacheCoherencyStatus() == kArmMaliCacheCoherencyAce,
-                               nullptr))
+  if (!access_flags_from_flags(
+          flags, owner_->NdtGetCacheCoherencyStatus() == kArmMaliCacheCoherencyAce, nullptr))
     return false;
+
+  auto mapping = std::make_unique<GpuMapping>(gpu_va, page_offset, size, flags, this, buffer);
+  if (pages_to_grow_on_fault) {
+    mapping->set_pages_to_grow_on_fault(*pages_to_grow_on_fault);
+  }
 
   if (!UpdateCommittedMemory(mapping.get()))
     return false;
+
   gpu_mappings_[gpu_va] = std::move(mapping);
   return true;
 }
@@ -459,9 +464,7 @@ bool MsdArmConnection::RemoveMappingLocked(uint64_t gpu_va) {
   return true;
 }
 
-// CommitMemoryForBuffer or PageInAddress will hold address_lock_ before calling this, but that's
-// impossible to specify for the thread safety analysis.
-bool MsdArmConnection::UpdateCommittedMemory(GpuMapping* mapping) __TA_NO_THREAD_SAFETY_ANALYSIS {
+bool MsdArmConnection::UpdateCommittedMemory(GpuMapping* mapping) {
   uint64_t access_flags = 0;
   if (!access_flags_from_flags(mapping->flags(),
                                owner_->NdtGetCacheCoherencyStatus() == kArmMaliCacheCoherencyAce,
@@ -621,7 +624,14 @@ bool MsdArmConnection::PageInMemory(uint64_t address) {
 
   // The MMU command to update the page tables should automatically cause
   // the atom to continue executing.
-  return buffer->CommitPageRange(buffer->start_committed_pages(), committed_page_count);
+  bool success = buffer->CommitPageRange(buffer->start_committed_pages(), committed_page_count);
+  if (success) {
+    for (auto& mapping : buffer->mappings()) {
+      if (!UpdateCommittedMemory(mapping))
+        success = false;
+    }
+  }
+  return success;
 }
 
 MsdArmConnection::JitMemoryRegion* MsdArmConnection::FindBestJitRegionAddressWithUsage(
@@ -696,7 +706,7 @@ std::optional<ArmMaliResultCode> MsdArmConnection::AllocateNewJitMemoryRegion(
       return {};
     }
     // Release address_lock_ so we can do a few slower operations like creating the buffer without
-    // the address space lock held. Also, AddMapping locks address_space_lock_.
+    // the address space lock held. Also, CreateMapping locks address_lock_.
   }
 
   std::shared_ptr<MsdArmBuffer> buffer =
@@ -723,10 +733,8 @@ std::optional<ArmMaliResultCode> MsdArmConnection::AllocateNewJitMemoryRegion(
   }
 
   const size_t page_size = zx_system_get_page_size();
-  auto mapping = std::make_unique<GpuMapping>(current_address, 0, info.va_page_count * page_size,
-                                              flags, this, buffer);
-  mapping->set_pages_to_grow_on_fault(info.extend_page_count);
-  bool result = AddMapping(std::move(mapping));
+  bool result = CreateMapping(current_address, 0, info.va_page_count * page_size, flags, buffer,
+                              info.extend_page_count);
   std::lock_guard<std::mutex> lock(address_lock_);
   if (!result) {
     // This could happen if the client mapped something here, or if the
@@ -896,6 +904,9 @@ void MsdArmConnection::ReleaseOneJitMemory(const magma_arm_jit_memory_free_info&
           magma::Status result = region.buffer->platform_buffer()->DecommitPages(
               new_page_count, current_committed_page_count - new_page_count);
           DASSERT(result.ok());
+          for (auto& mapping : region.buffer->mappings()) {
+            UpdateCommittedMemory(mapping);
+          }
         }
       }
       break;
@@ -937,19 +948,42 @@ size_t MsdArmConnection::FreeUnusedJitRegionsIfNeeded() {
 bool MsdArmConnection::CommitMemoryForBuffer(MsdArmBuffer* buffer, uint64_t page_offset,
                                              uint64_t page_count) {
   std::lock_guard<std::mutex> lock(address_lock_);
-  return buffer->CommitPageRange(page_offset, page_count);
+  if (!buffer->CommitPageRange(page_offset, page_count)) {
+    return false;
+  }
+
+  bool success = true;
+  for (auto& mapping : buffer->mappings()) {
+    if (!UpdateCommittedMemory(mapping))
+      success = false;
+  }
+  return success;
 }
 
 bool MsdArmConnection::SetCommittedPagesForBuffer(MsdArmBuffer* buffer, uint64_t page_offset,
                                                   uint64_t page_count) {
   std::lock_guard<std::mutex> lock(address_lock_);
-  return buffer->SetCommittedPages(page_offset, page_count);
+  if (!buffer->SetCommittedPages(page_offset, page_count))
+    return false;
+  bool success = true;
+  for (auto& mapping : buffer->mappings()) {
+    if (!UpdateCommittedMemory(mapping))
+      success = false;
+  }
+  return success;
 }
 
 bool MsdArmConnection::DecommitMemoryForBuffer(MsdArmBuffer* buffer, uint64_t page_offset,
                                                uint64_t page_count) {
   std::lock_guard<std::mutex> lock(address_lock_);
-  return buffer->DecommitPageRange(page_offset, page_count);
+  if (!buffer->DecommitPageRange(page_offset, page_count))
+    return false;
+  bool success = true;
+  for (auto& mapping : buffer->mappings()) {
+    if (!UpdateCommittedMemory(mapping))
+      success = false;
+  }
+  return success;
 }
 
 void MsdArmConnection::SetNotificationCallback(msd::NotificationHandler* handler) {
@@ -1174,11 +1208,9 @@ magma_status_t MsdArmAbiConnection::MsdMapBuffer(msd::Buffer& abi_buffer, uint64
   MsdArmConnection* connection = ptr().get();
 
   const size_t page_size = zx_system_get_page_size();
-  auto mapping =
-      std::make_unique<GpuMapping>(gpu_va, page_offset, page_count * page_size, flags, connection,
-                                   MsdArmAbiBuffer::cast(&abi_buffer)->base_ptr());
-  if (!connection->AddMapping(std::move(mapping)))
-    return DRET_MSG(MAGMA_STATUS_INTERNAL_ERROR, "AddMapping failed");
+  if (!connection->CreateMapping(gpu_va, page_offset, page_count * page_size, flags,
+                                 MsdArmAbiBuffer::cast(&abi_buffer)->base_ptr()))
+    return DRET_MSG(MAGMA_STATUS_INTERNAL_ERROR, "CreateMapping failed");
   return MAGMA_STATUS_OK;
 }
 

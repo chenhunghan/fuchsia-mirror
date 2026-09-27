@@ -12,40 +12,22 @@ use futures::StreamExt as _;
 use netemul::{TestRealm, TestSandbox};
 use netstack_testing_common::ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT;
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, Netstack2, Netstack3, NetstackVersion, TestSandboxExt as _,
-    constants,
+    KnownServiceProvider, Netstack, Netstack3, TestSandboxExt as _, constants,
 };
 use netstack_testing_macros::netstack_test;
-use std::borrow::Cow;
 
 const MOCK_SERVICES_NAME: &str = "mock";
 
-fn create_netstack_with_mock_endpoint<'s, RS, N>(
+fn create_netstack_with_mock_endpoint<'s, RS>(
     sandbox: &'s TestSandbox,
     name: &'s str,
 ) -> (TestRealm<'s>, ServiceFs<ServiceObj<'s, RS>>)
 where
     RS: RequestStream + 'static,
     RS::Protocol: DiscoverableProtocolMarker,
-    N: Netstack,
 {
     let mut netstack: fnetemul::ChildDef =
-        netstack_testing_common::realms::KnownServiceProvider::Netstack(
-            match N::VERSION {
-                // The prod ns2 has a route for
-                // fuchsia.scheduler.deprecated.ProfileProvider which is needed for tests
-                // in this suite.
-                NetstackVersion::Netstack2 { tracing: false, fast_udp: false } => NetstackVersion::ProdNetstack2,
-                v @ NetstackVersion::Netstack3 => v,
-                v @ (NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-                | NetstackVersion::ProdNetstack2
-                | NetstackVersion::ProdNetstack3
-                ) => {
-                    panic!("netstack_test should only be parameterized with Netstack2 or Netstack3: got {:?}", v);
-                }
-            }
-        )
-            .into();
+        netstack_testing_common::realms::KnownServiceProvider::Netstack(Netstack3::VERSION).into();
     {
         let fnetemul::ChildUses::Capabilities(capabilities) =
             netstack.uses.as_mut().expect("empty uses");
@@ -108,12 +90,10 @@ where
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn ns_sets_thread_profiles<N: Netstack>(name: &str) {
+async fn ns_sets_thread_profiles(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let (_realm, mut fs) = create_netstack_with_mock_endpoint::<
         fidl_fuchsia_scheduler_deprecated::ProfileProviderRequestStream,
-        N,
     >(&sandbox, name);
 
     let profile_provider_request_stream = fs.next().await.expect("fs terminated unexpectedly");
@@ -170,9 +150,8 @@ async fn ns_sets_thread_profiles<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn ns_persist_tags_under_size_limits<N: Netstack>(name: &str) {
-    persist_tags_under_size_limits(name, N::VERSION.into()).await
+async fn ns_persist_tags_under_size_limits(name: &str) {
+    persist_tags_under_size_limits(name, PersistenceTestCase::Netstack3).await
 }
 
 #[netstack_test]
@@ -200,9 +179,8 @@ async fn persist_tags_under_size_limits(name: &str, test_case: PersistenceTestCa
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn ns_persist_root_inspect_nodes_for_selectors<N: Netstack>(name: &str) {
-    persist_root_inspect_nodes_for_selectors(name, N::VERSION.into()).await
+async fn ns_persist_root_inspect_nodes_for_selectors(name: &str) {
+    persist_root_inspect_nodes_for_selectors(name, PersistenceTestCase::Netstack3).await
 }
 
 #[netstack_test]
@@ -240,10 +218,6 @@ async fn persist_root_inspect_nodes_for_selectors(name: &str, test_case: Persist
                 _ => panic!("unknown StringSelector variant {:?}", root_node),
             };
 
-            // Strip the wildcard tree selector prefix used in Netstack2's
-            // persistence selectors.
-            let root_node_name = root_node_name.strip_prefix("[...]").unwrap_or(root_node_name);
-
             // Assert payload has the node name specified in the selector.
             assert_eq!(root_node_name, &inspect_payload.name);
         }
@@ -251,39 +225,15 @@ async fn persist_root_inspect_nodes_for_selectors(name: &str, test_case: Persist
     .await
 }
 
-fn persistence_tag_to_ns2_diagnostics_dir(tag: &persistence_config::Tag) -> Cow<'static, str> {
-    match tag.as_str() {
-        "fidl" => Cow::from("fidlStats"),
-        "nics" => Cow::from("interfaces"),
-        "runtime" => Cow::from("configuration"),
-        other => Cow::from(format!("{other}")),
-    }
-}
-
 enum PersistenceTestCase {
-    Netstack2,
     Netstack3,
     DhcpClient,
-}
-
-impl From<NetstackVersion> for PersistenceTestCase {
-    fn from(netstack_version: NetstackVersion) -> Self {
-        match netstack_version {
-            NetstackVersion::ProdNetstack2 | NetstackVersion::Netstack2 { .. } => {
-                PersistenceTestCase::Netstack2
-            }
-            NetstackVersion::ProdNetstack3 | NetstackVersion::Netstack3 => {
-                PersistenceTestCase::Netstack3
-            }
-        }
-    }
 }
 
 impl PersistenceTestCase {
     // Returns the path to the persit configuration.
     fn config_path(&self) -> &'static str {
         match self {
-            PersistenceTestCase::Netstack2 => "/pkg/data/netstack.persist",
             PersistenceTestCase::Netstack3 => "/pkg/data/netstack3.persist",
             PersistenceTestCase::DhcpClient => "/pkg/data/dhcp_client.persist",
         }
@@ -292,7 +242,7 @@ impl PersistenceTestCase {
     // Returns the component name of the component that serves the inspect data.
     fn component_name(&self) -> &'static str {
         match self {
-            PersistenceTestCase::Netstack2 | PersistenceTestCase::Netstack3 => "netstack",
+            PersistenceTestCase::Netstack3 => "netstack",
             PersistenceTestCase::DhcpClient => "dhcp-client",
         }
     }
@@ -300,7 +250,7 @@ impl PersistenceTestCase {
     // Returns the service name declared in the persit configuration.
     fn service_name(&self) -> &'static str {
         match self {
-            PersistenceTestCase::Netstack2 | PersistenceTestCase::Netstack3 => "netstack",
+            PersistenceTestCase::Netstack3 => "netstack",
             PersistenceTestCase::DhcpClient => "dhcp-client",
         }
     }
@@ -316,7 +266,6 @@ where
 {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let realm = match test_case {
-        PersistenceTestCase::Netstack2 => sandbox.create_netstack_realm::<Netstack2, _>(name),
         PersistenceTestCase::Netstack3 => sandbox.create_netstack_realm::<Netstack3, _>(name),
         PersistenceTestCase::DhcpClient => sandbox.create_netstack_realm_with::<Netstack3, _, _>(
             name,
@@ -330,7 +279,7 @@ where
 
     // Create a socket to ensure socket Inspect data is available.
     let _socket = match test_case {
-        PersistenceTestCase::Netstack2 | PersistenceTestCase::Netstack3 => Some(
+        PersistenceTestCase::Netstack3 => Some(
             realm
                 .datagram_socket(
                     fposix_socket::Domain::Ipv4,
@@ -345,7 +294,7 @@ where
     // Connect to the DHCP protocol to ensure the DHCP client starts and makes
     // Inspect data available.
     let _dhcp_client = match test_case {
-        PersistenceTestCase::Netstack2 | PersistenceTestCase::Netstack3 => None,
+        PersistenceTestCase::Netstack3 => None,
         PersistenceTestCase::DhcpClient => Some(
             realm
                 .connect_to_protocol::<fidl_fuchsia_net_dhcp::ClientProviderMarker>()
@@ -354,17 +303,8 @@ where
     };
 
     // The realm moniker is needed to construct the component part of an Inspect
-    // selector.
-    let moniker = realm.get_moniker().await.expect("get moniker failed");
-    let realm_moniker = match test_case {
-        PersistenceTestCase::Netstack2 => {
-            // Because Netstack2 uses the deprecated diagnostics API, it needs
-            // to use a sanitized moniker. The `ArchiveReader` used to gather
-            // Netstack3/DhcpClient data will sanitize the moniker internally.
-            selectors::sanitize_moniker_for_selectors(&moniker)
-        }
-        PersistenceTestCase::Netstack3 | PersistenceTestCase::DhcpClient => moniker,
-    };
+    // selector. The `ArchiveReader` sanitizes the moniker internally.
+    let realm_moniker = realm.get_moniker().await.expect("get moniker failed");
 
     const SANDBOX_MONIKER: &str = "sandbox";
 
@@ -378,56 +318,38 @@ where
             // <type>:<component>:<subtree>:<property>. Extract the subtree portion
             // of the selector, and combine it with a test realm specific component
             // selector.
-            .map(|selector| {
-                fidl_fuchsia_diagnostics::Selector {
-                    component_selector: Some(fidl_fuchsia_diagnostics::ComponentSelector {
-                        moniker_segments: Some(vec![
-                            fidl_fuchsia_diagnostics::StringSelector::ExactMatch(
-                                SANDBOX_MONIKER.to_string(),
-                            ),
-                            fidl_fuchsia_diagnostics::StringSelector::ExactMatch(
-                                realm_moniker.to_string(),
-                            ),
-                            fidl_fuchsia_diagnostics::StringSelector::ExactMatch(
-                                test_case.component_name().to_string(),
-                            ),
-                        ]),
-                        ..Default::default()
-                    }),
-                    ..selector.clone().into()
-                }
-                .into()
+            .map(|selector| fidl_fuchsia_diagnostics::Selector {
+                component_selector: Some(fidl_fuchsia_diagnostics::ComponentSelector {
+                    moniker_segments: Some(vec![
+                        fidl_fuchsia_diagnostics::StringSelector::ExactMatch(
+                            SANDBOX_MONIKER.to_string(),
+                        ),
+                        fidl_fuchsia_diagnostics::StringSelector::ExactMatch(
+                            realm_moniker.to_string(),
+                        ),
+                        fidl_fuchsia_diagnostics::StringSelector::ExactMatch(
+                            test_case.component_name().to_string(),
+                        ),
+                    ]),
+                    ..Default::default()
+                }),
+                ..selector.clone().into()
             });
 
-        let inspect_payload = match test_case {
-            PersistenceTestCase::Netstack2 => {
-                let diagnostics_dir =
-                    realm.open_diagnostics_directory(test_case.component_name()).unwrap();
-                let subdir = persistence_tag_to_ns2_diagnostics_dir(tag);
-                netstack_testing_common::get_deprecated_netstack2_inspect_data(
-                    &diagnostics_dir,
-                    &subdir,
-                    selectors,
-                )
-                .await
-            }
-            PersistenceTestCase::Netstack3 | PersistenceTestCase::DhcpClient => {
-                // Retrieve the inspect payload from the archivist.
-                let mut archive_reader = diagnostics_reader::ArchiveReader::inspect();
-                let archive_reader = archive_reader.add_selectors(selectors);
-                let payload = archive_reader
-                    .with_timeout(ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT)
-                    .snapshot()
-                    .await
-                    .expect("snapshot failed")
-                    .into_iter()
-                    .filter_map(|v| v.payload)
-                    .next();
-                match payload {
-                    Some(p) => p,
-                    None => panic!("No payload in snapshot for tag={tag}."),
-                }
-            }
+        // Retrieve the inspect payload from the archivist.
+        let mut archive_reader = diagnostics_reader::ArchiveReader::inspect();
+        let archive_reader = archive_reader.add_selectors(selectors);
+        let payload = archive_reader
+            .with_timeout(ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT)
+            .snapshot()
+            .await
+            .expect("snapshot failed")
+            .into_iter()
+            .filter_map(|v| v.payload)
+            .next();
+        let inspect_payload = match payload {
+            Some(p) => p,
+            None => panic!("No payload in snapshot for tag={tag}."),
         };
 
         // Assert on payload.
@@ -436,10 +358,9 @@ where
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn serves_ota_health_check<N: Netstack>(name: &str) {
+async fn serves_ota_health_check(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     let health_check = realm
         .connect_to_protocol::<fidl_fuchsia_update_verify::ComponentOtaHealthCheckMarker>()
         .expect("connect to protocol");
@@ -449,10 +370,9 @@ async fn serves_ota_health_check<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn emits_logs<N: Netstack>(name: &str) {
+async fn emits_logs(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("create netstack realm");
+    let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create netstack realm");
     // Start the netstack.
     let _ = realm
         .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()

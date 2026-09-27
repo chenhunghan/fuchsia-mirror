@@ -53,6 +53,7 @@ fuchsia_products_repository(
 # Using the targets:
 #   $ bazel run @fuchsia_products//:core.x64.emu -- --headless
 #   $ bazel run @fuchsia_products//:core.vim3.flash
+```
 """,
     implementation = _fuchsia_products_repository_impl,
     attrs = {

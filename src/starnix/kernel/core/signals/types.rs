@@ -158,6 +158,9 @@ impl QueuedSignals {
     /// Used by ptrace to provide a replacement for the signal that might have been
     /// delivered when the task entered signal-delivery-stop.
     pub fn jump_queue(&mut self, siginfo: SignalInfo) {
+        if !siginfo.signal.is_real_time() {
+            self.queue.retain(|info| info.signal != siginfo.signal);
+        }
         self.queue.push_front(siginfo);
     }
 
@@ -184,6 +187,11 @@ impl QueuedSignals {
     /// Returns whether any signals are queued and not blocked by the given mask.
     pub fn is_any_allowed_by_mask(&self, mask: SigSet) -> bool {
         self.iter().any(|sig| !mask.has_signal(sig.signal))
+    }
+
+    /// Returns whether any signals are queued and either forced or allowed by the given mask.
+    pub fn is_any_deliverable(&self, mask: SigSet) -> bool {
+        self.iter().any(|sig| !mask.has_signal(sig.signal) || sig.force)
     }
 
     /// Returns an iterator over all the pending signals.
@@ -308,9 +316,9 @@ impl SignalState {
         self.queue.take_next_where(predicate)
     }
 
-    /// Returns whether any signals are pending (queued and not blocked).
+    /// Returns whether any signals are pending (queued and either forced or not blocked).
     pub fn is_any_pending(&self) -> bool {
-        self.queue.is_any_allowed_by_mask(self.mask)
+        self.queue.is_any_deliverable(self.mask)
     }
 
     /// Returns whether any signals are queued and not blocked by the given mask.

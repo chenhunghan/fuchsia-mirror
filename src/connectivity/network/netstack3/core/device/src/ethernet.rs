@@ -16,10 +16,11 @@ use netstack3_base::ref_counted_hash_map::{InsertResult, RefCountedHashSet, Remo
 use netstack3_base::sync::{Mutex, RwLock};
 use netstack3_base::{
     BroadcastIpExt, ChecksumOffloadSpec, CoreTimerContext, Device, DeviceIdContext, EventContext,
-    FrameDestination, HandleableTimer, LinkDevice, NestedIntoCoreTimerCtx, NetworkParsingContext,
-    NetworkSerializer, ReceivableFrameMeta, RecvFrameContext, RecvIpFrameMeta,
-    ResourceCounterContext, RngContext, SendFrameError, SendFrameErrorReason, SendableFrameMeta,
-    TimerContext, TimerHandler, TxMetadataBindingsTypes, WeakDeviceIdentifier, WrapBroadcastMarker,
+    FrameDestination, GsoInfo, HandleableTimer, LinkDevice, NestedIntoCoreTimerCtx,
+    NetworkParsingContext, NetworkSerializer, ReceivableFrameMeta, RecvFrameContext,
+    RecvIpFrameMeta, ResourceCounterContext, RngContext, SendFrameError, SendFrameErrorReason,
+    SendableFrameMeta, TimerContext, TimerHandler, TxMetadataBindingsTypes, WeakDeviceIdentifier,
+    WrapBroadcastMarker,
 };
 use netstack3_ip::nud::{LinkResolutionContext, NudHandler, NudState, NudTimerId, NudUserConfig};
 use netstack3_ip::{DeviceIpLayerMetadata, IpCounters, IpPacketDestination};
@@ -497,6 +498,8 @@ pub struct RecvEthernetFrameMeta<D> {
     pub device_id: D,
     /// The parsing context for the received frame.
     pub parsing_context: NetworkParsingContext,
+    /// GSO metadata if the frame was coalesced from multiple segments.
+    pub gso_info: Option<GsoInfo>,
 }
 
 impl DeviceReceiveFrameSpec for EthernetLinkDevice {
@@ -523,7 +526,7 @@ where
         mut buffer: B,
     ) {
         trace_duration!("device::ethernet::receive_frame");
-        let Self { device_id, parsing_context } = self;
+        let Self { device_id, parsing_context, gso_info } = self;
         trace!("ethernet::receive_frame: device_id = {:?}", device_id);
         core_ctx.increment_both(&device_id, |counters: &DeviceCounters| &counters.recv_frame);
         core_ctx.add_both_usize(&device_id, buffer.len(), |counters: &DeviceCounters| {
@@ -604,6 +607,7 @@ where
                         Some(local_frame_dst),
                         DeviceIpLayerMetadata::default(),
                         parsing_context,
+                        gso_info,
                     ),
                     buffer,
                 )
@@ -628,6 +632,7 @@ where
                         Some(local_frame_dst),
                         DeviceIpLayerMetadata::default(),
                         parsing_context,
+                        gso_info,
                     ),
                     buffer,
                 )
@@ -968,7 +973,6 @@ pub(crate) mod testutil {
 mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
-    use core::convert::Infallible as Never;
     use netstack3_hashmap::HashSet;
 
     use net_types::SpecifiedAddr;
@@ -1353,7 +1357,7 @@ mod tests {
     impl TransmitQueueCommon<EthernetLinkDevice, FakeBindingsCtx> for FakeCoreCtx {
         type Meta = FakeTxMetadata;
 
-        type DequeueContext = Never;
+        type DequeueContext = !;
 
         fn parse_outgoing_frame<'a>(
             buf: &'a [u8],
@@ -1366,7 +1370,7 @@ mod tests {
     impl TransmitQueueCommon<EthernetLinkDevice, FakeBindingsCtx> for FakeInnerCtx {
         type Meta = FakeTxMetadata;
 
-        type DequeueContext = Never;
+        type DequeueContext = !;
 
         fn parse_outgoing_frame<'a, 'b>(
             buf: &'a [u8],
@@ -1405,7 +1409,7 @@ mod tests {
             &mut self,
             bindings_ctx: &mut FakeBindingsCtx,
             device_id: &Self::DeviceId,
-            dequeue_context: Option<&mut Never>,
+            dequeue_context: Option<&mut !>,
             tx_meta: Self::Meta,
             buf: packet::Buf<Vec<u8>>,
         ) -> Result<(), DeviceSendFrameError> {
@@ -1462,7 +1466,7 @@ mod tests {
             &mut self,
             _bindings_ctx: &mut FakeBindingsCtx,
             device_id: &Self::DeviceId,
-            dequeue_context: Option<&mut Never>,
+            dequeue_context: Option<&mut !>,
             _tx_meta: Self::Meta,
             buf: packet::Buf<Vec<u8>>,
         ) -> Result<(), DeviceSendFrameError> {

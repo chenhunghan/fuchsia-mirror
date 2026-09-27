@@ -2,17 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/lib/chunked-compression/streaming-chunked-compressor.h"
+
 #include <lib/syslog/cpp/macros.h>
 #include <zircon/assert.h>
 
 #include <algorithm>
 
 #include <fbl/algorithm.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
-#include <src/lib/chunked-compression/chunked-compressor.h>
-#include <src/lib/chunked-compression/status.h>
-#include <src/lib/chunked-compression/streaming-chunked-compressor.h>
 #include <zstd/zstd.h>
+
+#include "src/lib/chunked-compression/chunked-archive.h"
+#include "src/lib/chunked-compression/chunked-compressor.h"
+#include "src/lib/chunked-compression/status.h"
 
 namespace chunked_compression {
 

@@ -34,7 +34,7 @@ use netemul::{RealmTcpListener as _, RealmUdpSocket as _};
 use netstack_testing_common::constants::ipv6 as ipv6_consts;
 use netstack_testing_common::ndp::send_ra_with_router_lifetime;
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Manager, ManagerConfig, Netstack, NetstackExt, SocketProxyType,
+    KnownServiceProvider, Manager, ManagerConfig, Netstack3, NetstackExt, SocketProxyType,
     TestSandboxExt as _, constants,
 };
 use netstack_testing_common::{
@@ -61,11 +61,10 @@ use test_case::test_case;
 const DEFAULT_DNS_PORT: u16 = 53;
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn no_ip_literal<N: Netstack>(name: &str) {
+async fn no_ip_literal(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )
@@ -274,18 +273,17 @@ const NDP_DNS_SERVER: fnet::Ipv6Address = fidl_ip_v6!("20a::1234:5678");
 /// appropriately publishes the DNS servers.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(DnsCheckType::lookup_admin(); "lookup_admin")]
 #[test_case(DnsCheckType::dns_server_watcher(); "dns_server_watcher")]
-async fn discovered_ndp_dns<M: Manager, N: Netstack>(name: &str, check_type: DnsCheckType) {
+async fn discovered_ndp_dns<M: Manager>(name: &str, check_type: DnsCheckType) {
     let name = name.to_string();
     // The device must be installed by netcfg in order to start the NDP watcher
     // on the interface.
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         &name.clone(),
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
         },
@@ -333,10 +331,9 @@ async fn discovered_ndp_dns<M: Manager, N: Netstack>(name: &str, check_type: Dns
 /// appropriately publishes the DNS servers.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(DnsCheckType::lookup_admin(); "lookup_admin")]
 #[test_case(DnsCheckType::dns_server_watcher(); "dns_server_watcher")]
-async fn discovered_dhcpv4_dns<M: Manager, N: Netstack>(name: &str, check_type: DnsCheckType) {
+async fn discovered_dhcpv4_dns<M: Manager>(name: &str, check_type: DnsCheckType) {
     const SERVER_ADDR: fnet::Subnet = fidl_subnet!("192.168.0.1/24");
     /// DNS server served by DHCP.
     const DHCP_DNS_SERVER: fnet::Ipv4Address = fidl_ip_v4!("123.12.34.56");
@@ -347,18 +344,18 @@ async fn discovered_dhcpv4_dns<M: Manager, N: Netstack>(name: &str, check_type: 
     // The device must be installed by netcfg in order to start the DHCPv4 client
     // on the interface, as the DHCPv4 DNS servers are found through the DHCPv4
     // client configuration and not the DnsServerWatcher.
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         &name.clone(),
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![],
         },
         |_, network, _, client_realm, sandbox| {
             async move {
                 let server_realm = sandbox
-                    .create_netstack_realm_with::<N, _, _>(
+                    .create_netstack_realm_with::<Netstack3, _, _>(
                         format!("{}_server", name),
                         &[
                             KnownServiceProvider::DnsResolver,
@@ -468,10 +465,9 @@ async fn discovered_dhcpv4_dns<M: Manager, N: Netstack>(name: &str, check_type: 
 /// appropriately publishes the DNS servers.
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(DnsCheckType::lookup_admin(); "lookup_admin")]
 #[test_case(DnsCheckType::dns_server_watcher(); "dns_server_watcher")]
-async fn discovered_dhcpv6_dns<M: Manager, N: Netstack>(name: &str, check_type: DnsCheckType) {
+async fn discovered_dhcpv6_dns<M: Manager>(name: &str, check_type: DnsCheckType) {
     /// DHCPv6 server IP.
     const DHCPV6_SERVER: net_types_ip::Ipv6Addr =
         net_types_ip::Ipv6Addr::from_bytes(std_ip_v6!("fe80::1").octets());
@@ -483,11 +479,11 @@ async fn discovered_dhcpv6_dns<M: Manager, N: Netstack>(name: &str, check_type: 
     let name = name.to_string();
     // Install the device into the Netstack via netcfg so that the DHCPv6
     // client is started on the interface.
-    let _if_name = with_netcfg_owned_device::<M, N, _>(
+    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
         &name.clone(),
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
-            use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+            use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
             socket_proxy_type: SocketProxyType::None,
             extra_known_service_providers: vec![KnownServiceProvider::Dhcpv6Client],
         },
@@ -640,25 +636,21 @@ async fn discovered_dhcpv6_dns<M: Manager, N: Netstack>(name: &str, check_type: 
 
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(DnsCheckType::lookup_admin(); "lookup_admin")]
 #[test_case(DnsCheckType::dns_server_watcher(); "dns_server_watcher")]
-async fn discovered_starnix_networks_dns<M: Manager, N: Netstack>(
-    name: &str,
-    check_type: DnsCheckType,
-) {
+async fn discovered_starnix_networks_dns<M: Manager>(name: &str, check_type: DnsCheckType) {
     const NETWORK_ID1: u32 = 1;
     const NETWORK_ID2: u32 = 2;
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("{}-realm", name),
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::EnableSocketProxy,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::Real,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -667,7 +659,7 @@ async fn discovered_starnix_networks_dns<M: Manager, N: Netstack>(
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -761,24 +753,20 @@ fn starnix_network_info(mark: u32, handle: u64) -> fnp_socketproxy::NetworkInfo 
 
 #[netstack_test]
 #[variant(M, Manager)]
-#[variant(N, Netstack)]
 #[test_case(DnsCheckType::lookup_admin(); "lookup_admin")]
 #[test_case(DnsCheckType::dns_server_watcher(); "dns_server_watcher")]
-async fn discovered_starnix_fuchsia_networks_dns<M: Manager, N: Netstack>(
-    name: &str,
-    check_type: DnsCheckType,
-) {
+async fn discovered_starnix_fuchsia_networks_dns<M: Manager>(name: &str, check_type: DnsCheckType) {
     const STARNIX_NETWORK_ID: u32 = 2;
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             format!("{name}-realm"),
             [
                 KnownServiceProvider::Manager {
                     agent: M::MANAGEMENT_AGENT,
                     config: ManagerConfig::EnableSocketProxy,
                     use_dhcp_server: false,
-                    use_out_of_stack_dhcp_client: N::USE_OUT_OF_STACK_DHCP_CLIENT,
+                    use_out_of_stack_dhcp_client: Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT,
                     socket_proxy_type: SocketProxyType::Real,
                 },
                 KnownServiceProvider::DnsResolver,
@@ -787,7 +775,7 @@ async fn discovered_starnix_fuchsia_networks_dns<M: Manager, N: Netstack>(
             ]
             .into_iter()
             .chain(
-                N::USE_OUT_OF_STACK_DHCP_CLIENT
+                Netstack3::USE_OUT_OF_STACK_DHCP_CLIENT
                     .then_some(KnownServiceProvider::DhcpClient)
                     .into_iter(),
             ),
@@ -1011,14 +999,13 @@ const EXAMPLE_IPV4_ADDR: fnet::IpAddress = fidl_ip!("93.184.216.34");
 const EXAMPLE_IPV6_ADDR: fnet::IpAddress = fidl_ip!("2606:2800:220:1:248:1893:25c8:1946");
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn successfully_retrieves_ipv6_record_despite_ipv4_timeout<N: Netstack>(name: &str) {
+async fn successfully_retrieves_ipv6_record_despite_ipv4_timeout(name: &str) {
     use trust_dns_proto::op::{Message, ResponseCode};
     use trust_dns_proto::rr::RecordType;
 
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )
@@ -1166,8 +1153,7 @@ async fn successfully_retrieves_ipv6_record_despite_ipv4_timeout<N: Netstack>(na
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn fallback_on_error_response_code<N: Netstack>(name: &str) {
+async fn fallback_on_error_response_code(name: &str) {
     use itertools::Itertools as _;
     use trust_dns_proto::op::{Message, ResponseCode};
     use trust_dns_proto::rr::RecordType;
@@ -1204,7 +1190,7 @@ async fn fallback_on_error_response_code<N: Netstack>(name: &str) {
 
         let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
         let realm = sandbox
-            .create_netstack_realm_with::<N, _, _>(
+            .create_netstack_realm_with::<Netstack3, _, _>(
                 name,
                 &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
             )
@@ -1380,13 +1366,12 @@ async fn setup_dns_server(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn no_fallback_to_tcp_on_failed_udp<N: Netstack>(name: &str) {
+async fn no_fallback_to_tcp_on_failed_udp(name: &str) {
     use trust_dns_proto::op::{Message, ResponseCode};
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )
@@ -1444,13 +1429,12 @@ async fn no_fallback_to_tcp_on_failed_udp<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn fallback_to_tcp_on_truncated_response<N: Netstack>(name: &str) {
+async fn fallback_to_tcp_on_truncated_response(name: &str) {
     use trust_dns_proto::op::{Message, ResponseCode};
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )
@@ -1521,13 +1505,12 @@ async fn fallback_to_tcp_on_truncated_response<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn query_preferred_name_servers_first<N: Netstack>(name: &str) {
+async fn query_preferred_name_servers_first(name: &str) {
     use trust_dns_proto::op::{Message, MessageType, OpCode, ResponseCode};
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )
@@ -1717,13 +1700,12 @@ async fn query_preferred_name_servers_first<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dns_name_server_stats_inspect<N: Netstack>(name: &str) {
+async fn dns_name_server_stats_inspect(name: &str) {
     use trust_dns_proto::op::{Message, ResponseCode};
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )
@@ -1813,13 +1795,12 @@ async fn dns_name_server_stats_inspect<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dns_name_server_stats_tcp_inspect<N: Netstack>(name: &str) {
+async fn dns_name_server_stats_tcp_inspect(name: &str) {
     use trust_dns_proto::op::{Message, ResponseCode};
 
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )
@@ -1920,11 +1901,10 @@ async fn dns_name_server_stats_tcp_inspect<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn dns_name_server_stats_failure_inspect<N: Netstack>(name: &str) {
+async fn dns_name_server_stats_failure_inspect(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[KnownServiceProvider::DnsResolver, KnownServiceProvider::FakeClock],
         )

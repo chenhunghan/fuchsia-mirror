@@ -40,9 +40,6 @@ import("//build/zbi/zbi.gni")
 #    provide).
 #
 #    Examples:
-#      - `fuchsia::network_require_netstack3` - netstack3 (implemented in Rust)
-#        must be used on this board, and not netstack2 (implemented in Go).
-#
 #      - `fuchsia::wlan_softmac` - used to tell assembly that this board uses a
 #        "soft MAC" wifi driver.
 #

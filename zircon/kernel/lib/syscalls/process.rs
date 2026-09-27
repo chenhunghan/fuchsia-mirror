@@ -7,6 +7,7 @@
 use crate::object::{Dispatcher, HandleValue, JobDispatcher, ProcessDispatcher, ThreadDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use crate::userabi::VDso;
+use crate::vm::vm_object::VmObjectReadWriteOptions;
 use boot_options::BootOptions;
 use debug::ltracef;
 use syscalls_macro::syscall;
@@ -221,7 +222,9 @@ pub fn sys_process_read_memory(
     // Additionally, it is racy with the mapping going away.
     let buffer_size = core::cmp::min(buffer_size, vm_mapping.size() - (vaddr - vm_mapping.base()));
 
-    let out_actual = vmo.read_user(buffer, offset, buffer_size)?;
+    let (res, out_actual) =
+        vmo.read_user(buffer, offset, buffer_size, VmObjectReadWriteOptions::TRIM_LENGTH);
+    res?;
     if out_actual == 0 {
         // If our partial read returned 0 bytes, it means that offset is past the end of the VMO.
         return Err(Status::OUT_OF_RANGE);
@@ -274,7 +277,9 @@ pub fn sys_process_write_memory(
     // Additionally, it is racy with the mapping going away.
     let buffer_size = core::cmp::min(buffer_size, vm_mapping.size() - (vaddr - vm_mapping.base()));
 
-    let out_actual = vmo.write_user(buffer, offset, buffer_size)?;
+    let (res, out_actual) =
+        vmo.write_user(buffer, offset, buffer_size, VmObjectReadWriteOptions::TRIM_LENGTH);
+    res?;
     if out_actual == 0 {
         // If our partial write returned 0 bytes, it means that offset is past the end of the VMO.
         return Err(Status::OUT_OF_RANGE);

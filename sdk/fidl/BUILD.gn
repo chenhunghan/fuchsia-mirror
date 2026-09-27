@@ -260,6 +260,7 @@ _partner_idk_unstable_fidl_libraries_targets_list = [
   # keep-sorted: begin
   "//sdk/fidl/fuchsia.boot.metadata:fuchsia.boot.metadata",
   "//sdk/fidl/fuchsia.buttons:fuchsia.buttons",
+  "//sdk/fidl/fuchsia.driver.debug:fuchsia.driver.debug",
   "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata",
   "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token",
   "//sdk/fidl/fuchsia.hardware.adcimpl:fuchsia.hardware.adcimpl",

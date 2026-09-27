@@ -7,8 +7,8 @@ use crate::util;
 use anyhow::{bail, ensure};
 use assembly_config_capabilities::{Config, ConfigValueType};
 use assembly_config_schema::platform_settings::connectivity_config::{
-    NetstackVersion, NetworkingConfig, PlatformConnectivityConfig, WlanPolicyLayer,
-    WlanRecoveryProfile, WlanRoamingMode, WlanRoamingPolicy, WlanRoamingProfile,
+    NetworkingConfig, PlatformConnectivityConfig, WlanPolicyLayer, WlanRecoveryProfile,
+    WlanRoamingMode, WlanRoamingPolicy, WlanRoamingProfile,
 };
 use assembly_constants::{BoardFeature, FileEntry, PackageDestination, PackageSetDestination};
 
@@ -176,76 +176,34 @@ impl DefineSubsystemConfiguration<PlatformConnectivityConfig> for ConnectivitySu
                 )?;
             }
 
-            // The use of netstack3 can be forcibly required by the board,
-            // otherwise it's selectable by the product.
-            match (
-                context.board_config.provides_feature(BoardFeature::NetworkRequireNetstack3),
-                connectivity_config.network.netstack_version,
-            ) {
-                (true, _) | (false, NetstackVersion::Netstack3) => {
-                    builder.platform_bundle("netstack3")?;
-                    builder.platform_bundle(maybe_gub_bundle("netstack3_packages").as_ref())?;
-                }
-                (false, NetstackVersion::Netstack2) => {
-                    if connectivity_config.network.max_rolling_capture_buffer_size.is_some() {
-                        anyhow::bail!(
-                            "max_rolling_capture_buffer_size only affects Netstack3, \
-                             but Netstack2 was selected"
-                        );
-                    }
-                    if connectivity_config.network.netstack_thread_count.is_some() {
-                        anyhow::bail!(
-                            "netstack_thread_count only affects Netstack3, \
-                             but Netstack2 was selected"
-                        );
-                    }
-
-                    builder.platform_bundle("netstack2")?;
-                }
-                (false, NetstackVersion::NetstackMigration) => {
-                    builder.platform_bundle("netstack_migration")?;
-                    builder.platform_bundle(
-                        maybe_gub_bundle("netstack_migration_packages").as_ref(),
-                    )?;
-                }
-            }
+            builder.platform_bundle("netstack3")?;
+            builder.platform_bundle(maybe_gub_bundle("netstack3_packages").as_ref())?;
 
             // Define netstack3 structured configuration keys.
-            //
-            // It must be set twice, because netstack3 is both in the
-            // netstack-migration package and the netstack3 package.
-            for (package, component) in [
-                ("netstack3", "meta/netstack3.cm"),
-                ("netstack-migration", "meta/netstack-proxy.cm"),
-            ] {
-                builder
-                    .package(package)
-                    .component(component)?
-                    .field(
-                        "num_threads",
-                        connectivity_config.network.netstack_thread_count.unwrap_or_default().get(),
-                    )?
-                    .field("debug_logs", false)?
-                    .field("opaque_iids", true)?
-                    .field(
-                        "sampled_stats_enabled",
-                        matches!(context.build_type, BuildType::Eng | BuildType::UserDebug),
-                    )?
-                    .field("multi_vmo", connectivity_config.network.netstack_multi_vmo)?
-                    .field(
-                        "max_rolling_capture_buffer_size",
-                        connectivity_config
-                            .network
-                            .max_rolling_capture_buffer_size
-                            .unwrap_or(16777216),
-                    )?
-                    // Routed from fuchsia.power.SuspendEnabled capability.
-                    //
-                    // TODO(https://fxbug.dev/368386068): This should not be
-                    // necessary once we teach structured config and routed
-                    // capabilities to coexist peacefully.
-                    .field("suspend_enabled", false)?;
-            }
+            builder
+                .package("netstack3")
+                .component("meta/netstack3.cm")?
+                .field(
+                    "num_threads",
+                    connectivity_config.network.netstack_thread_count.unwrap_or_default().get(),
+                )?
+                .field("debug_logs", false)?
+                .field("opaque_iids", true)?
+                .field(
+                    "sampled_stats_enabled",
+                    matches!(context.build_type, BuildType::Eng | BuildType::UserDebug),
+                )?
+                .field("multi_vmo", connectivity_config.network.netstack_multi_vmo)?
+                .field(
+                    "max_rolling_capture_buffer_size",
+                    connectivity_config.network.max_rolling_capture_buffer_size.unwrap_or(16777216),
+                )?
+                // Routed from fuchsia.power.SuspendEnabled capability.
+                //
+                // TODO(https://fxbug.dev/368386068): This should not be
+                // necessary once we teach structured config and routed
+                // capabilities to coexist peacefully.
+                .field("suspend_enabled", false)?;
 
             let has_fullmac = context.board_config.provides_feature(BoardFeature::WlanFullmac);
             let has_softmac = context.board_config.provides_feature(BoardFeature::WlanSoftmac);

@@ -66,6 +66,14 @@
     {
       "kind": "Switch",
       "optionality": "optional",
+      "long": "--compressed",
+      "short": null,
+      "description": "keep the trace file compressed on the host. Defaults to false.",
+      "hidden": false
+    },
+    {
+      "kind": "Switch",
+      "optionality": "optional",
       "long": "--upload",
       "short": null,
       "description": "upload the trace file to GCS and display the Perfetto Trace Viewer URL. Defaults to false.",

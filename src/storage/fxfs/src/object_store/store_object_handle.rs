@@ -12,8 +12,8 @@ use crate::object_handle::ObjectHandle;
 use crate::object_store::extent_record::{ExtentMode, ExtentValue};
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{
-    AttributeKey, ExtendedAttributeValue, ObjectAttributes, ObjectKey, ObjectKeyData, ObjectValue,
-    Timestamp,
+    AttributeKey, BytesAndNodes, ExtendedAttributeValue, ObjectAttributes, ObjectKey,
+    ObjectKeyData, ObjectValue, Timestamp,
 };
 use crate::object_store::transaction::{
     AssocObj, AssociatedObject, LockKey, Mutation, ObjectStoreMutation, Options, ReadGuard,
@@ -27,6 +27,7 @@ use crate::range::RangeExt;
 use anyhow::{Context, Error, anyhow, bail, ensure};
 use assert_matches::assert_matches;
 use bit_vec::BitVec;
+use futures::future::try_join_all;
 use futures::stream::{FuturesOrdered, FuturesUnordered, unfold};
 use futures::{Stream, TryStreamExt, try_join};
 use fxfs_crypto::{
@@ -574,15 +575,10 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 // The allocated and deallocated shouldn't exceed the max size of the file which is
                 // bound within i64.
                 let diff = i64::try_from(allocated).unwrap() - i64::try_from(deallocated).unwrap();
-                transaction.add(
+                transaction.merge_bytes_and_nodes(
                     self.store().store_object_id(),
-                    Mutation::merge_object(
-                        ObjectKey::project_usage(
-                            self.store().root_directory_object_id(),
-                            *project_id,
-                        ),
-                        ObjectValue::BytesAndNodes { bytes: diff, nodes: 0 },
-                    ),
+                    ObjectKey::project_usage(self.store().root_directory_object_id(), *project_id),
+                    BytesAndNodes { bytes: diff, nodes: 0 },
                 );
             }
         } else {
@@ -661,7 +657,8 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         // Deal with head alignment.
         if aligned.start < offset {
             let mut head_block = aligned_buf.subslice_mut(0..block_size.get() as usize);
-            let read = self.read(attribute_id, aligned.start, head_block.reborrow()).await?;
+            let read =
+                self.read_aligned(attribute_id, aligned.start, head_block.reborrow()).await?;
             let len = head_block.len();
             head_block.subslice_mut(read..len).fill(0);
         }
@@ -673,7 +670,9 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             if offset <= end_block_offset {
                 let mut tail_block =
                     aligned_buf.subslice_mut(aligned_buf.len() - block_size.get() as usize..);
-                let read = self.read(attribute_id, end_block_offset, tail_block.reborrow()).await?;
+                let read = self
+                    .read_aligned(attribute_id, end_block_offset, tail_block.reborrow())
+                    .await?;
                 let len = tail_block.len();
                 tail_block.subslice_mut(read..len).fill(0);
             }
@@ -994,12 +993,22 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         Ok(cipher)
     }
 
-    pub async fn read(
+    /// Reads up to `buf.len()` bytes from attribute `attribute_id` starting at `offset`.
+    ///
+    /// Both `offset` and `buf.len()` must be aligned to the object's `block_size()`.
+    ///
+    /// Returns the number of bytes read. If `offset >= size`, returns 0. Holes/sparse extents
+    /// within the read range are zero-filled. Callers should not make any assumptions about the
+    /// contents of the buffer past the returned read amount.
+    pub async fn read_aligned(
         &self,
         attribute_id: AttributeId,
         offset: u64,
         mut buf: MutableBufferRef<'_>,
     ) -> Result<usize, Error> {
+        let block_size = self.block_size();
+        ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
+        ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
         let fs = self.store().filesystem();
         let guard = fs
             .lock_manager()
@@ -1025,173 +1034,45 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             return Ok(0);
         }
         let length = min(buf.len() as u64, size - offset) as usize;
-        buf = buf.subslice_mut(0..length);
-        self.read_unchecked(attribute_id, offset, buf, &guard).await?;
+        let aligned_length =
+            block_size.align_up(length as u64).ok_or(FxfsError::Inconsistent)? as usize;
+        buf = buf.subslice_mut(0..aligned_length);
+        self.read_aligned_unchecked(attribute_id, offset, buf, &guard).await?;
         Ok(length)
     }
 
     /// Read `buf.len()` bytes from the attribute `attribute_id`, starting at `offset`, into `buf`.
     /// It's required that a read lock on this attribute id is taken before this is called.
     ///
+    /// Both `offset` and `buf.len()` must be aligned to the object's `block_size()`.
+    ///
     /// This function doesn't do any size checking - any portion of `buf` past the end of the file
     /// will be filled with zeros. The caller is responsible for enforcing the file size on reads.
     /// This is because, just looking at the extents, we can't tell the difference between the file
     /// actually ending and there just being a section at the end with no data (since attributes
     /// are sparse).
-    pub async fn read_unchecked(
+    pub async fn read_aligned_unchecked(
         &self,
         attribute_id: AttributeId,
-        mut offset: u64,
-        mut buf: MutableBufferRef<'_>,
+        offset: u64,
+        buf: MutableBufferRef<'_>,
         _guard: &ReadGuard<'_>,
     ) -> Result<(), Error> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return Ok(());
         }
         let end_offset = offset + buf.len() as u64;
-
-        self.store().logical_read_ops.fetch_add(1, Ordering::Relaxed);
-
-        // Whilst the read offset must be aligned to the filesystem block size, the buffer need only
-        // be aligned to the device's block size.
-        let block_size = self.block_size();
-        let device_block_size = self.store().device.block_size() as u64;
-        assert_eq!(offset % block_size, 0);
-        assert_eq!(buf.range().start as u64 % device_block_size, 0);
         let tree = &self.store().tree;
         let layer_set = tree.layer_set();
         let mut merger = layer_set.merger();
-        let mut iter = merger
+        let iter = merger
             .query(Query::LimitedRange(&ObjectKey::extent(
                 self.object_id(),
                 attribute_id,
                 offset..end_offset,
             )))
             .await?;
-        let end_align = ((offset + buf.len() as u64) % block_size) as usize;
-        let trace = self.trace();
-        let reads = FuturesUnordered::new();
-        while let Some(ItemRef {
-            key:
-                ObjectKey {
-                    object_id,
-                    data: ObjectKeyData::Attribute(attr_id, AttributeKey::Extent(extent_key)),
-                },
-            value: ObjectValue::Extent(extent_value),
-            ..
-        }) = iter.get()
-        {
-            if *object_id != self.object_id() || *attr_id != attribute_id {
-                break;
-            }
-            ensure!(
-                extent_key.is_valid() && block_size.is_aligned(extent_key),
-                FxfsError::Inconsistent
-            );
-            if extent_key.start > offset {
-                // Zero everything up to the start of the extent.
-                let to_zero = min(extent_key.start - offset, buf.len() as u64) as usize;
-                let len = buf.len();
-                buf.reborrow().subslice_mut(0..to_zero).fill(0);
-                buf = buf.subslice_mut(to_zero..len);
-                if buf.is_empty() {
-                    break;
-                }
-                offset += to_zero as u64;
-            }
-
-            if let ExtentValue::Some { device_offset, key_id, mode } = extent_value {
-                let mut device_offset = device_offset + (offset - extent_key.start);
-                let key_id = *key_id;
-
-                let to_copy = min(buf.len() - end_align, (extent_key.end - offset) as usize);
-                if to_copy > 0 {
-                    if trace {
-                        info!(
-                            store_id = self.store().store_object_id(),
-                            oid = self.object_id(),
-                            device_range:? = (device_offset..device_offset + to_copy as u64),
-                            offset,
-                            range:? = **extent_key,
-                            block_size = block_size.get();
-                            "R",
-                        );
-                    }
-                    let (mut head, tail) = buf.split_at_mut(to_copy);
-                    let maybe_bitmap = match mode {
-                        ExtentMode::OverwritePartial(bitmap) => {
-                            let mut read_bitmap = bitmap
-                                .clone()
-                                .split_off(((offset - extent_key.start) / block_size) as usize);
-                            read_bitmap.truncate(((to_copy as u64) / block_size) as usize);
-                            Some(read_bitmap)
-                        }
-                        _ => None,
-                    };
-                    reads.push(async move {
-                        self.read_and_decrypt(
-                            attribute_id,
-                            device_offset,
-                            offset,
-                            head.reborrow(),
-                            key_id,
-                        )
-                        .await?;
-                        if let Some(bitmap) = maybe_bitmap {
-                            apply_bitmap_zeroing(self.block_size(), &bitmap, head);
-                        }
-                        Ok::<(), Error>(())
-                    });
-                    buf = tail;
-                    if buf.is_empty() {
-                        break;
-                    }
-                    offset += to_copy as u64;
-                    device_offset += to_copy as u64;
-                }
-
-                // Deal with end alignment by reading the existing contents into an alignment
-                // buffer.
-                if offset < extent_key.end && end_align > 0 {
-                    if let ExtentMode::OverwritePartial(bitmap) = mode {
-                        let bitmap_offset = (offset - extent_key.start) / block_size;
-                        if !bitmap.get(bitmap_offset as usize).ok_or(FxfsError::Inconsistent)? {
-                            // If this block isn't actually initialized, skip it.
-                            break;
-                        }
-                    }
-                    let mut align_buf =
-                        self.store().device.allocate_buffer(block_size.get() as usize).await;
-                    if trace {
-                        info!(
-                            store_id = self.store().store_object_id(),
-                            oid = self.object_id(),
-                            device_range:? = (device_offset..device_offset + align_buf.len() as u64);
-                            "RT",
-                        );
-                    }
-                    self.read_and_decrypt(
-                        attribute_id,
-                        device_offset,
-                        offset,
-                        align_buf.as_mut(),
-                        key_id,
-                    )
-                    .await?;
-                    buf.copy_from_buffer(align_buf.as_ref().subslice(0..end_align));
-                    buf = buf.subslice_mut(0..0);
-                    break;
-                }
-            } else if extent_key.end >= offset + buf.len() as u64 {
-                // Deleted extent covers remainder, so we're done.
-                break;
-            }
-
-            iter.advance().await?;
-        }
-        reads.try_collect::<()>().await?;
-        buf.fill(0);
-        Ok(())
+        self.read_aligned_impl(attribute_id, offset, buf, iter).await
     }
 
     /// Reads an entire attribute.
@@ -1241,12 +1122,39 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             }
             _ => bail!(FxfsError::InvalidArgs),
         };
+        iter.advance().await?;
+        self.read_aligned_impl(attribute_id, 0, buffer.as_mut(), iter).await?;
+        Ok(buffer.as_ref().subslice(0..size).to_vec().into_boxed_slice())
+    }
+
+    /// Reads block-aligned data from `offset` for attribute `attribute_id` into `buf` using `iter`.
+    ///
+    /// Both `offset` and `buf.len()` must be aligned to the object's `block_size()`, and `buf`'s
+    /// memory buffer range start must be aligned to the device block size.
+    ///
+    /// Extents from `iter` are read and decrypted in parallel. Holes and any unallocated portions
+    /// within `buf` are zero-filled.
+    async fn read_aligned_impl(
+        &self,
+        attribute_id: AttributeId,
+        mut offset: u64,
+        mut buf: MutableBufferRef<'_>,
+        mut iter: MergerIterator<'_, '_, ObjectKey, ObjectValue>,
+    ) -> Result<(), Error> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let block_size = self.block_size();
+        debug_assert!(block_size.is_aligned(offset));
+        debug_assert!(block_size.is_aligned(buf.len() as u64));
+        let device_block_size = self.store().device.block_size() as u64;
+        debug_assert!(buf.range().start as u64 % device_block_size == 0);
 
         self.store().logical_read_ops.fetch_add(1, Ordering::Relaxed);
-        let mut last_offset = 0;
+
+        let mut reads = Vec::new();
         loop {
-            iter.advance().await?;
-            match iter.get() {
+            let (mut extent_key, mut device_offset, key_id, mode) = match iter.get() {
                 Some(ItemRef {
                     key:
                         ObjectKey {
@@ -1256,49 +1164,91 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                         },
                     value: ObjectValue::Extent(extent_value),
                     ..
-                }) if *object_id == self.object_id() && *attr_id == attribute_id => {
-                    if let ExtentValue::Some { device_offset, key_id, mode } = extent_value {
-                        let offset = extent_key.start as usize;
-                        buffer.subslice_mut(last_offset..offset).fill(0);
-                        let end = std::cmp::min(extent_key.end as usize, buffer.len());
-                        let maybe_bitmap = match mode {
-                            ExtentMode::OverwritePartial(bitmap) => {
-                                // The caller has to adjust the bitmap if necessary, but we always
-                                // start from the beginning of any extent, so we only truncate.
-                                let mut read_bitmap = bitmap.clone();
-                                read_bitmap.truncate(
-                                    ((end as u64 - extent_key.start) / self.block_size()) as usize,
-                                );
-                                Some(read_bitmap)
-                            }
-                            _ => None,
-                        };
-                        self.read_and_decrypt(
-                            attribute_id,
-                            *device_offset,
-                            extent_key.start,
-                            buffer.subslice_mut(offset..end as usize),
-                            *key_id,
-                        )
-                        .await?;
-                        if let Some(bitmap) = maybe_bitmap {
-                            apply_bitmap_zeroing(
-                                self.block_size(),
-                                &bitmap,
-                                buffer.subslice_mut(offset..end as usize),
+                }) if *object_id == self.object_id && *attr_id == attribute_id => {
+                    match extent_value {
+                        ExtentValue::Some { device_offset, mode, key_id } => {
+                            ensure!(extent_key.is_valid(), FxfsError::Inconsistent);
+                            ensure!(block_size.is_aligned(extent_key), FxfsError::Inconsistent);
+                            ensure!(
+                                device_offset % device_block_size == 0,
+                                FxfsError::Inconsistent
                             );
+                            // The iterator shouldn't start entirely before the offset.
+                            ensure!(extent_key.end > offset, FxfsError::Inconsistent);
+                            (extent_key.0.clone(), *device_offset, *key_id, mode)
                         }
-                        last_offset = end;
-                        if last_offset >= size {
-                            break;
+                        ExtentValue::None => {
+                            // Treat deleted extents like holes.
+                            iter.advance().await?;
+                            continue;
                         }
                     }
                 }
                 _ => break,
+            };
+            if extent_key.start > offset {
+                // Zero fill holes in the attribute.
+                let split = std::cmp::min((extent_key.start - offset) as usize, buf.len());
+                let (mut to_zero, remaining) = buf.split_at_mut(split);
+                to_zero.fill(0);
+                buf = remaining;
+                if buf.is_empty() {
+                    break;
+                }
+                offset = extent_key.start;
+            }
+
+            let mut bitmap_offset = 0;
+            if extent_key.start < offset {
+                let diff = offset - extent_key.start;
+                extent_key.start = offset;
+                device_offset += diff;
+                bitmap_offset = diff;
+            }
+            if (extent_key.end - extent_key.start) > buf.len() as u64 {
+                extent_key.end = extent_key.start + buf.len() as u64;
+            }
+            let (mut to_read, remaining) =
+                buf.split_at_mut((extent_key.end - extent_key.start) as usize);
+            buf = remaining;
+            let maybe_bitmap = match mode {
+                ExtentMode::OverwritePartial(bitmap) => {
+                    let mut read_bitmap =
+                        bitmap.clone().split_off((bitmap_offset / block_size) as usize);
+                    read_bitmap.truncate(((to_read.len() as u64) / block_size) as usize);
+                    Some(read_bitmap)
+                }
+                _ => None,
+            };
+            reads.push(async move {
+                self.read_and_decrypt(
+                    attribute_id,
+                    device_offset,
+                    extent_key.start,
+                    to_read.reborrow(),
+                    key_id,
+                )
+                .await?;
+                if let Some(bitmap) = maybe_bitmap {
+                    apply_bitmap_zeroing(block_size, &bitmap, to_read);
+                }
+                Ok::<(), Error>(())
+            });
+            if buf.is_empty() {
+                break;
+            }
+            offset = extent_key.end;
+            iter.advance().await?;
+        }
+        match reads.len() {
+            0 => {}
+            1 => reads.pop().unwrap().await?,
+            _ => {
+                try_join_all(reads).await?;
             }
         }
-        buffer.subslice_mut(std::cmp::min(last_offset, size)..buffer.len()).fill(0);
-        Ok(buffer.as_ref().subslice(0..size).to_vec().into_boxed_slice())
+        buf.fill(0);
+        Ok(())
     }
 
     /// Writes potentially unaligned data at `device_offset` and returns checksums if requested.
@@ -3252,7 +3202,7 @@ mod tests {
 
         // Read the entire 5 MiB buffer back.
         let mut read_buf = object.allocate_buffer(size).await;
-        assert_eq!(object.read(0, read_buf.as_mut()).await.expect("read failed"), size);
+        assert_eq!(object.read_aligned(0, read_buf.as_mut()).await.expect("read failed"), size);
         assert_eq!(&read_buf.as_ptr_slice().to_vec()[..], &buf.as_ptr_slice().to_vec()[..]);
     }
 }

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fuchsia_inspect::Node;
+use fuchsia_inspect::{Error, Node};
 use std::collections::VecDeque;
 
 /// This struct is intended to represent a list node in Inspect, which doesn't support list
@@ -71,6 +71,27 @@ impl BoundedListNode {
 
         self.index += 1;
         self.items.back().unwrap()
+    }
+
+    /// Adopt an existing node as a new entry within a list, renaming it to the next index in the
+    /// list, and return a writer that creates properties or children for this entry. The writer
+    /// does not have to be kept for the created properties and children to be maintained in the
+    /// list.
+    ///
+    /// If adopting the entry exceeds capacity of the list, the oldest entry is evicted.
+    pub fn adopt_entry(&mut self, entry: Node) -> Result<&Node, Error> {
+        self.node.atomic_update(|node| {
+            node.adopt(&entry)?;
+            entry.rename(self.index.to_string())
+        })?;
+
+        if self.items.len() >= self.capacity {
+            self.items.pop_front();
+        }
+
+        self.items.push_back(entry);
+        self.index += 1;
+        Ok(self.items.back().unwrap())
     }
 }
 
@@ -194,6 +215,122 @@ mod tests {
                     key2: "value2",
                 }
             }
+        });
+    }
+
+    #[fuchsia::test]
+    async fn test_bounded_list_node_adopt_entry() {
+        let inspector = Inspector::default();
+        let list_node = inspector.root().create_child("list_node");
+        let mut list_node = BoundedListNode::new(list_node, 3);
+
+        let first = inspector.root().create_child("first");
+        first.record_int("val", 10);
+        assert_data_tree!(inspector, root: {
+            list_node: {},
+            first: { val: 10i64 },
+        });
+
+        let adopted = list_node.adopt_entry(first).unwrap();
+        adopted.record_string("extra", "hello");
+        assert_eq!(list_node.len(), 1);
+        assert_data_tree!(inspector, root: {
+            list_node: {
+                "0": {
+                    val: 10i64,
+                    extra: "hello",
+                },
+            },
+        });
+
+        list_node.add_entry(|n| n.record_int("val", 20));
+        let third = inspector.root().create_child("third");
+        third.record_int("val", 30);
+        list_node.adopt_entry(third).unwrap();
+        assert_eq!(list_node.len(), 3);
+        assert_data_tree!(inspector, root: {
+            list_node: {
+                "0": {
+                    val: 10i64,
+                    extra: "hello",
+                },
+                "1": {
+                    val: 20i64,
+                },
+                "2": {
+                    val: 30i64,
+                },
+            },
+        });
+
+        // Adopting a fourth entry should evict "0" and rename the adopted node to "3".
+        let fourth = inspector.root().create_child("fourth");
+        fourth.record_int("val", 40);
+        list_node.adopt_entry(fourth).unwrap();
+        assert_eq!(list_node.len(), 3);
+        assert_data_tree!(inspector, root: {
+            list_node: {
+                "1": {
+                    val: 20i64,
+                },
+                "2": {
+                    val: 30i64,
+                },
+                "3": {
+                    val: 40i64,
+                },
+            },
+        });
+    }
+
+    #[fuchsia::test]
+    async fn test_bounded_list_node_adopt_entry_error() {
+        let inspector = Inspector::default();
+        let parent = inspector.root().create_child("parent");
+        let list_node = parent.create_child("list_node");
+        let mut list_node = BoundedListNode::new(list_node, 1);
+
+        list_node.add_entry(|n| n.record_int("val", 1));
+        assert_eq!(list_node.len(), 1);
+
+        // Adopting from a different inspector VMO fails and preserves existing list state.
+        let other_inspector = Inspector::default();
+        let other_node = other_inspector.root().create_child("other");
+        assert_matches!(list_node.adopt_entry(other_node), Err(Error::AdoptionIntoWrongVmo));
+        assert_data_tree!(inspector, root: {
+            parent: {
+                list_node: {
+                    "0": {
+                        val: 1i64,
+                    },
+                },
+            },
+        });
+
+        // Adopting an ancestor fails and preserves existing list state.
+        assert_matches!(list_node.adopt_entry(parent.clone_weak()), Err(Error::AdoptAncestor));
+        assert_data_tree!(inspector, root: {
+            parent: {
+                list_node: {
+                    "0": {
+                        val: 1i64,
+                    },
+                },
+            },
+        });
+
+        // The next index is still 1.
+        let valid_node = inspector.root().create_child("valid");
+        valid_node.record_int("val", 2);
+        list_node.adopt_entry(valid_node).unwrap();
+        assert_data_tree!(inspector, root: {
+            parent: {
+                list_node: {
+                    "1": {
+                        val: 2i64,
+                    },
+                },
+            },
         });
     }
 }

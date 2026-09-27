@@ -84,7 +84,7 @@ TEST(ExtendBitsGeneral, Works) {
         nearby = RandomUpTo(std::numeric_limits<uint64_t>::max());
       }
       uint64_t before_extension = RandomUpTo(modulus - 1);
-      uint64_t result = ExtendBitsGeneral(nearby, before_extension, modulus);
+      uint64_t result = ExtendBitsGeneral(nearby, before_extension, static_cast<uint32_t>(modulus));
       uint64_t nearby_epoch_index = nearby / modulus;
       uint64_t min_distance_so_far = std::numeric_limits<int64_t>::max();
       std::vector<uint64_t> results_so_far;

@@ -99,7 +99,8 @@ bool OpusDecoder::ProcessPacket(const uint8_t* data, size_t size, bool first, bo
   auto output_buffer = std::make_unique<int16_t[]>(kOutputBufferMaxFrameCount * channels_);
 
   int decoded_frame_count_or_error =
-      opus_decode(decoder_.get(), data, size, output_buffer.get(), kOutputBufferMaxFrameCount, 0);
+      opus_decode(decoder_.get(), data, static_cast<opus_int32>(size), output_buffer.get(),
+                  kOutputBufferMaxFrameCount, 0);
   if (decoded_frame_count_or_error < 0) {
     // Decode failed.
     FX_LOGS(WARNING) << "opus_decode failed, error " << decoded_frame_count_or_error;

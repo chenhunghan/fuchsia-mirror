@@ -89,6 +89,12 @@ func ResolveIP(ctx context.Context, nodename string) (net.IP, net.IPAddr, error)
 	defer t.Stop()
 	for {
 		if err := m.Send(ctx, mdns.QuestionPacket(domain)); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				if errors.Is(ctxErr, context.DeadlineExceeded) {
+					ctxErr = fmt.Errorf("%w after %s", ctxErr, time.Since(startTime))
+				}
+				return nil, net.IPAddr{}, ctxErr
+			}
 			return nil, net.IPAddr{}, fmt.Errorf("could not send mDNS question: %w", err)
 		}
 

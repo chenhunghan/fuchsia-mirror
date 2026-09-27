@@ -25,10 +25,12 @@ if (internal_access) {
     sources = [ "//prebuilt/touch/$config_9364_path" ]
     outputs = [ "lib/firmware/$config_9364_path" ]
   }
+
   resource("config-9365") {
     sources = [ "//prebuilt/touch/$config_9365_path" ]
     outputs = [ "lib/firmware/$config_9365_path" ]
   }
+
   resource("firmware") {
     sources = [ "//prebuilt/touch/$firmware_path" ]
     outputs = [ "lib/firmware/$firmware_path" ]
@@ -60,8 +62,24 @@ group("common") {
   ]
 }
 
+fuchsia_driver_dml("goodix-gt6853-cpp-dml") {
+  dml = "meta/goodix-gt6853-cpp.dml"
+  driver_name = "goodix-gt6853-cpp"
+  component_name = "goodix-gt6853"
+  golden_cml = "meta/goodix-gt6853-cpp.cml"
+  golden_bind = "meta/goodix-gt6853.bind"
+}
+
+fuchsia_driver_dml("goodix-gt6853-rust-dml") {
+  dml = "meta/goodix-gt6853-rust.dml"
+  driver_name = "goodix-gt6853-rust"
+  component_name = "goodix-gt6853"
+  golden_cml = "meta/goodix-gt6853-rust.cml"
+  golden_bind = "meta/goodix-gt6853.bind"
+}
+
 driver_bind_rules("goodix-gt6853-bind") {
-  rules = "meta/goodix-gt6853.bind"
+  dml_label = ":goodix-gt6853-cpp-dml"
   tests = "meta/goodix-gt6853-bind-test.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -148,15 +166,21 @@ fuchsia_rust_driver("driver-rust") {
 fuchsia_driver_component("component-cpp") {
   info = "meta/goodix-gt6853-module-info.json"
   component_name = "goodix-gt6853"
-  manifest = "meta/goodix-gt6853-cpp.cml"
-  deps = [ ":driver-cpp" ]
+  dml_label = ":goodix-gt6853-cpp-dml"
+  deps = [
+    ":driver-cpp",
+    ":goodix-gt6853-bind",
+  ]
 }
 
 fuchsia_driver_component("component-rust") {
   info = "meta/goodix-gt6853-module-info.json"
   component_name = "goodix-gt6853"
-  manifest = "meta/goodix-gt6853-rust.cml"
-  deps = [ ":driver-rust" ]
+  dml_label = ":goodix-gt6853-rust-dml"
+  deps = [
+    ":driver-rust",
+    ":goodix-gt6853-bind",
+  ]
 }
 
 group("component") {

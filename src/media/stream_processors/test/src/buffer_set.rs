@@ -13,6 +13,7 @@ use fidl_fuchsia_sysmem2::*;
 use fuchsia_component::client;
 use fuchsia_stream_processors::*;
 use log::debug;
+use std::collections::HashMap;
 use std::fmt;
 use std::iter::StepBy;
 use std::ops::RangeFrom;
@@ -230,12 +231,22 @@ pub struct Buffer {
     pub size: u64,
 }
 
+pub type PacketIdx = u32;
+pub type BufferIdx = u32;
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum UsageStatus {
+    Free,
+    InUse,
+}
+
 #[derive(Debug)]
 pub struct BufferSet {
     pub proxy: BufferCollectionProxy,
     pub buffers: Vec<Buffer>,
     pub buffer_lifetime_ordinal: u64,
     pub buffer_size: usize,
+    pub packet_and_buffer_pairs: HashMap<PacketIdx, (BufferIdx, UsageStatus)>,
 }
 
 impl TryFrom<BufferSetSpec> for BufferSet {
@@ -270,11 +281,16 @@ impl TryFrom<BufferSetSpec> for BufferSet {
             });
         }
 
+        let packets = 0..(buffers.len() as PacketIdx);
+        let packet_buffers = packets.clone().rev().map(|idx| (idx, UsageStatus::Free));
+        let packet_and_buffer_pairs = packets.zip(packet_buffers).collect();
+
         Ok(Self {
             proxy: src.proxy,
             buffers,
             buffer_lifetime_ordinal: src.buffer_lifetime_ordinal,
             buffer_size: buffer_size as usize,
+            packet_and_buffer_pairs,
         })
     }
 }

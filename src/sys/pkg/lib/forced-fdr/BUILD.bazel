@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "forced-fdr",
+    srcs = [
+        "src/forced_fdr_test.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "forced_fdr",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    test_deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+    version = "0.1.0",
+    visibility = ["//:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.recovery:fuchsia.recovery_rust",
+        "//sdk/fidl/fuchsia.update.channel:fuchsia.update.channel_rust",
+        "//src/lib/fuchsia-component/client",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

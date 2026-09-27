@@ -46,6 +46,7 @@ const TOTAL_DYNAMIC_CHILDREN_KEY: &str = "total_dynamic_children";
 const ALLOCATED_BLOCKS_KEY: &str = "allocated_blocks";
 const DEALLOCATED_BLOCKS_KEY: &str = "deallocated_blocks";
 const FAILED_ALLOCATIONS_KEY: &str = "failed_allocations";
+const PEAK_BYTES_REQUESTED_KEY: &str = "peak_bytes_requested";
 
 /// InspectorExt provides a method for installing a "fuchsia.inspect.Stats" lazy node at the root
 /// of the Inspector's hierarchy.
@@ -83,6 +84,7 @@ pub struct StatsNode {
     allocated_blocks: UintProperty,
     deallocated_blocks: UintProperty,
     failed_allocations: UintProperty,
+    peak_bytes_requested: UintProperty,
 }
 
 impl StatsNode {
@@ -113,6 +115,7 @@ impl StatsNode {
                 self.allocated_blocks.set(stats.allocated_blocks as u64);
                 self.deallocated_blocks.set(stats.deallocated_blocks as u64);
                 self.failed_allocations.set(stats.failed_allocations as u64);
+                self.peak_bytes_requested.set(stats.peak_bytes_requested as u64);
             });
         }
     }
@@ -127,6 +130,7 @@ impl StatsNode {
         lifetime.record(self.allocated_blocks);
         lifetime.record(self.deallocated_blocks);
         lifetime.record(self.failed_allocations);
+        lifetime.record(self.peak_bytes_requested);
     }
 
     /// Write stats from the state of `root_of_instrumented_inspector` to `stats_root`
@@ -151,6 +155,8 @@ impl StatsNode {
                     .create_uint(DEALLOCATED_BLOCKS_KEY, stats.deallocated_blocks as u64),
                 failed_allocations: stats_root
                     .create_uint(FAILED_ALLOCATIONS_KEY, stats.failed_allocations as u64),
+                peak_bytes_requested: stats_root
+                    .create_uint(PEAK_BYTES_REQUESTED_KEY, stats.peak_bytes_requested as u64),
                 ..StatsNode::default()
             });
             n.stats_root = stats_root;
@@ -181,6 +187,7 @@ mod tests {
                 allocated_blocks: 4u64,
                 deallocated_blocks: 0u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 176u64,
             },
         });
 
@@ -204,6 +211,7 @@ mod tests {
                 allocated_blocks: 7u64,
                 deallocated_blocks: 0u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 240u64,
             },
         });
 
@@ -226,6 +234,7 @@ mod tests {
                 // STRING_REFERENCE
                 deallocated_blocks: 2u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 59856u64,
             }
         });
 
@@ -242,6 +251,7 @@ mod tests {
                 allocated_blocks: 664u64,
                 deallocated_blocks: 6u64,
                 failed_allocations: 2u64,
+                peak_bytes_requested: 265168u64,
             }
         });
     }
@@ -259,6 +269,7 @@ mod tests {
                 allocated_blocks: 3u64,
                 deallocated_blocks: 0u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 112u64,
             }
         });
 
@@ -275,6 +286,7 @@ mod tests {
                 allocated_blocks: 3u64,
                 deallocated_blocks: 0u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 112u64,
             }
         });
 
@@ -287,9 +299,10 @@ mod tests {
                 maximum_size: constants::DEFAULT_VMO_SIZE_BYTES as u64,
                 utilization_per_ten_k: 156u64,
                 total_dynamic_children: 0u64,
-                allocated_blocks: 19u64,
+                allocated_blocks: 21u64,
                 deallocated_blocks: 0u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 592u64,
             }
         });
     }
@@ -311,6 +324,7 @@ mod tests {
                 allocated_blocks: 3u64,
                 deallocated_blocks: 0u64,
                 failed_allocations: 0u64,
+                peak_bytes_requested: 112u64,
             }
         });
     }

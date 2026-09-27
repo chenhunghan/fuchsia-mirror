@@ -78,7 +78,7 @@ rust_library(
     }),
     version = "0.3.8",
     deps = [
-        "//third_party/rust_crates/vendor/futures-util-0.3.31:futures_util",
+        "//third_party/rust_crates/vendor/futures-util-0.3.34:futures_util",
         "//third_party/rust_crates/vendor/ringbuf-0.5.1:ringbuf",
     ],
 )

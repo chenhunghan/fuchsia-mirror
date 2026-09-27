@@ -614,4 +614,151 @@ TEST_ffx-default-repository-name() {
   BT_EXPECT_EQ "$(ffx-default-repository-name)" "custom-build-arm64-1"
 }
 
+_run_fx-wait-ignoring-signals_test_case() {
+  local -r expected_child_exit_code="$1"
+  local -r test_name_suffix="$2"
+
+  BT_ASSERT_FUNCTION_EXISTS fx-wait-ignoring-signals
+
+  local -r suffix="${expected_child_exit_code}_${test_name_suffix}"
+  local -r temp_file="${BT_TEMP_DIR}/signal_received_${suffix}"
+  local -r child_script="${BT_TEMP_DIR}/child_${suffix}.sh"
+  local -r child_pid_file="${BT_TEMP_DIR}/child_${suffix}.pid"
+  local -r child_ready_file="${BT_TEMP_DIR}/child_${suffix}.ready"
+  local -r handler_stderr="${BT_TEMP_DIR}/handler_stderr_${suffix}"
+
+  cat > "${child_script}" <<EOF
+#!/bin/bash
+child_pid_file="\$1"
+temp_file="\$2"
+child_ready_file="\$3"
+
+echo \$\$ > "\${child_pid_file}"
+
+cleanup() {
+  if [[ -n "\$sleep_pid" ]]; then
+    kill "\$sleep_pid" 2>/dev/null || true
+  fi
+  echo 'child_terminated' > "\${temp_file}"
+  exit ${expected_child_exit_code}
+}
+
+trap cleanup TERM
+
+# Signal that we are ready (trap is set) before sleeping
+echo "ready" > "\${child_ready_file}"
+
+sleep 30 >/dev/null 2>&1 &
+sleep_pid=\$!
+wait \$sleep_pid
+EOF
+  chmod +x "${child_script}"
+
+  # Run in background
+  fx-wait-ignoring-signals test_caller "${child_script}" "${child_pid_file}" "${temp_file}" "${child_ready_file}" 2>"${handler_stderr}" &
+  local -r parent_pid=$!
+
+  # Wait for child to write its PID
+  local child_pid=""
+  for i in {1..20}; do
+    if [[ -f "${child_pid_file}" ]]; then
+      child_pid=$(cat "${child_pid_file}")
+      break
+    fi
+    sleep 0.1
+  done
+
+  if [[ -z "${child_pid}" ]]; then
+    BT_FAIL "Could not find child PID"
+    kill "${parent_pid}" 2>/dev/null || true
+    return
+  fi
+
+  # Wait for child to be ready (trap set)
+  local child_ready=false
+  for i in {1..20}; do
+    if [[ -f "${child_ready_file}" ]]; then
+      child_ready=true
+      break
+    fi
+    sleep 0.1
+  done
+
+  if ! $child_ready; then
+    BT_FAIL "Child did not signal ready (trap not set)"
+    kill "${parent_pid}" 2>/dev/null || true
+    return
+  fi
+
+  # Send SIGTERM to parent
+  kill -TERM "${parent_pid}"
+
+  # Wait for parent to exit
+  wait "${parent_pid}"
+  local -r exit_status=$?
+
+  BT_EXPECT_EQ "${exit_status}" "${expected_child_exit_code}"
+  BT_EXPECT_FILE_CONTAINS "${temp_file}" "child_terminated"
+  BT_EXPECT_FILE_CONTAINS "${handler_stderr}" "[test_caller] Received SIGTERM. Waiting for command to shut down gracefully..."
+}
+
+TEST_fx-wait-ignoring-signals_exit_143() {
+  _run_fx-wait-ignoring-signals_test_case 143 "exit_143"
+}
+
+TEST_fx-wait-ignoring-signals_exit_0() {
+  _run_fx-wait-ignoring-signals_test_case 0 "exit_0"
+}
+
+TEST_fx-wait-ignoring-signals_exit_1() {
+  _run_fx-wait-ignoring-signals_test_case 1 "exit_1"
+}
+
+TEST_fx-wait-ignoring-signals_normal_exit_0() {
+  BT_ASSERT_FUNCTION_EXISTS fx-wait-ignoring-signals
+  local -r handler_stderr="${BT_TEMP_DIR}/handler_stderr_normal_0"
+
+  fx-wait-ignoring-signals test_caller true 2>"${handler_stderr}"
+  local -r exit_status=$?
+
+  BT_EXPECT_EQ "${exit_status}" 0
+  BT_EXPECT [[ ! -s "${handler_stderr}" ]]
+}
+
+TEST_fx-wait-ignoring-signals_normal_exit_non_zero() {
+  BT_ASSERT_FUNCTION_EXISTS fx-wait-ignoring-signals
+  local -r handler_stderr="${BT_TEMP_DIR}/handler_stderr_normal_42"
+
+  fx-wait-ignoring-signals test_caller bash -c "exit 42" 2>"${handler_stderr}"
+  local -r exit_status=$?
+
+  BT_EXPECT_EQ "${exit_status}" 42
+  BT_EXPECT [[ ! -s "${handler_stderr}" ]]
+}
+
+TEST_fx-wait-ignoring-signals_trap_restoration() {
+  BT_ASSERT_FUNCTION_EXISTS fx-wait-ignoring-signals
+
+  local initial_term initial_hup
+  initial_term=$(trap -p TERM)
+  initial_hup=$(trap -p HUP)
+
+  # Set a custom trap for INT
+  trap 'echo "original_int"' INT
+
+  fx-wait-ignoring-signals test_caller true >/dev/null 2>&1
+
+  # Check that INT is restored and others match their initial states
+  local current_int current_term current_hup
+  current_int=$(trap -p INT)
+  current_term=$(trap -p TERM)
+  current_hup=$(trap -p HUP)
+
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${current_int}" "original_int"
+  BT_EXPECT_EQ "${current_term}" "${initial_term}"
+  BT_EXPECT_EQ "${current_hup}" "${initial_hup}"
+
+  # Restore default INT trap for the test environment
+  trap - INT
+}
 BT_RUN_TESTS "$@"

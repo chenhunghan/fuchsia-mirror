@@ -9,15 +9,6 @@
             on_terminate: "reboot",
         },
     ],
-    offer: [
-        {
-            // NS3 does not implement fuchsia.net.filter.deprecated.
-            protocol: "fuchsia.net.filter.deprecated.Filter",
-            from: "void",
-            to: "#netcfg",
-            availability: "optional",
-        },
-    ],
     expose: [
         {
             protocol: [

@@ -16,8 +16,20 @@ declare_args() {
   goodix_gt92xx_driver_flavor = "cpp"
 }
 
+fuchsia_driver_dml("goodix-gt92xx-cpp-dml") {
+  dml = "meta/goodix-gt92xx-cpp.dml"
+  driver_name = "goodix-gt92xx-cpp"
+  component_name = "goodix-gt92xx"
+}
+
+fuchsia_driver_dml("goodix-gt92xx-rust-dml") {
+  dml = "meta/goodix-gt92xx-rust.dml"
+  driver_name = "goodix-gt92xx-rust"
+  component_name = "goodix-gt92xx"
+}
+
 driver_bind_rules("goodix_gt92xx_bind") {
-  rules = "meta/goodix-gt92xx.bind"
+  dml_label = ":goodix-gt92xx-cpp-dml"
   bind_output = "goodix-gt92xx.bindbc"
   tests = "meta/goodix-gt92xx-bind-test.json"
   deps = [
@@ -87,14 +99,14 @@ fuchsia_rust_driver("driver-rust") {
 fuchsia_driver_component("component-cpp") {
   info = "meta/goodix-gt92xx-module-info.json"
   component_name = "goodix-gt92xx"
-  manifest = "meta/goodix-gt92xx-cpp.cml"
+  dml_label = ":goodix-gt92xx-cpp-dml"
   deps = [ ":driver-cpp" ]
 }
 
 fuchsia_driver_component("component-rust") {
   info = "meta/goodix-gt92xx-module-info.json"
   component_name = "goodix-gt92xx"
-  manifest = "meta/goodix-gt92xx-rust.cml"
+  dml_label = ":goodix-gt92xx-rust-dml"
   deps = [ ":driver-rust" ]
 }
 

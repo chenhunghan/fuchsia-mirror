@@ -216,6 +216,45 @@ impl ProcessDispatcher {
         }
     }
 
+    /// Returns the KOID of this process's handle table.
+    #[inline]
+    pub fn handle_table_koid(&self) -> zx_types::zx_koid_t {
+        unsafe {
+            super::process_dispatcher_ffi::cpp_process_dispatcher_handle_table_koid(
+                self as *const _,
+            )
+        }
+    }
+
+    /// Resolves a handle to a dispatcher of type `T` with the required `rights` in this process's
+    /// handle table in a single FFI call.
+    #[inline]
+    pub fn get_dispatcher_with_rights<T>(
+        &self,
+        handle_value: HandleValue,
+        rights: zx_rights_t,
+    ) -> Result<fbl::RefPtr<T>, Status>
+    where
+        T: DispatcherOps + fbl::HasRefCount + fbl::Recyclable,
+    {
+        const { assert!(T::TYPE != zx_types::ZX_OBJ_TYPE_NONE) };
+        let mut ref_ptr = MaybeUninit::<fbl::RefPtr<super::Dispatcher>>::uninit();
+        // SAFETY: `self` is a valid `ProcessDispatcher` and `ref_ptr` points to valid uninitialized
+        // memory. C++ checks `T::TYPE` and `rights` before initializing `ref_ptr`.
+        unsafe {
+            let status =
+                super::process_dispatcher_ffi::cpp_process_dispatcher_get_dispatcher_with_rights(
+                    self.as_ffi(),
+                    handle_value,
+                    T::TYPE,
+                    rights,
+                    ref_ptr.as_mut_ptr(),
+                );
+            Status::ok(status)?;
+            Ok(ref_ptr.assume_init().cast::<T>())
+        }
+    }
+
     /// Returns information about this process.
     pub fn get_info(&self) -> zx_info_process_t {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.

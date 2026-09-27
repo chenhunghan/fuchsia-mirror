@@ -110,6 +110,9 @@ class Blobfs : public TransactionManager, public BlockIteratorProvider {
   // Returns filesystem specific information.
   zx::result<fs::FilesystemInfo> GetFilesystemInfo();
 
+  // Performs a health check on the filesystem by verifying a subset of open nodes.
+  zx_status_t VerifyHealth();
+
   BlobLayoutFormat BlobWriteFormat() const;
 
   BlobOverwriteConfig OverwriteConfig() const;

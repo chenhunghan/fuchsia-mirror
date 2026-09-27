@@ -204,7 +204,7 @@ mod tests {
         let handle = FakeObjectHandle::new(object.clone());
         let mut buf = handle.allocate_buffer(object.get_size() as usize).await;
         assert_eq!(buf.len(), TEST_BLOCK_SIZE.get() as usize);
-        handle.read(0, buf.as_mut()).await.expect("read failed");
+        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
         let mut reader = buf.as_ptr_slice();
         let value: u32 =
             u32::deserialize_from(&mut reader, LATEST_VERSION).expect("deserialize_from failed");
@@ -240,7 +240,7 @@ mod tests {
         let handle = FakeObjectHandle::new(object.clone());
         let mut buf = handle.allocate_buffer(object.get_size() as usize).await;
         assert_eq!(buf.len(), TEST_BLOCK_SIZE.get() as usize);
-        handle.read(0, buf.as_mut()).await.expect("read failed");
+        handle.read_aligned(0, buf.as_mut()).await.expect("read failed");
         let mut reader = buf.subslice(checkpoint.file_offset as usize..).as_ptr_slice();
         let value: u64 =
             u64::deserialize_from(&mut reader, LATEST_VERSION).expect("deserialize_from failed");

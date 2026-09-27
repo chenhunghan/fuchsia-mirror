@@ -72,7 +72,7 @@ mod implementation {
     use zx_status::Status;
 
     #[cfg(not(target_os = "fuchsia"))]
-    use fuchsia_async::emulated_handle::Koid;
+    use fuchsia_emulated_handle::Koid;
     #[cfg(target_os = "fuchsia")]
     use zx::Koid;
 

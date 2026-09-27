@@ -53,14 +53,14 @@ impl<T, const N: usize, A: Allocator> InlineArray<T, N, A> {
     {
         if count <= N {
             let mut inline_storage = [const { MaybeUninit::uninit() }; N];
-            for i in 0..count {
-                inline_storage[i].write(f());
+            for item in inline_storage.iter_mut().take(count) {
+                item.write(f());
             }
             Ok(InlineArray { count, ptr: core::ptr::null_mut(), inline_storage, allocator })
         } else {
             let mut heap_data = Box::try_new_uninit_slice_in(count, allocator)?;
-            for i in 0..count {
-                heap_data[i].write(f());
+            for item in heap_data.iter_mut().take(count) {
+                item.write(f());
             }
             // SAFETY: We just initialized all the values.
             let (fat_ptr, allocator) =

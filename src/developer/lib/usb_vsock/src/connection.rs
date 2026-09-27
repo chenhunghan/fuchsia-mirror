@@ -806,9 +806,9 @@ mod test {
 
     use super::*;
 
-    #[cfg(not(target_os = "fuchsia"))]
-    use fuchsia_async::emulated_handle::Socket as SyncSocket;
     use fuchsia_async::{Socket, Task};
+    #[cfg(not(target_os = "fuchsia"))]
+    use fuchsia_emulated_handle::Socket as SyncSocket;
     use futures::StreamExt;
     #[cfg(target_os = "fuchsia")]
     use zx::Socket as SyncSocket;

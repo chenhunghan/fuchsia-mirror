@@ -135,9 +135,8 @@ zx_status_t CreateGpioHPlatformDevice(
   fidl::Arena<> fidl_arena;
   fdf::Arena arena('GPIO');
 
-  auto composite_spec = fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(fidl_arena)
-                            .name("aml_gpio_h")
-                            .Build();
+  auto composite_spec =
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(fidl_arena).name("gpio-h").Build();
 
   auto result = pbus.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, gpio_h_dev),
                                                          composite_spec);
@@ -192,9 +191,8 @@ zx_status_t CreateGpioCPlatformDevice(
   fidl::Arena<> fidl_arena;
   fdf::Arena arena('GPIO');
 
-  auto composite_spec = fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(fidl_arena)
-                            .name("aml_gpio_c")
-                            .Build();
+  auto composite_spec =
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(fidl_arena).name("gpio-c").Build();
 
   auto result = pbus.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, gpio_c_dev),
                                                          composite_spec);
@@ -390,9 +388,8 @@ zx_status_t Nelson::CreateGpioPlatformDevice() {
   fidl::Arena<> fidl_arena;
   fdf::Arena arena('GPIO');
 
-  auto composite_spec = fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(fidl_arena)
-                            .name("aml_gpio")
-                            .Build();
+  auto composite_spec =
+      fuchsia_driver_framework::wire::CompositeNodeSpec::Builder(fidl_arena).name("gpio").Build();
 
   auto result =
       pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, gpio_dev), composite_spec);

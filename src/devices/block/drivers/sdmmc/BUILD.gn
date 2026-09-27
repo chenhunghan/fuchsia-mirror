@@ -13,6 +13,10 @@ fuchsia_driver_dml("sdmmc-dml") {
   driver_name = "sdmmc"
 }
 
+fuchsia_driver_dml_cpp_parser("sdmmc-metadata") {
+  dml_label = ":sdmmc-dml"
+}
+
 driver_bind_rules("sdmmc-bind") {
   dml_label = ":sdmmc-dml"
   bind_output = "sdmmc.bindbc"
@@ -47,6 +51,7 @@ source_set("sdmmc-driver-source") {
     "sdmmc-rpmb-device.h",
   ]
   deps = [
+    ":sdmmc-metadata",
     "//sdk/fidl/fuchsia.hardware.inlineencryption:fuchsia.hardware.inlineencryption_cpp",
     "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
     "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_cpp",
@@ -62,6 +67,7 @@ source_set("sdmmc-driver-source") {
     "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/devices/block/lib/common",
     "//src/devices/lib/driver:driver_runtime",
+    "//src/lib/backoff",
     "//tools/power_config/lib/cpp",
     "//zircon/system/ulib/inspect",
     "//zircon/system/ulib/pretty",

@@ -115,6 +115,7 @@ def _rust_toolchain_with_build_flags_impl(ctx):
             continue
         fields[k] = getattr(base_info, k)
     fields["extra_rustc_flags"] = all_extra_flags
+    fields["extra_exec_rustc_flags"] = ctx.attr.extra_rustc_flags + getattr(base_info, "extra_exec_rustc_flags", [])
 
     providers = [platform_common.ToolchainInfo(**fields)]
     if platform_common.TemplateVariableInfo in ctx.attr.toolchain:

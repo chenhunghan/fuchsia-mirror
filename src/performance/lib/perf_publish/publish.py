@@ -16,7 +16,7 @@ from importlib.resources import as_file, files
 from typing import Any, Iterable, Self
 
 from perf_publish import data  # type: ignore[attr-defined]
-from perf_publish import metrics_allowlist, summarize
+from perf_publish import device_types, metrics_allowlist, summarize
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ _SUMMARIZED_RESULTS_FILE: str = f"results{_FUCHSIA_PERF_EXT}"
 
 ENV_CATAPULT_DASHBOARD_MASTER: str = "CATAPULT_DASHBOARD_MASTER"
 ENV_CATAPULT_DASHBOARD_BOT: str = "CATAPULT_DASHBOARD_BOT"
+ENV_PERF_PUBLISH_MULTI_DEVICE_BUILDER: str = "PERF_PUBLISH_MULTI_DEVICE_BUILDER"
 ENV_BUILDBUCKET_ID: str = "BUILDBUCKET_ID"
 ENV_BUILD_CREATE_TIME: str = "BUILD_CREATE_TIME"
 ENV_RELEASE_VERSION: str = "RELEASE_VERSION"
@@ -49,6 +50,7 @@ ENV_FUCHSIA_EXPECTED_METRIC_NAMES_DEST_DIR: str = (
 ENV_INTEGRATION_INTERNAL_GIT_COMMIT: str = "INTEGRATION_INTERNAL_GIT_COMMIT"
 ENV_INTEGRATION_PUBLIC_GIT_COMMIT: str = "INTEGRATION_PUBLIC_GIT_COMMIT"
 ENV_SMART_INTEGRATION_GIT_COMMIT: str = "SMART_INTEGRATION_GIT_COMMIT"
+ENV_FUCHSIA_DEVICE_TYPE: str = "FUCHSIA_DEVICE_TYPE"
 
 
 def publish_fuchsiaperf(
@@ -98,6 +100,8 @@ class CatapultConverter:
         current_time: int | None = None,
         subprocess_check_call: Any = subprocess.check_call,
         runtime_deps_dir: str | os.PathLike[str] | None = None,
+        multi_device_builder: str | None = None,
+        fuchsia_device_type: str | None = None,
     ):
         """Creates a new catapult converter.
 
@@ -220,6 +224,10 @@ class CatapultConverter:
                 raise ValueError("Expected a single file when not summarizing")
             os.rename(fuchsia_perf_file_paths[0], self._results_path)
 
+        assert multi_device_builder in ("1", None), multi_device_builder
+        if multi_device_builder == "1":
+            self._apply_multi_device_naming(fuchsia_device_type)
+
         catapult_extension = (
             _CATAPULT_UPLOAD_ENABLED_EXT
             if self._upload_enabled
@@ -312,6 +320,8 @@ class CatapultConverter:
             runtime_deps_dir=runtime_deps_dir,
             current_time=current_time,
             subprocess_check_call=subprocess_check_call,
+            multi_device_builder=env.get(ENV_PERF_PUBLISH_MULTI_DEVICE_BUILDER),
+            fuchsia_device_type=env.get(ENV_FUCHSIA_DEVICE_TYPE),
         )
 
     def run(self) -> None:
@@ -393,6 +403,12 @@ class CatapultConverter:
                         f'"{_TEST_SUITE_REGEX}"'
                     )
                     continue
+                if test_suite.startswith("fuchsia.device."):
+                    errors.append(
+                        f'Invalid test_suite field "{test_suite}":'
+                        ' the prefix "fuchsia.device." is reserved'
+                    )
+                    continue
 
                 label: str = entry["label"]
                 if not re.match(_LABEL_REGEX, label):
@@ -462,6 +478,31 @@ class CatapultConverter:
             ]
 
         return args
+
+    def _apply_multi_device_naming(
+        self, fuchsia_device_type: str | None
+    ) -> None:
+        if not fuchsia_device_type:
+            raise ValueError(
+                "FUCHSIA_DEVICE_TYPE env var must be set when"
+                " PERF_PUBLISH_MULTI_DEVICE_BUILDER is set"
+            )
+
+        dev_name = device_types.DEVICE_TYPE_MAPPING.get(fuchsia_device_type)
+        if dev_name is None:
+            raise ValueError(
+                f"Unknown FUCHSIA_DEVICE_TYPE: {fuchsia_device_type!r}:"
+                " not present in DEVICE_TYPE_MAPPING"
+            )
+
+        with open(self._results_path) as f:
+            data = json.load(f)
+        for entry in data:
+            assert entry["test_suite"].startswith("fuchsia.")
+            suffix = entry["test_suite"].removeprefix("fuchsia.")
+            entry["test_suite"] = f"fuchsia.device.{dev_name}.{suffix}"
+        with open(self._results_path, "w") as f:
+            summarize.write_fuchsiaperf_json(f, data)
 
 
 def get_associated_runtime_deps_dir(

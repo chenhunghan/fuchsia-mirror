@@ -6,6 +6,9 @@ use crate::manager::DEFAULT_TIMEOUT_IN_SECONDS;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use fidl::endpoints::ClientEnd;
+use fidl_fuchsia_diagnostics as diagnostics;
+use fidl_fuchsia_test_manager as test_manager;
+use fuchsia_async as fasync;
 use futures::channel::mpsc;
 use futures::{AsyncWriteExt, FutureExt, SinkExt, StreamExt, join, pin_mut, select};
 use log::{info, warn};
@@ -13,10 +16,6 @@ use std::cell::RefCell;
 use std::collections::LinkedList;
 use std::rc::Rc;
 use test_manager::Artifact;
-use {
-    fidl_fuchsia_diagnostics as diagnostics, fidl_fuchsia_test_manager as test_manager,
-    fuchsia_async as fasync,
-};
 
 /// Dispatches `test_manager` artifacts to the `ArtifactBridge`s used to forward data to `ffx fuzz`.
 ///
@@ -181,12 +180,11 @@ trait ArtifactBridgeInternal: ArtifactBridge {
             // recently provided one.
             loop {
                 let mut socket_receiver = socket_receiver_rc.borrow_mut();
-                match socket_receiver.try_next() {
-                    Ok(Some(s)) => {
+                match socket_receiver.try_recv() {
+                    Ok(s) => {
                         socket = Some(fasync::Socket::from_socket(s));
                     }
                     // Either the socket_receiver closed, or there's no sockets available.
-                    Ok(None) => break,
                     Err(_) => break,
                 }
             }

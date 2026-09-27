@@ -24,7 +24,6 @@ use ffx_writer::{ToolIO, VerifiedMachineWriter};
 use fho::{FfxContext, FfxError, FfxMain, FfxTool, deferred, return_bug, return_user_error};
 use fidl::Error;
 use futures::channel::oneshot;
-use futures::try_join;
 use gcs::client::{Client, ProgressResponse};
 use pbms::{AuthFlowChoice, handle_new_access_token};
 use schemars::JsonSchema;
@@ -587,7 +586,7 @@ Reboot the Target to the bootloader and re-run this command."
                     } else {
                         futures::future::Either::Right(handle_event_text(writer, event_rx))
                     };
-                    try_join!(
+                    let (flash_res, handler_res) = futures::join!(
                         async {
                             from_manifest(
                                 &self.ctx,
@@ -599,8 +598,9 @@ Reboot the Target to the bootloader and re-run this command."
                             .map_err(anyhow::Error::from)
                         },
                         handler_fut
-                    )
-                    .map_err(fho::Error::from)?;
+                    );
+                    flash_res.map_err(fho::Error::from)?;
+                    handler_res.map_err(fho::Error::from)?;
                     Ok(())
                 }
                 _ => {
@@ -710,70 +710,77 @@ async fn handle_event_text(
     let mut ui = TextUi::new(&mut input, &mut output, &mut err_out);
     let mut progress_indicator = ProgressIndicator::new();
     loop {
-        // Clear TUI so normal stdout/stderr doesn't instantly get overwritten
-        // by the progress indicator.
-        ui.clear_progress().map_err(|e| anyhow::Error::new(e))?;
         match rec.recv().await {
-            Some(event) => match event {
-                Event::Upload(upload) => match upload {
-                    UploadProgress::OnReady { partition, files } => {
-                        log::info!("Uploading partition {} ({} files)", partition, files);
-                        progress_indicator.start_next_partition(&partition, files);
+            Some(event) => {
+                // Clear TUI so normal stdout/stderr doesn't get overwritten by
+                // the progress indicator.
+                ui.clear_progress().map_err(|e| anyhow::Error::new(e))?;
+                match event {
+                    Event::Upload(upload) => match upload {
+                        UploadProgress::OnReady { partition, files } => {
+                            log::info!("Uploading partition {} ({} files)", partition, files);
+                            progress_indicator.start_next_partition(&partition, files);
+                        }
+                        UploadProgress::OnStarted { size } => {
+                            progress_indicator.start_next_file(size);
+                        }
+                        UploadProgress::OnProgress { bytes_written } => {
+                            log::trace!("Made progress, wrote: {}", bytes_written);
+                            progress_indicator.wrote_bytes(bytes_written);
+                        }
+                        UploadProgress::OnFinished => {}
+                        UploadProgress::OnError { error } => {
+                            writeln!(writer, "Error {}", error)?;
+                        }
+                    },
+                    Event::FlashProduct { product_name, partition_count } => {
+                        log::info!("Flashing {} ({} partitions)", product_name, partition_count);
+                        progress_indicator.init(&product_name, partition_count.try_into()?);
                     }
-                    UploadProgress::OnStarted { size } => {
-                        progress_indicator.start_next_file(size);
+                    Event::FlashPartition { .. } => {}
+                    Event::FlashPartitionFinished { partition_name, duration } => {
+                        progress_indicator.finish_partition();
+                        writeln!(writer, "Flashed {} in {}", partition_name, time(duration))?;
                     }
-                    UploadProgress::OnProgress { bytes_written } => {
-                        log::trace!("Made progress, wrote: {}", bytes_written);
-                        progress_indicator.wrote_bytes(bytes_written);
+                    Event::Unlock(unlock_event) => match unlock_event {
+                        UnlockEvent::SearchingForCredentials => {
+                            writeln!(writer, "Looking for unlock credentials...")?
+                        }
+                        UnlockEvent::GeneratingToken => {
+                            writeln!(writer, "Generating unlock token...")?
+                        }
+                        UnlockEvent::FoundCredentials(delta)
+                        | UnlockEvent::FinishedGeneratingToken(delta) => {
+                            writeln!(writer, "{} {}", done(), time(delta))?
+                        }
+                        UnlockEvent::BeginningUploadOfToken => {
+                            writeln!(writer, "Preparing to upload unlock token...")?
+                        }
+                        UnlockEvent::Done => writeln!(writer, "{}", done())?,
+                    },
+                    Event::Oem { oem_command } => {
+                        writeln!(writer, "Sending command: \"{}\"", oem_command)?;
                     }
-                    UploadProgress::OnFinished => {}
-                    UploadProgress::OnError { error } => {
-                        writeln!(writer, "Error {}", error)?;
+                    Event::RebootStarted => {
+                        writeln!(writer, "Rebooting to bootloader... ")?;
                     }
-                },
-                Event::FlashProduct { product_name, partition_count } => {
-                    log::info!("Flashing {} ({} partitions)", product_name, partition_count);
-                    progress_indicator.init(&product_name, partition_count.try_into()?);
-                }
-                Event::FlashPartition { .. } => {}
-                Event::FlashPartitionFinished { partition_name, duration } => {
-                    progress_indicator.finish_partition();
-                    writeln!(writer, "Flashed {} in {}", partition_name, time(duration))?;
-                }
-                Event::Unlock(unlock_event) => match unlock_event {
-                    UnlockEvent::SearchingForCredentials => {
-                        writeln!(writer, "Looking for unlock credentials...")?
+                    Event::Rebooted(delta) => {
+                        writeln!(writer, "{} {}", done(), time(delta))?;
                     }
-                    UnlockEvent::GeneratingToken => writeln!(writer, "Generating unlock token...")?,
-                    UnlockEvent::FoundCredentials(delta)
-                    | UnlockEvent::FinishedGeneratingToken(delta) => {
-                        writeln!(writer, "{} {}", done(), time(delta))?
+                    Event::Variable(variable) => {
+                        log::trace!("got variable {:#?}", variable);
                     }
-                    UnlockEvent::BeginningUploadOfToken => {
-                        writeln!(writer, "Preparing to upload unlock token...")?
+                    Event::Locked => {
+                        let msg = "The flashing library should not lock the device...";
+                        writeln!(writer, "Error: {}", msg)?;
+                        return Err(anyhow!(msg));
                     }
-                    UnlockEvent::Done => writeln!(writer, "{}", done())?,
-                },
-                Event::Oem { oem_command } => {
-                    writeln!(writer, "Sending command: \"{}\"", oem_command)?;
                 }
-                Event::RebootStarted => {
-                    writeln!(writer, "Rebooting to bootloader... ")?;
-                }
-                Event::Rebooted(delta) => {
-                    writeln!(writer, "{} {}", done(), time(delta))?;
-                }
-                Event::Variable(variable) => {
-                    log::trace!("got variable {:#?}", variable);
-                }
-                Event::Locked => {
-                    let msg = "The flashing library should not lock the device...";
-                    writeln!(writer, "Error: {}", msg)?;
-                    return Err(anyhow!(msg));
-                }
-            },
-            None => return Ok(()),
+            }
+            None => {
+                ui.clear_progress().map_err(|e| anyhow::Error::new(e))?;
+                return Ok(());
+            }
         }
         progress_indicator.present(&mut ui)?;
     }

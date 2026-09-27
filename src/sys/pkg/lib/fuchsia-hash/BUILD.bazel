@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fuchsia-hash",
+    srcs = [
+        "src/iter.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "fuchsia_hash",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    test_deps = [
+        "//third_party/rust_crates/vendor:proptest",
+    ],
+    visibility = [
+        "//src/developer/ffx:__subpackages__",
+        "//src/devices/bin/driver-index:__subpackages__",
+        "//src/lib/assembly:__subpackages__",
+        "//src/lib/fuchsia-url:__subpackages__",
+        "//src/security:__subpackages__",
+        "//src/storage:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//vendor/google/starnix:__subpackages__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

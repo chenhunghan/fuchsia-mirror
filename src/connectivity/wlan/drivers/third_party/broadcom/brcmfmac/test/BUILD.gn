@@ -234,7 +234,7 @@ fuchsia_test_package("brcmfmac_test") {
 }
 
 bind_test("brcmfmac_sdio_bind_test") {
-  rules = "../meta/brcmfmac_sdio.bind"
+  rules = "../meta/brcmfmac.bind"
   tests = "meta/bind_sdio_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",

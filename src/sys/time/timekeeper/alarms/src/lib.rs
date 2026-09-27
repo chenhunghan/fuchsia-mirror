@@ -48,6 +48,7 @@ use futures::sink::SinkExt;
 use log::{debug, error, warn};
 use scopeguard::defer;
 use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::LazyLock;
 use time_pretty::{MSEC_IN_NANOS, format_duration, format_timer};
@@ -1143,8 +1144,8 @@ async fn wake_timer_loop(
 
     let hrtimer_node = debug_node.create_child("hrtimer");
 
-    const LRU_CACHE_CAPACITY: usize = 100;
-    let mut error_cache = lru_cache::LruCache::new(LRU_CACHE_CAPACITY);
+    const LRU_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(100).unwrap();
+    let mut error_cache = lru::LruCache::new(LRU_CACHE_CAPACITY);
 
     while let Some(cmd) = cmds.next().await {
         let _i = ScopedInc::new(&loop_count);
@@ -1383,14 +1384,14 @@ async fn wake_timer_loop(
                 // we get to schedule a new timer. We have no way to avoid it
                 // today.
                 let error_string = format!("{}", error);
-                if !error_cache.contains_key(&error_string) {
+                if !error_cache.contains(&error_string) {
                     warn!(
                         "wake_timer_loop: FIDL error: {}, deadline: {}, now: {}",
                         error,
                         format_timer(expired_deadline.into()),
                         format_timer(now.into()),
                     );
-                    error_cache.insert(error_string, ());
+                    error_cache.put(error_string, ());
                 }
                 // Manufacture a fake lease to make the code below work.
                 // Maybe use Option instead?

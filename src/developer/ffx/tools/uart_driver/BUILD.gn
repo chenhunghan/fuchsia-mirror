@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Defines the host daemon executable `ffx-uart-driver` and its CLI wrapper
+# library
+# `ffx_uart_host_driver`.
+
+import("//build/host.gni")
+import("//build/rust/rustc_library.gni")
+import("//src/developer/ffx/build/ffx_tool.gni")
+
+if (is_host) {
+  rustc_library("lib") {
+    name = "ffx_uart_host_driver"
+    edition = "2024"
+    with_unit_tests = true
+
+    deps = [
+      "impl:lib",
+      "//src/developer/ffx/command:lib",
+      "//src/developer/ffx/config:lib",
+      "//src/developer/ffx/lib/fho:lib",
+      "//src/developer/ffx/lib/logging:lib",
+      "//src/developer/ffx/lib/uart_driver_api:lib",
+      "//src/developer/ffx/tools/uart:lib",
+      "//third_party/rust_crates:argh",
+      "//third_party/rust_crates:log",
+      "//third_party/rust_crates:serde_json",
+    ]
+
+    test_deps = [
+      "//src/lib/fuchsia",
+      "//third_party/rust_crates:tempfile",
+    ]
+
+    sources = [ "src/lib.rs" ]
+  }
+
+  ffx_tool("ffx_uart_driver") {
+    edition = "2024"
+    output_name = "ffx-uart-driver"
+    deps = [
+      ":lib",
+      "//src/developer/ffx/lib/version:lib",
+      "//src/lib/fuchsia-async",
+    ]
+    sources = [ "src/main.rs" ]
+  }
+
+  group("uart_driver") {
+    public_deps = [
+      ":ffx_uart_driver",
+      ":ffx_uart_driver_host_tool",
+    ]
+  }
+
+  group("bin") {
+    public_deps = [ ":ffx_uart_driver_versioned" ]
+  }
+
+  group("tests") {
+    testonly = true
+    deps = [
+      ":lib_test",
+      "impl:lib_test",
+    ]
+  }
+} else {
+  group("tests") {
+    testonly = true
+    deps = [ ":tests($host_toolchain)" ]
+  }
+}

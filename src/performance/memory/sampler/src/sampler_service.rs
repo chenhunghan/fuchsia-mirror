@@ -22,10 +22,11 @@ use futures::stream::SelectAll;
 use std::time::{Duration, Instant};
 
 /// The threshold of recorded stack traces to trigger a partial
-/// report. The overhead for each stack trace is of the order of 1
-/// KiB; keeping this below 1000 should keep the residual memory
-/// *for a single profiled process* roughly under ~1 MiB.
-const RECLAIMABLE_STACK_TRACES_PROFILE_THRESHOLD: usize = 1000;
+/// report. Measured on production profiles (mean depth ~27 frames),
+/// each unique stack trace costs ~300 B; keeping this at 3000 keeps
+/// the residual memory *for a single profiled process* roughly
+/// under ~1 MiB.
+const RECLAIMABLE_STACK_TRACES_PROFILE_THRESHOLD: usize = 3000;
 
 /// Upper bound on the number of concurrent connections served.
 const MAX_CONCURRENT_REQUESTS: usize = 10;
@@ -95,7 +96,12 @@ enum ClientEvent {
 impl From<&[u8]> for ClientEvent {
     fn from(datagram: &[u8]) -> ClientEvent {
         if datagram.is_empty() {
-            return ClientEvent::PeerClosed;
+            // `fuchsia_async::Socket::poll_datagram` can yield a 0-byte read on
+            // an open socket if `outstanding_read_bytes()` observes 0 bytes
+            // immediately before a datagram arrives and `zx_socket_read` is
+            // called with a 0-length buffer. The datagram remains in the kernel
+            // socket buffer and will be read on the next poll.
+            return ClientEvent::Ignored;
         }
         match fidl::unpersist::<fidl_fuchsia_memory_sampler::SamplerDatagram>(&datagram) {
             Ok(fidl_fuchsia_memory_sampler::SamplerDatagram::RecordAllocation(alloc)) => {
@@ -161,6 +167,10 @@ async fn process_sampler_requests(
 
     while let Some(event_res) = event_streams.next().await {
         let event = event_res?;
+        if matches!(event, ClientEvent::PeerClosed) {
+            log::info!("Socket connection closed by peer");
+            break;
+        }
         if !is_enabled {
             continue;
         }
@@ -185,6 +195,7 @@ async fn process_sampler_requests(
                         Ok(datagram) => Ok(ClientEvent::from(&datagram[..])),
                         Err(e) => Err(anyhow::Error::from(e).context("failed socket read")),
                     })
+                    .chain(futures::stream::once(async { Ok(ClientEvent::PeerClosed) }))
                     .boxed();
                 event_streams.push(socket_stream);
             }
@@ -237,11 +248,8 @@ async fn process_sampler_requests(
             }) => {
                 profile_builder.set_process_info(process_name, module_map.into_iter().flatten());
             }
-            ClientEvent::PeerClosed => {
-                log::info!("Socket connection closed by peer");
-                break;
-            }
-            ClientEvent::Ignored => {}
+            ClientEvent::PeerClosed => unreachable!(),
+            ClientEvent::Ignored => continue,
         }
 
         request_index += 1;
@@ -323,9 +331,11 @@ mod test {
     use super::*;
     use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_memory_sampler::{ExecutableSegment, ModuleMap, SamplerMarker, StackTrace};
+    use flate2::read::GzDecoder;
     use futures::{StreamExt, join};
     use itertools::{assert_equal, sorted};
     use prost::Message;
+    use std::io::Read;
     use zx::{Peered, Vmo};
 
     use crate::crash_reporter::ProfileReport;
@@ -337,7 +347,10 @@ mod test {
     };
 
     fn deserialize_profile(profile: Vmo, size: u64) -> Profile {
-        Profile::decode(&profile.read_to_vec(0, size).unwrap()[..]).unwrap()
+        let compressed_profile = profile.read_to_vec(0, size).unwrap();
+        let mut proto_profile = Vec::new();
+        GzDecoder::new(&compressed_profile[..]).read_to_end(&mut proto_profile).unwrap();
+        Profile::decode(&proto_profile[..]).unwrap()
     }
 
     #[fuchsia::test]
@@ -753,6 +766,52 @@ mod test {
             assert_eq!(1, profile.comment.len());
             let comment = &profile.string_table[profile.comment[0] as usize];
             assert!(comment.contains("WARNING: Socket buffer saturated"));
+        } else {
+            panic!("Expected complete report, got partial report instead.");
+        };
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_empty_datagram_is_ignored_and_socket_close_terminates() -> Result<(), Error> {
+        assert!(matches!(ClientEvent::from(&[][..]), ClientEvent::Ignored));
+
+        let (client, request_stream) = create_proxy_and_stream::<SamplerMarker>();
+        let (mut tx, _rx) = mpsc::channel(1);
+        let mut profile_future = Box::pin(process_sampler_requests(request_stream, &mut tx));
+
+        let (client_sock, server_sock) = zx::Socket::create_datagram();
+        client.set_shared_socket(server_sock)?;
+        client.set_process_info(&SamplerSetProcessInfoRequest {
+            process_name: Some("empty datagram test".to_string()),
+            module_map: Some(vec![]),
+            ..Default::default()
+        })?;
+
+        // Poll while the socket is open and empty; the session must remain active.
+        assert!(futures::poll!(&mut profile_future).is_pending());
+
+        let alloc =
+            fidl_fuchsia_memory_sampler::SamplerDatagram::RecordAllocation(RecordAllocationEvent {
+                address: Some(0x200),
+                size: Some(64),
+                stack_trace: Some(StackTrace {
+                    stack_frames: Some(vec![2000]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        client_sock.write(&fidl::persist(&alloc)?)?;
+
+        // Closing the socket peer (even while the FIDL channel remains open) terminates the stream.
+        drop(client_sock);
+
+        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+            assert_eq!("empty datagram test", process_name);
+            let profile = deserialize_profile(profile, size);
+            let locations = profile.location.into_iter().map(|Location { address, .. }| address);
+            assert_equal(vec![2000].into_iter(), sorted(locations));
         } else {
             panic!("Expected complete report, got partial report instead.");
         };

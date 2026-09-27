@@ -1,0 +1,107 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "brcmfmac_sdio",
+    include: [
+        "driver/platform-device.shard.cml",
+        "driver_component/driver.shard.cml",
+    ],
+    program: {
+        binary: "driver/brcmfmac.so",
+        colocate: "true",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        allowed_scheduler_roles: [
+            "fuchsia.devices.wlan.drivers.brcmf.sdio.oob-interrupt",
+            "fuchsia.devices.wlan.drivers.brcmf.workqueue.runner",
+        ],
+    },
+    capabilities: [
+        { service: "fuchsia.hardware.network.driver.Service" },
+        { service: "fuchsia.wlan.phy.Service" },
+        { service: "fuchsia.wlan.fullmac.Service" },
+    ],
+    use: [
+        {
+            name: "sdio-function-1",
+            primary: true,
+            bind: {
+                service: "fuchsia.hardware.sdio.Service",
+                one_of: [
+                    {
+                        rules: { "fuchsia.NAME": "sdio-function-1" },
+                    },
+                    {
+                        rules: { "fuchsia.BIND_SDIO_FUNCTION": 1 },
+                    },
+                ],
+            },
+        },
+        { protocol: "fuchsia.scheduler.RoleManager" },
+        { service: "fuchsia.boot.metadata.MacAddressMetadata" },
+        {
+            name: "gpio-oob",
+            service: "fuchsia.hardware.gpio.Service",
+            bind: {
+                rules: { "fuchsia.NAME": "gpio-oob" },
+            },
+        },
+        { service: "fuchsia.hardware.pci.Service" },
+        {
+            name: "sdio-function-2",
+            bind: {
+                service: "fuchsia.hardware.sdio.Service",
+                one_of: [
+                    {
+                        rules: { "fuchsia.NAME": "sdio-function-2" },
+                    },
+                    {
+                        rules: { "fuchsia.BIND_SDIO_FUNCTION": 2 },
+                    },
+                ],
+            },
+        },
+        {
+            name: "pdev",
+            bind: {
+                one_of: [
+                    { compat: "broadcom,bcm4359" },
+                    {
+                        protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                        vid: "fuchsia.broadcom.platform.BIND_PLATFORM_DEV_VID.BROADCOM",
+                        did: "fuchsia.broadcom.platform.BIND_PLATFORM_DEV_DID.WIFI",
+                        pid: [
+                            "fuchsia.broadcom.platform.BIND_PLATFORM_DEV_PID.BCM43458",
+                            "fuchsia.broadcom.platform.BIND_PLATFORM_DEV_PID.BCM4356",
+                            "fuchsia.broadcom.platform.BIND_PLATFORM_DEV_PID.BCM4359",
+                        ],
+                    },
+                ],
+            },
+        },
+        {
+            name: "gpio-init-0",
+            service: "fuchsia.gpio.Init",
+            availability: "optional",
+        },
+        {
+            name: "pin-states-0",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            availability: "optional",
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.network.driver.Service",
+            from: "self",
+        },
+        {
+            service: "fuchsia.wlan.phy.Service",
+            from: "self",
+        },
+        {
+            service: "fuchsia.wlan.fullmac.Service",
+            from: "self",
+        },
+    ],
+}

@@ -200,5 +200,6 @@ group("tests") {
   deps = [
     ":driver-host-enumeration-test-nelson",
     ":nelson-bind_test",
+    "//zircon/system/utest/device-enumeration:device-enumeration-test-nelson",
   ]
 }

@@ -35,13 +35,13 @@ using RenderScheduledFrame =
 // TODOs can be found in the frame scheduler epic: https://fxbug.dev/42098599. Any new bugs filed
 // concerning the frame scheduler should be added to it as well.
 
-// DefaultFrameScheduler is the source of a number of events:
-// - UpdateSessions: Fired when CPU should be done apply any pending updates to the scene graph and
-//   prepare for rendering.
-// - OnCpuWorkDone: Fired when CPU work has completed.
-// - OnFramePresented: Fired when the renderer has signaled that the previous frame was presented
+// `DefaultFrameScheduler` is the source of a number of events:
+// - `UpdateSessions`: Fired when CPU should be done apply any pending updates to the scene graph
+//   and prepare for rendering.
+// - `OnCpuWorkDone`: Fired when CPU work has completed.
+// - `OnFramePresented`: Fired when the renderer has signaled that the previous frame was presented
 //   to the display.
-// - RenderScheduledFrame: Fired when non-CPU-based rendering should begin.
+// - `RenderScheduledFrame`: Fired when non-CPU-based rendering should begin.
 class DefaultFrameScheduler final : public FrameScheduler {
  public:
   explicit DefaultFrameScheduler(std::unique_ptr<FramePredictor> predictor,
@@ -50,23 +50,28 @@ class DefaultFrameScheduler final : public FrameScheduler {
   ~DefaultFrameScheduler();
 
   // Set the renderer and session updaters to be used. Can only be called once.
-  // |session_updaters| will be called in this order for every event.
+  // `session_updaters` will be called in this order for every event.
   void Initialize(std::shared_ptr<const VsyncTiming> vsync_timing, UpdateSessions update_sessions,
                   OnCpuWorkDone on_cpu_work_done, OnFramePresented on_frame_presented,
                   RenderScheduledFrame render_scheduled_frame);
 
-  // |FrameScheduler|
+  // `FrameScheduler`
   void SetRenderContinuously(bool render_continuously) override;
 
-  // |FrameScheduler|
+  // Renders a frame as soon as possible even if no session has a pending update.
+  // Used when the display is powered on again, so that the current scene is shown
+  // without waiting for a client to present.
+  void ForceRenderFrame();
+
+  // `FrameScheduler`
   void ScheduleUpdateForSession(zx::time presentation_time, SchedulingIdPair id_pair,
                                 bool squashable, bool schedule_asap) override;
 
-  // |FrameScheduler|
+  // `FrameScheduler`
   std::vector<FuturePresentationInfo> GetFuturePresentationInfos(
       zx::duration requested_prediction_span) override;
 
-  // |FrameScheduler|
+  // `FrameScheduler`
   void RemoveSession(SessionId session_id) override;
 
   constexpr static zx::duration kMinPredictedFrameDuration = zx::msec(0);
@@ -83,7 +88,7 @@ class DefaultFrameScheduler final : public FrameScheduler {
   // Requests a new frame to be drawn, which schedules the next wake up time for rendering. If we've
   // already scheduled a wake up time, it checks if it needs rescheduling and deals with it
   // appropriately.
-  // If schedule_asp is given, immediately starts the render.
+  // If `schedule_asp` is given, immediately starts the render.
   void RequestFrame(zx::time requested_presentation_time, bool schedule_asap);
 
   // Check if there are pending updates, and if there are then find the lowest next requested
@@ -108,23 +113,23 @@ class DefaultFrameScheduler final : public FrameScheduler {
   // Return true if there are any scheduled session updates that have not yet been applied.
   bool HaveUpdatableSessions() const { return !pending_present_requests_.empty(); }
 
-  // Signal all SessionUpdaters that frames up to |frame_number| have been presented.
+  // Signal all `SessionUpdaters` that frames up to `frame_number` have been presented.
   void SignalPresentedUpTo(uint64_t frame_number, zx::time actual_presentation_time,
                            zx::duration presentation_interval);
 
-  // Get map of latch times for each present up to |id_pair.present_id| for |id_pair.session_id|.
+  // Get map of latch times for each present up to `id_pair.present_id` for `id_pair.session_id`.
   std::map<PresentId, zx::time> ExtractLatchTimestampsUpTo(SchedulingIdPair id_pair);
 
-  // Set all unset latched times for each registered present of |session_id|, up to and including
-  // |present_id|.
+  // Set all unset latched times for each registered present of `session_id`, up to and including
+  // `present_id`.
   void SetLatchedTimeForPresentsUpTo(SchedulingIdPair id_pair, zx::time latched_time);
 
-  // Extracts all presents that should be updated this frame and returns them as a map of SessionIds
-  // to the last PresentId that should be updated for that session.
+  // Extracts all presents that should be updated this frame and returns them as a map of
+  // `SessionIds` to the last `PresentId` that should be updated for that session.
   std::unordered_map<SessionId, PresentId> CollectUpdatesForThisFrame(
       zx::time target_presentation_time);
 
-  // Prepares all per-present data for later OnFrameRendered and OnFramePresented events.
+  // Prepares all per-present data for later `OnFrameRendered` and `OnFramePresented` events.
   void PrepareUpdates(const std::unordered_map<SessionId, PresentId>& updates,
                       zx::time latched_time, uint64_t frame_number);
 
@@ -136,7 +141,7 @@ class DefaultFrameScheduler final : public FrameScheduler {
     bool squashable;
     bool schedule_asap;
   };
-  // Map of all pending Present calls ordered by SessionId and then PresentId.
+  // Map of all pending `Present` calls ordered by `SessionId` and then `PresentId`.
   std::map<SchedulingIdPair, PresentRequest> pending_present_requests_;
 
   std::unordered_set<SessionId> sessions_with_unsquashable_updates_pending_presentation_;
@@ -146,7 +151,7 @@ class DefaultFrameScheduler final : public FrameScheduler {
     std::unordered_map<SessionId, PresentId> updated_sessions;
     zx::time latched_time;
   };
-  // Queue of session updates mapped to frame numbers. Used in OnFramePresented.
+  // Queue of session updates mapped to frame numbers. Used in `OnFramePresented`.
   std::queue<FrameUpdate> latched_updates_;
 
   // Map of all presents to their latched presentation time.
@@ -161,12 +166,14 @@ class DefaultFrameScheduler final : public FrameScheduler {
   RenderScheduledFrame render_scheduled_frame_;
 
   // State.
-  // Frame number is 1-based so that |last_presented_frame_number_| can remain unsigned.
+  // Frame number is 1-based so that `last_presented_frame_number_` can remain unsigned.
   uint64_t frame_number_ = 1;
   uint64_t last_presented_frame_number_ = 0;
   bool last_frame_is_presented_ = false;
   std::deque<zx::time> outstanding_latch_points_;
   bool render_continuously_ = false;
+  // Set by `ForceRenderFrame()`; cleared when the forced frame starts rendering.
+  bool force_render_next_frame_ = false;
   zx::time wakeup_time_;
   zx::time next_target_presentation_time_;
   const std::unique_ptr<FramePredictor> frame_predictor_;

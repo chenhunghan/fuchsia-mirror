@@ -17,9 +17,6 @@ source_set("backoff") {
     "//src/lib/fxl",
     "//zircon/system/ulib/zx",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 cc_test_executable("backoff_unittests") {

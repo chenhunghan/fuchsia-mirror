@@ -99,6 +99,13 @@ impl<T: BlockSizeSpec> GenericBlockSize<T> {
         let end = self.align_up(range.end)?;
         Some(start..end)
     }
+
+    /// Multiplies `blocks` by the block size, returning `None` on overflow.
+    #[inline(always)]
+    pub fn checked_mul(self, blocks: u64) -> Option<u64> {
+        let shift = self.shift();
+        if blocks.leading_zeros() >= shift { Some(blocks << shift) } else { None }
+    }
 }
 
 /// A [`BlockSizeSpec`] that packs the alignment mask in the upper 32 bits and the power-of-two bit
@@ -266,10 +273,9 @@ impl_binary_op!(Sub, sub, &u64, &GenericBlockSize<T>, |val, bs| *val - bs.get())
 #[inline(always)]
 fn mul_block_size<T: BlockSizeSpec>(val: u64, bs: GenericBlockSize<T>) -> u64 {
     let shift = bs.shift();
-    let res = val << shift;
     // Preserve the panic on overflow during multiplication in debug builds.
-    debug_assert_eq!(res >> shift, val, "attempt to multiply with overflow");
-    res
+    debug_assert!(val.leading_zeros() >= shift, "attempt to multiply with overflow");
+    val << shift
 }
 
 // Mul: GenericBlockSize * u64 and u64 * GenericBlockSize (and reference variants)
@@ -558,6 +564,12 @@ mod tests {
         assert_eq!(&3u64 * bs, 12288);
         assert_eq!(&3u64 * bs_ref, 12288);
 
+        assert_eq!(bs.checked_mul(0), Some(0));
+        assert_eq!(bs.checked_mul(3), Some(12288));
+        assert_eq!(bs.checked_mul((1 << 52) - 1), Some(u64::MAX - 4095));
+        assert_eq!(bs.checked_mul(1 << 52), None);
+        assert_eq!(bs.checked_mul(u64::MAX), None);
+
         // Div
         assert_eq!(val / bs, 2);
         assert_eq!(val / bs_ref, 2);
@@ -709,6 +721,9 @@ mod tests {
         assert_eq!(block_size * 0, 0);
         assert_eq!(block_size * 20, 20);
         assert_eq!(block_size * u64::MAX, u64::MAX);
+        assert_eq!(block_size.checked_mul(0), Some(0));
+        assert_eq!(block_size.checked_mul(20), Some(20));
+        assert_eq!(block_size.checked_mul(u64::MAX), Some(u64::MAX));
 
         assert_eq!(0 / block_size, 0);
         assert_eq!(20 / block_size, 20);
@@ -733,6 +748,9 @@ mod tests {
         assert_eq!(bs.align_up(1), Some(1 << 32));
         assert_eq!(bs.align_down((1 << 32) + 123), 1 << 32);
         assert_eq!(bs * 3u64, 3 << 32);
+        assert_eq!(bs.checked_mul(3), Some(3 << 32));
+        assert_eq!(bs.checked_mul(u32::MAX as u64), Some((u32::MAX as u64) << 32));
+        assert_eq!(bs.checked_mul(1 << 32), None);
         assert_eq!((3u64 << 32) / bs, 3);
         assert_eq!(((3u64 << 32) + 55) % bs, 55);
     }

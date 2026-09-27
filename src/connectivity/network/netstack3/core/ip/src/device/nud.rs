@@ -6,7 +6,6 @@
 
 use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::vec::Vec;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::hash::Hash;
 use core::marker::PhantomData;
@@ -512,7 +511,7 @@ impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M> Incomplete<D, N, M> {
         &mut self,
         body: S,
         meta: M,
-    ) -> Result<(), ErrorAndSerializer<SerializeError<Never>, S>>
+    ) -> Result<(), ErrorAndSerializer<SerializeError<!>, S>>
     where
         B: BufferMut,
         S: NetworkSerializer<Buffer = B>,

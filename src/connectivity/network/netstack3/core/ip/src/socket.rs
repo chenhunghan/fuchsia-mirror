@@ -5,7 +5,6 @@
 //! IPv4 and IPv6 sockets.
 
 use core::cmp::Ordering;
-use core::convert::Infallible;
 use core::num::NonZeroU8;
 
 use log::{debug, error};
@@ -34,7 +33,8 @@ use crate::icmp::IcmpErrorHandler;
 use crate::internal::base::{
     FilterHandlerProvider, IpDeviceMtuContext, IpLayerIpExt, IpLayerPacketMetadata,
     IpPacketDestination, IpSendFrameError, IpSendFrameErrorReason, ResolveRouteError,
-    SendIpPacketMeta, reject_type_to_icmpv4_error, reject_type_to_icmpv6_error,
+    SendIpPacketMeta, SplitMulticastPacketMetadata, reject_type_to_icmpv4_error,
+    reject_type_to_icmpv6_error,
 };
 use crate::internal::counters::IpCounters;
 use crate::internal::device::state::IpDeviceStateIpExt;
@@ -217,7 +217,7 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
             bindings_ctx,
             args,
             tx_metadata,
-            |ip| Ok::<_, Infallible>(get_body_from_src_ip(ip)),
+            |ip| Ok::<_, !>(get_body_from_src_ip(ip)),
         )
         .map_err(|err| match err {
             SendOneShotIpPacketError::CreateAndSendError { err } => err,
@@ -245,7 +245,7 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
             bindings_ctx,
             args,
             tx_metadata,
-            |ip| Ok::<_, Infallible>(get_body_from_src_ip(ip)),
+            |ip| Ok::<_, !>(get_body_from_src_ip(ip)),
         )
         .map_err(|err| match err {
             SendOneShotIpPacketError::CreateAndSendError { err } => err,
@@ -274,8 +274,8 @@ pub enum IpSockSendError {
     BroadcastNotAllowed,
 }
 
-impl From<SerializeError<Infallible>> for IpSockSendError {
-    fn from(err: SerializeError<Infallible>) -> IpSockSendError {
+impl From<SerializeError<!>> for IpSockSendError {
+    fn from(err: SerializeError<!>) -> IpSockSendError {
         match err {
             SerializeError::SizeLimitExceeded => IpSockSendError::Mtu,
         }
@@ -932,8 +932,11 @@ where
 
     let previous_dst = remote_ip.addr();
     let mut packet = filter::TxPacket::new(local_ip.addr(), remote_ip.addr(), *proto, &mut body);
+    // TODO(https://fxbug.dev/565891068): Support TCP GSO by populating GSO
+    // metadata when segment offloading is enabled for the socket.
+    let gso_info = None;
     let mut packet_metadata =
-        IpLayerPacketMetadata::from_tx_metadata_and_marks(tx_metadata, *options.marks());
+        IpLayerPacketMetadata::new_local_tx(tx_metadata, *options.marks(), gso_info);
 
     let filter_result = core_ctx.filter_handler().local_egress_hook(
         bindings_ctx,
@@ -1088,18 +1091,25 @@ where
     // or multicast address. For multicast packets this feature can be disabled
     // with IP_MULTICAST_LOOP.
 
-    let loopback_packet = (!egress_device.is_loopback()
+    let loopback_packet_and_meta = if !egress_device.is_loopback()
         && ((options.multicast_loop() && remote_ip.addr().is_multicast())
-            || next_hop.is_broadcast()))
-    .then(|| {
-        body.serialize_new_buf(
+            || next_hop.is_broadcast())
+    {
+        let body_copy = body.serialize_new_buf(
             &mut NetworkSerializationContext::default(),
             PacketConstraints::UNCONSTRAINED,
             packet::new_buf_vec,
-        )
-    })
-    .transpose()?
-    .map(|buf| RawIpBody::new(*proto, local_ip.addr(), remote_ip.addr(), buf));
+        )?;
+        let loopback_metadata;
+        SplitMulticastPacketMetadata { primary: packet_metadata, secondary: loopback_metadata } =
+            packet_metadata.split_for_multicast();
+        Some((
+            RawIpBody::new(*proto, local_ip.addr(), remote_ip.addr(), body_copy),
+            loopback_metadata,
+        ))
+    } else {
+        None
+    };
 
     let destination = match &local_delivery_device {
         Some(d) => IpPacketDestination::Loopback(d),
@@ -1116,12 +1126,14 @@ where
         mtu: options.mtu(),
         dscp_and_ecn: options.dscp_and_ecn(),
     };
-    IpSocketContext::send_ip_packet(core_ctx, bindings_ctx, meta, body, packet_metadata).or_else(
-        |IpSendFrameError { serializer: _, error }| IpSockSendError::from_ip_send_frame(error),
-    )?;
+    let result =
+        IpSocketContext::send_ip_packet(core_ctx, bindings_ctx, meta, body, packet_metadata)
+            .or_else(|IpSendFrameError { serializer: _, error }| {
+                IpSockSendError::from_ip_send_frame(error)
+            });
 
-    match (loopback_packet, core_ctx.get_loopback_device()) {
-        (Some(loopback_packet), Some(loopback_device)) => {
+    match (result, loopback_packet_and_meta, core_ctx.get_loopback_device()) {
+        (Ok(()), Some((loopback_packet, packet_metadata)), Some(loopback_device)) => {
             let meta = SendIpPacketMeta {
                 device: &loopback_device,
                 src_ip: local_ip.into(),
@@ -1132,7 +1144,6 @@ where
                 mtu: options.mtu(),
                 dscp_and_ecn: options.dscp_and_ecn(),
             };
-            let packet_metadata = IpLayerPacketMetadata::default();
 
             // The loopback packet will hit the egress hook. LOCAL_EGRESS hook
             // is not called again.
@@ -1147,13 +1158,18 @@ where
                 error!("failed to send loopback packet: {error:?}")
             });
         }
-        (Some(_loopback_packet), None) => {
-            error!("can't send a loopback packet without the loopback device")
+        (Ok(()), Some((_loopback_packet, packet_metadata)), None) => {
+            error!("can't send a loopback packet without the loopback device");
+            packet_metadata.acknowledge_drop();
         }
-        _ => (),
+        (Err(_), Some((_loopback_packet, packet_metadata)), _) => {
+            // Don't send the loopback packet in case the original one wasn't sent.
+            packet_metadata.acknowledge_drop();
+        }
+        (_, None, _) => (),
     }
 
-    Ok(())
+    result
 }
 
 /// Enables a blanket implementation of [`DeviceIpSocketHandler`].

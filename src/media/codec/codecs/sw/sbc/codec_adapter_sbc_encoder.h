@@ -41,8 +41,6 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
 
-  void CoreCodecStopStream() override;
-
  protected:
   // Processes input in a loop. Should only execute on input_processing_thread_.
   // Loops for the lifetime of a stream.
@@ -110,7 +108,7 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
   InputLoopStatus CreateContext(const fuchsia::media::FormatDetails& format_details);
 
   // Attempts to encode input packet. Reports failures through `events_`.
-  InputLoopStatus EncodeInput(CodecPacket* input_packet);
+  InputLoopStatus EncodeInput(const CodecPacket* input_packet);
 
   // Sends the output packet if it has any data in it.
   void SendPendingOutputPacket();

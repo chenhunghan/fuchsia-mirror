@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, mpsc as sync_mpsc};
 use zerocopy::{Immutable, IntoBytes};
 
-use futures::io::{AsyncReadExt, Cursor};
 use fxt::TraceRecord;
 use fxt::profiler::ProfilerRecord;
 use fxt::session::SessionParser;
@@ -70,8 +69,6 @@ const ESTIMATED_MMAP_BUFFER_SIZE: u64 = 16 * 1024 * 1024;
 // Size of a PERF_RECORD_LOST record in bytes:
 // perf_event_header (8) + sample_id (8) + lost_events (8) = 24.
 const LOST_RECORD_SIZE: u64 = 24;
-// FXT magic bytes (little endian).
-const FXT_MAGIC_BYTES: [u8; 8] = [0x10, 0x00, 0x04, 0x46, 0x78, 0x54, 0x16, 0x00];
 // Register indices in the profiler's register capture block.
 const AARCH64_REG_PC: usize = 32;
 const AARCH64_REG_SP: usize = 31;
@@ -821,14 +818,12 @@ async fn set_up_profiler(
     }
 }
 
-// Collects samples and puts backtrace in VMO.
-// - Reads in the buffer from the socket for that duration in chunks.
-// - Parses the buffer backtraces into PERF_RECORD_SAMPLE format.
-// - Writes the PERF_RECORD_SAMPLE into VMO.
-async fn stop_and_collect_samples(
-    session_proxy: profiler::SessionProxy,
-    mut client: fidl::AsyncSocket,
-    seq_lock: &OnceLock<Result<SeqLock<PerfMetadataHeader, PerfMetadataValue>, Errno>>,
+// Converts one FXT record from the profiler into a PERF_RECORD_SAMPLE in
+// the ring buffer and publishes the new data_head. Non-sample records are
+// ignored.
+fn process_fxt_record(
+    record: TraceRecord,
+    seq_lock_wrapper: &SeqLock<PerfMetadataHeader, PerfMetadataValue>,
     perf_data_vmo: &zx::Vmo,
     sample_type: u64,
     sample_id: u64,
@@ -838,278 +833,204 @@ async fn stop_and_collect_samples(
     sample_stack_user: u64,
     koid_session: Option<&PidKoidSession>,
     vmo_write_offset: &mut u64,
-) -> Result<(), Errno> {
-    let seq_lock_wrapper = match seq_lock.get() {
-        Some(Ok(l)) => Some(l),
-        // Initialization failed in a previous mmap() call. Propagate the error.
-        Some(Err(e)) => return Err(e.clone()),
-        // Not initialized yet (i.e. mmap() hasn't been called). However, we need to drain the
-        // socket anyway if there is data as to unblock the profiler writing to the socket.
-        None => None,
-    };
-
-    let process_socket = async {
-        let mut header = [0; 8];
-        let mut bytes_read = 0;
-        while bytes_read < 8 {
-            match client.read(&mut header[bytes_read..]).await {
-                Ok(0) => break,
-                Ok(n) => bytes_read += n,
-                Err(e) => {
-                    log_warn!("[perf_event_open] Error reading from socket: {:?}", e);
-                    break;
-                }
+    lost_events: &mut u64,
+) {
+    match record {
+        TraceRecord::Profiler(ProfilerRecord::Backtrace(backtrace)) => {
+            let ips: Vec<u64> = backtrace.data;
+            // Resolve the sampled koids to Linux pid/tid against the live
+            // shared map (one read lock per record; collection is off the hot
+            // path and a live read sees every thread that recorded itself
+            // before it was sampled). If the sample cannot be resolved (e.g.
+            // native Fuchsia thread or without a session), drop the sample.
+            let Some(LinuxIdentity::Thread { pid, tid }) = koid_session.and_then(|s| {
+                s.resolve_koids(
+                    zx::Koid::from_raw(backtrace.process.0),
+                    zx::Koid::from_raw(backtrace.thread.0),
+                )
+            }) else {
+                return;
+            };
+            let time = zx::BootInstant::from_nanos(backtrace.timestamp.max(0));
+            let perf_record_sample = PerfRecordSample {
+                pid: Some(pid as u32),
+                tid: Some(tid as u32),
+                time,
+                ips,
+                regs: &[],
+                stack: &[],
+                regs_abi: perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_NONE as u64,
+                sample_regs_user,
+                sample_stack_user,
+            };
+            let metadata = seq_lock_wrapper.get();
+            let bytes_written = write_record_to_vmo(
+                perf_record_sample,
+                perf_data_vmo,
+                sample_type,
+                sample_id,
+                sample_period,
+                read_format,
+                *vmo_write_offset,
+                &metadata,
+                lost_events,
+            );
+            // Publish data_head after writing; set_value's
+            // release-ordered stores make the record contents
+            // visible to a reader that observes the new head.
+            if bytes_written > 0 {
+                *vmo_write_offset += bytes_written;
+                let mut metadata = seq_lock_wrapper.get();
+                metadata.data_head = *vmo_write_offset;
+                seq_lock_wrapper.set_value(metadata);
             }
         }
+        TraceRecord::LargeBlob(large_blob) => {
+            // The DWARF strategy delivers each sample as a
+            // "stack_sample" blob: [u64 regs_size][regs bytes]
+            // followed by memory chunks of [u64 base][u64 size]
+            // [bytes] (see the profiler's StackSampler).
+            if large_blob.name != "stack_sample" {
+                return;
+            }
+            let Some(blob_metadata) = large_blob.metadata else {
+                return;
+            };
+            let bytes = &large_blob.bytes;
+            if bytes.len() < 8 {
+                return;
+            }
+            let regs_size = u64::from_ne_bytes(bytes[0..8].try_into().unwrap()) as usize;
+            let mut offset = 8;
+            if regs_size == 0 || bytes.len() < offset + regs_size {
+                return;
+            }
 
-        if bytes_read != 8 || header != FXT_MAGIC_BYTES {
-            if bytes_read > 0 {
-                log_warn!(
-                    "[perf_event_open] Received invalid or non-FXT sample data (bytes_read={})",
-                    bytes_read
+            // 33 u64 general registers (r0-r29, lr, sp, pc), with
+            // cpsr following them in the zircon thread state.
+            // Register state of other widths (e.g. an x86_64
+            // thread state) is not supported and skipped by this
+            // size check.
+            const REGS_BYTES: usize = 33 * 8;
+            if regs_size < REGS_BYTES + 8 {
+                return;
+            }
+            #[cfg(target_arch = "aarch64")]
+            let is_32bit = {
+                let cpsr = u64::from_ne_bytes(
+                    bytes[offset + REGS_BYTES..offset + REGS_BYTES + 8].try_into().unwrap(),
                 );
+                (cpsr & zx::sys::ZX_REG_CPSR_ARCH_32_MASK) == zx::sys::ZX_REG_CPSR_ARCH_32_MASK
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let is_32bit = false;
+
+            let mut blob_regs = bytes[offset..offset + REGS_BYTES].to_vec();
+            offset += regs_size;
+
+            if is_32bit {
+                // Zircon reports the AArch32 PC in the pc slot
+                // (index 32). 64-bit readers take it from there,
+                // per the Linux compat layout (AArch32 R0-R14
+                // arrive in x0-x14); mirror it into the arm32 R15
+                // slot (index 15) too for 32-bit readers, which
+                // only consume indices 0-15 -- x15 carries no
+                // meaningful value for AArch32 state.
+                let pc_offset = AARCH64_REG_PC * 8;
+                let pc_bytes = blob_regs[pc_offset..pc_offset + 8].to_vec();
+                let r15_offset = AARCH32_REG_R15 * 8;
+                blob_regs[r15_offset..r15_offset + 8].copy_from_slice(&pc_bytes);
             }
-            return;
-        }
 
-        let header_cursor = Cursor::new(header);
-        let reader = header_cursor.chain(client);
-        let (mut stream, _task) = SessionParser::new_async(reader);
-        let mut lost_events: u64 = 0;
-        while let Some(record_result) = stream.next().await {
-            match record_result {
-                Ok(TraceRecord::Profiler(ProfilerRecord::Backtrace(backtrace))) => {
-                    if let Some(seq_lock_wrapper) = seq_lock_wrapper {
-                        let ips: Vec<u64> = backtrace.data;
-                        // Resolve the sampled koids to Linux pid/tid against the live
-                        // shared map (one read lock per record; collection is off the hot
-                        // path and a live read sees every thread that recorded itself
-                        // before it was sampled). If the sample cannot be resolved (e.g.
-                        // native Fuchsia thread or without a session), drop the sample.
-                        let Some(LinuxIdentity::Thread { pid, tid }) = koid_session.and_then(|s| {
-                            s.resolve_koids(
-                                zx::Koid::from_raw(backtrace.process.0),
-                                zx::Koid::from_raw(backtrace.thread.0),
-                            )
-                        }) else {
-                            continue;
-                        };
-                        let time = zx::BootInstant::from_nanos(backtrace.timestamp.max(0));
-                        let perf_record_sample = PerfRecordSample {
-                            pid: Some(pid as u32),
-                            tid: Some(tid as u32),
-                            time,
-                            ips,
-                            regs: &[],
-                            stack: &[],
-                            regs_abi: perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_NONE as u64,
-                            sample_regs_user,
-                            sample_stack_user,
-                        };
-                        let metadata = seq_lock_wrapper.get();
-                        let bytes_written = write_record_to_vmo(
-                            perf_record_sample,
-                            perf_data_vmo,
-                            sample_type,
-                            sample_id,
-                            sample_period,
-                            read_format,
-                            *vmo_write_offset,
-                            &metadata,
-                            &mut lost_events,
-                        );
-                        // Publish data_head after writing; set_value's
-                        // release-ordered stores make the record contents
-                        // visible to a reader that observes the new head.
-                        if bytes_written > 0 {
-                            *vmo_write_offset += bytes_written;
-                            let mut metadata = seq_lock_wrapper.get();
-                            metadata.data_head = *vmo_write_offset;
-                            seq_lock_wrapper.set_value(metadata);
-                        }
-                    }
-                }
-                Ok(TraceRecord::LargeBlob(large_blob)) => {
-                    if let Some(seq_lock_wrapper) = seq_lock_wrapper {
-                        // The DWARF strategy delivers each sample as a
-                        // "stack_sample" blob: [u64 regs_size][regs bytes]
-                        // followed by memory chunks of [u64 base][u64 size]
-                        // [bytes] (see the profiler's StackSampler).
-                        if large_blob.name != "stack_sample" {
-                            continue;
-                        }
-                        let Some(blob_metadata) = large_blob.metadata else {
-                            continue;
-                        };
-                        let bytes = &large_blob.bytes;
-                        if bytes.len() < 8 {
-                            continue;
-                        }
-                        let regs_size =
-                            u64::from_ne_bytes(bytes[0..8].try_into().unwrap()) as usize;
-                        let mut offset = 8;
-                        if regs_size == 0 || bytes.len() < offset + regs_size {
-                            continue;
-                        }
+            let sp = if is_32bit {
+                // The arm32 stack pointer is R13.
+                let r13_offset = AARCH32_REG_R13 * 8;
+                u64::from_ne_bytes(blob_regs[r13_offset..r13_offset + 8].try_into().unwrap())
+            } else {
+                let sp_offset = AARCH64_REG_SP * 8;
+                u64::from_ne_bytes(blob_regs[sp_offset..sp_offset + 8].try_into().unwrap())
+            };
+            let pc_offset = AARCH64_REG_PC * 8;
+            let pc = u64::from_ne_bytes(blob_regs[pc_offset..pc_offset + 8].try_into().unwrap());
 
-                        // 33 u64 general registers (r0-r29, lr, sp, pc), with
-                        // cpsr following them in the zircon thread state.
-                        // Register state of other widths (e.g. an x86_64
-                        // thread state) is not supported and skipped by this
-                        // size check.
-                        const REGS_BYTES: usize = 33 * 8;
-                        if regs_size < REGS_BYTES + 8 {
-                            continue;
-                        }
-                        #[cfg(target_arch = "aarch64")]
-                        let is_32bit = {
-                            let cpsr = u64::from_ne_bytes(
-                                bytes[offset + REGS_BYTES..offset + REGS_BYTES + 8]
-                                    .try_into()
-                                    .unwrap(),
-                            );
-                            (cpsr & zx::sys::ZX_REG_CPSR_ARCH_32_MASK)
-                                == zx::sys::ZX_REG_CPSR_ARCH_32_MASK
-                        };
-                        #[cfg(not(target_arch = "aarch64"))]
-                        let is_32bit = false;
-
-                        let mut regs = bytes[offset..offset + REGS_BYTES].to_vec();
-                        offset += regs_size;
-
-                        if is_32bit {
-                            // Zircon reports the AArch32 PC in the pc slot
-                            // (index 32). 64-bit readers take it from there,
-                            // per the Linux compat layout (AArch32 R0-R14
-                            // arrive in x0-x14); mirror it into the arm32 R15
-                            // slot (index 15) too for 32-bit readers, which
-                            // only consume indices 0-15 -- x15 carries no
-                            // meaningful value for AArch32 state.
-                            let pc_offset = AARCH64_REG_PC * 8;
-                            let pc_bytes = regs[pc_offset..pc_offset + 8].to_vec();
-                            let r15_offset = AARCH32_REG_R15 * 8;
-                            regs[r15_offset..r15_offset + 8].copy_from_slice(&pc_bytes);
-                        }
-
-                        let sp = if is_32bit {
-                            // The arm32 stack pointer is R13.
-                            let r13_offset = AARCH32_REG_R13 * 8;
-                            u64::from_ne_bytes(regs[r13_offset..r13_offset + 8].try_into().unwrap())
-                        } else {
-                            let sp_offset = AARCH64_REG_SP * 8;
-                            u64::from_ne_bytes(regs[sp_offset..sp_offset + 8].try_into().unwrap())
-                        };
-                        let pc_offset = AARCH64_REG_PC * 8;
-                        let pc =
-                            u64::from_ne_bytes(regs[pc_offset..pc_offset + 8].try_into().unwrap());
-
-                        // Select the memory chunk that contains the sampled
-                        // stack pointer and trim it to start exactly there:
-                        // readers overlay the STACK_USER bytes at the SP
-                        // reported in REGS_USER. The blob can carry several
-                        // captures (the thread-state stack, the
-                        // restricted-state struct, and a restricted-SP
-                        // stack); selecting by SP keeps the registers and the
-                        // stack bytes coherent.
-                        let mut stack: &[u8] = &[];
-                        while offset + 16 <= bytes.len() {
-                            let chunk_base =
-                                u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
-                            offset += 8;
-                            let chunk_size =
-                                u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
-                            offset += 8;
-                            if offset + chunk_size as usize > bytes.len() {
-                                break;
-                            }
-                            let data = &bytes[offset..offset + chunk_size as usize];
-                            offset += chunk_size as usize;
-                            if stack.is_empty() && chunk_base <= sp && sp < chunk_base + chunk_size
-                            {
-                                stack = &data[(sp - chunk_base) as usize..];
-                            }
-                        }
-                        if stack.is_empty() {
-                            // No capture covers the sampled SP; the sample
-                            // cannot be unwound.
-                            continue;
-                        }
-
-                        let Some(LinuxIdentity::Thread { pid, tid }) = koid_session.and_then(|s| {
-                            s.resolve_koids(
-                                zx::Koid::from_raw(blob_metadata.process.0),
-                                zx::Koid::from_raw(blob_metadata.thread.0),
-                            )
-                        }) else {
-                            continue;
-                        };
-                        let time = zx::BootInstant::from_nanos(blob_metadata.timestamp.max(0));
-                        let regs_abi = if is_32bit {
-                            perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_32 as u64
-                        } else {
-                            perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_64 as u64
-                        };
-                        let perf_record_sample = PerfRecordSample {
-                            pid: Some(pid as u32),
-                            tid: Some(tid as u32),
-                            time,
-                            ips: vec![pc],
-                            regs: &regs,
-                            stack,
-                            regs_abi,
-                            sample_regs_user,
-                            sample_stack_user,
-                        };
-                        let metadata = seq_lock_wrapper.get();
-                        let bytes_written = write_record_to_vmo(
-                            perf_record_sample,
-                            perf_data_vmo,
-                            sample_type,
-                            sample_id,
-                            sample_period,
-                            read_format,
-                            *vmo_write_offset,
-                            &metadata,
-                            &mut lost_events,
-                        );
-                        // Publish data_head after writing; set_value's
-                        // release-ordered stores make the record contents
-                        // visible to a reader that observes the new head.
-                        if bytes_written > 0 {
-                            *vmo_write_offset += bytes_written;
-                            let mut metadata = seq_lock_wrapper.get();
-                            metadata.data_head = *vmo_write_offset;
-                            seq_lock_wrapper.set_value(metadata);
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    log_warn!("[perf_event_open] Error parsing FXT: {:?}", e);
+            // Select the memory chunk that contains the sampled
+            // stack pointer and trim it to start exactly there:
+            // readers overlay the STACK_USER bytes at the SP
+            // reported in REGS_USER. The blob can carry several
+            // captures (the thread-state stack, the
+            // restricted-state struct, and a restricted-SP
+            // stack); selecting by SP keeps the registers and the
+            // stack bytes coherent.
+            let mut stack: &[u8] = &[];
+            while offset + 16 <= bytes.len() {
+                let chunk_base = u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+                let chunk_size = u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+                if offset + chunk_size as usize > bytes.len() {
                     break;
                 }
+                let data = &bytes[offset..offset + chunk_size as usize];
+                offset += chunk_size as usize;
+                if stack.is_empty() && chunk_base <= sp && sp < chunk_base + chunk_size {
+                    stack = &data[(sp - chunk_base) as usize..];
+                }
+            }
+            if stack.is_empty() {
+                // No capture covers the sampled SP; the sample
+                // cannot be unwound.
+                return;
+            }
+
+            let Some(LinuxIdentity::Thread { pid, tid }) = koid_session.and_then(|s| {
+                s.resolve_koids(
+                    zx::Koid::from_raw(blob_metadata.process.0),
+                    zx::Koid::from_raw(blob_metadata.thread.0),
+                )
+            }) else {
+                return;
+            };
+            let time = zx::BootInstant::from_nanos(blob_metadata.timestamp.max(0));
+            let regs_abi = if is_32bit {
+                perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_32 as u64
+            } else {
+                perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_64 as u64
+            };
+            let perf_record_sample = PerfRecordSample {
+                pid: Some(pid as u32),
+                tid: Some(tid as u32),
+                time,
+                ips: vec![pc],
+                regs: &blob_regs,
+                stack,
+                regs_abi,
+                sample_regs_user,
+                sample_stack_user,
+            };
+            let metadata = seq_lock_wrapper.get();
+            let bytes_written = write_record_to_vmo(
+                perf_record_sample,
+                perf_data_vmo,
+                sample_type,
+                sample_id,
+                sample_period,
+                read_format,
+                *vmo_write_offset,
+                &metadata,
+                lost_events,
+            );
+            // Publish data_head after writing; set_value's
+            // release-ordered stores make the record contents
+            // visible to a reader that observes the new head.
+            if bytes_written > 0 {
+                *vmo_write_offset += bytes_written;
+                let mut metadata = seq_lock_wrapper.get();
+                metadata.data_head = *vmo_write_offset;
+                seq_lock_wrapper.set_value(metadata);
             }
         }
-    };
-
-    let (stats, ()) = futures::join!(session_proxy.stop(), process_socket);
-
-    let samples_collected = match stats {
-        Ok(stats) => stats.samples_collected.unwrap_or(0),
-        Err(e) => return error!(EINVAL, e),
-    };
-
-    track_stub!(
-        TODO("https://fxbug.dev/422502681"),
-        "[perf_event_open] symbolize sample output and delete the below log_info"
-    );
-    log_info!("profiler samples_collected: {:?}", samples_collected);
-
-    let reset_status = session_proxy.reset().await;
-    return match reset_status {
-        Ok(_) => Ok(()),
-        Err(e) => error!(EINVAL, e),
-    };
+        _ => {}
+    }
 }
 
 // Notifies other thread that we should start/stop sampling.
@@ -1316,79 +1237,160 @@ pub fn sys_perf_event_open(
     let mut vmo_write_offset = 0;
 
     let closure = async move |kthread_task: &CurrentTask| {
-        let mut profiler_state: Option<(profiler::SessionProxy, fidl::AsyncSocket)> = None;
-        // Held while sampling is enabled so pid/koid mappings are recorded for the
-        // profiling session. Dropping it (including when this kthread exits with sampling
-        // still enabled) releases this file's interest in the shared manager.
-        let mut pid_koid_session: Option<PidKoidSession> = None;
+        let mut lost_events: u64 = 0;
 
-        // This loop will wait for messages from the sender.
+        // Each iteration waits for an Enable and then runs one session.
         while let Some((command, profiling_complete_receiver)) = receiver.next().await {
-            match command {
-                IoctlOp::Enable => {
-                    match set_up_profiler(zx_sample_period).await {
-                        Ok((session_proxy, client)) => {
-                            // Record pid/koid mappings before the profiler starts sampling
-                            // so every sampled thread can be resolved. If starting the
-                            // profiler fails, dropping the unstored session ends the
-                            // recording interest automatically.
-                            let session = kthread_task.kernel().trace_event_manager.open();
-                            let start_request = profiler::SessionStartRequest {
-                                buffer_results: Some(true),
-                                buffer_size_mb: Some(8 as u64),
-                                ..Default::default()
-                            };
-                            if let Err(e) = session_proxy.start(&start_request).await {
-                                log_warn!("Failed to start profiling: {}", e);
-                            } else {
-                                profiler_state = Some((session_proxy, client));
-                                pid_koid_session = Some(session);
+            // We only expect Enable when no session is active.
+            if command != IoctlOp::Enable {
+                let _ = profiling_complete_receiver.send(());
+                continue;
+            }
+
+            let (session_proxy, client) = match set_up_profiler(zx_sample_period).await {
+                Ok(session) => session,
+                Err(e) => {
+                    log_warn!("Failed to profile: {}", e);
+                    let _ = profiling_complete_receiver.send(());
+                    continue;
+                }
+            };
+
+            // Record pid/koid mappings before the profiler starts sampling
+            // so every sampled thread can be resolved. Dropping the session
+            // at the end of the profiling session ends the recording interest.
+            let pid_koid_session = kthread_task.kernel().trace_event_manager.open();
+            let start_request =
+                profiler::SessionStartRequest { buffer_results: Some(false), ..Default::default() };
+            if let Err(e) = session_proxy.start(&start_request).await {
+                log_warn!("Failed to start profiler: {:?}", e);
+                let _ = profiling_complete_receiver.send(());
+                continue;
+            }
+            let _ = profiling_complete_receiver.send(());
+
+            let vmo = zx::Vmo::from(
+                vmo_handle_copy
+                    .as_mut()
+                    .expect("Failed to get VMO handle")
+                    .as_handle_ref()
+                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                    .unwrap(),
+            );
+            let mut handle_record = |record: TraceRecord| {
+                // Records can only be written once mmap() has set up the
+                // ring buffer.
+                if let Some(Ok(seq_lock_wrapper)) = cloned_seq_lock.get() {
+                    process_fxt_record(
+                        record,
+                        seq_lock_wrapper,
+                        &vmo,
+                        perf_event_file.sample_type,
+                        perf_event_file.sample_id,
+                        sample_period_in_ticks,
+                        perf_event_file.attr.read_format,
+                        perf_event_file.attr.sample_regs_user,
+                        perf_event_file.attr.sample_stack_user as u64,
+                        Some(&pid_koid_session),
+                        &mut vmo_write_offset,
+                        &mut lost_events,
+                    );
+                }
+            };
+
+            // Pump records from the profiler into the ring buffer until a
+            // Disable arrives: readers poll the ring during the session, and
+            // the profiler's socket must be drained continuously.
+            let (stream, _parser_task) = SessionParser::new_async(client);
+            let mut stream = stream.fuse();
+            let mut stream_ended = false;
+            let disable_ack = loop {
+                if stream_ended {
+                    // The profiler closed the socket early; only commands
+                    // remain.
+                    match receiver.next().await {
+                        Some((IoctlOp::Disable, ack)) => break Some(ack),
+                        Some((IoctlOp::Enable, ack)) => {
+                            // A session is already active.
+                            let _ = ack.send(());
+                        }
+                        None => break None,
+                    }
+                } else {
+                    futures::select_biased! {
+                        cmd = receiver.next() => match cmd {
+                            Some((IoctlOp::Disable, ack)) => break Some(ack),
+                            Some((IoctlOp::Enable, ack)) => {
+                                // A session is already active.
+                                let _ = ack.send(());
+                            }
+                            None => break None,
+                        },
+                        record = stream.next() => match record {
+                            Some(Ok(record)) => handle_record(record),
+                            Some(Err(e)) => {
+                                // The stream is desynchronized and the parser
+                                // would keep returning this error, so end the
+                                // session. The teardown below drops the
+                                // socket, which unblocks the profiler if it is
+                                // stalled writing to it.
+                                log_warn!("[perf_event_open] Error parsing FXT: {:?}", e);
+                                stream_ended = true;
+                                break None;
+                            }
+                            None => {
+                                log_warn!("[perf_event_open] Profiler stream ended mid-session");
+                                stream_ended = true;
+                            }
+                        },
+                    }
+                }
+            };
+
+            // Tear the session down while still draining: the profiler is a
+            // separate process whose socket writes block, so if its socket is
+            // full it is stalled mid-write and cannot service stop() or
+            // reset() until we keep reading. Awaiting either without pumping
+            // would deadlock the two.
+            let stop_and_reset = async {
+                match session_proxy.stop().await {
+                    Ok(stats) => log_info!(
+                        "[perf_event_open] profiler samples_collected: {:?}",
+                        stats.samples_collected.unwrap_or(0)
+                    ),
+                    Err(e) => log_warn!("[perf_event_open] Failed to stop profiler: {:?}", e),
+                }
+                // Reset flushes the remaining data and closes the socket,
+                // which is what ends the drain below.
+                let _ = session_proxy.reset().await;
+            };
+            let drain = async move {
+                if !stream_ended {
+                    while let Some(record) = stream.next().await {
+                        match record {
+                            Ok(record) => handle_record(record),
+                            Err(e) => {
+                                // The stream is desynchronized, so further
+                                // records cannot be parsed.
+                                log_warn!("[perf_event_open] Error parsing FXT: {:?}", e);
+                                break;
                             }
                         }
-                        Err(e) => {
-                            log_warn!("Failed to profile: {}", e);
-                        }
-                    };
-                    // Send notification anyway to unblock the ioctl caller.
-                    let _ = profiling_complete_receiver.send(());
-                }
-                IoctlOp::Disable => {
-                    if let Some((session_proxy, client)) = profiler_state.take() {
-                        let handle = vmo_handle_copy
-                            .as_mut()
-                            .expect("Failed to get VMO handle")
-                            .as_handle_ref()
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .unwrap();
-
-                        if let Err(e) = stop_and_collect_samples(
-                            session_proxy,
-                            client,
-                            &cloned_seq_lock,
-                            &zx::Vmo::from(handle),
-                            perf_event_file.sample_type,
-                            perf_event_file.sample_id,
-                            sample_period_in_ticks,
-                            perf_event_file.attr.read_format,
-                            perf_event_file.attr.sample_regs_user,
-                            perf_event_file.attr.sample_stack_user as u64,
-                            pid_koid_session.as_ref(),
-                            &mut vmo_write_offset,
-                        )
-                        .await
-                        {
-                            log_warn!("Failed to collect sample: {:?}", e);
-                        }
                     }
-                    // Sampling is disabled: drop this file's recording session.
-                    pid_koid_session = None;
-                    // Send notification anyway to unblock the ioctl caller.
-                    let _ = profiling_complete_receiver.send(());
                 }
+                // Hand the profiler a closed socket so that a write it is
+                // blocked on fails instead of hanging forever.
+                drop(stream);
+                drop(_parser_task);
+            };
+            futures::join!(stop_and_reset, drain);
+
+            // The Disable ioctl returns only after the drain above, so the
+            // reader sees every record once the ioctl completes.
+            if let Some(ack) = disable_ack {
+                let _ = ack.send(());
             }
         }
-        // If the command channel closed with sampling still enabled (e.g. the perf event
-        // file was closed), dropping pid_koid_session here ends the recording interest.
     };
     let req = SpawnRequestBuilder::new()
         .with_debug_name("perf-event-sampler")
@@ -1449,133 +1451,9 @@ use crate::{fileops_impl_nonseekable, fileops_impl_noop_sync};
 mod tests {
     use super::*;
     use crate::task::tracing::{TracePerformanceEventManager, ZirconIdentity};
-    use fidl::endpoints::create_proxy;
-    use fuchsia_async as fasync;
 
     #[::fuchsia::test]
-    async fn test_stop_and_collect_samples_socket_full() {
-        let (session_proxy, session_stream) = create_proxy::<profiler::SessionMarker>();
-        let (client_socket, server_socket) = zx::Socket::create_stream();
-
-        // Fill server_socket until it is no longer writable.
-        // Start with FXT_MAGIC_BYTES so process_socket recognizes FXT format.
-        let _ = server_socket.write(&FXT_MAGIC_BYTES);
-        let buf = [0u8; 1024];
-        while match server_socket.write(&buf) {
-            Ok(_) => true,
-            Err(zx::Status::SHOULD_WAIT) => false,
-            Err(e) => panic!("unexpected error filling socket: {:?}", e),
-        } {}
-
-        let mock_service = async move {
-            let mut session_stream = session_stream.into_stream();
-            let mut server_socket = Some(server_socket);
-            // The profiler is currently single threaded and blocks if the socket is full. Model
-            // this here to ensure we don't deadlock if the socket fills up.
-            while let Some(Ok(request)) = session_stream.next().await {
-                match request {
-                    profiler::SessionRequest::Stop { responder } => {
-                        if let Some(socket) = server_socket.take() {
-                            let _ =
-                                fasync::OnSignals::new(&socket, zx::Signals::SOCKET_WRITABLE).await;
-                            drop(socket);
-                        }
-                        let _ = responder.send(&profiler::SessionResult::default());
-                    }
-                    profiler::SessionRequest::Reset { responder } => {
-                        let _ = responder.send();
-                    }
-                    _ => {}
-                }
-            }
-        };
-
-        let client = fidl::AsyncSocket::from_socket(client_socket);
-        let seq_lock = OnceLock::new();
-        let perf_data_vmo = zx::Vmo::create(ESTIMATED_MMAP_BUFFER_SIZE).unwrap();
-        let mut vmo_write_offset = 0;
-
-        let test_task = stop_and_collect_samples(
-            session_proxy,
-            client,
-            &seq_lock,
-            &perf_data_vmo,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            None,
-            &mut vmo_write_offset,
-        );
-
-        let ((), result) = futures::join!(mock_service, test_task);
-        assert!(result.is_ok());
-    }
-
-    fn write_fxt_backtrace_record(
-        buf: &mut Vec<u8>,
-        ticks: u64,
-        process_koid: u64,
-        thread_koid: u64,
-        ips: &[u64],
-    ) {
-        let record_type: u64 = 10;
-        let sub_type: u64 = 2; // Backtrace
-        let thread_ref: u64 = 0; // Inline process and thread koid
-        let num_records: u64 = ips.len() as u64;
-        let flags: u64 = 0;
-        let size_words: u64 = 4 + num_records;
-
-        let header_val: u64 = (flags << 36)
-            | (num_records << 28)
-            | (thread_ref << 20)
-            | (sub_type << 16)
-            | (size_words << 4)
-            | record_type;
-
-        buf.extend_from_slice(&header_val.to_le_bytes());
-        buf.extend_from_slice(&ticks.to_le_bytes());
-        buf.extend_from_slice(&process_koid.to_le_bytes());
-        buf.extend_from_slice(&thread_koid.to_le_bytes());
-        for ip in ips {
-            buf.extend_from_slice(&ip.to_le_bytes());
-        }
-    }
-
-    #[::fuchsia::test]
-    async fn test_stop_and_collect_samples_resolves_pid_tid() {
-        let (session_proxy, session_stream) = create_proxy::<profiler::SessionMarker>();
-        let (client_socket, server_socket) = zx::Socket::create_stream();
-
-        let mut socket_data = Vec::new();
-        socket_data.extend_from_slice(&FXT_MAGIC_BYTES);
-        // Mapped sample: process 1001, thread 1002 -> should resolve to pid 42, tid 43.
-        write_fxt_backtrace_record(&mut socket_data, 1000, 1001, 1002, &[0x12345678]);
-        // Unmapped sample: process 9999, thread 9998 -> should be dropped.
-        write_fxt_backtrace_record(&mut socket_data, 2000, 9999, 9998, &[0x87654321]);
-        server_socket.write(&socket_data).expect("failed to write FXT data to socket");
-
-        let mock_service = async move {
-            let mut session_stream = session_stream.into_stream();
-            let mut server_socket = Some(server_socket);
-            while let Some(Ok(request)) = session_stream.next().await {
-                match request {
-                    profiler::SessionRequest::Stop { responder } => {
-                        // Drop the server socket to signal EOF to the reader.
-                        drop(server_socket.take());
-                        let _ = responder.send(&profiler::SessionResult::default());
-                    }
-                    profiler::SessionRequest::Reset { responder } => {
-                        let _ = responder.send();
-                    }
-                    _ => {}
-                }
-            }
-        };
-
-        // Set up the pid/koid manager and register the mapping.
+    async fn test_process_fxt_record_resolves_pid_tid() {
         let manager = Arc::new(TracePerformanceEventManager::new(std::sync::Weak::new()));
         let session = manager.open();
         manager.record(
@@ -1587,19 +1465,25 @@ mod tests {
         let perf_data_vmo = zx::Vmo::create(ESTIMATED_MMAP_BUFFER_SIZE).unwrap();
         let vmo_handle_copy =
             perf_data_vmo.as_handle_ref().duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
-        let seq_lock = OnceLock::new();
         // SAFETY: The test maintains exclusive write access to this VMO.
-        let _ = seq_lock
-            .set(Ok(unsafe { create_seq_lock(&vmo_handle_copy, ESTIMATED_MMAP_BUFFER_SIZE) }));
+        let seq_lock = unsafe { create_seq_lock(&vmo_handle_copy, ESTIMATED_MMAP_BUFFER_SIZE) };
 
         let sample_type = (perf_event_sample_format_PERF_SAMPLE_IP
             | perf_event_sample_format_PERF_SAMPLE_TID) as u64;
         let mut vmo_write_offset = 0;
-        let client = fidl::AsyncSocket::from_socket(client_socket);
+        let mut lost_events = 0;
 
-        let test_task = stop_and_collect_samples(
-            session_proxy,
-            client,
+        // Mapped sample: process 1001, thread 1002 -> should resolve to pid 42, tid 43.
+        let mapped_record =
+            TraceRecord::Profiler(ProfilerRecord::Backtrace(fxt::profiler::BacktraceRecord {
+                timestamp: 1000,
+                process: fxt::ProcessKoid(1001),
+                thread: fxt::ThreadKoid(1002),
+                num_records: 1,
+                data: vec![0x12345678],
+            }));
+        process_fxt_record(
+            mapped_record,
             &seq_lock,
             &perf_data_vmo,
             sample_type,
@@ -1610,16 +1494,14 @@ mod tests {
             0,
             Some(&session),
             &mut vmo_write_offset,
+            &mut lost_events,
         );
-
-        let ((), result) = futures::join!(mock_service, test_task);
-        assert!(result.is_ok());
 
         // Header (8 bytes) + IP (8 bytes) + PID/TID (8 bytes) = 24 bytes.
         let expected_record_size: u64 = 24;
         assert_eq!(vmo_write_offset, expected_record_size);
 
-        let metadata = seq_lock.get().unwrap().as_ref().unwrap().get();
+        let metadata = seq_lock.get();
         assert_eq!(metadata.data_head, expected_record_size);
 
         let mut record_bytes = [0u8; 24];
@@ -1643,7 +1525,34 @@ mod tests {
         let tid = u32::from_ne_bytes(record_bytes[20..24].try_into().unwrap());
         assert_eq!(tid, 43);
 
+        // Unmapped sample: process 9999, thread 9998 -> should be dropped.
+        let unmapped_record =
+            TraceRecord::Profiler(ProfilerRecord::Backtrace(fxt::profiler::BacktraceRecord {
+                timestamp: 2000,
+                process: fxt::ProcessKoid(9999),
+                thread: fxt::ThreadKoid(9998),
+                num_records: 1,
+                data: vec![0x87654321],
+            }));
+        process_fxt_record(
+            unmapped_record,
+            &seq_lock,
+            &perf_data_vmo,
+            sample_type,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Some(&session),
+            &mut vmo_write_offset,
+            &mut lost_events,
+        );
+
         // Verify that unmapped sample was dropped and no extra bytes were written.
+        assert_eq!(vmo_write_offset, expected_record_size);
+        let metadata = seq_lock.get();
+        assert_eq!(metadata.data_head, expected_record_size);
         let mut trailing_bytes = [0u8; 24];
         perf_data_vmo
             .read(&mut trailing_bytes, metadata.data_offset + expected_record_size)

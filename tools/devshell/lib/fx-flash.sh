@@ -81,8 +81,10 @@ function fx-flash {
   fi
 
   # Ignore the default ffx device if it is not discoverable.
-  if [[ -n "${device}" && ! "$(fx-target-finder-info)" =~ "${device}" ]]; then
+  local default_device="${device:-$(fx-command-run host-tool ffx config get target.default 2>/dev/null | tr -d '"')}"
+  if [[ -n "${default_device}" && ! "$(fx-target-finder-info)" =~ "${default_device}" ]]; then
      ffx_args+=("-c" "target.default=")
+     unset FUCHSIA_NODENAME FUCHSIA_DEVICE_ADDR
   fi
 
   if [[ -n "${flash_manifest}" && ! -f "${flash_manifest}" ]]; then

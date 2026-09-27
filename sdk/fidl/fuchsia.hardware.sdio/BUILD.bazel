@@ -9,6 +9,7 @@ package(default_applicable_licenses = ["//:license"])
 fidl_library(
     name = "fuchsia.hardware.sdio",
     srcs = [
+        "metadata.fidl",
         "sdio.fidl",
     ],
     api_area = "Drivers",

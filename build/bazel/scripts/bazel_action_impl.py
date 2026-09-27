@@ -40,7 +40,7 @@ from debug_symbols import (
     DebugSymbolsManifestParser,
 )
 
-# LINT.ThenChange(//build/bazel/bazel_action.gni:bazel_action_impl_imports)
+# LINT.ThenChange(//build/bazel/bazel_action.gni:bazel_action_impl_imports, //build/bazel/scripts/BUILD.gn:bazel_action_impl_imports)
 
 
 # Set this to True to debug operations locally in this script.
@@ -345,7 +345,7 @@ class BazelActionRunner(object):
             # issues.
             genquery_files_to_cleanup = []
 
-            def _cleanup_genqueries():
+            def _cleanup_genqueries() -> None:
                 # First, the genquery BUILD.bazel file itself.
                 try:
                     genquery_build_file.unlink()
@@ -453,7 +453,9 @@ class BazelActionRunner(object):
         # functionality for better clarity.
         output_copier = _BazelOutputCopier(self.paths)
         if not self.global_args.quiet:
-            print(f"Copying {len(outputs)} outputs from Bazel...")
+            print(
+                f"Inspecting {len(outputs)} outputs from Bazel for copying back to GN/Ninja..."
+            )
         all_output_files = output_copier.copy(outputs, time_profile)
 
         # Perform the merging of debug symbols data, and optionally copy
@@ -720,7 +722,11 @@ class BazelActionRunner(object):
                 source_path = source_mapper.resolve_path(path)
                 if source_path:
                     sources.append(source_prefix + source_path)
-            input_files[target].extend(sources)
+            # A target named in an extra_bazel_targets_file may be a
+            # test_suite(), which Bazel expands into its member tests. The
+            # aspect then reports sources for those members, which were never
+            # requested by label and so have no entry yet.
+            input_files.setdefault(target, []).extend(sources)
 
         time_profile.stop()
 
@@ -1221,6 +1227,7 @@ class _BazelOutputCopier(object):
                 % "\n".join(str(d) for d in unwanted_dirs)
             )
 
+        files_to_copy: list[tuple[Path, Path]] = []
         if file_copies:
             time_profile.start(
                 "check_copy_files",
@@ -1248,7 +1255,7 @@ class _BazelOutputCopier(object):
                         for src, dst in files_to_copy
                     ],
                 )
-        return [dst for _, dst in file_copies]
+        return [dst for _, dst in files_to_copy]
 
     def _copy_directories(
         self,
@@ -1321,20 +1328,19 @@ To fix this, check that the Bazel action or assembly configuration produced the 
 """
             raise MissingTrackedFileError(error_msg)
 
+        copied_tracked_files: list[Path] = []
         if dir_copies:
             time_profile.start(
                 "copy_directories",
                 "Copy Bazel output directories to Ninja build directory",
             )
             for src_path, dst_path, tracked_files in dir_copies:
-                copy_directory_if_changed(src_path, dst_path, tracked_files)
+                if copy_directory_if_changed(src_path, dst_path, tracked_files):
+                    copied_tracked_files.extend(
+                        [dst_path / file for file in tracked_files]
+                    )
 
-        # Return all of the full paths to the tracked files in the directories, as these are
-        # the "destination output files" of these directories.
-        all_tracked_files: list[Path] = []
-        for dst, _, tracked_files in dir_copies:
-            all_tracked_files.extend([dst / file for file in tracked_files])
-        return all_tracked_files
+        return copied_tracked_files
 
     def _make_final_symlinks(
         self,

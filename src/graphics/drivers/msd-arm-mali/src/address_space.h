@@ -100,6 +100,8 @@ class AddressSpace {
     mali_pte_t entry[kPageTableEntries];
   };
 
+  struct ReapedTable;
+
   class PageTable {
    public:
     static std::unique_ptr<PageTable> Create(Owner* owner, uint32_t level, bool cache_coherent);
@@ -114,11 +116,17 @@ class AddressSpace {
 
     uint64_t page_bus_address() const { return bus_mapping_->Get()[0]; }
 
+    uint32_t level() const { return level_; }
+
+    uint64_t range_size() const {
+      return 1ULL << (kMaliPageShift + (level_ + 1) * kPageOffsetBits);
+    }
+
     // Collect empty page tables that are in the path to page_number, and
     // put them in |empty_tables|. |is_empty| is set if the page table is
     // now empty.
     void GarbageCollectChildren(uint64_t page_number, bool* is_empty,
-                                std::vector<std::unique_ptr<PageTable>>* empty_tables);
+                                std::vector<ReapedTable>* empty_tables);
 
    private:
     static mali_pte_t get_directory_entry(uint64_t physical_address);
@@ -137,6 +145,11 @@ class AddressSpace {
     std::vector<std::unique_ptr<PageTable>> next_levels_;
 
     friend class TestAddressSpace;
+  };
+
+  struct ReapedTable {
+    gpu_addr_t base_address;
+    std::unique_ptr<PageTable> table;
   };
 
   AddressSpace(Owner* owner, bool cache_coherent, std::unique_ptr<PageTable> root_page_directory);

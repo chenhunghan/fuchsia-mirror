@@ -258,3 +258,113 @@ License File: LICENSE
 		t.Errorf("expected level 'error', got %q", f.Level)
 	}
 }
+
+func TestRunValidate_PolicyExceptionAllowsMissingLicense(t *testing.T) {
+	tmpRoot := t.TempDir()
+	oldFuchsiaDir := os.Getenv("FUCHSIA_DIR")
+	defer os.Setenv("FUCHSIA_DIR", oldFuchsiaDir)
+	os.Setenv("FUCHSIA_DIR", tmpRoot)
+
+	// Create AllProjectsMustHaveALicense policy exception config
+	policyDir := filepath.Join(tmpRoot, "tools", "check-licenses", "assets", "configs", "policy_exceptions", "AllProjectsMustHaveALicense")
+	if err := os.MkdirAll(policyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	policyJSON := `{
+  "policy_exceptions": {
+    "AllProjectsMustHaveALicense": [
+      {
+        "bug": "12345",
+        "description": "test",
+        "paths": [
+          "third_party/exempt_proj",
+          "prebuilt/third_party/exempt_prebuilt"
+        ]
+      }
+    ]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(policyDir, "exempt.json"), []byte(policyJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. In-tree README.fuchsia without License / License File
+	inTreeReadme := filepath.Join(tmpRoot, "third_party", "exempt_proj", "README.fuchsia")
+	if err := os.MkdirAll(filepath.Dir(inTreeReadme), 0755); err != nil {
+		t.Fatal(err)
+	}
+	readmeContent := `Name: exempt_proj
+URL: https://example.com
+Revision: 12345
+Security Critical: no
+Description: Exempt project
+`
+	if err := os.WriteFile(inTreeReadme, []byte(readmeContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runValidate([]string{inTreeReadme}); err != nil {
+		t.Errorf("expected runValidate to succeed for in-tree project with AllProjectsMustHaveALicense exception, got: %v", err)
+	}
+
+	// 2. Virtual README.fuchsia without License / License File
+	virtualReadme := filepath.Join(tmpRoot, "tools", "check-licenses", "assets", "readmes", "prebuilt", "third_party", "exempt_prebuilt", "README.fuchsia")
+	if err := os.MkdirAll(filepath.Dir(virtualReadme), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(virtualReadme, []byte(readmeContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runValidate([]string{virtualReadme}); err != nil {
+		t.Errorf("expected runValidate to succeed for virtual README project with AllProjectsMustHaveALicense exception, got: %v", err)
+	}
+
+	// 3. Vendor virtual README.fuchsia with vendor policy exception and FUCHSIA_DIR unset (found via config.json walk)
+	os.Setenv("FUCHSIA_DIR", "")
+	if err := os.WriteFile(filepath.Join(tmpRoot, "tools", "check-licenses", "config.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	vendorPolicyDir := filepath.Join(tmpRoot, "vendor", "google", "tools", "check-licenses", "assets", "configs", "policy_exceptions", "AllProjectsMustHaveALicense")
+	if err := os.MkdirAll(vendorPolicyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	vendorPolicyJSON := `{
+  "policy_exceptions": {
+    "AllProjectsMustHaveALicense": [
+      {
+        "bug": "67890",
+        "description": "vendor test",
+        "paths": [
+          "//prebuilt/vendor/google/exempt_vendor"
+        ]
+      }
+    ]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(vendorPolicyDir, "vendor_exempt.json"), []byte(vendorPolicyJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	vendorVirtualReadme := filepath.Join(tmpRoot, "vendor", "google", "tools", "check-licenses", "assets", "readmes", "prebuilt", "vendor", "google", "exempt_vendor", "README.fuchsia")
+	if err := os.MkdirAll(filepath.Dir(vendorVirtualReadme), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vendorVirtualReadme, []byte(readmeContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runValidate([]string{vendorVirtualReadme}); err != nil {
+		t.Errorf("expected runValidate to succeed for vendor virtual README project with AllProjectsMustHaveALicense exception, got: %v", err)
+	}
+
+	// 4. Non-exempt project must still fail validation when License / License File are missing
+	nonExemptReadme := filepath.Join(tmpRoot, "third_party", "non_exempt_proj", "README.fuchsia")
+	if err := os.MkdirAll(filepath.Dir(nonExemptReadme), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nonExemptReadme, []byte(readmeContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runValidate([]string{nonExemptReadme}); err == nil {
+		t.Errorf("expected runValidate to fail for non-exempt project missing License / License File, got nil")
+	}
+}

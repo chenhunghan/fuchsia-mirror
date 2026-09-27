@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/lib/chunked-compression/chunked-decompressor.h"
+
 #include <lib/syslog/cpp/macros.h>
 
 #include <fbl/array.h>
-#include <src/lib/chunked-compression/chunked-archive.h>
-#include <src/lib/chunked-compression/chunked-decompressor.h>
-#include <src/lib/chunked-compression/status.h>
 #include <zstd/zstd.h>
 #include <zstd/zstd_errors.h>
+
+#include "src/lib/chunked-compression/chunked-archive.h"
+#include "src/lib/chunked-compression/status.h"
 
 namespace chunked_compression {
 

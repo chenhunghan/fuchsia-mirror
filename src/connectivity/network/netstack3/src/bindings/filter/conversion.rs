@@ -237,7 +237,7 @@ impl<I: IpExt> From<State<I>> for CoreRoutines<I> {
 }
 
 impl TryFromFidl<fnet_filter_ext::MarkAction> for netstack3_core::filter::MarkAction {
-    type Error = std::convert::Infallible;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_filter_ext::MarkAction) -> Result<Self, Self::Error> {
         match fidl {
@@ -249,7 +249,7 @@ impl TryFromFidl<fnet_filter_ext::MarkAction> for netstack3_core::filter::MarkAc
 }
 
 impl TryFromFidl<fnet_filter_ext::RejectType> for netstack3_core::filter::RejectType {
-    type Error = std::convert::Infallible;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_filter_ext::RejectType) -> Result<Self, Self::Error> {
         match fidl {

@@ -25,7 +25,7 @@ class GenReferenceDocsTest(unittest.TestCase):
             ),
         ):
             files = gen_fidldocs.read_fidl_packages(self.temp_dir)
-            self.assertEquals(files, ["fakefidl_a", "fakefidl_b"])
+            self.assertEqual(files, ["fakefidl_a", "fakefidl_b"])
 
     def test_run_fidl_doc(self) -> None:
         build_dir = os.path.join(self.temp_dir, "out")

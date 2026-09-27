@@ -58,6 +58,9 @@ if (is_host) {
 }
 group("tests") {
   deps = [ ":subprocess_tests" ]
-  visibility = [ "//tools:*" ]
+  visibility = [
+    ":*",
+    "//tools:*",
+  ]
   testonly = true
 }

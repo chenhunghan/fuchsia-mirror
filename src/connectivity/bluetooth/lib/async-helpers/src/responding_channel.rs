@@ -85,7 +85,11 @@ impl<Req, Resp> Receiver<Req, Resp> {
     /// This function will panic if called after `try_next` has returned `None` or `receive` has
     /// returned an `Err`.
     pub fn try_receive(&mut self) -> Result<Option<(Req, Responder<Resp>)>, Error> {
-        Ok(self.inner.try_next()?)
+        match self.inner.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(mpsc::TryRecvError::Closed) => Ok(None),
+            Err(e @ mpsc::TryRecvError::Empty) => Err(e.into()),
+        }
     }
 }
 

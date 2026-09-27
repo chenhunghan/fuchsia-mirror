@@ -241,6 +241,7 @@ where
             ip_layer_metadata,
             marker: IpVersionMarker { .. },
             parsing_context,
+            gso_info,
         } = self;
         let device = device.into();
         update_rx_checksum_offload_counters(core_ctx, &device, parsing_context.checksum_offload());
@@ -252,6 +253,7 @@ where
                 frame_dst,
                 ip_layer_metadata,
                 parsing_context,
+                gso_info,
                 frame,
             ),
             IpVersion::V6 => ip::receive_ipv6_packet(
@@ -261,6 +263,7 @@ where
                 frame_dst,
                 ip_layer_metadata,
                 parsing_context,
+                gso_info,
                 frame,
             ),
         }

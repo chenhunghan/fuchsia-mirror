@@ -64,6 +64,7 @@ impl StreamRunner {
                 stream: stream.as_ref(),
                 options: options.clone(),
                 output: vec![],
+                closing: false,
             };
 
             stream.start().await?;

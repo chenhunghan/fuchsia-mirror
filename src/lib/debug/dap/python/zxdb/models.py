@@ -74,6 +74,7 @@ class ZxdbThreadEventBody(ThreadEventBody):
     """Body of the thread event containing optional processId."""
 
     process_id: int | None = None
+    is_stopped: bool | None = None
 
 
 class ZxdbThreadEvent(ThreadEvent):

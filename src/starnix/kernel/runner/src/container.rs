@@ -8,7 +8,7 @@ use crate::{
     serve_container_info, serve_graphical_presenter, serve_lutex_controller,
 };
 use anyhow::{Context, Error, anyhow, bail};
-use bootreason::get_or_init_android_bootreason;
+use bootreason::{get_bootloader_file_bootreason, get_or_init_android_bootreason};
 use bstr::{BString, ByteSlice};
 use devicetree::parser::parse_devicetree;
 use devicetree::types::Devicetree;
@@ -612,7 +612,7 @@ async fn create_container(
 
     log_debug!("Creating container with {:#?}", features);
     let mut kernel_cmdline = BString::from(start_info.program.kernel_cmdline.as_bytes());
-    let mut android_provided_bootreason = None;
+    let mut devicetree_bootreason = None;
 
     let mut bootargs_has_serialno = false;
     let mut bootargs_has_verifiedbootstate = false;
@@ -641,7 +641,7 @@ async fn create_container(
                             // possible values are.
                             log_info!("Original devicetree bootarg {:?}", item);
                             if let Some((_, v)) = item.split_once('=') {
-                                android_provided_bootreason = Some(v.to_string());
+                                devicetree_bootreason = Some(v.to_string());
                             }
                             continue;
                         }
@@ -672,6 +672,20 @@ async fn create_container(
         }
     }
     if features.android_bootreason {
+        let bootloader_file_bootreason = match get_bootloader_file_bootreason().await {
+            Ok(Some(reason)) => {
+                log_info!("Original bootloader file androidboot.bootreason={:?}", reason);
+                Some(reason)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                log_warn!("Could not get androidboot.bootreason boot item: {err:?}");
+                None
+            }
+        };
+        // A device only provides one of these in practice; prefer the legacy devicetree value so
+        // existing devices are unaffected.
+        let android_provided_bootreason = devicetree_bootreason.or(bootloader_file_bootreason);
         kernel_cmdline.extend(b" androidboot.bootreason=");
 
         let tmp_channel = start_info.container_namespace.get_namespace_channel("/tmp_lifecycle");

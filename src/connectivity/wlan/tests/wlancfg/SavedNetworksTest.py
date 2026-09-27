@@ -17,7 +17,6 @@ from antlion.utils import rand_ascii_str, rand_hex_str
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )
-from honeydew.affordances.connectivity.wlan.utils.types import NetworkConfig
 from mobly import asserts, signals, test_runner
 from openwrt_access_point.lib.access_point_config import (
     DEFAULT_2G_CHANNEL,
@@ -34,9 +33,6 @@ from openwrt_access_point.lib.access_point_config_mapper import (
 )
 
 PSK_LEN = 64
-CREDENTIAL_TYPE_PSK = "Psk"
-CREDENTIAL_TYPE_NONE = "None"
-CREDENTIAL_TYPE_PASSWORD = "Password"
 CREDENTIAL_VALUE_NONE = ""
 
 
@@ -72,7 +68,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             self.access_point.stop_all_aps()
         await super().teardown_class()
 
-    async def _has_saved_network(self, network: NetworkConfig) -> bool:
+    async def _has_saved_network(
+        self, network: f_wlan_policy.NetworkConfig
+    ) -> bool:
         """Verify that the network is present in saved networks.
 
         Args:
@@ -139,18 +137,24 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_open_network_with_password(self) -> None:
         """Save an open network with a password and verify that it fails to save."""
-        test_network = NetworkConfig(
-            rand_ascii_str(10),
-            f_wlan_policy.SecurityType.NONE,
-            CREDENTIAL_TYPE_NONE,
-            rand_ascii_str(8),
+        ssid = rand_ascii_str(10)
+        security_type = f_wlan_policy.SecurityType.NONE
+        password = rand_ascii_str(8)
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(
+                password=list(password.encode("utf-8"))
+            ),
         )
 
         try:
             await self.dut.wlan_policy.save_network(
-                test_network.ssid,
-                test_network.security_type,
-                test_network.credential_value,
+                ssid,
+                security_type,
+                password,
             )
             asserts.fail("Unexpectedly succeeded to save network")
         except HoneydewWlanError:
@@ -164,17 +168,20 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_open_network(self) -> None:
         """Save an open network and verify presence."""
-        test_network = NetworkConfig(
-            rand_ascii_str(10),
-            f_wlan_policy.SecurityType.NONE,
-            CREDENTIAL_TYPE_NONE,
-            CREDENTIAL_VALUE_NONE,
+        ssid = rand_ascii_str(10)
+        security_type = f_wlan_policy.SecurityType.NONE
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(none=f_wlan_policy.Empty()),
         )
 
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            CREDENTIAL_VALUE_NONE,
         )
         if not await self._has_saved_network(test_network):
             asserts.fail("Saved network not present")
@@ -182,105 +189,138 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     async def test_network_with_psk(self) -> None:
         """Save a network with a PSK and verify presence.
 
-        PSK are translated from hex to bytes when saved, and when returned by
-        get_saved_networks it will be lower case.
+        PSK are translated from hex to bytes when saved.
         """
-        test_network = NetworkConfig(
-            rand_ascii_str(11),
-            f_wlan_policy.SecurityType.WPA2,
-            CREDENTIAL_TYPE_PSK,
-            rand_hex_str(PSK_LEN).lower(),
+        ssid = rand_ascii_str(11)
+        security_type = f_wlan_policy.SecurityType.WPA2
+        psk = rand_hex_str(PSK_LEN).lower()
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(psk=list(bytes.fromhex(psk))),
         )
 
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            psk,
         )
         if not await self._has_saved_network(test_network):
             asserts.fail("Saved network not present")
 
     async def test_wep_network(self) -> None:
         """Save a wep network and verify presence."""
-        test_network = NetworkConfig(
-            rand_ascii_str(12),
-            f_wlan_policy.SecurityType.WEP,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(13),
+        ssid = rand_ascii_str(12)
+        security_type = f_wlan_policy.SecurityType.WEP
+        password = rand_ascii_str(13)
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(
+                password=list(password.encode("utf-8"))
+            ),
         )
 
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            password,
         )
         if not await self._has_saved_network(test_network):
             asserts.fail("Saved network not present")
 
     async def test_wpa2_network(self) -> None:
         """Save a wpa2 network and verify presence."""
-        test_network = NetworkConfig(
-            rand_ascii_str(9),
-            f_wlan_policy.SecurityType.WPA2,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(15),
+        ssid = rand_ascii_str(9)
+        security_type = f_wlan_policy.SecurityType.WPA2
+        password = rand_ascii_str(15)
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(
+                password=list(password.encode("utf-8"))
+            ),
         )
 
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            password,
         )
         if not await self._has_saved_network(test_network):
             asserts.fail("Saved network not present")
 
     async def test_wpa_network(self) -> None:
         """Save a wpa network and verify presence."""
-        test_network = NetworkConfig(
-            rand_ascii_str(16),
-            f_wlan_policy.SecurityType.WPA,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(9),
+        ssid = rand_ascii_str(16)
+        security_type = f_wlan_policy.SecurityType.WPA
+        password = rand_ascii_str(9)
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(
+                password=list(password.encode("utf-8"))
+            ),
         )
 
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            password,
         )
         if not await self._has_saved_network(test_network):
             asserts.fail("Saved network not present")
 
     async def test_wpa3_network(self) -> None:
         """Save a wpa3 network and verify presence."""
-        test_network = NetworkConfig(
-            rand_ascii_str(9),
-            f_wlan_policy.SecurityType.WPA3,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(15),
+        ssid = rand_ascii_str(9)
+        security_type = f_wlan_policy.SecurityType.WPA3
+        password = rand_ascii_str(15)
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(
+                password=list(password.encode("utf-8"))
+            ),
         )
 
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            password,
         )
         if not await self._has_saved_network(test_network):
             asserts.fail("Saved network not present")
 
     async def test_save_network_persists(self) -> None:
         """Save a network and verify after reboot network is present."""
-        test_network = NetworkConfig(
-            rand_ascii_str(10),
-            f_wlan_policy.SecurityType.WPA2,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(10),
+        ssid = rand_ascii_str(10)
+        security_type = f_wlan_policy.SecurityType.WPA2
+        password = rand_ascii_str(10)
+        test_network = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=security_type,
+            ),
+            credential=f_wlan_policy.Credential(
+                password=list(password.encode("utf-8"))
+            ),
         )
 
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            password,
         )
 
         if not await self._has_saved_network(test_network):
@@ -298,29 +338,34 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         different security types and therefore different network identifiers.
         """
         ssid = rand_ascii_str(19)
-        test_network_wpa2 = NetworkConfig(
+        password_wpa2 = rand_ascii_str(12)
+        test_network_wpa2 = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=f_wlan_policy.SecurityType.WPA2,
+            ),
+            credential=f_wlan_policy.Credential(
+                password=list(password_wpa2.encode("utf-8"))
+            ),
+        )
+        test_network_open = f_wlan_policy.NetworkConfig(
+            id_=f_wlan_policy.NetworkIdentifier(
+                ssid=list(ssid.encode("utf-8")),
+                type_=f_wlan_policy.SecurityType.NONE,
+            ),
+            credential=f_wlan_policy.Credential(none=f_wlan_policy.Empty()),
+        )
+
+        await self.dut.wlan_policy.save_network(
             ssid,
             f_wlan_policy.SecurityType.WPA2,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(12),
+            password_wpa2,
         )
-        test_network_open = NetworkConfig(
+
+        await self.dut.wlan_policy.save_network(
             ssid,
             f_wlan_policy.SecurityType.NONE,
-            CREDENTIAL_TYPE_NONE,
             CREDENTIAL_VALUE_NONE,
-        )
-
-        await self.dut.wlan_policy.save_network(
-            test_network_wpa2.ssid,
-            test_network_wpa2.security_type,
-            test_network_wpa2.credential_value,
-        )
-
-        await self.dut.wlan_policy.save_network(
-            test_network_open.ssid,
-            test_network_open.security_type,
-            test_network_open.credential_value,
         )
 
         if not (
@@ -335,16 +380,11 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         This test requires a wpa2 network. Remove all other networks first so that we
         don't auto connect to them.
         """
-        test_network = NetworkConfig(
-            rand_ascii_str(10),
-            f_wlan_policy.SecurityType.WPA2,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(10),
-        )
+        ssid = rand_ascii_str(10)
+        security_type = f_wlan_policy.SecurityType.WPA2
+        password = rand_ascii_str(10)
 
-        self._start_ap(
-            test_network.ssid, SecurityWpa2(), test_network.credential_value
-        )
+        self._start_ap(ssid, SecurityWpa2(), password)
 
         await self.dut.wlan_policy.wait_for_no_connections()
         # Make sure client connections are enabled
@@ -354,18 +394,18 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         )
         # Save and verify we connect to network
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
-            test_network.security_type,
-            test_network.credential_value,
+            ssid,
+            security_type,
+            password,
         )
 
         await self.dut.wlan_policy.wait_for_network_state(
-            test_network.ssid, f_wlan_policy.ConnectionState.CONNECTED
+            ssid, f_wlan_policy.ConnectionState.CONNECTED
         )
         # Remove network and verify we disconnect
         await self.dut.wlan_policy.forget_network(
-            test_network.ssid,
-            test_network.security_type,
+            ssid,
+            security_type,
         )
         try:
             await self.dut.wlan_policy.wait_for_no_connections()
@@ -378,16 +418,10 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         Start up AP with an open network and verify that the client auto connects to
         that network after we save it.
         """
-        test_network = NetworkConfig(
-            rand_ascii_str(10),
-            f_wlan_policy.SecurityType.NONE,
-            CREDENTIAL_TYPE_NONE,
-            CREDENTIAL_VALUE_NONE,
-        )
+        ssid = rand_ascii_str(10)
+        security_type = f_wlan_policy.SecurityType.NONE
 
-        self._start_ap(
-            test_network.ssid, SecurityOpen(), test_network.credential_value
-        )
+        self._start_ap(ssid, SecurityOpen(), CREDENTIAL_VALUE_NONE)
 
         await self.dut.wlan_policy.wait_for_no_connections()
         # Make sure client connections are enabled
@@ -397,12 +431,10 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             f_wlan_policy.WlanClientState.CONNECTIONS_ENABLED
         )
         # Save the network and make sure that we see the device auto connect to it.
-        await self.dut.wlan_policy.save_network(
-            test_network.ssid, test_network.security_type
-        )
+        await self.dut.wlan_policy.save_network(ssid, security_type)
         try:
             await self.dut.wlan_policy.wait_for_network_state(
-                test_network.ssid, f_wlan_policy.ConnectionState.CONNECTED
+                ssid, f_wlan_policy.ConnectionState.CONNECTED
             )
         except HoneydewWlanError as e:
             raise signals.TestFailure(
@@ -415,16 +447,10 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         Start up AP with a wpa3 network and verify that the client auto connects to
         that network after we save it.
         """
-        test_network = NetworkConfig(
-            rand_ascii_str(10),
-            f_wlan_policy.SecurityType.WPA3,
-            CREDENTIAL_TYPE_PASSWORD,
-            rand_ascii_str(10),
-        )
+        ssid = rand_ascii_str(10)
+        password = rand_ascii_str(10)
 
-        self._start_ap(
-            test_network.ssid, SecurityWpa3(), test_network.credential_value
-        )
+        self._start_ap(ssid, SecurityWpa3(), password)
 
         await self.dut.wlan_policy.wait_for_no_connections()
         # Make sure client connections are enabled
@@ -434,13 +460,13 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         )
         # Save the network and make sure that we see the device auto connect to it.
         await self.dut.wlan_policy.save_network(
-            test_network.ssid,
+            ssid,
             f_wlan_policy.SecurityType.WPA3,
-            test_network.credential_value,
+            password,
         )
         try:
             await self.dut.wlan_policy.wait_for_network_state(
-                test_network.ssid, f_wlan_policy.ConnectionState.CONNECTED
+                ssid, f_wlan_policy.ConnectionState.CONNECTED
             )
         except HoneydewWlanError as e:
             raise signals.TestFailure(

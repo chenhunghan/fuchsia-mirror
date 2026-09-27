@@ -1060,7 +1060,7 @@ mod tests {
 
         // Verify the expected Cobalt event for the `thermal_limit_result` metric
         assert_eq!(
-            cobalt_receiver.try_next().unwrap().unwrap(),
+            cobalt_receiver.try_recv().unwrap(),
             MetricEvent {
                 metric_id: power_metrics_registry::THERMAL_LIMIT_RESULT_MIGRATED_METRIC_ID,
                 event_codes: vec![thermal_limit_result::Mitigated as u32],
@@ -1069,7 +1069,7 @@ mod tests {
         );
 
         // Verify there were no more dispatched Cobalt events
-        assert!(cobalt_receiver.try_next().is_err());
+        assert!(cobalt_receiver.try_recv().is_err());
     }
 
     /// Tests for the correct behavior when the `ThrottlingResultShutdown` metric is received:
@@ -1118,7 +1118,7 @@ mod tests {
         {
             // Verify the expected Cobalt event for the `thermal_limit_result` metric
             assert_eq!(
-                cobalt_receiver.try_next().unwrap().unwrap(),
+                cobalt_receiver.try_recv().unwrap(),
                 MetricEvent {
                     metric_id: power_metrics_registry::THERMAL_LIMIT_RESULT_MIGRATED_METRIC_ID,
                     event_codes: vec![thermal_limit_result::Shutdown as u32],
@@ -1127,7 +1127,7 @@ mod tests {
             );
 
             // Verify there were no more dispatched Cobalt events
-            assert!(cobalt_receiver.try_next().is_err());
+            assert!(cobalt_receiver.try_recv().is_err());
         }
 
         // Inspect
@@ -1258,7 +1258,7 @@ mod tests {
 
         // Verify the expected Cobalt event for the `raw_temperature` metric
         assert_eq!(
-            cobalt_receiver.try_next().unwrap().unwrap(),
+            cobalt_receiver.try_recv().unwrap(),
             MetricEvent {
                 metric_id: power_metrics_registry::RAW_TEMPERATURE_MIGRATED_METRIC_ID,
                 event_codes: vec![],
@@ -1267,7 +1267,7 @@ mod tests {
         );
 
         // Verify there were no more dispatched Cobalt events
-        assert!(cobalt_receiver.try_next().is_err());
+        assert!(cobalt_receiver.try_recv().is_err());
     }
 
     /// Tests for the correct behavior when the `ThermalLoad` metric is received: record thermal

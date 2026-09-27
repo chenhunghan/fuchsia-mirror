@@ -98,7 +98,7 @@ func (p *PolicyAddCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...in
 		fmt.Fprintf(os.Stderr, "Error: invalid check name %q. Must be one of: %s\n", checkName, strings.Join(validChecks, ", "))
 		return subcommands.ExitUsageError
 	}
-	targetPath := filepath.Clean(f.Arg(1))
+	targetPath := f.Arg(1)
 
 	if _, err := AddPolicyException(p.fuchsiaDir, checkName, targetPath, p.bug, p.description); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -115,7 +115,7 @@ func AddPolicyException(fuchsiaDir, checkName, targetPath, bug, description stri
 		return "", fmt.Errorf("failed to load input context: %w", err)
 	}
 
-	resolvedTarget := targetPath
+	resolvedTarget := ic.AbsPath
 	if validate.IsProjectScopePolicy(checkName) {
 		if projectRoot, err := ic.ResolveProjectRoot(targetPath); err == nil {
 			resolvedTarget = projectRoot

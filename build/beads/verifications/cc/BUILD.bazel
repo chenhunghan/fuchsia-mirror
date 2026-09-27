@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+build_flags(
+    name = "example_flags",
+    defines = ["EXAMPLE_MACRO=1"],
+    include_dirs = ["build/beads/verifications/cc/src"],
+)
+
+fx_cc_library(
+    name = "c_example_lib",
+    srcs = ["src/c_lib.c"],
+    hdrs = ["src/c_lib.h"],
+    build_flags = [":example_flags"],
+    target_compatible_with = HOST_CONSTRAINTS,
+)
+
+fx_cc_library(
+    name = "cc_example_lib",
+    srcs = ["src/cc_lib.cc"],
+    hdrs = ["src/cc_lib.h"],
+    build_flags = [":example_flags"],
+    target_compatible_with = HOST_CONSTRAINTS,
+)
+
+fx_cc_library(
+    name = "asm_example_lib",
+    srcs = ["src/asm_func.S"],
+    build_flags = [":example_flags"],
+    target_compatible_with = HOST_CONSTRAINTS,
+)
+
+fx_cc_binary(
+    name = "cc_example_bin",
+    srcs = ["src/main.cc"],
+    build_flags = [":example_flags"],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = [
+        ":asm_example_lib",
+        ":c_example_lib",
+        ":cc_example_lib",
+    ],
+)

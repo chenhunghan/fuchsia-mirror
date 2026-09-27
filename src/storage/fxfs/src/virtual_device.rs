@@ -51,7 +51,7 @@ impl<H: ReadObjectHandle> Device for ReadOnlyDevice<H> {
         _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         let len = buffer.len();
-        let amount = self.handle.read(offset, buffer).await?;
+        let amount = self.handle.read_aligned(offset, buffer).await?;
         if amount != len {
             return Err(FxfsError::OutOfRange).context("short read from underlying object");
         }

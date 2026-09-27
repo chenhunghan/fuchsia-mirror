@@ -20,6 +20,11 @@
                 compat: "fake,clock",
             },
         },
+        {
+            name: "pdev",
+            service: "fuchsia.hardware.interrupt.ControllerRegistryService",
+            generate_bind_rule: false,
+        },
     ],
     expose: [
         {

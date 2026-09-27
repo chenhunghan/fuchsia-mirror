@@ -51,8 +51,8 @@ mod tests {
 
         // Note: can't use `assert_matches!()` here, because `InputDeviceRegistryRequestStream`
         // does not implement `Debug`.
-        match receiver.try_next() {
-            Ok(opt) => assert!(opt.is_some()),
+        match receiver.try_recv() {
+            Ok(_) => {}
             Err(e) => panic!("reading failed with {:#?}", e),
         }
     }

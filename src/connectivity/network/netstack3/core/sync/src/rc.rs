@@ -905,8 +905,8 @@ where
     }
 }
 
-/// A handy implementation for the common Infallible "Never" type.
-impl<T> Notifier<T> for core::convert::Infallible {
+/// A handy implementation for the "never" type.
+impl<T> Notifier<T> for ! {
     fn notify(&mut self, _data: T) {
         match *self {}
     }

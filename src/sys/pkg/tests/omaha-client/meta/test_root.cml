@@ -12,11 +12,24 @@
             url: "fuchsia-pkg://fuchsia.com/omaha-client-integration-tests#meta/test_driver.cm",
         },
         {
+            name: "http-client",
+            url: "fuchsia-pkg://fuchsia.com/omaha-client-integration-tests#meta/http-client.cm",
+        },
+        {
             name: "fake_cobalt",
             url: "fuchsia-pkg://fuchsia.com/omaha-client-integration-tests#meta/fake_cobalt.cm",
         },
     ],
     offer: [
+        {
+            config: [
+                "fuchsia.http-client.StopOnIdleTimeoutMillis",
+                "fuchsia.http-client.TcpReceiveBufferSizeBytes",
+            ],
+            from: "void",
+            to: "#http-client",
+            availability: "optional",
+        },
         {
             storage: "data",
             from: "parent",
@@ -33,11 +46,22 @@
         {
             protocol: [ "fuchsia.posix.socket.Provider" ],
             from: "#netstack",
-            to: "#test_driver",
+            to: [
+                "#http-client",
+                "#test_driver",
+            ],
         },
         {
             protocol: [ "fuchsia.net.name.Lookup" ],
             from: "#dns_resolver",
+            to: [
+                "#http-client",
+                "#test_driver",
+            ],
+        },
+        {
+            protocol: [ "fuchsia.net.http.Loader" ],
+            from: "#http-client",
             to: "#test_driver",
         },
         {
@@ -64,7 +88,10 @@
             directory: "pkg",
             from: "framework",
             as: "root-ssl-certificates",
-            to: "#test_driver",
+            to: [
+                "#http-client",
+                "#test_driver",
+            ],
             rights: [ "r*" ],
             subdir: "fake-ssl-certs",
         },

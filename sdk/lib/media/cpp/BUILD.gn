@@ -96,6 +96,7 @@ sdk_source_set("no_converters") {
   public_configs = [ "//sdk/config" ]
   stable = true
   visibility = [
+    ":*",
     "//build/bazel/bazel_idk/tests/*",
     "//build/sdk:*",
     "//sdk/lib/media/*",

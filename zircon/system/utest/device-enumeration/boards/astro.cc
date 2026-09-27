@@ -16,9 +16,7 @@ TEST_F(DeviceEnumerationTest, AstroTest) {
       "i2c-5000.aml-i2c",
       "i2c-1c000.aml-i2c",
       "i2c-1d000.aml-i2c",
-      "gpu-ffe40000.aml-gpu",
       "usb-phy-ffe09000.aml_usb_phy",
-      "bt-uart-ffd24000.aml-uart",
       "mmc-ffe05000.aml-sd-emmc.sdmmc",
       "mmc-ffe05000.aml-sd-emmc.sdmmc.sdmmc-sdio",
       "mmc-ffe05000.aml-sd-emmc.sdmmc.sdmmc-sdio.sdmmc-sdio-1",
@@ -50,7 +48,6 @@ TEST_F(DeviceEnumerationTest, AstroTest) {
       "thermistor.thermistor-device.therm-wifi",
       "thermistor.thermistor-device.therm-dsp",
       "thermistor.thermistor-device.therm-ambient",
-      "ram-controller-ff638000.ram",
       "temperature-sensor-ff634800",
       "temperature-sensor-ff634c00",
       "temperature-sensor-ff634800.thermal",
@@ -59,9 +56,6 @@ TEST_F(DeviceEnumerationTest, AstroTest) {
       "secure-monitor.aml-securemem",
       "clock-controller-ff63c000",
       "clock-controller-ff63c000.clocks.clock-init",
-      "aml-light",
-      "i2c-1c000.aml-i2c.i2c.i2c-2-72.audio-codec-48",
-      "i2c-5000.aml-i2c.i2c.i2c-0-57.tcs3400-light-39.tcs-3400",
       "power-controller",
       "power-controller.power-impl.power-core",
       "power-controller.power-impl.power-core.power-0",
@@ -69,6 +63,12 @@ TEST_F(DeviceEnumerationTest, AstroTest) {
       "power-controller.power-impl.power-core.power-0.cpu-controller-0",
 
 #ifdef include_packaged_drivers
+      "gpu-ffe40000.aml-gpu",
+      "bt-uart-ffd24000.aml-uart",
+      "ram-controller-ff638000.ram",
+      "aml-light",
+      "i2c-1c000.aml-i2c.i2c.i2c-2-72.audio-codec-48",
+      "i2c-5000.aml-i2c.i2c.i2c-0-57.tcs3400-light-39.tcs-3400",
       "astro-i2s-audio-out.aml_tdm.astro-audio-i2s-out",
       "astro-audio-pdm-in.aml_pdm.astro-audio-pdm-in",
       "bt-uart-ffd24000.aml-uart.serial.bt-transport-uart",
@@ -79,23 +79,25 @@ TEST_F(DeviceEnumerationTest, AstroTest) {
   };
   VerifyNodes(kNodeMonikers);
 
+#ifdef include_packaged_drivers
   static const char* kTouchscreenNodeMonikers[] = {
       "i2c-1d000.aml-i2c.i2c.i2c-1-56.focaltech-touch-38.focaltouch-HidDevice",
       "i2c-1d000.aml-i2c.i2c.i2c-1-93.goodix-touch-5d.gt92xx-HidDevice",
   };
   VerifyOneOf(kTouchscreenNodeMonikers);
 
-  static const char* kDisplayNodeMonikers[] = {
-      "boe-display-ff900000.amlogic-display.display-coordinator",
-      "innolux-display-ff900000.amlogic-display.display-coordinator",
-  };
-  VerifyOneOf(kDisplayNodeMonikers);
-
   static const char* kBacklightNodeMonikers[] = {
       "i2c-1c000.aml-i2c.i2c.i2c-2-44.backlight-boe-2c",
       "i2c-1c000.aml-i2c.i2c.i2c-2-44.backlight-innolux-2c",
   };
   VerifyOneOf(kBacklightNodeMonikers);
+#endif
+
+  static const char* kDisplayNodeMonikers[] = {
+      "boe-display-ff900000.amlogic-display.display-coordinator",
+      "innolux-display-ff900000.amlogic-display.display-coordinator",
+  };
+  VerifyOneOf(kDisplayNodeMonikers);
 }
 
 }  // namespace

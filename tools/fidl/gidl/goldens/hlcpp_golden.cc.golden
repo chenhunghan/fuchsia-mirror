@@ -653,10 +653,12 @@ TEST(Conformance, GoldenByteArrayStruct_V2_Decode) {
       fidl::test::util::DecodedBytes<test::conformance::GoldenByteArrayStruct>(fidl::internal::WireFormatVersion::kV2, std::move(bytes), std::move(handles));
   [[maybe_unused]] auto& f1 = value;
 [[maybe_unused]] auto& f2 = f1.v;
-ASSERT_EQ(f2[0], uint8_t(1ull));
-ASSERT_EQ(f2[1], uint8_t(2ull));
-ASSERT_EQ(f2[2], uint8_t(3ull));
-ASSERT_EQ(f2[3], uint8_t(4ull));
+{
+[[maybe_unused]] const auto& f3 = std::array<uint8_t, 4>{1ull, 2ull, 3ull, 4ull};
+for (size_t i = 0; i < f2.size(); ++i) {
+	ASSERT_EQ(f2[i], f3[i]);
+}
+}
 
 }
 
@@ -689,18 +691,12 @@ TEST(Conformance, GoldenByteVectorStruct_V2_Decode) {
   [[maybe_unused]] auto& f1 = value;
 [[maybe_unused]] auto& f2 = f1.v;
 ASSERT_EQ(f2.size(), 12);
-ASSERT_EQ(f2[0], uint8_t(1ull));
-ASSERT_EQ(f2[1], uint8_t(2ull));
-ASSERT_EQ(f2[2], uint8_t(3ull));
-ASSERT_EQ(f2[3], uint8_t(4ull));
-ASSERT_EQ(f2[4], uint8_t(1ull));
-ASSERT_EQ(f2[5], uint8_t(2ull));
-ASSERT_EQ(f2[6], uint8_t(3ull));
-ASSERT_EQ(f2[7], uint8_t(4ull));
-ASSERT_EQ(f2[8], uint8_t(1ull));
-ASSERT_EQ(f2[9], uint8_t(2ull));
-ASSERT_EQ(f2[10], uint8_t(3ull));
-ASSERT_EQ(f2[11], uint8_t(4ull));
+{
+[[maybe_unused]] const auto& f3 = std::vector<uint8_t>{1ull, 2ull, 3ull, 4ull, 1ull, 2ull, 3ull, 4ull, 1ull, 2ull, 3ull, 4ull};
+for (size_t i = 0; i < f2.size(); ++i) {
+	ASSERT_EQ(f2[i], f3[i]);
+}
+}
 
 }
 
@@ -716,10 +712,12 @@ TEST(Conformance, GoldenByteNullableVectorStructNonNull_V2_Decode) {
   [[maybe_unused]] auto& f1 = value;
 [[maybe_unused]] auto& f2 = f1.v.value();
 ASSERT_EQ(f2.size(), 4);
-ASSERT_EQ(f2[0], uint8_t(1ull));
-ASSERT_EQ(f2[1], uint8_t(2ull));
-ASSERT_EQ(f2[2], uint8_t(3ull));
-ASSERT_EQ(f2[3], uint8_t(4ull));
+{
+[[maybe_unused]] const auto& f3 = ::fidl::VectorPtr<uint8_t>{{1ull, 2ull, 3ull, 4ull}};
+for (size_t i = 0; i < f2.size(); ++i) {
+	ASSERT_EQ(f2[i], f3.value()[i]);
+}
+}
 
 }
 

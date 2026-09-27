@@ -5,12 +5,10 @@
 #ifndef SRC_CONNECTIVITY_WLAN_LIB_COMMON_CPP_INCLUDE_WLAN_COMMON_CHANNEL_H_
 #define SRC_CONNECTIVITY_WLAN_LIB_COMMON_CPP_INCLUDE_WLAN_COMMON_CHANNEL_H_
 
-#include <fuchsia/wlan/common/cpp/fidl.h>
-
 #include <cstdint>
 #include <string>
 
-#include "fidl/fuchsia.wlan.common/cpp/wire_types.h"
+#include "fidl/fuchsia.wlan.ieee80211/cpp/wire_types.h"
 
 namespace wlan {
 namespace common {

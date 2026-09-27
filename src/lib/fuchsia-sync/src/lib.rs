@@ -4,6 +4,10 @@
 
 //! Fuchsia-native synchronization primitives.
 
+#[cfg(target_os = "fuchsia")]
+mod completion;
+#[cfg(target_os = "fuchsia")]
+pub use completion::*;
 mod condvar;
 pub use condvar::*;
 

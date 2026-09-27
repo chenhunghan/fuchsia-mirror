@@ -49,7 +49,10 @@ source_set("vmo") {
   ]
   configs += [ "//build/config:Wno-conversion" ]
   deps = [ "//sdk/lib/fdio" ]
-  visibility = [ "//src/lib/fsl/*" ]
+  visibility = [
+    ":*",
+    "//src/lib/fsl/*",
+  ]
   public_deps = [
     "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
     "//sdk/lib/syslog/cpp",

@@ -187,8 +187,7 @@ mod tests {
 
     #[test]
     fn parse_nack() {
-        // SAFETY: value is non-zero.
-        const ERROR_CODE: NonZeroI32 = unsafe { NonZeroI32::new_unchecked(-1234) };
+        const ERROR_CODE: NonZeroI32 = NonZeroI32::new(-1234).unwrap();
         let mut bytes = vec![0, 0, 0, 0];
         NativeEndian::write_i32(&mut bytes, ERROR_CODE.get());
         let msg = ErrorBuffer::new(&bytes)

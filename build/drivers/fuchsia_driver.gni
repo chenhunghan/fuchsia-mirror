@@ -248,10 +248,4 @@ set_defaults("fuchsia_rust_driver") {
               # if unused crates are removed at call sites.
               "//build/config/rust/lints:allow_unused_crate_dependencies",
             ]
-
-  # Drivers cannot dynamically link against the Rust standard library. This
-  # config tells the linker to link against it statically. This is safe for
-  # drivers which don't depend on the standard library as well as the linker
-  # will not have any symbols to resolve.
-  configs += [ "//build/config/fuchsia:static_rust_standard_library" ]
 }

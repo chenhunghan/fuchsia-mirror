@@ -125,6 +125,12 @@
     },
     {
         "kind": "table/member",
+        "name": "fuchsia.developer.remotecontrol/IdentifyHostResponse.f_release",
+        "ordinal": "10",
+        "type": "uint32"
+    },
+    {
+        "kind": "table/member",
         "name": "fuchsia.developer.remotecontrol/IdentifyHostResponse.ids",
         "ordinal": "5",
         "type": "vector<uint64>"

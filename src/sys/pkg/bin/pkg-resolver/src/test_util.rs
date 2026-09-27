@@ -19,7 +19,7 @@ pub(crate) fn verify_cobalt_emits_event(
     expected_event_codes: impl AsEventCodes,
 ) {
     assert_eq!(
-        cobalt_receiver.try_next().unwrap().unwrap(),
+        cobalt_receiver.try_recv().unwrap(),
         MetricEvent {
             metric_id,
             event_codes: expected_event_codes.as_event_codes(),

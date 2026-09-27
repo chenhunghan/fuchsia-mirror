@@ -4,9 +4,7 @@
 
 use crate::child_name::ChildName;
 use crate::moniker::Moniker;
-use schemars::r#gen::SchemaGenerator;
-use schemars::schema::Schema;
-use schemars::{JsonSchema, schema_for};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 use std::fmt;
@@ -88,10 +86,10 @@ impl<'de> Deserialize<'de> for Moniker {
 }
 
 impl JsonSchema for Moniker {
-    fn schema_name() -> String {
-        "Moniker".to_owned()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Moniker".into()
     }
-    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
-        Schema::Object(schema_for!(String).schema)
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        String::json_schema(generator)
     }
 }

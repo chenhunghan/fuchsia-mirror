@@ -14,12 +14,30 @@ use net_types::for_any_ip_version;
 use net_types::ip::{IpAddress, IpVersion, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr};
 use packet::ParsablePacket;
 use packet_formats::ethernet::{EtherType, EthernetFrame, EthernetFrameLengthCheck};
-use packet_formats::ip::{IpExt, IpPacket as _, IpProto, Ipv4Proto, Ipv6Proto};
-use packet_formats::ipv4::Ipv4Packet;
-use packet_formats::ipv6::Ipv6Packet;
-use packet_formats::tcp::{TcpParseArgs, TcpSegment};
+use packet_formats::ip::{DscpAndEcn, IpExt, IpProto, Ipv4Proto, Ipv6Proto};
+use packet_formats::ipv4::{Ipv4Header, Ipv4Packet, Ipv4PacketRaw};
+use packet_formats::ipv6::{IPV6_FIXED_HDR_LEN, Ipv6Header, Ipv6Packet, Ipv6PacketRaw};
+use packet_formats::tcp::{MAX_OPTIONS_LEN, TcpParseArgs, TcpSegment, TcpSegmentRaw};
 
-use netstack3_base::{ChecksumRxOffloading, NetworkParsingContext};
+use netstack3_base::{ChecksumRxOffloading, GsoInfo, Ipv4IdMode, NetworkParsingContext};
+
+/// The maximum length of a coalesced frame.
+///
+/// Chosen so that the lengths derived from a coalesced frame (IPv4 total
+/// length, IPv6 payload length, and the transport packet length that's part of
+/// the IP pseudo-header used in transport-layer checksum calculation) always
+/// fit in 16 bits (the size allotted for each of these values, with the
+/// exception of the transport length in the IPv6 pseudo-header which is 32
+/// bits). This is a conservative bound: the frame length also includes the
+/// link-layer and IP headers, so each of those lengths is strictly smaller than
+/// the frame length.
+const MAX_GRO_FRAME_LEN: u16 = u16::MAX;
+
+/// Returns the number of bytes that can still be coalesced into a frame whose
+/// current length is `frame_len`.
+fn gro_headroom(frame_len: usize) -> usize {
+    usize::from(MAX_GRO_FRAME_LEN).saturating_sub(frame_len)
+}
 
 /// A slice view of a buffer, which is either a contiguous slice or linearized
 /// into scratch storage.
@@ -167,6 +185,25 @@ enum IpFlowId {
     Ipv6(Ipv6FlowId),
 }
 
+impl IpFlowId {
+    /// Returns the partial sum of `segment`'s payload, computed from
+    /// `segment`'s checksum and this flow's pseudo header addresses.
+    fn recover_payload_partial_sum(&self, segment: &TcpSegment<&'_ [u8]>) -> [u8; 2] {
+        fn recover<A: IpAddress>(src_ip: A, dst_ip: A, segment: &TcpSegment<&'_ [u8]>) -> [u8; 2] {
+            segment
+                .recover_payload_partial_sum::<A::Version>(src_ip, dst_ip)
+                .expect("transport len fits in IP total length")
+        }
+
+        match self {
+            IpFlowId::Ipv4(Ipv4FlowId { src_ip, dst_ip }) => recover(*src_ip, *dst_ip, segment),
+            IpFlowId::Ipv6(Ipv6FlowId { src_ip, dst_ip, flowlabel: _ }) => {
+                recover(*src_ip, *dst_ip, segment)
+            }
+        }
+    }
+}
+
 enum IpPacket<'a> {
     V4(Ipv4Packet<&'a [u8]>),
     V6(Ipv6Packet<&'a [u8]>),
@@ -184,6 +221,15 @@ impl<'a> From<Ipv6Packet<&'a [u8]>> for IpPacket<'a> {
     }
 }
 
+impl IpPacket<'_> {
+    fn total_len(&self) -> usize {
+        match self {
+            IpPacket::V4(packet) => packet.header_len() + packet.body().len(),
+            IpPacket::V6(packet) => packet.header_len() + packet.body().len(),
+        }
+    }
+}
+
 trait GroIpPacket<I: IpExt> {
     fn is_eligible_for_gro(&self) -> bool;
     fn ip_proto(&self) -> Option<IpProto>;
@@ -192,8 +238,6 @@ trait GroIpPacket<I: IpExt> {
 
 impl GroIpPacket<Ipv4> for Ipv4Packet<&[u8]> {
     fn is_eligible_for_gro(&self) -> bool {
-        use packet_formats::ipv4::Ipv4Header as _;
-
         // Must not be fragmented: the transport headers are only
         // available for flow matching in the first fragment.
         self.fragment_offset() == packet_formats::ip::FragmentOffset::ZERO
@@ -255,6 +299,10 @@ enum TransportFlowId {
     Tcp(TcpFlowId),
 }
 
+fn flag_requires_flush(segment: &TcpSegment<&'_ [u8]>) -> bool {
+    segment.syn() || segment.fin() || segment.rst() || segment.urg() || segment.psh()
+}
+
 enum TransportPacket<'a> {
     Tcp(TcpSegment<&'a [u8]>),
 }
@@ -301,12 +349,9 @@ impl<'a> TransportPacket<'a> {
     /// If it need not be flushed, it's eligible to become a new flow.
     fn flush_if_not_merged(&self) -> bool {
         match self {
-            Self::Tcp(_tcp) => {
-                // True if `SYN`, `FIN`, `RST`, `URG`, or `PSH` is set, or if
-                // the payload is empty.
-
-                // TODO(https://fxbug.dev/452980285): Implement.
-                false
+            Self::Tcp(tcp) => {
+                let is_payload_segment = !tcp.body().is_empty();
+                !is_payload_segment || flag_requires_flush(tcp)
             }
         }
     }
@@ -404,41 +449,175 @@ impl<'a> GroPacket<'a> {
         Some(GroPacket { flow_id, offsets, ip, transport })
     }
 
-    fn flush_if_not_merged(&self) -> bool {
-        self.transport.flush_if_not_merged()
+    /// The offset of the end of the IP payload in the frame this packet was
+    /// parsed from, as indicated by the length field in its IP header.
+    ///
+    /// Anything past this point is a trailing byte that is not part of the
+    /// packet, typically link layer padding on a frame smaller than the link
+    /// layer minimum.
+    ///
+    /// Note that this can never be past the end of the frame: the IP parsers
+    /// reject a frame whose body is shorter than its header claims, so such a
+    /// frame never makes it this far.
+    fn payload_end(&self) -> usize {
+        self.offsets.ip_offset + self.ip.total_len()
+    }
+
+    /// Checks if this packet must be flushed to the stack given that it was
+    /// not merged into a flow.
+    fn flush_if_not_merged(&self, frame_len: usize) -> bool {
+        // A frame that is already at the maximum coalesced length can never
+        // accept another segment, so don't let it establish a flow. This also
+        // guarantees that every flow's accumulated transport packet length can
+        // be represented in the IP pseudo-header.
+        gro_headroom(frame_len) == 0 || self.transport.flush_if_not_merged()
     }
 }
 
 enum CoalesceResult {
-    // TODO(https://fxbug.dev/452980285): Remove once used.
-    #[expect(dead_code)]
     Flush,
     Continue,
 }
 
+/// Encapsulates raw TCP options bytes up to maximum supported options length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TcpOptions {
+    bytes: [u8; MAX_OPTIONS_LEN],
+    len: usize,
+}
+
+impl TcpOptions {
+    fn from_slice(slice: &[u8]) -> Self {
+        let mut bytes = [0u8; MAX_OPTIONS_LEN];
+        // Note: we're depending on TCP segment parsing (specifically
+        // `TcpSegmentRaw::parse`) to uphold the invariant that this length is
+        // <= `MAX_OPTIONS_LEN`.
+        let len = slice.len();
+        bytes[..len].copy_from_slice(slice);
+        Self { bytes, len }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// The flags that coalesced segments are allowed to disagree on.
+const PSH_OR_FIN: u8 = packet_formats::tcp::flags::PSH | packet_formats::tcp::flags::FIN;
+
 /// TCP flow matching criteria and accumulation state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TcpFlow {
-    // TODO(https://fxbug.dev/452980285): Add flow state tracking.
+    flags: u8,
+    reserved_bits: u8,
+    ack: Option<u32>,
+    win: u16,
+    options: TcpOptions,
+    /// The sequence number that the next coalesced segment must start at.
+    ///
+    /// This only counts payload bytes; it ignores the virtual sequence number
+    /// length consumed by a `FIN`. That's fine because anything received after
+    /// a `FIN` is discarded by the state machine, so a segment that would only
+    /// match the `FIN`-inclusive value can't be usefully coalesced anyways.
+    next_seq: u32,
+    checksum: [u8; 2],
+    /// The total length of the first segment in the flow (header, options, and
+    /// payload), i.e. the pseudo header length that is covered by the
+    /// accumulated `checksum`.
+    ///
+    /// The difference between this and the final coalesced length is applied to
+    /// the checksum once in `finalize`.
+    orig_tcp_len: usize,
+    /// Whether the accumulated length of the coalesced TCP segment (header,
+    /// options, and payload so far) is odd.
+    ///
+    /// Determines whether the next coalesced payload starts on an odd byte
+    /// offset; see [`TcpFlow::update_checksum`].
+    tcp_len_is_odd: bool,
+    /// The maximum size of the individual segment payloads that comprise the
+    /// coalesced segment. These are all required to have the same length, with
+    /// the possible exception of the last which is permitted to be shorter.
+    ///
+    /// This is tracked so that the segment can be faithfully resegmented in the
+    /// event that it needs to be forwarded.
+    gso_size: NonZeroU16,
 }
 
 impl TcpFlow {
-    fn new(_segment: &TcpSegment<&'_ [u8]>) -> Self {
-        Self {}
+    fn new(segment: &TcpSegment<&'_ [u8]>) -> Self {
+        let payload_len = u16::try_from(segment.body().len()).expect("payload len fits in u16");
+        let next_seq = segment.seq_num().wrapping_add(u32::from(payload_len));
+        let options = TcpOptions::from_slice(segment.options().bytes());
+        // `TransportFlow::flush_if_not_merged` ensures that only payload
+        // segments can start GRO flows, so it's safe to assume here that
+        // payload length is nonzero.
+        let gso_size = NonZeroU16::new(payload_len).expect("payload len is non-zero");
+        let tcp_len = segment.total_segment_len();
+        Self {
+            flags: segment.flags(),
+            reserved_bits: segment.reserved_bits(),
+            ack: segment.ack_num(),
+            win: segment.window_size(),
+            options,
+            next_seq,
+            checksum: segment.checksum(),
+            orig_tcp_len: tcp_len,
+            tcp_len_is_odd: tcp_len % 2 == 1,
+            gso_size,
+        }
     }
 
     /// Determines whether a TCP segment already matched to this flow is
     /// permitted to coalesce with it.
-    fn can_coalesce(&self, _current_frame_len: usize, _segment: &TcpSegment<&'_ [u8]>) -> bool {
-        // Requires that:
-        // - payload is nonempty and no larger than `gso_size`
-        // - new frame length would not exceed the maximum
-        // - flags match in all bits but `PSH` and `FIN`
-        // - ACK number, window size, and options match
-        // - sequence numbers are contiguous
+    fn can_coalesce(&self, current_frame_len: usize, segment: &TcpSegment<&'_ [u8]>) -> bool {
+        let Self {
+            flags,
+            reserved_bits,
+            ack,
+            win,
+            options,
+            next_seq,
+            checksum: _,
+            orig_tcp_len: _,
+            tcp_len_is_odd: _,
+            gso_size,
+        } = self;
+        let payload_len = segment.body().len();
+        // All coalesced segments must have size `gso_size` save for the last,
+        // which may be smaller but cannot be larger.
+        if payload_len == 0 || payload_len > usize::from(gso_size.get()) {
+            return false;
+        }
+        payload_len <= gro_headroom(current_frame_len)
+            // Coalesced segments' flags may only disagree on `PSH` or `FIN`.
+            // The coalesced segment will receive the union of the flags.
+            && (*flags & !PSH_OR_FIN) == (segment.flags() & !PSH_OR_FIN)
+            // The reserved bits must match exactly; they may carry semantics
+            // that we don't know about.
+            && *reserved_bits == segment.reserved_bits()
+            && *ack == segment.ack_num()
+            && *win == segment.window_size()
+            && options.as_bytes() == segment.options().bytes()
+            // Sequence numbers must be contiguous.
+            && *next_seq == segment.seq_num()
+    }
 
-        // TODO(https://fxbug.dev/452980285): Implement.
-        false
+    /// Updates the accumulated checksum to cover `segment`'s payload.
+    ///
+    /// The pseudo header length is not updated here; it is applied once in
+    /// `finalize`.
+    fn update_checksum(&mut self, ip_flow: &IpFlowId, segment: &TcpSegment<&'_ [u8]>) {
+        let mut partial_sum = ip_flow.recover_payload_partial_sum(segment);
+        // The TCP checksum is computed by summing the pseudo-header and segment
+        // two bytes at a time. If the accumulated segment length is odd, then
+        // the newly added payload would start in the middle of a two-byte pair.
+        // Because the Internet Checksum is byte-order independent, we can
+        // correct for this by swapping the bytes of the new payload's partial
+        // sum before adding it to our checksum.
+        if self.tcp_len_is_odd {
+            partial_sum = [partial_sum[1], partial_sum[0]];
+        }
+        self.checksum = internet_checksum::add(self.checksum, &partial_sum);
     }
 
     /// Coalesces a TCP segment into this flow.
@@ -448,24 +627,61 @@ impl TcpFlow {
     /// modifications once in `finalize`.
     fn coalesce(
         &mut self,
-        _ip_flow: &IpFlowId,
-        _segment: &TcpSegment<&'_ [u8]>,
-        _coalesce_into: &mut Vec<u8>,
+        ip_flow: &IpFlowId,
+        segment: &TcpSegment<&'_ [u8]>,
+        coalesce_into: &mut Vec<u8>,
     ) -> CoalesceResult {
-        // Flow matching is permitted to continue unless `SYN`, `FIN`, `RST`,
-        // `URG`, or `PSH` is set on `segment`, or its length is less than
-        // `gso_size` (all GRO'd segments must be the same length, save for the
-        // last one).
+        coalesce_into.extend_from_slice(segment.body());
+        let added_payload_len =
+            u16::try_from(segment.body().len()).expect("payload len fits in u16");
+        self.update_checksum(ip_flow, segment);
 
-        // TODO(https://fxbug.dev/452980285): Implement.
-        CoalesceResult::Continue
+        self.tcp_len_is_odd ^= added_payload_len % 2 == 1;
+        self.next_seq = segment.seq_num().wrapping_add(u32::from(added_payload_len));
+        self.flags |= segment.flags() & PSH_OR_FIN;
+
+        // All GRO'd segments must be the same length, save for the last one,
+        // which may be shorter. This allows us to pass a single value up the
+        // stack to indicate the original segment size and ensure that we can
+        // resegment along the original segment boundaries if we end up
+        // forwarding the frame.
+        let is_smaller_than_gso = added_payload_len < self.gso_size.get();
+        if is_smaller_than_gso || flag_requires_flush(segment) {
+            CoalesceResult::Flush
+        } else {
+            CoalesceResult::Continue
+        }
     }
 
     /// Finalizes the coalesced TCP segment by updating the header with the
     /// correct checksum and the merged flags (which may only set `FIN` and/or
     /// `PSH`).
-    fn finalize(&self, mut _transport_view: &mut [u8]) {
-        // TODO(https://fxbug.dev/452980285): Implement.
+    ///
+    /// Returns the GSO segment size (the payload length of each coalesced
+    /// segment).
+    fn finalize(&self, mut transport_view: &mut [u8]) -> NonZeroU16 {
+        // By the time the flow is finalized, the view holds exactly the
+        // coalesced segment: any trailing bytes on the seed frame were trimmed
+        // before the first payload was appended.
+        let tcp_len = transport_view.len();
+        let mut tcp =
+            TcpSegmentRaw::parse_mut(&mut transport_view, ()).expect("valid TCP segment header");
+
+        // NB: the IPv6 pseudo header carries a 32-bit upper layer length where
+        // the IPv4 pseudo header carries a 16-bit TCP length.
+        // `MAX_GRO_FRAME_LENGTH` ensures that our TCP segment length can be
+        // represented by the latter, but we don't bother casting from `usize`
+        // because the upper bits must all be zero anyways and thus have no
+        // effect on the checksum.
+        let checksum = internet_checksum::update(
+            self.checksum,
+            &self.orig_tcp_len.to_be_bytes(),
+            &tcp_len.to_be_bytes(),
+        );
+
+        tcp.set_checksum(checksum);
+        tcp.set_flags(self.flags);
+        self.gso_size
     }
 }
 
@@ -503,70 +719,137 @@ impl TransportFlow {
         }
     }
 
-    fn finalize(&self, transport_view: &mut [u8]) {
+    fn finalize(&self, transport_view: &mut [u8]) -> NonZeroU16 {
         match self {
             Self::Tcp(tcp) => tcp.finalize(transport_view),
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ipv4IdState {
+    /// Only one packet seen so far with this ID.
+    Initial(u16),
+    /// IDs are consistent across packets.
+    Consistent(u16),
+    /// IDs are increasing by 1 across packets; stores the last seen ID.
+    Increasing(u16),
+}
+
+impl Ipv4IdState {
+    fn can_coalesce(&self, next_id: u16) -> bool {
+        match self {
+            Self::Initial(id) => next_id == *id || next_id == id.wrapping_add(1),
+            Self::Consistent(id) => next_id == *id,
+            Self::Increasing(prev_id) => next_id == prev_id.wrapping_add(1),
+        }
+    }
+
+    fn coalesce(&mut self, next_id: u16) {
+        *self = match self {
+            Self::Initial(id) => {
+                if next_id == *id {
+                    Self::Consistent(next_id)
+                } else if next_id == id.wrapping_add(1) {
+                    Self::Increasing(next_id)
+                } else {
+                    unreachable!("cannot coalesce non-matching ID");
+                }
+            }
+            Self::Consistent(id) => {
+                debug_assert_eq!(next_id, *id);
+                Self::Consistent(next_id)
+            }
+            Self::Increasing(_) => Self::Increasing(next_id),
+        };
+    }
+}
+
 /// IPv4 flow post-match fields and header finalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Flow {
-    // TODO(https://fxbug.dev/452980285): Add flow state tracking.
+    ttl: u8,
+    dscp_and_ecn: DscpAndEcn,
+    df_flag: bool,
+    id_state: Ipv4IdState,
 }
 
 impl Ipv4Flow {
-    fn new(_packet: &Ipv4Packet<&'_ [u8]>) -> Ipv4Flow {
-        Self {}
+    fn new(packet: &impl Ipv4Header) -> Ipv4Flow {
+        Self {
+            ttl: packet.ttl(),
+            dscp_and_ecn: packet.dscp_and_ecn(),
+            df_flag: packet.df_flag(),
+            id_state: Ipv4IdState::Initial(packet.id()),
+        }
     }
 
     /// Determines whether an IPv4 packet already matched to this flow is
     /// permitted to coalesce with it.
-    fn can_coalesce(&self, _packet: &Ipv4Packet<&'_ [u8]>) -> bool {
-        // Requires that;
-        // - TTLs match
-        // - DSCP, ECN, and DF bit match
-        // - ID matches the pattern established for the flow (may be constant or
-        //   increasing by one with each packet)
+    fn can_coalesce(&self, packet: &impl Ipv4Header) -> bool {
+        let Self { ttl, dscp_and_ecn, df_flag, id_state } = self;
+        *ttl == packet.ttl()
+            && *dscp_and_ecn == packet.dscp_and_ecn()
+            && *df_flag == packet.df_flag()
+            && id_state.can_coalesce(packet.id())
+    }
 
-        // TODO(https://fxbug.dev/452980285): Implement.
-        false
+    fn coalesce(&mut self, packet: &impl Ipv4Header) {
+        self.id_state.coalesce(packet.id());
     }
 
     /// Finalizes the coalesced IPv4 packet by updating the header with the new
     /// length and checksum.
-    fn finalize(&self, mut _ip_view: &mut [u8]) {
-        // TODO(https://fxbug.dev/452980285): Implement.
+    fn finalize(&self, mut ip_view: &mut [u8]) {
+        let total_len = ip_view.len();
+        let mut ip = Ipv4PacketRaw::parse_mut(&mut ip_view, ()).expect("valid IPv4 header");
+        let new_len_u16 = u16::try_from(total_len).expect("IP total length fits in u16");
+        ip.set_total_len_and_update_checksum(new_len_u16);
+    }
+
+    fn ipv4_id_mode(&self) -> Ipv4IdMode {
+        match self.id_state {
+            Ipv4IdState::Consistent(_) => Ipv4IdMode::Fixed,
+            Ipv4IdState::Increasing(_) => Ipv4IdMode::Incrementing,
+            Ipv4IdState::Initial(_) => {
+                unreachable!("coalesced flow with num_coalesced > 1 cannot be Initial")
+            }
+        }
     }
 }
 
 /// IPv6 flow post-match fields and header finalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv6Flow {
-    // TODO(https://fxbug.dev/452980285): Add flow state tracking.
+    hop_limit: u8,
+    dscp_and_ecn: DscpAndEcn,
 }
 
 impl Ipv6Flow {
-    fn new(_packet: &Ipv6Packet<&'_ [u8]>) -> Ipv6Flow {
-        Self {}
+    fn new(packet: &impl Ipv6Header) -> Ipv6Flow {
+        Self { hop_limit: packet.hop_limit(), dscp_and_ecn: packet.dscp_and_ecn() }
     }
 
     /// Determines whether an IPv6 packet already matched to this flow is
     /// permitted to coalesce with it.
-    fn can_coalesce(&self, _packet: &Ipv6Packet<&'_ [u8]>) -> bool {
-        // Requires that:
-        // - Hop limits match
-        // - DSCP and ECN match
+    fn can_coalesce(&self, packet: &impl Ipv6Header) -> bool {
+        let Self { hop_limit, dscp_and_ecn } = self;
+        *hop_limit == packet.hop_limit() && *dscp_and_ecn == packet.dscp_and_ecn()
+    }
 
-        // TODO(https://fxbug.dev/452980285): Implement.
-        false
+    fn coalesce(&mut self, _packet: &impl Ipv6Header) {
+        // This is a no-op: unlike IPv4, which must track the identification
+        // field across coalesced packets, no IPv6 header field needs to be
+        // accumulated. The header is updated once in `finalize`.
     }
 
     /// Finalizes the coalesced IPv6 packet by updating the header with the new
     /// payload length.
-    fn finalize(&self, mut _ip_view: &mut [u8]) {
-        // TODO(https://fxbug.dev/452980285): Implement.
+    fn finalize(&self, mut ip_view: &mut [u8]) {
+        let payload_len = ip_view.len() - IPV6_FIXED_HDR_LEN;
+        let mut ip = Ipv6PacketRaw::parse_mut(&mut ip_view, ()).expect("valid IPv6 header");
+        let payload_len_u16 = u16::try_from(payload_len).expect("IPv6 payload len fits in u16");
+        ip.set_payload_len(payload_len_u16);
     }
 }
 
@@ -593,10 +876,27 @@ impl IpFlow {
         }
     }
 
+    fn coalesce(&mut self, ip: &IpPacket<'_>) {
+        match (self, ip) {
+            (Self::Ipv4(flow), IpPacket::V4(packet)) => flow.coalesce(packet),
+            (Self::Ipv6(flow), IpPacket::V6(packet)) => flow.coalesce(packet),
+            (Self::Ipv4(_), IpPacket::V6(_)) | (Self::Ipv6(_), IpPacket::V4(_)) => {
+                unreachable!("mismatched IP versions can't be coalesced")
+            }
+        }
+    }
+
     fn finalize(&self, ip_view: &mut [u8]) {
         match self {
             Self::Ipv4(flow) => flow.finalize(ip_view),
             Self::Ipv6(flow) => flow.finalize(ip_view),
+        }
+    }
+
+    fn ipv4_id_mode(&self) -> Option<Ipv4IdMode> {
+        match self {
+            Self::Ipv4(flow) => Some(flow.ipv4_id_mode()),
+            Self::Ipv6(_) => None,
         }
     }
 }
@@ -643,14 +943,19 @@ impl<T: Eq> GroFlow<T> {
 
     fn coalesce(&mut self, parsed: GroPacket<'_>, coalesce_into: &mut Vec<u8>) -> CoalesceResult {
         self.num_coalesced += 1;
+        self.ip.coalesce(&parsed.ip);
         self.transport.coalesce(&self.flow_id.ip, &parsed.transport, coalesce_into)
     }
 
-    fn finalize(&self, view: &mut [u8]) {
+    fn finalize(&self, view: &mut [u8]) -> Option<GsoInfo> {
         let HeaderOffsets { ip_offset, transport_offset } = self.offsets;
         if self.num_coalesced > 1 {
             self.ip.finalize(&mut view[ip_offset..]);
-            self.transport.finalize(&mut view[transport_offset..]);
+            let gso_size = self.transport.finalize(&mut view[transport_offset..]);
+            let ipv4_id_mode = self.ip.ipv4_id_mode();
+            Some(GsoInfo { gso_size, ipv4_id_mode })
+        } else {
+            None
         }
     }
 }
@@ -704,6 +1009,8 @@ pub struct GroOutputItem<'a, B, T, O> {
     pub target: T,
     /// Checksum offload state for the frame.
     pub checksum_offload: ChecksumRxOffloading,
+    /// GSO metadata if the frame was coalesced from multiple segments.
+    pub gso_info: Option<GsoInfo>,
     /// The buffer(s) associated with this frame.
     pub buffers: GroOutputBuffers<'a, B, O>,
 }
@@ -736,34 +1043,126 @@ impl<B> GroBufferStorage<B> {
 
 impl<B: MaybeContiguousBuffer> GroBufferStorage<B> {
     /// Adapts the provided iterator of packet buffers into a GRO iterator.
-    pub fn coalesce<I, T>(&mut self, iter: I) -> GroIter<'_, I, B, T>
+    pub fn coalesce<I, T>(&mut self, iter: I, enable_tcp_gro: bool) -> GroIter<'_, I, B, T>
     where
         I: Iterator<Item = GroInputItem<B, T>>,
         T: GroBufferDestination,
     {
-        // TODO(https://fxbug.dev/452980285): Create a setting to control whether
-        // GRO is enabled and implement TCP coalescing.
-        GroIter::new(iter, self, false)
-    }
-
-    fn hold(&mut self, buffer: B) {
-        self.coalesced_buffers.push(buffer);
+        let enable_tcp_gro = match iter.size_hint() {
+            (_, Some(1)) => false,
+            _ => enable_tcp_gro,
+        };
+        GroIter::new(iter, self, enable_tcp_gro)
     }
 
     fn build_output<'a, T: Eq>(
         &'a mut self,
-        flow: GroFlow<T>,
+        ActiveFlow { flow, buffers }: ActiveFlow<B, T>,
     ) -> GroOutputItem<'a, B, T, alloc::vec::Drain<'a, B>> {
-        let GroBufferStorage { coalescing_vec, coalesced_buffers, .. } = self;
+        match buffers {
+            // Nothing was ever merged into this flow, so its buffer was never
+            // copied into the coalescing buffer; hand it back untouched.
+            ActiveFlowBuffers::Single { buffer, payload_end: _ } => GroOutputItem {
+                target: flow.target,
+                checksum_offload: flow.checksum_offload,
+                gso_info: None,
+                buffers: GroOutputBuffers::Contiguous(buffer),
+            },
+            ActiveFlowBuffers::Coalesced => {
+                let GroBufferStorage { coalescing_vec, coalesced_buffers, .. } = self;
 
-        flow.finalize(&mut coalescing_vec[..]);
+                let gso_info = flow.finalize(&mut coalescing_vec[..]);
 
-        let GroFlow { target, checksum_offload, num_coalesced, .. } = flow;
-        let buffers = GroOutputBuffers::Coalesced {
-            slice: &mut coalescing_vec[..],
-            buffers: coalesced_buffers.drain(..num_coalesced),
-        };
-        GroOutputItem { target, checksum_offload, buffers }
+                let GroFlow { target, checksum_offload, num_coalesced, .. } = flow;
+                let buffers = GroOutputBuffers::Coalesced {
+                    slice: &mut coalescing_vec[..],
+                    buffers: coalesced_buffers.drain(..num_coalesced),
+                };
+                GroOutputItem { target, checksum_offload, gso_info, buffers }
+            }
+        }
+    }
+}
+
+/// The buffers held by an [`ActiveFlow`].
+enum ActiveFlowBuffers<B> {
+    /// Nothing has been merged into the flow yet, so its seed buffer is still
+    /// held verbatim and has not been copied into the coalescing buffer.
+    Single {
+        buffer: B,
+        /// The seed frame's [`GroPacket::payload_end`]; only the bytes before
+        /// this point are copied into the coalescing buffer, since any trailing
+        /// bytes would be stranded in the middle of the coalesced payload.
+        payload_end: usize,
+    },
+    /// The flow's frame lives in the coalescing buffer and the buffers that
+    /// formed it are held by [`GroBufferStorage`].
+    Coalesced,
+}
+
+/// A [`GroFlow`] along with the buffers it currently holds.
+struct ActiveFlow<B, T> {
+    flow: GroFlow<T>,
+    buffers: ActiveFlowBuffers<B>,
+}
+
+impl<B, T> ActiveFlow<B, T> {
+    /// The length the frame for this flow would have if a payload were merged
+    /// into it right now.
+    fn frame_len(&self, coalescing_vec_len: usize) -> usize {
+        match &self.buffers {
+            // Nothing has been merged in yet, so the buffer still holds the
+            // seed frame verbatim. Any trailing bytes it carries are dropped on
+            // the first merge, so they don't count towards the frame length.
+            ActiveFlowBuffers::Single { payload_end, .. } => *payload_end,
+            ActiveFlowBuffers::Coalesced => coalescing_vec_len,
+        }
+    }
+}
+
+impl<B: MaybeContiguousBuffer, T: Eq> ActiveFlow<B, T> {
+    fn matches(
+        &self,
+        target: &T,
+        flow_id: &GroFlowId,
+        checksum_offload: ChecksumRxOffloading,
+    ) -> bool {
+        self.flow.matches(target, flow_id, checksum_offload)
+    }
+
+    fn can_coalesce(&self, coalescing_vec_len: usize, parsed: &GroPacket<'_>) -> bool {
+        self.flow.can_coalesce(self.frame_len(coalescing_vec_len), parsed)
+    }
+
+    /// Merges `parsed` into the flow's frame in `coalesce_into`.
+    ///
+    /// If the flow is still holding its seed buffer verbatim, the seed is first
+    /// copied into `coalesce_into` and the buffer is moved into `hold_buffers`,
+    /// which must keep the buffers alive until the frame is handed to the
+    /// stack.
+    fn coalesce(
+        &mut self,
+        parsed: GroPacket<'_>,
+        coalesce_into: &mut Vec<u8>,
+        hold_buffers: &mut Vec<B>,
+    ) -> CoalesceResult {
+        match core::mem::replace(&mut self.buffers, ActiveFlowBuffers::Coalesced) {
+            ActiveFlowBuffers::Single { mut buffer, payload_end } => {
+                coalesce_into.clear();
+                // Unwrapping is okay here because `ActiveFlowBuffers::Single`
+                // is only ever constructed for a buffer that was found to be
+                // contiguous; a fragmented buffer is linearized into the
+                // coalescing buffer up front and recorded as
+                // `ActiveFlowBuffers::Coalesced`.
+                //
+                // Any trailing bytes (e.g. link layer padding) are dropped;
+                // only the packet itself may be coalesced against.
+                coalesce_into.extend_from_slice(&buffer.unwrap_contiguous()[..payload_end]);
+                hold_buffers.push(buffer);
+            }
+            ActiveFlowBuffers::Coalesced => {}
+        }
+        self.flow.coalesce(parsed, coalesce_into)
     }
 }
 
@@ -782,6 +1181,10 @@ enum BufferLinearization {
 struct PendingFlow<B, T> {
     buffer: B,
     flow: GroFlow<T>,
+    /// The seed frame's [`GroPacket::payload_end`]; only the bytes before this
+    /// point are copied into the coalescing buffer, since any trailing bytes
+    /// would be stranded in the middle of the coalesced payload.
+    seed_payload_end: usize,
     linearization: BufferLinearization,
 }
 
@@ -807,7 +1210,7 @@ pub struct GroIter<'a, I, B, T> {
     iter: I,
     storage: &'a mut GroBufferStorage<B>,
     /// The active GRO flow that GRO is attempting to match.
-    active_flow: Option<GroFlow<T>>,
+    active_flow: Option<ActiveFlow<B, T>>,
     /// Item pending processing on next iteration.
     pending_item: Option<PendingItem<B, T>>,
     enable_tcp_gro: bool,
@@ -867,18 +1270,37 @@ where
     ) -> ProcessingResult<'b, B, T, alloc::vec::Drain<'b, B>> {
         let Self { storage, active_flow, .. } = self;
         match pending {
-            PendingItem::NewFlow(flow) => {
-                let PendingFlow { mut buffer, flow, linearization } = flow;
-                let slice = match linearization {
-                    BufferLinearization::Contiguous => buffer.unwrap_contiguous(),
-                    BufferLinearization::Linearized => &mut storage.linearization_vec,
+            PendingItem::NewFlow(pending) => {
+                let PendingFlow { buffer, flow, seed_payload_end, linearization } = pending;
+                let buffers = match linearization {
+                    // The buffer is contiguous, so the flow can hold onto it
+                    // verbatim and defer copying it into the coalescing buffer
+                    // until something merges into the flow.
+                    BufferLinearization::Contiguous => {
+                        ActiveFlowBuffers::Single { buffer, payload_end: seed_payload_end }
+                    }
+                    BufferLinearization::Linearized => {
+                        // The buffer is fragmented and its linearization is
+                        // already in the linearization buffer; move it into the
+                        // coalescing buffer, which the previous active flow has
+                        // now released.
+                        //
+                        // Drop any trailing bytes (e.g. link layer padding)
+                        // from the seed frame; only the packet itself may be
+                        // coalesced against.
+                        let GroBufferStorage {
+                            coalescing_vec,
+                            coalesced_buffers,
+                            linearization_vec,
+                        } = storage;
+                        coalescing_vec.clear();
+                        coalescing_vec.extend_from_slice(&linearization_vec[..seed_payload_end]);
+                        coalesced_buffers.push(buffer);
+                        ActiveFlowBuffers::Coalesced
+                    }
                 };
 
-                storage.coalescing_vec.clear();
-                storage.coalescing_vec.extend_from_slice(slice);
-
-                storage.hold(buffer);
-                *active_flow = Some(flow);
+                *active_flow = Some(ActiveFlow { flow, buffers });
                 ProcessingResult::Continue
             }
             PendingItem::Flush(pending) => {
@@ -891,7 +1313,12 @@ where
                         slice: &mut storage.linearization_vec,
                     },
                 };
-                ProcessingResult::Return(GroOutputItem { target, checksum_offload, buffers })
+                ProcessingResult::Return(GroOutputItem {
+                    target,
+                    checksum_offload,
+                    gso_info: None,
+                    buffers,
+                })
             }
         }
     }
@@ -930,6 +1357,7 @@ where
                 return ProcessingResult::Return(GroOutputItem {
                     target,
                     checksum_offload: $csum_offload,
+                    gso_info: None,
                     buffers,
                 });
             }};
@@ -950,21 +1378,37 @@ where
             None => return_single_buffer!(checksum_offload),
         };
 
-        let flush_if_not_merged = parsed.flush_if_not_merged();
+        let flush_if_not_merged = parsed.flush_if_not_merged(buffer_slice.as_slice().len());
         let Some(mut active) = active_flow.take() else {
-            // There's no active flow. Establish the active flow unless the
-            // buffer needs to be flushed immediately.
+            // There's no active flow, so the buffer was not merged. Establish
+            // it as the active flow unless it must be flushed immediately.
 
             if flush_if_not_merged {
                 return_single_buffer!(checksum_offload);
             }
 
-            storage.coalescing_vec.clear();
-            storage.coalescing_vec.extend_from_slice(buffer_slice.as_slice());
-
+            let seed_payload_end = parsed.payload_end();
             let flow = GroFlow::new(target, parsed, checksum_offload);
-            storage.hold(buffer);
-            *active_flow = Some(flow);
+            let buffers = match linearization {
+                // The buffer is contiguous, so the flow can hold onto it
+                // verbatim and defer copying it into the coalescing buffer
+                // until something merges into the flow.
+                BufferLinearization::Contiguous => {
+                    ActiveFlowBuffers::Single { buffer, payload_end: seed_payload_end }
+                }
+                BufferLinearization::Linearized => {
+                    storage.coalescing_vec.clear();
+                    // Drop any trailing bytes (e.g. link layer padding) from
+                    // the seed frame; only the packet itself may be coalesced
+                    // against.
+                    storage
+                        .coalescing_vec
+                        .extend_from_slice(&buffer_slice.as_slice()[..seed_payload_end]);
+                    storage.coalesced_buffers.push(buffer);
+                    ActiveFlowBuffers::Coalesced
+                }
+            };
+            *active_flow = Some(ActiveFlow { flow, buffers });
             return ProcessingResult::Continue;
         };
 
@@ -984,15 +1428,22 @@ where
                 return_single_buffer!(checksum_offload);
             }
 
+            let seed_payload_end = parsed.payload_end();
             let flow = GroFlow::new(target, parsed, checksum_offload);
-            let pending = PendingItem::NewFlow(PendingFlow { buffer, flow, linearization });
+            let pending =
+                PendingItem::NewFlow(PendingFlow { buffer, flow, seed_payload_end, linearization });
             *pending_item = Some(pending);
             return ProcessingResult::Return(storage.build_output(active));
         }
 
         if active.can_coalesce(storage.coalescing_vec.len(), &parsed) {
-            let coalesce_result = active.coalesce(parsed, &mut storage.coalescing_vec);
-            storage.hold(buffer);
+            let coalesce_result = active.coalesce(
+                parsed,
+                &mut storage.coalescing_vec,
+                &mut storage.coalesced_buffers,
+            );
+
+            storage.coalesced_buffers.push(buffer);
 
             match coalesce_result {
                 CoalesceResult::Flush => ProcessingResult::Return(storage.build_output(active)),
@@ -1009,8 +1460,9 @@ where
             let pending = if flush_if_not_merged {
                 PendingItem::Flush(PendingFlush { buffer, target, linearization, checksum_offload })
             } else {
+                let seed_payload_end = parsed.payload_end();
                 let flow = GroFlow::new(target, parsed, checksum_offload);
-                PendingItem::NewFlow(PendingFlow { buffer, flow, linearization })
+                PendingItem::NewFlow(PendingFlow { buffer, flow, seed_payload_end, linearization })
             };
             *pending_item = Some(pending);
             ProcessingResult::Return(storage.build_output(active))
@@ -1023,7 +1475,7 @@ mod tests {
     use super::*;
     use alloc::sync::Arc;
     use alloc::vec;
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use net_declare::{net_ip_v4, net_ip_v6, net_mac};
     use net_types::ip::{Ipv4, Ipv6};
@@ -1038,7 +1490,8 @@ mod tests {
         ExtensionHeaderOptionAction, HopByHopOption, HopByHopOptionData,
     };
     use packet_formats::ipv6::{Ipv6PacketBuilder, Ipv6PacketBuilderWithHbhOptions};
-    use packet_formats::tcp::TcpSegmentBuilder;
+    use packet_formats::tcp::options::{TcpOptionsBuilder, TimestampOption};
+    use packet_formats::tcp::{TcpSegmentBuilder, TcpSegmentBuilderWithOptions};
     use packet_formats::udp::UdpPacketBuilder;
     use test_case::test_case;
 
@@ -1048,67 +1501,40 @@ mod tests {
         }
     }
 
-    #[derive(Debug, PartialEq, Eq)]
-    struct TestBuffer {
-        buf: Vec<u8>,
-        contiguous: bool,
-    }
-
-    impl MaybeContiguousBuffer for TestBuffer {
-        fn linearized<'a, 'b>(
-            &'a mut self,
-            storage: Option<&'b mut Vec<u8>>,
-        ) -> Option<BufferSlice<'a, 'b>> {
-            if self.contiguous {
-                Some(BufferSlice::Contiguous(&mut self.buf[..]))
-            } else {
-                let storage = storage?;
-                let frame_length = self.buf.len();
-                if storage.len() < frame_length {
-                    storage.resize(frame_length, 0);
-                }
-                let slice = &mut storage[..frame_length];
-                slice.copy_from_slice(&self.buf);
-                Some(BufferSlice::Linearized(slice))
-            }
-        }
-    }
-
-    #[test]
-    fn process_gro_handles_fragmented() {
-        let items: Vec<GroInputItem<TestBuffer, GroFrameType>> = vec![
-            GroInputItem {
-                buffer: TestBuffer { buf: vec![1, 2, 3], contiguous: true },
-                target: GroFrameType::Ethernet,
-                checksum_offload: ChecksumRxOffloading::FullyOffloaded,
-            },
-            GroInputItem {
-                buffer: TestBuffer { buf: vec![4, 5, 6], contiguous: false },
-                target: GroFrameType::Ethernet,
-                checksum_offload: ChecksumRxOffloading::FullyOffloaded,
-            },
-        ];
-
-        let mut storage = GroBufferStorage::new();
-        let mut output = Vec::new();
-        let mut gro = storage.coalesce(items.into_iter());
-        while let Some(mut item) = gro.next() {
-            output.push(item.buffers.slice_mut().to_vec());
-        }
-
-        assert_eq!(output, vec![vec![1, 2, 3], vec![4, 5, 6]]);
-    }
-
+    /// A buffer that records how GRO used it.
     #[derive(Debug)]
     struct TrackedBuffer {
         buf: Vec<u8>,
         contiguous: bool,
-        dropped: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+        dropped: Arc<AtomicBool>,
+        linearized_count: Arc<AtomicUsize>,
+    }
+
+    impl TrackedBuffer {
+        fn new(buf: Vec<u8>, contiguous: bool) -> Self {
+            Self {
+                buf,
+                contiguous,
+                dropped: Arc::new(AtomicBool::new(false)),
+                linearized_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// Returns a handle reporting whether this buffer has been dropped.
+        fn dropped(&self) -> Arc<AtomicBool> {
+            self.dropped.clone()
+        }
+
+        /// Returns a handle to the number of times this buffer has been
+        /// linearized.
+        fn linearized_count(&self) -> Arc<AtomicUsize> {
+            self.linearized_count.clone()
+        }
     }
 
     impl Drop for TrackedBuffer {
         fn drop(&mut self) {
-            self.dropped.store(true, core::sync::atomic::Ordering::SeqCst);
+            self.dropped.store(true, Ordering::SeqCst);
         }
     }
 
@@ -1121,6 +1547,7 @@ mod tests {
                 Some(BufferSlice::Contiguous(&mut self.buf[..]))
             } else {
                 let storage = storage?;
+                let _: usize = self.linearized_count.fetch_add(1, Ordering::SeqCst);
                 let frame_length = self.buf.len();
                 if storage.len() < frame_length {
                     storage.resize(frame_length, 0);
@@ -1132,34 +1559,721 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gro_buffers_dropped_when_item_dropped() {
-        let dropped1 = Arc::new(AtomicBool::new(false));
-        let dropped2 = Arc::new(AtomicBool::new(false));
+    /// Wraps `buffer` in an Ethernet GRO input item.
+    fn input_item(buffer: TrackedBuffer) -> GroInputItem<TrackedBuffer, GroFrameType> {
+        GroInputItem {
+            buffer,
+            target: GroFrameType::Ethernet,
+            checksum_offload: ChecksumRxOffloading::FullyOffloaded,
+        }
+    }
 
+    #[test]
+    fn process_gro_handles_fragmented() {
         let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = vec![
             GroInputItem {
-                buffer: TrackedBuffer {
-                    buf: vec![1, 2, 3],
-                    contiguous: true,
-                    dropped: dropped1.clone(),
-                },
+                buffer: TrackedBuffer::new(vec![1, 2, 3], true),
                 target: GroFrameType::Ethernet,
                 checksum_offload: ChecksumRxOffloading::FullyOffloaded,
             },
             GroInputItem {
-                buffer: TrackedBuffer {
-                    buf: vec![4, 5, 6],
-                    contiguous: false,
-                    dropped: dropped2.clone(),
-                },
+                buffer: TrackedBuffer::new(vec![4, 5, 6], false),
                 target: GroFrameType::Ethernet,
                 checksum_offload: ChecksumRxOffloading::FullyOffloaded,
             },
         ];
 
         let mut storage = GroBufferStorage::new();
-        let mut gro = storage.coalesce(items.into_iter());
+        let mut output = Vec::new();
+        let mut gro = storage.coalesce(items.into_iter(), false);
+        while let Some(mut item) = gro.next() {
+            output.push(item.buffers.slice_mut().to_vec());
+        }
+
+        assert_eq!(output, vec![vec![1, 2, 3], vec![4, 5, 6]]);
+    }
+
+    const SRC_MAC: Mac = net_mac!("00:11:22:33:44:55");
+    const DST_MAC: Mac = net_mac!("66:77:88:99:aa:bb");
+    const SRC_IP_V4: Ipv4Addr = net_ip_v4!("192.168.0.1");
+    const DST_IP_V4: Ipv4Addr = net_ip_v4!("192.168.0.2");
+    const SRC_IP_V6: Ipv6Addr = net_ip_v6!("2001:db8::1");
+    const DST_IP_V6: Ipv6Addr = net_ip_v6!("2001:db8::2");
+
+    /// A TCP-over-IP frame to feed to GRO.
+    ///
+    /// Construct with [`v4`] or [`v6`] and override the fields of interest with
+    /// struct update syntax, e.g. `FrameSpec { psh: true, ..v4(100, b"x") }`.
+    #[derive(Clone, Debug)]
+    struct FrameSpec {
+        /// The IP version to emit, along with its version-specific fields.
+        ip: IpSpec,
+        seq: u32,
+        ack: u32,
+        win: u16,
+        psh: bool,
+        fin: bool,
+        syn: bool,
+        rst: bool,
+        urg: bool,
+        /// The TTL for IPv4, or the hop limit for IPv6.
+        ttl: u8,
+        dscp_and_ecn: DscpAndEcn,
+        /// Emits a TCP timestamp option with this TSval when set.
+        timestamp: Option<u32>,
+        /// The minimum Ethernet body length, used to force link layer padding.
+        min_body_len: usize,
+        payload: &'static [u8],
+        /// Whether the frame is presented to GRO as a contiguous buffer.
+        contiguous: bool,
+    }
+
+    /// The IP-version-specific fields of a [`FrameSpec`].
+    #[derive(Clone, Copy, Debug)]
+    enum IpSpec {
+        V4 { df: bool, id: u16 },
+        V6 { flowlabel: u32 },
+    }
+
+    /// Returns a default IPv4 frame carrying `payload` at `seq`.
+    fn v4(seq: u32, payload: &'static [u8]) -> FrameSpec {
+        FrameSpec {
+            ip: IpSpec::V4 { df: false, id: 0 },
+            seq,
+            ack: 1000,
+            win: 64240,
+            psh: false,
+            fin: false,
+            syn: false,
+            rst: false,
+            urg: false,
+            ttl: 64,
+            dscp_and_ecn: DscpAndEcn::default(),
+            timestamp: None,
+            min_body_len: 0,
+            payload,
+            contiguous: true,
+        }
+    }
+
+    /// Returns a default IPv6 frame carrying `payload` at `seq`.
+    fn v6(seq: u32, payload: &'static [u8]) -> FrameSpec {
+        FrameSpec { ip: IpSpec::V6 { flowlabel: 0 }, ..v4(seq, payload) }
+    }
+
+    impl FrameSpec {
+        /// Serializes this spec into an Ethernet frame.
+        fn build(&self) -> Vec<u8> {
+            let FrameSpec {
+                ip: ip_spec,
+                seq,
+                ack,
+                win,
+                psh,
+                fin,
+                syn,
+                rst,
+                urg,
+                ttl,
+                dscp_and_ecn,
+                timestamp,
+                min_body_len,
+                payload,
+                contiguous: _,
+            } = *self;
+
+            let mut body = payload.to_vec();
+
+            macro_rules! tcp_builder {
+                ($src:expr, $dst:expr) => {{
+                    let mut tcp = TcpSegmentBuilder::new(
+                        $src,
+                        $dst,
+                        TEST_SRC_PORT,
+                        TEST_DST_PORT,
+                        seq,
+                        Some(ack),
+                        win,
+                    );
+                    tcp.psh(psh);
+                    tcp.fin(fin);
+                    tcp.syn(syn);
+                    tcp.rst(rst);
+                    tcp.urg(urg);
+                    tcp
+                }};
+            }
+
+            macro_rules! serialize {
+                ($tcp:expr, $ip:expr, $ethertype:expr) => {
+                    Buf::new(&mut body[..], ..)
+                        .wrap_in($tcp)
+                        .wrap_in($ip)
+                        .wrap_in(EthernetFrameBuilder::new(
+                            SRC_MAC,
+                            DST_MAC,
+                            $ethertype,
+                            min_body_len,
+                        ))
+                        .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                        .unwrap()
+                        .unwrap_b()
+                        .as_ref()
+                        .to_vec()
+                };
+            }
+
+            // NB: the TCP builder type differs depending on whether options are
+            // present, so each combination needs its own serialization.
+            macro_rules! serialize_with_options {
+                ($tcp:expr, $ip:expr, $ethertype:expr) => {
+                    match timestamp {
+                        None => serialize!($tcp, $ip, $ethertype),
+                        Some(ts_val) => {
+                            let options = TcpOptionsBuilder {
+                                timestamp: Some(TimestampOption::new(ts_val, 0)),
+                                ..Default::default()
+                            };
+                            let tcp = TcpSegmentBuilderWithOptions::new($tcp, options).unwrap();
+                            serialize!(tcp, $ip, $ethertype)
+                        }
+                    }
+                };
+            }
+
+            match ip_spec {
+                IpSpec::V4 { df, id } => {
+                    let mut ip =
+                        Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, ttl, IpProto::Tcp.into());
+                    ip.dscp_and_ecn(dscp_and_ecn);
+                    ip.df_flag(df);
+                    ip.id(id);
+                    serialize_with_options!(tcp_builder!(SRC_IP_V4, DST_IP_V4), ip, EtherType::Ipv4)
+                }
+                IpSpec::V6 { flowlabel } => {
+                    let mut ip =
+                        Ipv6PacketBuilder::new(SRC_IP_V6, DST_IP_V6, ttl, IpProto::Tcp.into());
+                    ip.dscp_and_ecn(dscp_and_ecn);
+                    ip.flowlabel(flowlabel);
+                    serialize_with_options!(tcp_builder!(SRC_IP_V6, DST_IP_V6), ip, EtherType::Ipv6)
+                }
+            }
+        }
+    }
+
+    /// Runs GRO over `frames` and returns the frames it emits.
+    fn run_gro(frames: &[FrameSpec], enable_tcp_gro: bool) -> Vec<Vec<u8>> {
+        let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = frames
+            .iter()
+            .map(|spec| input_item(TrackedBuffer::new(spec.build(), spec.contiguous)))
+            .collect();
+
+        let mut storage = GroBufferStorage::new();
+        let mut output = Vec::new();
+        let mut gro = storage.coalesce(items.into_iter(), enable_tcp_gro);
+        while let Some(mut item) = gro.next() {
+            output.push(item.buffers.slice_mut().to_vec());
+        }
+        output
+    }
+
+    /// Parses `frame` as a GRO packet, verifying its checksum.
+    #[track_caller]
+    fn parse_frame(frame: &[u8]) -> GroPacket<'_> {
+        GroPacket::parse(
+            frame,
+            &GroFrameType::Ethernet,
+            &mut NetworkParsingContext::new(ChecksumRxOffloading::Offloaded(None)),
+        )
+        .expect("frame is a valid GRO packet")
+    }
+
+    #[test_case(
+        vec![v4(100, b"hello "), v4(106, b"world")],
+        vec![b"hello world"]; "coalesces_contiguous")]
+    #[test_case(
+        vec![
+            FrameSpec { contiguous: false, ..v4(100, b"foo ") },
+            FrameSpec { contiguous: false, ..v4(104, b"bar") },
+        ],
+        vec![b"foo bar"]; "coalesces_fragmented")]
+    #[test_case(
+        vec![v4(100, b"contig "), FrameSpec { contiguous: false, ..v4(107, b"frag") }],
+        vec![b"contig frag"]; "coalesces_contiguous_then_fragmented")]
+    #[test_case(
+        vec![FrameSpec { contiguous: false, ..v4(100, b"single") }],
+        vec![b"single"]; "lone_fragmented_frame_is_emitted")]
+    #[test_case(
+        vec![v4(100, b"first "), v4(106, b"second"), v4(112, b"third")],
+        vec![b"first secondthird"]; "coalesces_three_frames")]
+    #[test_case(
+        vec![v6(200, b"ipv6_1"), FrameSpec { psh: true, ..v6(206, b"ipv6_2") }],
+        vec![b"ipv6_1ipv6_2"]; "coalesces_ipv6")]
+    #[test_case(
+        vec![
+            FrameSpec { ack: 1000, ..v4(100, b"ack1000 ") },
+            FrameSpec { ack: 2000, ..v4(108, b"ack2000") },
+        ],
+        vec![b"ack1000 ", b"ack2000"]; "ack_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { win: 64240, ..v4(100, b"win64k ") },
+            FrameSpec { win: 32120, ..v4(107, b"win32k") },
+        ],
+        vec![b"win64k ", b"win32k"]; "window_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { timestamp: Some(1), ..v4(100, b"opt1") },
+            FrameSpec { timestamp: Some(1), ..v4(104, b"opt2") },
+        ],
+        vec![b"opt1opt2"]; "matching_options_coalesce")]
+    #[test_case(
+        vec![
+            FrameSpec { timestamp: Some(1), ..v4(100, b"opt1") },
+            FrameSpec { timestamp: Some(2), ..v4(104, b"mismatch") },
+        ],
+        vec![b"opt1", b"mismatch"]; "options_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { ttl: 64, ..v4(100, b"ttl64 ") },
+            FrameSpec { ttl: 63, ..v4(106, b"ttl63") },
+        ],
+        vec![b"ttl64 ", b"ttl63"]; "ttl_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { ip: IpSpec::V4 { df: true, id: 0 }, ..v4(100, b"df1 ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 0 }, ..v4(104, b"df0") },
+        ],
+        vec![b"df1 ", b"df0"]; "df_flag_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { dscp_and_ecn: DscpAndEcn::new(1, 0), ..v4(100, b"ecn1 ") },
+            FrameSpec { dscp_and_ecn: DscpAndEcn::new(2, 0), ..v4(105, b"ecn2") },
+        ],
+        vec![b"ecn1 ", b"ecn2"]; "dscp_ecn_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { ttl: 64, ..v6(200, b"hop64 ") },
+            FrameSpec { ttl: 63, ..v6(206, b"hop63") },
+        ],
+        vec![b"hop64 ", b"hop63"]; "hop_limit_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { ip: IpSpec::V6 { flowlabel: 123 }, ..v6(200, b"lbl1 ") },
+            FrameSpec { ip: IpSpec::V6 { flowlabel: 456 }, ..v6(205, b"lbl2") },
+        ],
+        vec![b"lbl1 ", b"lbl2"]; "flowlabel_mismatch_flushes")]
+    #[test_case(
+        vec![v4(100, b"seq100 "), v4(200, b"seq200")],
+        vec![b"seq100 ", b"seq200"]; "out_of_order_seq_flushes")]
+    #[test_case(
+        vec![v4(100, b"seq100 "), v4(200, b"seq200"), v4(206, b"seq206")],
+        vec![b"seq100 ", b"seq200seq206"]; "merge_failure_starts_new_flow")]
+    #[test_case(
+        vec![
+            FrameSpec { urg: true, ..v4(100, b"urg ") },
+            FrameSpec { urg: false, ..v4(104, b"normal") },
+        ],
+        vec![b"urg ", b"normal"]; "urg_flag_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { urg: true, ..v4(100, b"urg1") },
+            FrameSpec { urg: true, ..v4(104, b"urg2") },
+        ],
+        vec![b"urg1", b"urg2"]; "consecutive_urg_flags_flush")]
+    #[test_case(
+        vec![
+            FrameSpec { syn: true, ..v4(100, b"syn1") },
+            FrameSpec { syn: true, ..v4(104, b"syn2") },
+        ],
+        vec![b"syn1", b"syn2"]; "syn_flag_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { rst: true, ..v4(100, b"rst1") },
+            FrameSpec { rst: true, ..v4(104, b"rst2") },
+        ],
+        vec![b"rst1", b"rst2"]; "rst_flag_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 42 }, ..v4(100, b"hello ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 42 }, ..v4(106, b"world ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 42 }, ..v4(112, b"again") },
+        ],
+        vec![b"hello world again"]; "consistent_ipv4_ids_coalesce")]
+    #[test_case(
+        vec![
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 100 }, ..v4(100, b"hello ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 101 }, ..v4(106, b"world ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 102 }, ..v4(112, b"again") },
+        ],
+        vec![b"hello world again"]; "increasing_ipv4_ids_coalesce")]
+    #[test_case(
+        vec![
+            FrameSpec { ip: IpSpec::V4 { df: false, id: u16::MAX }, ..v4(100, b"hello ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 0 }, ..v4(106, b"world") },
+        ],
+        vec![b"hello world"]; "wrapping_ipv4_ids_coalesce")]
+    #[test_case(
+        vec![
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 100 }, ..v4(100, b"hello ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 105 }, ..v4(106, b"world") },
+        ],
+        vec![b"hello ", b"world"]; "ipv4_id_mismatch_flushes")]
+    #[test_case(
+        vec![
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 100 }, ..v4(100, b"first ") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 100 }, ..v4(106, b"second") },
+            FrameSpec { ip: IpSpec::V4 { df: false, id: 101 }, ..v4(112, b"third") },
+        ],
+        vec![b"first second", b"third"]; "ipv4_id_mode_switch_flushes")]
+    #[test_case(
+        vec![FrameSpec { min_body_len: 46, ..v4(100, b"abcd") }, v4(104, b"e")],
+        vec![b"abcde"]; "padded_seed_frame_is_trimmed")]
+    #[test_case(
+        vec![
+            FrameSpec { min_body_len: 46, contiguous: false, ..v4(100, b"abcd") },
+            v4(104, b"e"),
+        ],
+        vec![b"abcde"]; "linearized_padded_seed_frame_is_trimmed")]
+    #[test_case(
+        vec![FrameSpec { min_body_len: 46, ..v4(100, b"a") }, v4(101, b"normal")],
+        vec![b"a", b"normal"]; "unmerged_padded_frame_is_emitted_verbatim")]
+    #[test_case(
+        vec![v4(100, b"first "), FrameSpec { min_body_len: 46, ..v4(106, b"b") }],
+        vec![b"first b"]; "padded_second_frame_is_trimmed")]
+    #[test_case(
+        vec![FrameSpec { min_body_len: 70, ..v6(200, b"c") }, v6(201, b"ipv6_normal")],
+        vec![b"c", b"ipv6_normal"]; "unmerged_padded_ipv6_frame_is_emitted_verbatim")]
+    #[test_case(
+        vec![v4(100, b"short"), v4(105, b"longer_payload")],
+        vec![b"short", b"longer_payload"]; "payload_larger_than_gso_size_flushes")]
+    #[test_case(
+        vec![v4(100, b"data"), v4(104, b"")],
+        vec![b"data", b""]; "empty_payload_in_active_flow_flushes")]
+    #[test_case(
+        vec![v4(100, b"odd"), v4(103, b"len"), v4(106, b"tcp")],
+        vec![b"oddlentcp"]; "coalesces_odd_length_payloads")]
+    #[test_case(
+        vec![
+            FrameSpec { timestamp: Some(1), ..v4(100, b"odd") },
+            FrameSpec { timestamp: Some(1), ..v4(103, b"opt") },
+        ],
+        vec![b"oddopt"]; "coalesces_odd_length_payloads_with_options")]
+    #[test_case(
+        vec![v4(100, b"first "), v4(106, b"sub"), v4(109, b"more")],
+        vec![b"first sub", b"more"]; "payload_smaller_than_gso_size_terminates_flow")]
+    fn gro_coalescing(frames: Vec<FrameSpec>, expected: Vec<&'static [u8]>) {
+        let output = run_gro(&frames, true);
+        assert_eq!(output.len(), expected.len(), "wrong number of frames emitted");
+
+        for (index, (frame, payload)) in output.iter().zip(expected.iter()).enumerate() {
+            let parsed = parse_frame(&frame[..]);
+            let TransportPacket::Tcp(tcp) = parsed.transport;
+            assert_eq!(tcp.body(), *payload, "frame {index}");
+        }
+    }
+
+    #[test]
+    fn gro_disabled_emits_every_frame_unchanged() {
+        let frames = vec![v4(100, b"hello "), v4(106, b"world")];
+        let output = run_gro(&frames, false);
+        assert_eq!(output, vec![frames[0].build(), frames[1].build()]);
+    }
+
+    #[test_case(true; "contiguous")]
+    #[test_case(false; "fragmented")]
+    fn gro_emits_unmergeable_frames_unmodified(contiguous: bool) {
+        // `URG` segments are never coalesced, so every frame is emitted on its
+        // own with its headers and payload untouched.
+        let frames = vec![
+            FrameSpec { urg: true, contiguous, ..v4(100, b"hello ") },
+            FrameSpec { urg: true, contiguous, ..v4(106, b"world") },
+        ];
+        let output = run_gro(&frames, true);
+        assert_eq!(output.len(), frames.len(), "wrong number of frames emitted");
+
+        for (index, (frame, spec)) in output.iter().zip(frames.iter()).enumerate() {
+            let expected = spec.build();
+            let parsed = parse_frame(&expected);
+            // Trailing bytes (e.g. link layer padding) may or may not be
+            // trimmed, so only compare up to the end of the IP packet.
+            let packet_end = parsed.payload_end();
+            assert!(frame.len() >= packet_end, "frame {index} is truncated");
+            assert_eq!(&frame[..packet_end], &expected[..packet_end], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn gro_merges_psh_into_coalesced_frame() {
+        let frames = vec![v4(100, b"hello "), FrameSpec { psh: true, ..v4(106, b"world") }];
+        let output = run_gro(&frames, true);
+        let output = assert_matches!(&output[..], [output] => output);
+
+        let parsed = parse_frame(output);
+        let TransportPacket::Tcp(tcp) = parsed.transport;
+        assert_eq!(tcp.body(), b"hello world");
+        assert_eq!(tcp.seq_num(), 100);
+        assert_eq!(tcp.ack_num(), Some(1000));
+        assert_eq!(tcp.window_size(), 64240);
+        assert!(tcp.psh());
+    }
+
+    #[test]
+    fn gro_merges_fin_into_coalesced_frame() {
+        let frames = vec![v4(100, b"data "), FrameSpec { fin: true, ..v4(105, b"fin") }];
+        let output = run_gro(&frames, true);
+        let output = assert_matches!(&output[..], [output] => output);
+
+        let parsed = parse_frame(output);
+        let TransportPacket::Tcp(tcp) = parsed.transport;
+        assert_eq!(tcp.body(), b"data fin");
+        assert!(tcp.fin());
+    }
+
+    #[test]
+    fn gro_gso_info_metadata() {
+        let mut storage = GroBufferStorage::new();
+
+        // Consistent IPv4 IDs across the flow yield a fixed IP ID.
+        let items = vec![
+            input_item(TrackedBuffer::new(
+                FrameSpec { ip: IpSpec::V4 { df: false, id: 1 }, ..v4(100, b"first ") }.build(),
+                true,
+            )),
+            input_item(TrackedBuffer::new(
+                FrameSpec { ip: IpSpec::V4 { df: false, id: 1 }, ..v4(106, b"second") }.build(),
+                true,
+            )),
+        ];
+        let mut gro = storage.coalesce(items.into_iter(), true);
+        let item = gro.next().unwrap();
+        assert_eq!(
+            item.gso_info,
+            Some(GsoInfo {
+                gso_size: NonZeroU16::new(6).unwrap(),
+                ipv4_id_mode: Some(Ipv4IdMode::Fixed),
+            })
+        );
+        drop(item);
+        assert!(gro.next().is_none());
+        drop(gro);
+
+        // Increasing IPv4 IDs yield an incrementing IP ID mode.
+        let items = vec![
+            input_item(TrackedBuffer::new(
+                FrameSpec { ip: IpSpec::V4 { df: false, id: 1 }, ..v4(100, b"first ") }.build(),
+                true,
+            )),
+            input_item(TrackedBuffer::new(
+                FrameSpec { ip: IpSpec::V4 { df: false, id: 2 }, ..v4(106, b"second") }.build(),
+                true,
+            )),
+        ];
+        let mut gro = storage.coalesce(items.into_iter(), true);
+        let item = gro.next().unwrap();
+        assert_eq!(
+            item.gso_info,
+            Some(GsoInfo {
+                gso_size: NonZeroU16::new(6).unwrap(),
+                ipv4_id_mode: Some(Ipv4IdMode::Incrementing),
+            })
+        );
+        drop(item);
+        assert!(gro.next().is_none());
+        drop(gro);
+
+        // IPv6 flows have no IPv4 ID mode.
+        let items = vec![
+            input_item(TrackedBuffer::new(v6(100, b"first ").build(), true)),
+            input_item(TrackedBuffer::new(v6(106, b"second").build(), true)),
+        ];
+        let mut gro = storage.coalesce(items.into_iter(), true);
+        let item = gro.next().unwrap();
+        assert_eq!(
+            item.gso_info,
+            Some(GsoInfo { gso_size: NonZeroU16::new(6).unwrap(), ipv4_id_mode: None })
+        );
+        drop(item);
+        assert!(gro.next().is_none());
+    }
+
+    #[test]
+    fn gro_buffers_not_dropped_until_frame_processed() {
+        let pkt1 = v4(100, b"hello ").build();
+        let pkt2 = v4(106, b"world").build();
+
+        let buffer1 = TrackedBuffer::new(pkt1, true);
+        let buffer2 = TrackedBuffer::new(pkt2, true);
+        let dropped1 = buffer1.dropped();
+        let dropped2 = buffer2.dropped();
+        let items = vec![input_item(buffer1), input_item(buffer2)];
+
+        let mut gro_state = GroBufferStorage::new();
+        let mut gro = gro_state.coalesce(items.into_iter(), true);
+
+        let item = gro.next();
+        assert!(item.is_some());
+        let mut item = item.unwrap();
+        assert!(item.buffers.slice_mut().ends_with(b"hello world"));
+
+        // While the yielded frame is in use, neither buffer should be dropped!
+        assert!(!dropped1.load(Ordering::SeqCst));
+        assert!(!dropped2.load(Ordering::SeqCst));
+
+        // When the returned item is dropped, its buffers are dropped.
+        drop(item);
+        assert!(dropped1.load(Ordering::SeqCst));
+        assert!(dropped2.load(Ordering::SeqCst));
+
+        //`GroIter` is a lending iterator so `item` (and by extension any
+        // associated buffers) must be dropped before the next call to `next()`.
+        let next_item = gro.next();
+        assert!(next_item.is_none());
+    }
+
+    #[test]
+    fn gro_unmerged_flows_are_not_copied() {
+        // Nothing merges into either flow, so each hands its buffer back
+        // verbatim rather than copying it into the coalescing buffer.
+        let first = v4(100, b"one").build();
+        // Not sequential with `first`, so it starts a new flow rather than
+        // merging into it.
+        let second = v4(500, b"two").build();
+        let items = vec![
+            input_item(TrackedBuffer::new(first.clone(), true)),
+            input_item(TrackedBuffer::new(second.clone(), true)),
+        ];
+
+        let mut gro_state = GroBufferStorage::new();
+        let mut gro = gro_state.coalesce(items.into_iter(), true);
+
+        for expected in [first, second] {
+            let mut item = gro.next().expect("emits a frame");
+            assert_matches!(&mut item.buffers, GroOutputBuffers::Contiguous(buffer) => {
+                assert_eq!(buffer.unwrap_contiguous(), &expected[..]);
+            });
+        }
+        assert!(gro.next().is_none());
+    }
+
+    #[test]
+    fn gro_iter_drop_releases_held_buffers() {
+        let pkt1 = v4(100, b"hello ").build();
+        let buffer1 = TrackedBuffer::new(pkt1, true);
+        let dropped1 = buffer1.dropped();
+        let items = vec![input_item(buffer1)];
+
+        let mut gro_state = GroBufferStorage::new();
+        {
+            let mut gro = gro_state.coalesce(items.into_iter(), true);
+            let item = gro.next();
+            assert!(item.is_some());
+            assert!(!dropped1.load(Ordering::SeqCst));
+        }
+        // Dropping `gro` releases all held buffers.
+        assert!(dropped1.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn gro_interleaved_non_gro_packet() {
+        let pkt1 = v4(100, b"tcp1 ").build();
+        let non_gro_pkt = vec![0u8; 30];
+        let pkt2 = v4(105, b"tcp2").build();
+
+        let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = vec![
+            GroInputItem {
+                buffer: TrackedBuffer::new(pkt1, true),
+                target: GroFrameType::Ethernet,
+                checksum_offload: ChecksumRxOffloading::FullyOffloaded,
+            },
+            GroInputItem {
+                buffer: TrackedBuffer::new(non_gro_pkt.clone(), true),
+                target: GroFrameType::Ethernet,
+                checksum_offload: ChecksumRxOffloading::FullyOffloaded,
+            },
+            GroInputItem {
+                buffer: TrackedBuffer::new(pkt2, true),
+                target: GroFrameType::Ethernet,
+                checksum_offload: ChecksumRxOffloading::FullyOffloaded,
+            },
+        ];
+
+        let mut gro_state = GroBufferStorage::new();
+        let mut output_frames = Vec::new();
+        let mut gro = gro_state.coalesce(items.into_iter(), true);
+        while let Some(mut item) = gro.next() {
+            output_frames.push(item.buffers.slice_mut().to_vec());
+        }
+
+        // Non-GRO frame is emitted immediately without interrupting the TCP GRO flow.
+        assert_eq!(output_frames.len(), 2);
+        assert_eq!(output_frames[0], non_gro_pkt);
+        assert!(output_frames[1].ends_with(b"tcp1 tcp2"));
+    }
+
+    #[test]
+    fn gro_buffers_linearized_only_once() {
+        let buffer1 = TrackedBuffer::new(v4(100, b"first ").build(), false);
+        let buffer2 = TrackedBuffer::new(v4(106, b"second").build(), false);
+        let buffer3 = TrackedBuffer::new(v4(112, b"third").build(), false);
+        let count1 = buffer1.linearized_count();
+        let count2 = buffer2.linearized_count();
+        let count3 = buffer3.linearized_count();
+        let items = vec![input_item(buffer1), input_item(buffer2), input_item(buffer3)];
+
+        let mut gro_state = GroBufferStorage::new();
+        let mut output_frames = Vec::new();
+        let mut gro = gro_state.coalesce(items.into_iter(), true);
+        while let Some(mut item) = gro.next() {
+            output_frames.push(item.buffers.slice_mut().to_vec());
+        }
+
+        assert_eq!(output_frames.len(), 1);
+        assert!(output_frames[0].ends_with(b"first secondthird"));
+
+        assert_eq!(count1.load(Ordering::SeqCst), 1);
+        assert_eq!(count2.load(Ordering::SeqCst), 1);
+        assert_eq!(count3.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn gro_transport_offset_ignores_padding() {
+        // The transport offset must point at the transport header regardless of
+        // any trailing link layer padding, which the IP parser strips from the
+        // buffer before the transport header is parsed.
+        let pkt_padded = FrameSpec { min_body_len: 46, ..v4(100, b"a") }.build();
+        let pkt = v4(100, b"a").build();
+        assert!(pkt_padded.len() > pkt.len(), "packet should have been padded");
+
+        let mut context = NetworkParsingContext::new(ChecksumRxOffloading::FullyOffloaded);
+        let parsed = GroPacket::parse(&pkt_padded, &GroFrameType::Ethernet, &mut context)
+            .expect("should parse padded packet");
+        // The IP packet ends where the unpadded frame ends; the padding beyond
+        // it is not part of the packet.
+        assert_eq!(parsed.offsets.ip_offset + parsed.ip.total_len(), pkt.len());
+        let padded_offset = parsed.offsets.transport_offset;
+
+        let mut context = NetworkParsingContext::new(ChecksumRxOffloading::FullyOffloaded);
+        let parsed = GroPacket::parse(&pkt, &GroFrameType::Ethernet, &mut context)
+            .expect("should parse unpadded packet");
+        assert_eq!(parsed.offsets.ip_offset + parsed.ip.total_len(), pkt.len());
+        assert_eq!(padded_offset, parsed.offsets.transport_offset);
+
+        // The offset points at the TCP source and destination ports.
+        assert_eq!(&pkt_padded[padded_offset..padded_offset + 2], &1234u16.to_be_bytes());
+        assert_eq!(&pkt_padded[padded_offset + 2..padded_offset + 4], &5678u16.to_be_bytes());
+    }
+
+    #[test]
+    fn gro_buffers_dropped_when_item_dropped() {
+        let buffer1 = TrackedBuffer::new(vec![1, 2, 3], true);
+        let buffer2 = TrackedBuffer::new(vec![4, 5, 6], false);
+        let dropped1 = buffer1.dropped();
+        let dropped2 = buffer2.dropped();
+        let items = vec![input_item(buffer1), input_item(buffer2)];
+
+        let mut storage = GroBufferStorage::new();
+        let mut gro = storage.coalesce(items.into_iter(), false);
 
         let mut item1 = gro.next().unwrap();
         assert_eq!(item1.buffers.slice_mut(), &[1, 2, 3]);
@@ -1177,8 +2291,6 @@ mod tests {
         assert!(dropped2.load(Ordering::SeqCst));
     }
 
-    const TEST_SRC_MAC: Mac = net_mac!("00:11:22:33:44:55");
-    const TEST_DST_MAC: Mac = net_mac!("66:77:88:99:aa:bb");
     const TEST_SRC_PORT: NonZeroU16 = NonZeroU16::new(1234).unwrap();
     const TEST_DST_PORT: NonZeroU16 = NonZeroU16::new(5678).unwrap();
     const TEST_FLOWLABEL: u32 = 0x12345;
@@ -1191,16 +2303,16 @@ mod tests {
     }
 
     impl TestIpExt for Ipv4 {
-        const SRC_IP: Ipv4Addr = net_ip_v4!("192.168.0.1");
-        const DST_IP: Ipv4Addr = net_ip_v4!("192.168.0.2");
+        const SRC_IP: Ipv4Addr = SRC_IP_V4;
+        const DST_IP: Ipv4Addr = DST_IP_V4;
         fn ip_builder(proto: IpProto) -> Ipv4PacketBuilder {
             Ipv4PacketBuilder::new(Self::SRC_IP, Self::DST_IP, 64, Ipv4Proto::Proto(proto))
         }
     }
 
     impl TestIpExt for Ipv6 {
-        const SRC_IP: Ipv6Addr = net_ip_v6!("2001:db8::1");
-        const DST_IP: Ipv6Addr = net_ip_v6!("2001:db8::2");
+        const SRC_IP: Ipv6Addr = SRC_IP_V6;
+        const DST_IP: Ipv6Addr = DST_IP_V6;
         fn ip_builder(proto: IpProto) -> Ipv6PacketBuilder {
             let mut ip = Ipv6PacketBuilder::new(Self::SRC_IP, Self::DST_IP, 64, proto.into());
             ip.flowlabel(TEST_FLOWLABEL);
@@ -1209,7 +2321,7 @@ mod tests {
     }
 
     fn ethernet_builder<I: TestIpExt>() -> EthernetFrameBuilder {
-        EthernetFrameBuilder::new(TEST_SRC_MAC, TEST_DST_MAC, I::ETHER_TYPE, 0)
+        EthernetFrameBuilder::new(SRC_MAC, DST_MAC, I::ETHER_TYPE, 0)
     }
 
     fn tcp_builder<I: TestIpExt>() -> TcpSegmentBuilder<I::Addr> {
@@ -1253,8 +2365,8 @@ mod tests {
         HeaderOffsets { ip_offset: 14, transport_offset: 34 },
         GroFlowId {
             link_layer: LinkLayerFlowId::Ethernet(EthernetFlowId {
-                src_mac: TEST_SRC_MAC,
-                dst_mac: TEST_DST_MAC,
+                src_mac: SRC_MAC,
+                dst_mac: DST_MAC,
                 tag: None,
             }),
             ip: IpFlowId::Ipv4(Ipv4FlowId { src_ip: Ipv4::SRC_IP, dst_ip: Ipv4::DST_IP }),
@@ -1271,8 +2383,8 @@ mod tests {
         HeaderOffsets { ip_offset: 14, transport_offset: 54 },
         GroFlowId {
             link_layer: LinkLayerFlowId::Ethernet(EthernetFlowId {
-                src_mac: TEST_SRC_MAC,
-                dst_mac: TEST_DST_MAC,
+                src_mac: SRC_MAC,
+                dst_mac: DST_MAC,
                 tag: None,
             }),
             ip: IpFlowId::Ipv6(Ipv6FlowId {
@@ -1334,16 +2446,11 @@ mod tests {
 
     #[test]
     fn gro_ineligible_non_ip_ethertype() {
-        let arp = ArpPacketBuilder::new(
-            ArpOp::Request,
-            TEST_SRC_MAC,
-            Ipv4::SRC_IP,
-            TEST_DST_MAC,
-            Ipv4::DST_IP,
-        );
+        let arp =
+            ArpPacketBuilder::new(ArpOp::Request, SRC_MAC, Ipv4::SRC_IP, DST_MAC, Ipv4::DST_IP);
         let arp_bytes = arp
             .into_serializer()
-            .wrap_in(EthernetFrameBuilder::new(TEST_SRC_MAC, TEST_DST_MAC, EtherType::Arp, 0))
+            .wrap_in(EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Arp, 0))
             .serialize_vec_outer(&mut NetworkSerializationContext::default())
             .unwrap()
             .unwrap_b()
@@ -1485,8 +2592,8 @@ mod tests {
     #[test]
     fn upgrades_csum_offload_on_verified_tcp() {
         let packet = build_ethernet_tcp_packet::<Ipv4>();
-        let items: Vec<GroInputItem<TestBuffer, GroFrameType>> = vec![GroInputItem {
-            buffer: TestBuffer { buf: packet, contiguous: true },
+        let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = vec![GroInputItem {
+            buffer: TrackedBuffer::new(packet, true),
             target: GroFrameType::Ethernet,
             checksum_offload: ChecksumRxOffloading::default(),
         }];
@@ -1519,8 +2626,8 @@ mod tests {
             .as_ref()
             .to_vec();
 
-        let items: Vec<GroInputItem<TestBuffer, GroFrameType>> = vec![GroInputItem {
-            buffer: TestBuffer { buf: packet, contiguous: true },
+        let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = vec![GroInputItem {
+            buffer: TrackedBuffer::new(packet, true),
             target: GroFrameType::Ethernet,
             checksum_offload: ChecksumRxOffloading::default(),
         }];
@@ -1541,8 +2648,8 @@ mod tests {
             parsed.offsets.transport_offset + packet_formats::tcp::CHECKSUM_OFFSET;
         packet[checksum_offset] ^= 0xff;
 
-        let items: Vec<GroInputItem<TestBuffer, GroFrameType>> = vec![GroInputItem {
-            buffer: TestBuffer { buf: packet, contiguous: true },
+        let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = vec![GroInputItem {
+            buffer: TrackedBuffer::new(packet, true),
             target: GroFrameType::Ethernet,
             checksum_offload: ChecksumRxOffloading::default(),
         }];

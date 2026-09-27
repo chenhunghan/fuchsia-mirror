@@ -97,11 +97,17 @@ impl MapImpl for Array {
     }
 
     fn get_next_key(&self, key: Option<&[u8]>) -> Result<MapKey, MapError> {
-        let next_index = key.map(|v| array_key_to_index(v) + 1).unwrap_or(0);
-        if next_index as usize >= self.num_entries {
+        let next_index = match key {
+            Some(v) => {
+                let index = array_key_to_index(v) as usize;
+                if index < self.num_entries { index + 1 } else { 0 }
+            }
+            None => 0,
+        };
+        if next_index >= self.num_entries {
             return Err(MapError::InvalidKey);
         }
-        Ok(MapKey::from_slice(&next_index.to_ne_bytes()))
+        Ok(MapKey::from_slice(&(next_index as u32).to_ne_bytes()))
     }
 
     fn vmo(&self) -> &Arc<zx::Vmo> {

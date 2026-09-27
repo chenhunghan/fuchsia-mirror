@@ -27,7 +27,7 @@
         {
             protocol: [
                 "fuchsia.net.policy.properties.DefaultNetworkWatcher",
-                "fuchsia.net.policy.socketproxy.StarnixNetworks",
+                "fuchsia.net.policy.socketproxy.NetworkRegistry",
             ],
             from: "void",
             availability: "optional",

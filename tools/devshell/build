@@ -102,6 +102,12 @@
 ##   --skip-auth-check        Bypass pre-flight build service authentication
 ##                            checks.
 ##
+##   --resultstore[=VAL]      Enable uploading build events to ResultStore.
+##                            VAL can be 'all', 'ninja', 'bazel', or 'none'.
+##                            If VAL is omitted, 'all' is assumed.
+##
+##   --no-resultstore         Disable uploading build events to ResultStore.
+##
 ##   --verbose                Print extra information, such as the list of
 ##                            Ninja targets corresponding to the input GN labels
 ##                            to build. This does *not* enable Ninja --verbose flag,
@@ -407,6 +413,18 @@ function main {
 
       --skip-auth-check)
         skip_auth_check=1
+        ;;
+
+      --resultstore)
+        export FX_BUILD_RESULTSTORE_OVERRIDE="all"
+        ;;
+
+      --resultstore=*)
+        export FX_BUILD_RESULTSTORE_OVERRIDE="${1#--*=}"
+        ;;
+
+      --no-resultstore)
+        export FX_BUILD_RESULTSTORE_OVERRIDE="none"
         ;;
 
       --verbose)

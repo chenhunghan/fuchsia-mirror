@@ -437,6 +437,25 @@ pub fn write_rule<W: io::Write>(
     )> = target_dependencies.iter().collect();
     platform_deps.sort_by(|p, p2| p.0.cmp(p2.0));
 
+    let mut platform_specific_deps = std::collections::HashSet::new();
+    let mut platform_specific_features = std::collections::HashSet::new();
+    if let Some(custom_build) = custom_build {
+        for (platform, cfg) in custom_build {
+            if platform.map(String::as_str) == Some("cfg(not(kernel))") {
+                if let Some(ref deps) = cfg.deps {
+                    for dep in deps {
+                        platform_specific_deps.insert(dep.as_str());
+                    }
+                }
+                if let Some(ref feats) = cfg.features {
+                    for feat in feats {
+                        platform_specific_features.insert(feat.as_str());
+                    }
+                }
+            }
+        }
+    }
+
     for (platform, deps) in platform_deps {
         // sort for stable output
         let mut deps = deps.clone();
@@ -446,15 +465,15 @@ pub fn write_rule<W: io::Write>(
         match platform.as_ref().map(String::as_str) {
             None => {
                 for pkg in deps {
-                    dependencies.push_str("  deps += [");
-                    if pkg.0.is_proc_macro() {
-                        dependencies.push_str(
-                            format!("\":{}($host_toolchain)\"", pkg.0.gn_name()).as_str(),
-                        );
+                    let gn_dep = if pkg.0.is_proc_macro() {
+                        format!(":{}($host_toolchain)", pkg.0.gn_name())
                     } else {
-                        dependencies.push_str(format!("\":{}\"", pkg.0.gn_name()).as_str());
+                        format!(":{}", pkg.0.gn_name())
+                    };
+                    if platform_specific_deps.contains(gn_dep.as_str()) {
+                        continue;
                     }
-                    dependencies.push_str("]\n");
+                    dependencies.push_str(format!("  deps += [\"{}\"]\n", gn_dep).as_str());
                     if pkg.0.name.replace("-", "_") != pkg.1 {
                         // aliased_deps need to point to `rust_library` targets, which is the
                         // `.actual` target in `rustc_library`.
@@ -513,7 +532,9 @@ pub fn write_rule<W: io::Write>(
 
     // Aggregate feature flags
     for feature in target.features {
-        rustflags.add_cfg(format!("--cfg=feature=\\\"{}\\\"", feature));
+        if !platform_specific_features.contains(feature.as_str()) {
+            rustflags.add_cfg(format!("--cfg=feature=\\\"{}\\\"", feature));
+        }
     }
 
     // From the gn custom configs, add flags, env vars, and visibility

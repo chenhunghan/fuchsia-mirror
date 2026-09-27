@@ -49,6 +49,9 @@ def main() -> None:
         help="List all physical worktrees in the pool",
         description="List all physical worktrees in the pool along with state and physical paths.",
     )
+    parser_pool_list.add_argument(
+        "--json", action="store_true", help="Output JSON"
+    )
 
     parser_pool_add = pool_subparsers.add_parser(
         "add",
@@ -88,11 +91,12 @@ def main() -> None:
     parser_locate.add_argument("name", help="Name of the worktree")
 
     # Subcommand 'list'
-    subparsers.add_parser(
+    parser_list = subparsers.add_parser(
         "list",
         help="List all leased worktrees",
         description="List all leased worktrees and their git branches.",
     )
+    parser_list.add_argument("--json", action="store_true", help="Output JSON")
 
     # Subcommand 'add'
     parser_add = subparsers.add_parser(
@@ -100,9 +104,6 @@ def main() -> None:
         help="Add a leased worktree checkout for development",
     )
     parser_add.add_argument("name", help="Name of worktree / branch")
-    parser_add.add_argument(
-        "--sync", action="store_true", help="Sync after adding"
-    )
     parser_add.add_argument(
         "--pool-name", help="Specific pool slot to allocate"
     )
@@ -137,7 +138,7 @@ def main() -> None:
     try:
         if args.subcommand == "pool":
             if args.pool_subcommand == "list":
-                pool_list_cmd.run(pool)
+                pool_list_cmd.run(args, pool)
             elif args.pool_subcommand == "add":
                 pool_add_cmd.run(args, pool)
             elif args.pool_subcommand == "remove":

@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "@rules_fuchsia//fuchsia:defs.bzl",
     "fuchsia_cc_driver",
@@ -13,6 +12,7 @@ load(
     "fuchsia_prebuilt_package",
     "fuchsia_unittest_package",
 )
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 # ========================
 # Composite driver (DFv2).
@@ -35,7 +35,7 @@ fuchsia_driver_bind_bytecode(
     ],
 )
 
-cc_library(
+fx_cc_library(
     name = "common",
     srcs = [
         "aml-tdm-config-device.cc",
@@ -45,10 +45,10 @@ cc_library(
         "composite-server.cc",
         "composite-server.h",
     ],
+    build_flags = ["//build/config/fuchsia:enable_zircon_asserts"],
     defines = [
         "_ALL_SOURCE",
     ],
-    features = ["enable_zircon_asserts"],
     deps = [
         "//sdk/lib/driver/compat/cpp",
         "//src/devices/lib/amlogic",

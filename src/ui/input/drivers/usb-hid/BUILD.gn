@@ -7,15 +7,30 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("usb-hid-dml") {
+  dml = "meta/usb-hid.dml"
+  driver_name = "usb-hid"
+}
+
+fuchsia_driver_dml("usb-one-endpoint-hid-fake-usb-dml") {
+  dml = "meta/usb-one-endpoint-hid-fake-usb.dml"
+  driver_name = "usb-one-endpoint-hid-fake-usb"
+}
+
+fuchsia_driver_dml("usb-two-endpoint-hid-fake-usb-dml") {
+  dml = "meta/usb-two-endpoint-hid-fake-usb.dml"
+  driver_name = "usb-two-endpoint-hid-fake-usb"
+}
+
 driver_bind_rules("usb_hid_bind") {
-  rules = "meta/usb-hid.bind"
+  dml_label = ":usb-hid-dml"
   bind_output = "usb-hid.bindbc"
   tests = "meta/usb_hid_bind_tests.json"
   deps = [ "//src/devices/bind/fuchsia.usb" ]
 }
 
 driver_bind_rules("one_endpoint_hid_bind") {
-  rules = "meta/one_endpoint_hid.bind"
+  dml_label = ":usb-one-endpoint-hid-fake-usb-dml"
   tests = "meta/one_endpoint_hid_bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia.usb",
@@ -24,7 +39,7 @@ driver_bind_rules("one_endpoint_hid_bind") {
 }
 
 driver_bind_rules("two_endpoint_hid_bind") {
-  rules = "meta/two_endpoint_hid.bind"
+  dml_label = ":usb-two-endpoint-hid-fake-usb-dml"
   tests = "meta/two_endpoint_hid_bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia.usb",
@@ -70,7 +85,7 @@ fuchsia_driver_component("usb-hid") {
   component_name = "usb-hid"
   deps = [ ":usb-hid-driver" ]
   info = "meta/usb-hid-info.json"
-  manifest = "meta/usb-hid.cml"
+  dml_label = ":usb-hid-dml"
 }
 
 fuchsia_driver_package("package") {
@@ -112,7 +127,7 @@ fuchsia_driver_component("usb-one-endpoint-hid-fake-usb") {
   component_name = "usb-one-endpoint-hid-fake-usb"
   deps = [ ":usb-one-endpoint-hid-fake-usb-driver" ]
   info = "meta/usb-one-endpoint-hid-fake-usb-info.json"
-  manifest = "meta/usb-one-endpoint-hid-fake-usb.cml"
+  dml_label = ":usb-one-endpoint-hid-fake-usb-dml"
 }
 
 fuchsia_cc_driver("usb-two-endpoint-hid-fake-usb-driver") {
@@ -150,7 +165,7 @@ fuchsia_driver_component("usb-two-endpoint-hid-fake-usb") {
   component_name = "usb-two-endpoint-hid-fake-usb"
   deps = [ ":usb-two-endpoint-hid-fake-usb-driver" ]
   info = "meta/usb-two-endpoint-hid-fake-usb-info.json"
-  manifest = "meta/usb-two-endpoint-hid-fake-usb.cml"
+  dml_label = ":usb-two-endpoint-hid-fake-usb-dml"
 }
 
 group("fake") {

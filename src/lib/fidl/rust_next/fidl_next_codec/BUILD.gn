@@ -107,6 +107,7 @@ rustc_library("fidl_next_codec_internal") {
   crate_name = "fidl_next_codec"
   edition = "2024"
   visibility = [
+    ":*",
     "//src/lib/fdomain/client/*",
     "//src/lib/fidl/rust_next/*",
   ]

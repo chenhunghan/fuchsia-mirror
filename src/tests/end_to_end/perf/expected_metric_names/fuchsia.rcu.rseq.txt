@@ -1,0 +1,5 @@
+fuchsia.rcu.rseq: read_scope/non_nested
+fuchsia.rcu.rseq: read_scope/nested
+fuchsia.rcu.rseq: read_scope/with_contention/1
+fuchsia.rcu.rseq: read_scope/with_contention/3
+fuchsia.rcu.rseq: read_scope/with_contention/7

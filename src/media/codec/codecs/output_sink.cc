@@ -142,5 +142,6 @@ void OutputSink::Reset(bool keep_data) {
   free_output_packets_.Reset(keep_data);
   if (!keep_data) {
     buffer_count_ = 0;
+    current_packet_ = nullptr;
   }
 }

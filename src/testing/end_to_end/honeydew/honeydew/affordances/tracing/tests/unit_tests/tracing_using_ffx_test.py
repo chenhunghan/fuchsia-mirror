@@ -96,13 +96,12 @@ class TracingFfxTests(unittest.IsolatedAsyncioTestCase):
                 buffer_size=parameterized_dict.get("buffer_size"),
             )
             self.assertTrue(self.tracing_obj.is_session_initialized())
-            self.assertTrue(self.tracing_obj._compression)
 
     async def test_initialize_with_compression_disabled(self) -> None:
         """Test for Tracing.initialize() with compression=False."""
-        self.tracing_obj.initialize(compression=False)
-        self.assertTrue(self.tracing_obj.is_session_initialized())
-        self.assertFalse(self.tracing_obj._compression)
+        with self.assertRaises(TracingError):
+            self.tracing_obj.initialize(compression=False)
+        self.assertFalse(self.tracing_obj.is_session_initialized())
 
     @parameterized.expand(
         [
@@ -180,30 +179,6 @@ class TracingFfxTests(unittest.IsolatedAsyncioTestCase):
                 "1024",
                 "--buffering-mode",
                 "oneshot",
-            ]
-        )
-
-    async def test_start_with_compression_disabled(self) -> None:
-        """Test for Tracing.start() when compression is disabled."""
-        self.tracing_obj.initialize(
-            categories=["category1"],
-            buffer_size=1024,
-            buffering_mode=f_tracing.BufferingMode.ONESHOT,
-            compression=False,
-        )
-        await self.tracing_obj.start()
-        self.ffx_obj.run.assert_called_with(
-            [
-                "trace",
-                "start",
-                "--background",
-                "--categories",
-                "category1",
-                "--buffer-size",
-                "1024",
-                "--buffering-mode",
-                "oneshot",
-                "--nocompress",
             ]
         )
 
@@ -448,7 +423,6 @@ class TracingFfxTests(unittest.IsolatedAsyncioTestCase):
                 download=download_trace, directory=tmpdir, trace_file=trace_file
             ):
                 self.assertTrue(self.tracing_obj.is_active())
-                self.assertTrue(self.tracing_obj._compression)
             self.assertFalse(self.tracing_obj.is_active())
 
             if download_trace:
@@ -476,7 +450,6 @@ class TracingFfxTests(unittest.IsolatedAsyncioTestCase):
                     self.tracing_obj._buffering_mode,
                     f_tracing.BufferingMode.ONESHOT,
                 )
-                self.assertTrue(self.tracing_obj._compression)
                 self.assertTrue(self.tracing_obj.is_active())
 
             self.assertFalse(self.tracing_obj.is_active())
@@ -500,43 +473,14 @@ class TracingFfxTests(unittest.IsolatedAsyncioTestCase):
         """Test for Tracing.trace_session() when compression is disabled."""
         self.assertFalse(self.tracing_obj.is_session_initialized())
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with self.assertRaises(TracingError):
             async with self.tracing_obj.trace_session(
                 categories=["category1"],
                 buffer_size=1024,
                 buffering_mode=f_tracing.BufferingMode.ONESHOT,
                 compression=False,
-                download=True,
-                directory=tmpdir,
-                trace_file="trace.fxt",
             ):
-                self.assertTrue(self.tracing_obj.is_session_initialized())
-                self.assertEqual(self.tracing_obj._categories, ["category1"])
-                self.assertEqual(self.tracing_obj._buffer_size, 1024)
-                self.assertEqual(
-                    self.tracing_obj._buffering_mode,
-                    f_tracing.BufferingMode.ONESHOT,
-                )
-                self.assertFalse(self.tracing_obj._compression)
-                self.assertTrue(self.tracing_obj.is_active())
-
-            self.assertFalse(self.tracing_obj.is_active())
-            self.ffx_obj.run.assert_any_call(
-                [
-                    "trace",
-                    "start",
-                    "--background",
-                    "--categories",
-                    "category1",
-                    "--buffer-size",
-                    "1024",
-                    "--buffering-mode",
-                    "oneshot",
-                    "--nocompress",
-                ]
-            )
-            trace_path: str = os.path.join(tmpdir, "trace.fxt")
-            self.assertTrue(os.path.exists(trace_path))
+                pass
 
     async def test_trace_session_cleanup_on_exception(self) -> None:
         """Verify that trace_session cleans up even if an exception is raised."""

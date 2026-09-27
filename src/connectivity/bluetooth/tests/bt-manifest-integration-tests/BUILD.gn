@@ -288,20 +288,10 @@ fuchsia_component_manifest("test_bt_init_manifest") {
   manifest = "meta/test-bt-init.cml"
 }
 
-fuchsia_structured_config_values("test-bt-init-config") {
-  cm_label = ":test_bt_init_manifest"
-  values = {
-    autostart_snoop = true
-    fastpair_provider_enabled = false
-    rfcomm_enabled = true
-  }
-}
-
 fuchsia_component("test-bt-init") {
   cm_label = ":test_bt_init_manifest"
   deps = [
     "//src/connectivity/bluetooth/core/bt-gap:component",
-    "//src/connectivity/bluetooth/core/bt-gap:default_config_values",
     "//src/connectivity/bluetooth/core/bt-init:bin",
     "//src/connectivity/bluetooth/profiles/bt-rfcomm:component",
   ]
@@ -323,7 +313,6 @@ fuchsia_test_package("bt-init-smoke-test") {
   }
   deps = [
     ":test-bt-init",
-    ":test-bt-init-config",
     "//src/sys/stash:stash_secure_v2",
   ]
 }
@@ -346,6 +335,7 @@ rustc_test("bt_gap_smoke_test_bin") {
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-component-test",
+    "//src/sys/lib/cm_rust",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
@@ -365,10 +355,10 @@ fuchsia_test_package("bt-gap-smoke-test") {
   test_components = [ ":bt-gap-smoke-test-component" ]
   deps = [
     "//src/connectivity/bluetooth/core/bt-gap:component",
-    "//src/connectivity/bluetooth/core/bt-gap:default_config_values",
     "//src/sys/stash:stash_secure_v2",
   ]
 }
+
 group("tests") {
   testonly = true
   deps = [

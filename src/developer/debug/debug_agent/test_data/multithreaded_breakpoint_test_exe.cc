@@ -6,6 +6,7 @@
 
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "src/developer/debug/debug_agent/test_data/test_so_symbols.h"
 
@@ -24,16 +25,17 @@ int main(int argc, char* argv[]) {
     return -1;
 
   // Start all the threads.
-  std::thread threads[thread_count];
+  std::vector<std::thread> threads;
+  threads.reserve(thread_count);
   for (int i = 0; i < thread_count; i++) {
-    threads[i] = std::thread(ThreadFunction);
+    threads.emplace_back(ThreadFunction);
   }
 
   printf("Function address: %p\n", MultithreadedFunctionToBreakOn);
   fflush(stdout);
 
   // We join all the threads.
-  for (int i = 0; i < thread_count; i++) {
-    threads[i].join();
+  for (auto& thread : threads) {
+    thread.join();
   }
 }

@@ -168,6 +168,8 @@ function repro {
       compilation_flag="--release"
     elif grep -q "COMPILATION_MODE_DEBUG" "${fint_params_file}"; then
       compilation_flag="--debug"
+    elif grep -q "COMPILATION_MODE_SANITIZER" "${fint_params_file}"; then
+      compilation_flag="--sanitizer"
     fi
 
     local failed_tests_commas="${failed_tests// /,}"

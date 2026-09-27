@@ -25,7 +25,10 @@ FFI_ALWAYS_INLINE void* cpp_vm_object_get_ref_counted(const VmObject* vmo) {
 
 FFI_ALWAYS_INLINE void cpp_vm_object_free(VmObject* vmo) { delete vmo; }
 
-FFI_ALWAYS_INLINE uint64_t cpp_vm_object_size(const VmObject* vmo) { return vmo->size(); }
+FFI_ALWAYS_INLINE uint64_t cpp_vm_object_size_locked(const VmObject* vmo)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  return vmo->size_locked();
+}
 
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_resizable(const VmObject* vmo) {
   return vmo->is_resizable();
@@ -38,6 +41,8 @@ FFI_ALWAYS_INLINE bool cpp_vm_object_is_contiguous(const VmObject* vmo) {
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_stream_compatible(const VmObject* vmo) {
   return vmo->is_stream_compatible();
 }
+
+FFI_ALWAYS_INLINE void* cpp_vm_object_lock(const VmObject* vmo) { return vmo->lock(); }
 
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_resize(VmObject* vmo, uint64_t size) {
   return vmo->Resize(size);
@@ -225,26 +230,29 @@ FFI_ALWAYS_INLINE void cpp_vm_object_get_attributed_memory_in_range(
 }
 
 zx_status_t cpp_vm_object_read_user(VmObject* vmo, void* buffer, uint64_t offset, size_t size,
-                                    size_t* out_actual) {
+                                    uint8_t options, size_t* out_actual) {
   auto [st, out_actual_bytes] = vmo->ReadUser(make_user_out_ptr(buffer).reinterpret<char>(), offset,
-                                              size, VmObjectReadWriteOptions::TrimLength);
-  if (st != ZX_OK) {
-    return st;
-  }
+                                              size, static_cast<VmObjectReadWriteOptions>(options));
   *out_actual = out_actual_bytes;
-  return ZX_OK;
+  return st;
 }
 
 zx_status_t cpp_vm_object_write_user(VmObject* vmo, const void* buffer, uint64_t offset,
-                                     size_t size, size_t* out_actual) {
+                                     size_t size, uint8_t options,
+                                     void (*on_bytes_transferred)(void* ctx, uint64_t offset,
+                                                                  size_t len),
+                                     void* on_bytes_transferred_ctx, size_t* out_actual) {
+  VmObject::OnWriteBytesTransferredCallback cb;
+  if (on_bytes_transferred != nullptr) {
+    cb = [on_bytes_transferred, on_bytes_transferred_ctx](uint64_t offset, size_t len) {
+      on_bytes_transferred(on_bytes_transferred_ctx, offset, len);
+    };
+  }
   auto [st, out_actual_bytes] =
       vmo->WriteUser(make_user_in_ptr(buffer).reinterpret<const char>(), offset, size,
-                     VmObjectReadWriteOptions::TrimLength, /*on_bytes_transferred=*/nullptr);
-  if (st != ZX_OK) {
-    return st;
-  }
+                     static_cast<VmObjectReadWriteOptions>(options), cb);
   *out_actual = out_actual_bytes;
-  return ZX_OK;
+  return st;
 }
 
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_take_pages(VmObject* vmo, uint64_t offset, uint64_t len,

@@ -48,13 +48,13 @@ source_set("sim_common") {
     "sim_utils.h",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/devices/lib/broadcom",
     "//third_party/bcmdhd/crossdriver:bcmdhd_crossdriver",
     "//zircon/system/public",
   ]
   public_deps = [
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_hlcpp",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//sdk/lib/async",
     "//sdk/lib/async_patterns/testing/cpp",
     "//sdk/lib/driver/logging/cpp",

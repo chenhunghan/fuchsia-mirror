@@ -75,6 +75,7 @@ if (is_host) {
       "//src/developer/ffx/plugins/target/ssh:*",
       "//src/developer/ffx/tests/cli-goldens:*",
       "//src/developer/ffx/tests/help-json:*",
+      "//src/developer/ffx/tools/uart_driver:*",
       "//src/developer/ffx/tools/usb_driver:*",
       "//tools/clidoc:*",
     ]
@@ -91,6 +92,7 @@ if (is_host) {
       "//src/lib/agents:lib",
       "//src/lib/analytics/rust:lib",
       "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-emulated-handle",
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:argh",
       "//third_party/rust_crates:camino",

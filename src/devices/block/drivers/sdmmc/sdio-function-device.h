@@ -35,8 +35,8 @@ class SdioFunctionDevice : public ddk::SdioProtocol<SdioFunctionDevice>,
     kBoot,
   };
 
-  static zx_status_t Create(SdioControllerDevice* sdio_parent, uint32_t func,
-                            std::unique_ptr<SdioFunctionDevice>* out_dev);
+  SdioFunctionDevice(SdioControllerDevice* sdio_parent, uint32_t func,
+                     std::optional<uint32_t> id = std::nullopt);
 
   zx_status_t AddDevice(const sdio_func_hw_info_t& hw_info);
 
@@ -139,16 +139,6 @@ class SdioFunctionDevice : public ddk::SdioProtocol<SdioFunctionDevice>,
     fidl::ServerBindingGroup<fuchsia_hardware_sdio::Device> bindings_;
   };
 
-  SdioFunctionDevice(SdioControllerDevice* sdio_parent, uint32_t func)
-      : function_(static_cast<uint8_t>(func)),
-        sdio_parent_(sdio_parent),
-        driver_transport_impl_(this),
-        zircon_transport_impl_(this),
-        devfs_connector_(
-            fit::bind_member<&ZirconTransportImpl::DevfsConnect>(&zircon_transport_impl_)) {
-    sdio_function_name_ = "sdmmc-sdio-" + std::to_string(func);
-  }
-
   // FIDL-type implementations. Serves both Zircon and Driver transport types.
 
   zx::result<fuchsia_hardware_sdio::wire::DeviceGetDevHwInfoResponse*> GetDevHwInfo(
@@ -225,6 +215,7 @@ class SdioFunctionDevice : public ddk::SdioProtocol<SdioFunctionDevice>,
 
   uint8_t function_ = SDIO_MAX_FUNCS;
   SdioControllerDevice* const sdio_parent_;
+  std::optional<uint32_t> id_;
 
   std::string sdio_function_name_;
   fidl::WireSyncClient<fuchsia_driver_framework::NodeController> controller_;

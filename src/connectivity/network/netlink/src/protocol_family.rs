@@ -1650,8 +1650,6 @@ pub mod route {
 pub(crate) mod testutil {
     use super::*;
 
-    use std::convert::Infallible as Never;
-
     use crate::messaging::testutil::FakeCreds;
     use crate::messaging::{NetlinkMessageWithCreds, Permission};
     use crate::multicast_groups::GroupSupport;
@@ -1756,7 +1754,7 @@ pub(crate) mod testutil {
         type Response = FakeNetlinkInnerMessage;
         type RequestHandler<S: Sender<Self::Response>> = FakeNetlinkRequestHandler;
         type NotifiedMulticastGroup = ();
-        type AsyncWorkItem = Never;
+        type AsyncWorkItem = !;
 
         fn should_notify_on_group_membership_change(
             group: ModernGroup,

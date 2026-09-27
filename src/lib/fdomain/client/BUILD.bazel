@@ -84,6 +84,8 @@ rustc_library(
         "@platforms//os:fuchsia": [
             "//sdk/rust/zx",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//src/lib/fuchsia-emulated-handle",
+        ],
     }),
 )

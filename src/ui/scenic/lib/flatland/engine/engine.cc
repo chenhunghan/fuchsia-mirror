@@ -127,6 +127,15 @@ void Engine::RenderScheduledFrame(uint64_t frame_number, zx::time presentation_t
     return;
   }
 
+  if (flatland_compositor_->IsDisplayDark(hw_display->display_id())) {
+    // While the display is dark nothing is rendered or presented to the DisplayCoordinator;
+    // SkipRender() signals the frame's fences and invokes its callback so that nothing waits on
+    // a vsync. SceneState has already been initialized above so that the ViewTree and
+    // LinkWatchers are still updated properly.
+    SkipRender(std::move(callback), /*rotate_scene_state=*/false);
+    return;
+  }
+
   CullLayersInPlace(&scene_state.resolved_layers, hw_display->width_in_px(),
                     hw_display->height_in_px());
 
@@ -314,7 +323,7 @@ void Engine::SkipRender(scheduling::FramePresentedCallback callback, bool rotate
   callback({.render_done_time = now, .actual_presentation_time = now});
 }
 
-void Engine::AddDisplay(display::Display& display) {
+void Engine::AddDisplay(display::Display& display, uint32_t num_vmos) {
   utils::CheckIsOnMainThread();
 
   auto [it, inserted] = seen_display_ids_.emplace(display.display_id(), false);
@@ -329,8 +338,9 @@ void Engine::AddDisplay(display::Display& display) {
       .max_layer_count = display.max_layer_count(),
   };
   fpromise::promise<> promise =
-      flatland_compositor_->AddDisplay(&display, display_info, kNumDisplayFramebuffers)
-          .and_then([it] { it->second = true; });
+      flatland_compositor_->AddDisplay(&display, display_info, num_vmos).and_then([it] {
+        it->second = true;
+      });
   executor_.schedule_task(std::move(promise));
 }
 

@@ -67,9 +67,14 @@ impl GA4AnalyticsClient {
         let res = self.client().request(req).await;
         Ok(match res {
             Ok(mut res) => {
-                log::trace!("GA 4 Analytics response: {}", res.status());
-                while let Some(frame) = res.body_mut().frame().await {
-                    log::trace!(frame:?; "");
+                if log::log_enabled!(log::Level::Trace) {
+                    log::trace!("GA 4 Analytics response: {}", res.status());
+                    while let Some(frame) = res.body_mut().frame().await {
+                        log::trace!(frame:?; "");
+                    }
+                } else {
+                    // hyper will drop the connection if the body is not drained
+                    while let Some(_) = res.body_mut().frame().await {}
                 }
             }
             Err(e) => log::trace!("Error posting GA 4 analytics: {}", e),

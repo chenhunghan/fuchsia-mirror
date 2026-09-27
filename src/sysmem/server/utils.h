@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include <safemath/safe_conversions.h>
+#include <safemath/safe_math.h>
 
 bool IsWriteUsage(const fuchsia_sysmem2::BufferUsage& buffer_usage);
 
@@ -139,5 +140,25 @@ std::optional<T> TakeOptional(std::optional<T>& source) {
   source.reset();
   return tmp;
 }
+
+namespace sysmem_service {
+
+template <typename T, typename U>
+auto CheckRoundDown(T val, U multiple) {
+  using safemath::CheckDiv;
+  using safemath::CheckMul;
+  return CheckMul(CheckDiv(val, multiple), multiple);
+}
+
+template <typename T, typename U>
+auto CheckRoundUp(T val, U multiple) {
+  using safemath::CheckAdd;
+  using safemath::CheckDiv;
+  using safemath::CheckMul;
+  using safemath::CheckSub;
+  return CheckMul(CheckDiv(CheckAdd(val, CheckSub(multiple, 1)), multiple), multiple);
+}
+
+}  // namespace sysmem_service
 
 #endif  // SRC_SYSMEM_SERVER_UTILS_H_

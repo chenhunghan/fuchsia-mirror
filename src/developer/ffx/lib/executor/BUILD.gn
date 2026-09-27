@@ -60,7 +60,10 @@ if (is_host) {
     edition = "2024"
     test_deps = [ "//src/lib/fuchsia" ]
     version = "0.1.0"
-    visibility = [ "//src/developer/ffx/*" ]
+    visibility = [
+      ":*",
+      "//src/developer/ffx/*",
+    ]
     with_unit_tests = true
     deps = [
       "//src/developer/ffx/lib/writer:lib",

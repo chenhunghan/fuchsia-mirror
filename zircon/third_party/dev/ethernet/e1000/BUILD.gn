@@ -9,8 +9,13 @@ bind_library("fuchsia.intel.e1000") {
   source = "fuchsia.intel.e1000.bind"
 }
 
+fuchsia_driver_dml("e1000-dml") {
+  dml = "meta/e1000.dml"
+  driver_name = "e1000"
+}
+
 driver_bind_rules("e1000_bind") {
-  rules = "meta/e1000.bind"
+  dml_label = ":e1000-dml"
   tests = "meta/bind-tests.json"
   deps = [
     ":fuchsia.intel.e1000",
@@ -123,7 +128,7 @@ fuchsia_driver_component("e1000") {
   component_name = "e1000"
   deps = [ ":e1000-driver" ]
   info = "meta/e1000-info.json"
-  manifest = "meta/e1000.cml"
+  dml_label = ":e1000-dml"
 }
 
 fuchsia_driver_package("package") {

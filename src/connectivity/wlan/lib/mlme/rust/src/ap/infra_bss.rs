@@ -1430,7 +1430,7 @@ mod tests {
 
         fake_device_state.lock().wlan_queue.clear();
 
-        let _ = time_stream.try_next().unwrap().expect("Should have scheduled a timeout");
+        let _ = time_stream.try_recv().expect("Should have scheduled a timeout");
         bss.handle_timed_event(
             &mut ctx,
             TimedEvent::ClientEvent(*CLIENT_ADDR, ClientEvent::BssIdleTimeout),

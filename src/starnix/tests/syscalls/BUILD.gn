@@ -59,6 +59,7 @@ _syscall_deps_inputs =
       "$_target_linux_out_dir/signal_handling_test_exec_parent_after_exit",
       "$_target_linux_out_dir/signal_handling_test_exec_parent_before_exit",
       "$_target_linux_out_dir/syscall_test_exec_child",
+      "$_target_linux_out_dir/timers_test_exec_child",
 
       # Rust static resources & fixtures
       "rust/data/corrupted_hashtree_sha256.txt",
@@ -85,6 +86,7 @@ _test_helper_executables = [
   "cpp:ptrace_test_exec_child",
   "cpp:signal_handling_test_exec_child",
   "cpp:syscall_test_exec_child",
+  "cpp:timers_test_exec_child",
   "cpp/test_programs:clone_exec_helper",
   "cpp/test_programs:custom_pt_interp_child",
   "cpp/test_programs:exit_zero",

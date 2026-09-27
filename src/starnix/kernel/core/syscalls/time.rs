@@ -578,9 +578,10 @@ mod arch32 {
 
     pub use super::{
         sys_clock_getres as sys_arch32_clock_getres, sys_clock_gettime as sys_arch32_clock_gettime,
-        sys_gettimeofday as sys_arch32_gettimeofday, sys_nanosleep as sys_arch32_nanosleep,
-        sys_setitimer as sys_arch32_setitimer, sys_settimeofday as sys_arch32_settimeofday,
-        sys_timer_create as sys_arch32_timer_create, sys_timer_delete as sys_arch32_timer_delete,
+        sys_getitimer as sys_arch32_getitimer, sys_gettimeofday as sys_arch32_gettimeofday,
+        sys_nanosleep as sys_arch32_nanosleep, sys_setitimer as sys_arch32_setitimer,
+        sys_settimeofday as sys_arch32_settimeofday, sys_timer_create as sys_arch32_timer_create,
+        sys_timer_delete as sys_arch32_timer_delete,
         sys_timer_getoverrun as sys_arch32_timer_getoverrun,
         sys_timer_gettime as sys_arch32_timer_gettime,
         sys_timer_settime as sys_arch32_timer_settime,

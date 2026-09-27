@@ -27,6 +27,8 @@ _REMOTE_TARGET_IP_PORT_OBJ: custom_types.IpPort = (
     custom_types.IpPort.create_using_ip_and_port(_REMOTE_TARGET_IP_PORT)
 )
 
+_SHARED_DATA: str = "/tmp/shared_data"
+
 _INPUT_ARGS: dict[str, Any] = {
     "ffx_config_data": ffx_config.FfxConfigData(
         isolate_dir=fuchsia_controller.IsolateDir("/tmp/isolate"),
@@ -42,6 +44,7 @@ _INPUT_ARGS: dict[str, Any] = {
         emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
+        shared_data=_SHARED_DATA,
     ),
     "target_name": _TARGET_NAME,
     "target_ip_port": _REMOTE_TARGET_IP_PORT_OBJ,
@@ -90,6 +93,7 @@ class InitTests(unittest.TestCase):
             config={
                 "log.level": "debug",
                 "log.dir": "/tmp/logs",
+                "shared_data": _SHARED_DATA,
                 "connectivity.enable_usb": "false",
                 "connectivity.usb_driver_autostart": "false",
             },
@@ -134,6 +138,7 @@ class InitTests(unittest.TestCase):
             config={
                 "log.level": "debug",
                 "log.dir": "/tmp/logs",
+                "shared_data": _SHARED_DATA,
                 "connectivity.enable_usb": "false",
                 "connectivity.usb_driver_autostart": "false",
             },

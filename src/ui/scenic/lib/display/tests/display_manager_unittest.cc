@@ -28,7 +28,7 @@ constexpr uint32_t kMaxDisplayLayersCount = 2;
 
 class DisplayManagerMockTest : public gtest::TestLoopFixture {
  public:
-  // |testing::Test|
+  // `testing::Test`
   void SetUp() override {
     TestLoopFixture::SetUp();
 
@@ -36,7 +36,7 @@ class DisplayManagerMockTest : public gtest::TestLoopFixture {
     display_manager_ = std::make_unique<DisplayManager>([]() {});
   }
 
-  // |testing::Test|
+  // `testing::Test`
   void TearDown() override {
     display_manager_.reset();
     TestLoopFixture::TearDown();
@@ -80,12 +80,11 @@ TEST_F(DisplayManagerMockTest, DisplayVsyncCallback) {
       });
 
   display_manager()->default_display()->AddVsyncCallback(
-      [&num_vsync_display_received](zx::time_monotonic timestamp, WireConfigStamp stamp) {
-        ++num_vsync_display_received;
-      });
+      [&num_vsync_display_received](display::DisplayId, zx::time_monotonic timestamp,
+                                    WireConfigStamp stamp) { ++num_vsync_display_received; });
 
   for (size_t vsync_id = 1; vsync_id <= kTotalVsync; vsync_id++) {
-    // We only require acknowledgement for every |kAcknowledgeRate| Vsync IDs.
+    // We only require acknowledgement for every `kAcknowledgeRate` Vsync IDs.
     uint64_t cookie = (vsync_id % kAcknowledgeRate == 0) ? vsync_id : 0;
 
     test_loop().AdvanceTimeByEpsilon();
@@ -176,9 +175,9 @@ TEST_F(DisplayManagerMockTest, MultipleDisplayVsyncCallbacks) {
   size_t callback2_calls = 0;
 
   auto id1 = display_manager()->default_display()->AddVsyncCallback(
-      [&](auto, auto) { callback1_calls++; });
+      [&](auto, auto, auto) { callback1_calls++; });
   auto id2 = display_manager()->default_display()->AddVsyncCallback(
-      [&](auto, auto) { callback2_calls++; });
+      [&](auto, auto, auto) { callback2_calls++; });
 
   // Both callbacks should be called.
 

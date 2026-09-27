@@ -20,6 +20,7 @@ ignore_policy = struct(
         "fuchsia_scrutiny_config",  # Build time verification data.
         "fuchsia_debug_symbols",  # Debug symbols have no separate licenses.
         "current_py_toolchain",  # Python toolchain has no separate licenses.
+        "_fuchsia_assembly_developer_overrides_list",  # Local development overrides don't provide licenses.
     ]),
 
     # These targets will be ignored:
@@ -49,6 +50,12 @@ ignore_policy = struct(
         # which might not be intended. However, we can't just pass these
         # through `Label()` as these repo names are not actually known to
         # `rules_fuchsia` (this module).
+        #
+        # Canonical names encode the position of a `use_repo_rule()` in the
+        # root module's `MODULE.bazel`, so reordering that file silently
+        # invalidates these entries. Matching on the apparent name (the text
+        # after the last `+`) would be stable.
+        # TODO(https://fxbug.dev/566262167): Stop matching canonical repo names.
         "+_repo_rules+internal_sdk",  # TODO(https://fxbug.dev/42081016): sdk atoms should provide licenses.
         "+_repo_rules6+assembly_developer_overrides",  # Local development overrides don't provide licenses.
     ]),

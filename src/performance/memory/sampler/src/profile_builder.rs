@@ -3,10 +3,13 @@
 // found in the LICENSE file.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::rc::Rc;
 
-use anyhow::Error;
+use anyhow::{Context, Error};
 use fidl_fuchsia_memory_sampler::ModuleMap;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use prost::Message;
 use zx::Vmo;
 
@@ -16,6 +19,12 @@ use crate::pprof;
 /// The default sampling rate in bytes (128 KiB). This matches the default
 /// client-side sampling rate configured in the instrumentation library.
 const DEFAULT_SAMPLING_RATE_BYTES: f64 = 131072.0;
+
+/// The gzip compression level applied to profiles.
+///
+/// Experimental tests suggest that level 1 is a good tradeoff between
+/// compression rate and CPU usage.
+const PROFILE_COMPRESSION_LEVEL: Compression = Compression::new(1);
 
 pub type StackTrace = Vec<u64>;
 
@@ -204,7 +213,7 @@ impl ProfileBuilder {
             self.is_lossy,
         );
 
-        let (vmo, size) = profile_to_vmo(&profile)?;
+        let (vmo, size) = profile_to_vmo(profile)?;
         Ok(ProfileReport::Final { process_name, profile: vmo, size })
     }
     /// Produce a partial profile from a process that is still
@@ -228,28 +237,57 @@ impl ProfileBuilder {
         };
         self.prune_unreferenced_stack_traces();
 
-        let (vmo, size) = profile_to_vmo(&profile)?;
+        let (vmo, size) = profile_to_vmo(profile)?;
         Ok(ProfileReport::Partial { process_name, profile: vmo, size, iteration })
     }
 }
 
-// Serialize a profile to a VMO. On success, returns a tuple of a
-// `Vmo` and the size of its content.
-fn profile_to_vmo(profile: &pprof::pproto::Profile) -> Result<(Vmo, u64), Error> {
-    let proto_profile = profile.encode_to_vec();
-    let size = proto_profile.len() as u64;
+/// Serialize a profile to a VMO, compressed with gzip. On success,
+/// returns a tuple of a `Vmo` and the size of its content.
+///
+/// Note: profiles are compressed as early as possible, because they may
+/// sit in the crash reporting queue for a while before being filed; on
+/// representative profiles, this divides the size of a queued profile by
+/// more than four.
+///
+/// Note: consumers of pprof profiles detect gzip compression from the
+/// header of the profile, so compressing here is transparent to them.
+/// The format is reflected in `crash_reporter::PROFILE_ATTACHMENT_EXTENSION`,
+/// which has to be updated alongside it.
+fn profile_to_vmo(profile: pprof::pproto::Profile) -> Result<(Vmo, u64), Error> {
+    let compressed_profile = {
+        // Note: each representation of the profile is released as soon
+        // as the next one is built, so that the profile, its
+        // uncompressed serialization and the VMO never coexist. The
+        // capacity hint is slightly above the ~1/4 compression ratio
+        // observed on representative profiles to avoid reallocating on
+        // profiles above the median compressed size.
+        let proto_profile = profile.encode_to_vec();
+        drop(profile);
+        let mut encoder =
+            GzEncoder::new(Vec::with_capacity(proto_profile.len() / 3), PROFILE_COMPRESSION_LEVEL);
+        encoder.write_all(&proto_profile).context("Failed to compress profile")?;
+        encoder.finish().context("Failed to finalize compressed profile")?
+    };
+
+    let size = compressed_profile.len() as u64;
     let vmo = Vmo::create(size)?;
-    vmo.write(&proto_profile[..], 0)?;
+    vmo.write(&compressed_profile[..], 0)?;
     Ok((vmo, size))
 }
 
 #[cfg(test)]
 mod test {
+    use crate::crash_reporter::ProfileReport;
+    use crate::pprof::pproto::Profile;
     use crate::profile_builder::{
         DEFAULT_SAMPLING_RATE_BYTES, DeadAllocationCounter, DeallocationCounter, ModuleMap,
         ProfileBuilder,
     };
     use fidl_fuchsia_memory_sampler::ExecutableSegment;
+    use flate2::read::GzDecoder;
+    use prost::Message;
+    use std::io::Read;
 
     #[fuchsia::test]
     fn test_allocate() {
@@ -366,5 +404,35 @@ mod test {
         builder.set_lossy(true);
         let report = builder.build().unwrap();
         assert_eq!(report.get_process_name(), "my_proc [TAINTED: BUFFER OVERFLOW]");
+    }
+
+    #[fuchsia::test]
+    fn test_profile_is_compressed() {
+        const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+        let mut builder = ProfileBuilder::default();
+        builder.allocate(0x1000, vec![1, 2], 10);
+
+        let ProfileReport::Partial { profile, size, .. } =
+            builder.build_partial_profile(0).unwrap()
+        else {
+            panic!("Expected a partial profile.");
+        };
+        let compressed_profile = profile.read_to_vec(0, size).unwrap();
+
+        // Consumers of profiles rely on the `gzip` header to detect
+        // that they are compressed.
+        assert_eq!(
+            GZIP_MAGIC,
+            compressed_profile[..2],
+            "Profile should start with the gzip magic bytes."
+        );
+
+        let mut proto_profile = Vec::new();
+        GzDecoder::new(&compressed_profile[..])
+            .read_to_end(&mut proto_profile)
+            .expect("Profile should be gzip-compressed.");
+        let profile =
+            Profile::decode(&proto_profile[..]).expect("Profile should decode as a pprof profile.");
+        assert_eq!(1, profile.sample.len());
     }
 }

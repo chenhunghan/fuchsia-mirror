@@ -11,14 +11,14 @@ use super::buffer_chain::{BufferChain, CONTIGUOUS_SIZE};
 use super::handle::HandleOwner;
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use core::ffi::c_void;
-use core::mem::{self, MaybeUninit, offset_of, size_of};
+use core::mem::{self, MaybeUninit, align_of, size_of};
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::{cmp, slice};
 use fbl::{DoublyLinkedListContainable, DoublyLinkedListNode, ManagedPtr, PtrTraits};
-use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
-use zr::static_assert;
+use zerocopy::{FromBytes, Immutable, IntoBytes};
+use zr::{static_assert, static_assert_size_and_align};
 use zx_status::Status;
 use zx_types::{
     ZX_CHANNEL_MAX_MSG_BYTES, ZX_CHANNEL_MAX_MSG_HANDLES, ZX_CHANNEL_MAX_MSG_IOVEC,
@@ -33,21 +33,25 @@ const IOVEC_CHUNK_SIZE: usize = 16;
 // Handles are stored just after the MessagePacket.
 const HANDLES_OFFSET: usize = size_of::<MessagePacket>();
 
-// In C++, `iovec.reserved != 0` returns ZX_ERR_INVALID_ARGS.
-// In Rust `zx_channel_iovec_t`, `padding1` occupies the reserved field.
-#[inline]
-fn iovec_reserved(iovec: &zx_channel_iovec_t) -> u32 {
-    const OFFSET: usize = offset_of!(zx_channel_iovec_t, capacity) + size_of::<u32>();
-    // SAFETY: `zx_channel_iovec_t` is 8-byte aligned and 16 bytes in size.
-    // The reserved field immediately follows `capacity` at offset 12, which is 4-byte aligned.
-    unsafe { ptr::from_ref(iovec).cast::<u8>().add(OFFSET).cast::<u32>().read() }
-}
-
 // The MessagePacket object, its handles and zx_txid_t must all fit in the first buffer.
 const MIN_CONTIGUOUS_SIZE: usize = HANDLES_OFFSET
     + (ZX_CHANNEL_MAX_MSG_HANDLES as usize * size_of::<*mut c_void>())
     + size_of::<zx_txid_t>();
 static_assert!(MIN_CONTIGUOUS_SIZE <= CONTIGUOUS_SIZE);
+
+#[repr(C)]
+#[derive(Copy, Clone, Default, FromBytes, IntoBytes, Immutable)]
+struct RawChannelIovec {
+    buffer: usize,
+    capacity: u32,
+    reserved: u32,
+}
+
+static_assert_size_and_align!(
+    RawChannelIovec,
+    size_of::<zx_channel_iovec_t>(),
+    align_of::<zx_channel_iovec_t>()
+);
 
 // MessagePackets have special allocation requirements because they can contain a variable number of
 // handles and a variable size payload.
@@ -59,15 +63,12 @@ static_assert!(MIN_CONTIGUOUS_SIZE <= CONTIGUOUS_SIZE);
 // The first buffer in a MessagePacket's BufferChain contains the MessagePacket object, followed by
 // its handles (if any), and finally its payload data (if any).
 #[derive(DoublyLinkedListContainable)]
-#[pin_data(PinnedDrop)]
 #[repr(C)]
 pub struct MessagePacket {
     #[dll_node]
     node: DoublyLinkedListNode<MessagePacket>,
     buffer_chain: NonNull<BufferChain>,
-    handles: *mut *mut c_void,
     data_size: u32,
-    payload_offset: u32,
     num_handles: u16,
     owns_handles: bool,
 }
@@ -90,14 +91,22 @@ impl MessagePacket {
         num_handles: usize,
     ) -> Result<MessagePacketPtr, Status> {
         let mut new_msg = Self::create_common(data_size, num_handles)?;
-        new_msg.buffer_chain_mut().append_user(data, data_size)?;
+        if data_size == 0 {
+            return Ok(new_msg);
+        }
+        let dst = new_msg.start_of_payload_uninit_mut();
+        if dst.len() == data_size {
+            data.copy_slice_from_user(dst)?;
+        } else {
+            new_msg.buffer_chain_mut().append_user(data, data_size)?;
+        }
         Ok(new_msg)
     }
 
     /// Creates a message packet containing data gathered from userspace iovecs and space for
     /// `num_handles` handles.
     pub fn create_from_iovecs(
-        mut user_iovecs: UserInPtr<zx_channel_iovec_t>,
+        user_iovecs: UserInPtr<zx_channel_iovec_t>,
         mut num_iovecs: usize,
         num_handles: usize,
     ) -> Result<MessagePacketPtr, Status> {
@@ -105,21 +114,39 @@ impl MessagePacket {
             return Err(Status::OUT_OF_RANGE);
         }
 
-        let mut iovecs = [zx_channel_iovec_t::default(); IOVEC_CHUNK_SIZE];
+        let mut user_iovecs = user_iovecs.reinterpret::<RawChannelIovec>();
+        let mut iovecs = [MaybeUninit::<RawChannelIovec>::uninit(); IOVEC_CHUNK_SIZE];
 
         if num_iovecs <= IOVEC_CHUNK_SIZE {
-            Self::copy_iovec_chunk(user_iovecs, num_iovecs, &mut iovecs)?;
+            let iovecs = if num_iovecs > 0 {
+                user_iovecs.copy_slice_from_user(&mut iovecs[..num_iovecs])?
+            } else {
+                &mut []
+            };
             let mut message_size = 0;
-            for iovec in &iovecs[..num_iovecs] {
-                if iovec_reserved(iovec) != 0 {
+            for iovec in &*iovecs {
+                if iovec.reserved != 0 {
                     return Err(Status::INVALID_ARGS);
                 }
                 message_size += iovec.capacity as usize;
             }
             let mut msg = Self::create_common(message_size, num_handles)?;
-            for iovec in &iovecs[..num_iovecs] {
-                let src = UserInPtr::<u8>::new(iovec.buffer);
-                msg.buffer_chain_mut().append_user(src, iovec.capacity as usize)?;
+            let mut dst = msg.start_of_payload_uninit_mut();
+            if dst.len() == message_size {
+                for iovec in &*iovecs {
+                    let len = iovec.capacity as usize;
+                    if len > 0 {
+                        let (chunk_dst, rest) = dst.split_at_mut(len);
+                        dst = rest;
+                        let src = UserInPtr::new(ptr::with_exposed_provenance(iovec.buffer));
+                        src.copy_slice_from_user(chunk_dst)?;
+                    }
+                }
+            } else {
+                for iovec in &*iovecs {
+                    let src = UserInPtr::new(ptr::with_exposed_provenance(iovec.buffer));
+                    msg.buffer_chain_mut().append_user(src, iovec.capacity as usize)?;
+                }
             }
             return Ok(msg);
         }
@@ -128,13 +155,13 @@ impl MessagePacket {
         let mut message_size = 0;
         while num_iovecs > 0 {
             let chunk = cmp::min(num_iovecs, IOVEC_CHUNK_SIZE);
-            Self::copy_iovec_chunk(user_iovecs, chunk, &mut iovecs)?;
-            for iovec in &iovecs[..chunk] {
-                if iovec_reserved(iovec) != 0 {
+            let chunk_slice = user_iovecs.copy_slice_from_user(&mut iovecs[..chunk])?;
+            for iovec in chunk_slice {
+                if iovec.reserved != 0 {
                     return Err(Status::INVALID_ARGS);
                 }
                 message_size += iovec.capacity as usize;
-                let src = UserInPtr::<u8>::new(iovec.buffer);
+                let src = UserInPtr::new(ptr::with_exposed_provenance(iovec.buffer));
                 msg.buffer_chain_mut().append_user(src, iovec.capacity as usize)?;
             }
             num_iovecs -= chunk;
@@ -150,7 +177,12 @@ impl MessagePacket {
     /// for `num_handles` handles.
     pub fn create_from_kernel(data: &[u8], num_handles: usize) -> Result<MessagePacketPtr, Status> {
         let mut new_msg = Self::create_common(data.len(), num_handles)?;
-        new_msg.buffer_chain_mut().append_kernel(data)?;
+        let dst = new_msg.start_of_payload_mut();
+        if dst.len() == data.len() {
+            dst.copy_from_slice(data);
+        } else {
+            new_msg.buffer_chain_mut().append_kernel(data)?;
+        }
         Ok(new_msg)
     }
 
@@ -164,13 +196,17 @@ impl MessagePacket {
     ///
     /// Returns an error if `buf` points to a bad user address.
     pub fn copy_data_to(&self, buf: UserOutPtr<u8>) -> Result<(), Status> {
+        let data_size = self.data_size as usize;
+        if data_size == 0 {
+            return Ok(());
+        }
+        let first_chunk = self.start_of_payload();
+        if first_chunk.len() == data_size {
+            return buf.copy_slice_to_user(first_chunk);
+        }
         // SAFETY: `self.buffer_chain` is non-null and points to the BufferChain inside the first
         // buffer.
-        unsafe { self.buffer_chain.as_ref() }.copy_out(
-            buf,
-            self.payload_offset as usize,
-            self.data_size as usize,
-        )
+        unsafe { self.buffer_chain.as_ref() }.copy_out(buf, self.payload_offset(), data_size)
     }
 
     /// Returns the number of handles attached to this message packet.
@@ -183,29 +219,20 @@ impl MessagePacket {
     /// leading bytes of the payload as a transaction ID of type `zx_txid_t`).
     #[inline]
     pub fn get_txid(&self) -> zx_txid_t {
-        if (self.data_size as usize) < size_of::<zx_txid_t>() {
-            return 0;
-        }
         // The first few bytes of the payload are a zx_txid_t.
-        // SAFETY: Payload contains at least `size_of::<zx_txid_t>()` bytes within the contiguous
-        // buffer.
-        unsafe { self.payload().cast::<zx_txid_t>().read_unaligned() }
+        self.start_of_payload()
+            .first_chunk::<{ size_of::<zx_txid_t>() }>()
+            .map(|&bytes| zx_txid_t::from_ne_bytes(bytes))
+            .unwrap_or(0)
     }
 
     /// Sets the transaction ID in the payload header.
     #[inline]
     pub fn set_txid(&mut self, txid: zx_txid_t) {
-        if (self.data_size as usize) >= size_of::<zx_txid_t>() {
-            // SAFETY: `self` is located at the start of the first buffer's data.
-            // `self.payload_offset` is within the contiguous region of the first buffer, and the
-            // payload contains at least `size_of::<zx_txid_t>()` bytes.
-            unsafe {
-                (self as *mut Self)
-                    .cast::<u8>()
-                    .add(self.payload_offset as usize)
-                    .cast::<zx_txid_t>()
-                    .write_unaligned(txid);
-            }
+        if let Some(dst) =
+            self.start_of_payload_mut().first_chunk_mut::<{ size_of::<zx_txid_t>() }>()
+        {
+            *dst = txid.to_ne_bytes();
         }
     }
 
@@ -261,9 +288,9 @@ impl MessagePacket {
         }
 
         // The payload comes after the handles.
-        let payload_offset = HANDLES_OFFSET + num_handles * size_of::<*mut c_void>();
+        let payload_offset = Self::calc_payload_offset(num_handles);
 
-        // MessagePackets lives *inside* a list of buffers.  The first buffer holds the
+        // MessagePackets lives *inside* a list of buffers. The first buffer holds the
         // MessagePacket object, followed by its handles (if any), and finally the payload data.
         let mut chain = BufferChain::alloc(payload_offset + data_size)?;
         // SAFETY: `chain` is valid and pinned inside the first buffer.
@@ -271,52 +298,35 @@ impl MessagePacket {
         debug_assert!(!chain_pin.is_empty());
         chain_pin.as_mut().skip(payload_offset);
 
-        let data = chain_pin.first_buffer_data_mut();
-        // SAFETY: `data` has length at least `CONTIGUOUS_SIZE` and `HANDLES_OFFSET` is 48.
-        let handles = unsafe { data.add(HANDLES_OFFSET).cast::<*mut c_void>() };
+        // Construct the MessagePacket into the first buffer immediately after `BufferChain`.
+        // SAFETY: `BufferChain` occupies the first `BUFFER_CHAIN_SIZE` bytes of the first buffer's
+        // `raw_data`, so `chain.as_ptr().add(1)` points directly to `first_buffer_data_mut()`,
+        // which is 8-byte aligned and has `CONTIGUOUS_SIZE` usable bytes.
+        let packet = unsafe { chain.as_ptr().add(1).cast::<MessagePacket>() };
+        debug_assert_eq!(packet.cast::<u8>(), chain_pin.first_buffer_data_mut());
 
-        // Construct the MessagePacket into the first buffer.
-        let packet = data.cast::<MessagePacket>();
-
-        let init = pin_init!(MessagePacket {
-            node: DoublyLinkedListNode::new(),
-            buffer_chain: chain,
-            handles,
-            data_size: data_size as u32,
-            payload_offset: payload_offset as u32,
-            num_handles: num_handles as u16,
-            owns_handles: false,
-        });
-
-        // SAFETY: `packet` points into the first buffer and is properly aligned and sized.
-        if unsafe { init.__pinned_init(packet) }.is_err() {
-            // SAFETY: `chain` is valid and was allocated by `BufferChain::alloc`.
-            unsafe { BufferChain::free(chain) };
-            return Err(Status::NO_MEMORY);
-        }
         // The MessagePacket now owns the BufferChain and msg owns the MessagePacket.
-
-        // SAFETY: `packet` was freshly constructed and points to a valid MessagePacket.
-        unsafe { Ok(MessagePacketPtr::from_raw(packet)) }
+        // SAFETY: `packet` points into the first buffer and is properly aligned and sized.
+        unsafe {
+            packet.write(MessagePacket {
+                node: DoublyLinkedListNode::new(),
+                buffer_chain: chain,
+                data_size: data_size as u32,
+                num_handles: num_handles as u16,
+                owns_handles: false,
+            });
+            Ok(MessagePacketPtr::from_raw(packet))
+        }
     }
 
     #[inline]
-    fn copy_iovec_chunk(
-        user_iovecs: UserInPtr<zx_channel_iovec_t>,
-        count: usize,
-        dst: &mut [zx_channel_iovec_t; IOVEC_CHUNK_SIZE],
-    ) -> Result<(), Status> {
-        if count == 0 {
-            return Ok(());
-        }
-        let bytes_to_copy = count * size_of::<zx_channel_iovec_t>();
-        let user_bytes: UserInPtr<u8> = user_iovecs.reinterpret();
-        // SAFETY: `dst` has storage for `IOVEC_CHUNK_SIZE` iovecs, which is >= `bytes_to_copy`.
-        let dst_bytes = unsafe {
-            slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<MaybeUninit<u8>>(), bytes_to_copy)
-        };
-        user_bytes.copy_slice_from_user(dst_bytes)?;
-        Ok(())
+    const fn calc_payload_offset(num_handles: usize) -> usize {
+        HANDLES_OFFSET + num_handles * size_of::<*mut c_void>()
+    }
+
+    #[inline]
+    fn payload_offset(&self) -> usize {
+        Self::calc_payload_offset(self.num_handles as usize)
     }
 
     #[inline]
@@ -327,10 +337,11 @@ impl MessagePacket {
     }
 
     #[inline]
-    fn payload(&self) -> *const u8 {
-        // SAFETY: `self` is located at the start of the first buffer's data.
-        // `self.payload_offset` is within the contiguous region of the first buffer.
-        unsafe { (self as *const Self).cast::<u8>().add(self.payload_offset as usize) }
+    fn contiguous_payload_size(&self) -> usize {
+        // The first Buffer of a BufferChain will contain the handles (if any are present) and at
+        // least some of the message's payload. How much of message payload? Up to CONTIGUOUS_SIZE
+        // minus the payload's offset.
+        cmp::min(CONTIGUOUS_SIZE - self.payload_offset(), self.data_size as usize)
     }
 
     #[inline]
@@ -341,13 +352,17 @@ impl MessagePacket {
     /// Returns a const pointer to the array of handle pointers attached to this message packet.
     #[inline]
     pub fn handles(&self) -> *const *mut c_void {
-        self.handles.cast()
+        // SAFETY: Handles are stored immediately after `MessagePacket` at `HANDLES_OFFSET`
+        // inside the first buffer's contiguous data region.
+        unsafe { ptr::from_ref(self).cast::<u8>().add(HANDLES_OFFSET).cast() }
     }
 
     /// Returns a mutable pointer to the array of handle pointers attached to this message packet.
     #[inline]
     pub fn handles_mut(&mut self) -> *mut *mut c_void {
-        self.handles
+        // SAFETY: Handles are stored immediately after `MessagePacket` at `HANDLES_OFFSET`
+        // inside the first buffer's contiguous data region.
+        unsafe { ptr::from_mut(self).cast::<u8>().add(HANDLES_OFFSET).cast() }
     }
 
     /// Sets whether this packet owns its attached handles and should delete them on recycle.
@@ -361,39 +376,57 @@ impl MessagePacket {
     #[inline]
     pub fn start_of_payload(&self) -> &[u8] {
         // The first chunk of payload. Eventually we'd want to actually get the whole message out.
-        // The first Buffer of a BufferChain will contain the handles (if any are present) and at
-        // least some of the message's payload. How much of message payload? Up to CONTIGUOUS_SIZE
-        // minus the payload's offset.
-        let size = cmp::min(
-            CONTIGUOUS_SIZE.saturating_sub(self.payload_offset as usize),
-            self.data_size as usize,
-        );
-        // SAFETY: The first buffer contains at least `payload_offset + size` contiguous bytes.
-        unsafe { slice::from_raw_parts(self.payload(), size) }
+        // SAFETY: `self` is at the start of the first buffer's data, which contains at least
+        // `payload_offset() + contiguous_payload_size()` contiguous bytes.
+        unsafe {
+            let ptr = ptr::from_ref(self).cast::<u8>().add(self.payload_offset());
+            slice::from_raw_parts(ptr, self.contiguous_payload_size())
+        }
+    }
+
+    #[inline]
+    fn start_of_payload_uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: `self` is at the start of the first buffer's data, which contains at least
+        // `payload_offset() + contiguous_payload_size()` contiguous bytes.
+        unsafe {
+            let ptr = ptr::from_mut(self).cast::<MaybeUninit<u8>>().add(self.payload_offset());
+            slice::from_raw_parts_mut(ptr, self.contiguous_payload_size())
+        }
+    }
+
+    #[inline]
+    fn start_of_payload_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `self` is at the start of the first buffer's data, which contains at least
+        // `payload_offset() + contiguous_payload_size()` contiguous bytes.
+        unsafe {
+            let ptr = ptr::from_mut(self).cast::<u8>().add(self.payload_offset());
+            slice::from_raw_parts_mut(ptr, self.contiguous_payload_size())
+        }
+    }
+
+    #[cold]
+    fn drop_handles(&mut self) {
+        // SAFETY: `handles_mut()` points to `num_handles` handle pointers owned by `self`.
+        let handles = unsafe { slice::from_raw_parts_mut(self.handles_mut(), self.num_handles()) };
+        for &mut raw in handles {
+            // Delete the handle via HandleOwner dtor.
+            // SAFETY: Each entry is a valid handle pointer (or null) owned by `self`.
+            unsafe {
+                drop(HandleOwner::from_raw(raw));
+            }
+        }
     }
 }
 
 // A private destructor helps to make sure that only our custom deleter is ever used to destroy this
 // object which, in turn, makes it very difficult to not properly recycle the object.
-#[pinned_drop]
-impl PinnedDrop for MessagePacket {
-    fn drop(self: Pin<&mut Self>) {
-        // SAFETY: We have pinned mutable access during drop.
-        let this = unsafe { self.get_unchecked_mut() };
-        debug_assert!(!this.in_container());
+impl Drop for MessagePacket {
+    #[inline]
+    fn drop(&mut self) {
+        debug_assert!(!self.in_container());
 
-        if this.owns_handles {
-            for ix in 0..this.num_handles as usize {
-                // Delete the handle via HandleOwner dtor.
-                // SAFETY: `this.handles` points to an array of `num_handles` handle pointers.
-                let handle_ptr = unsafe { *this.handles.add(ix) };
-                if !handle_ptr.is_null() {
-                    // SAFETY: handle_ptr was owned by this MessagePacket.
-                    unsafe {
-                        let _ = HandleOwner::from_raw(handle_ptr);
-                    }
-                }
-            }
+        if self.owns_handles {
+            self.drop_handles();
         }
     }
 }
@@ -487,47 +520,37 @@ impl Drop for MessagePacketPtr {
     }
 }
 
-/// Creates a `MessagePacket` with user payload data and space for `num_handles` handles.
-///
-/// # Safety
-///
-/// `out` must point to valid writable memory capable of storing `*mut MessagePacket`.
+/// Creates a `MessagePacket` with userspace payload data and space for `num_handles` handles.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_create_user(
+pub extern "C" fn rust_message_packet_create_user(
     data_uaddr: usize,
     data_size: usize,
     num_handles: usize,
-    out: *mut *mut MessagePacket,
+    out: &mut *mut MessagePacket,
 ) -> zx_types::zx_status_t {
-    let user_in = UserInPtr::new(core::ptr::with_exposed_provenance::<u8>(data_uaddr));
+    let user_in = UserInPtr::new(ptr::with_exposed_provenance::<u8>(data_uaddr));
     match MessagePacket::create_from_user(user_in, data_size, num_handles) {
         Ok(packet) => {
-            // SAFETY: Caller guarantees `out` is valid writable memory.
-            unsafe { *out = packet.into_raw() };
+            *out = packet.into_raw();
             zx_types::ZX_OK
         }
         Err(status) => status.into_raw(),
     }
 }
 
-/// Creates a `MessagePacket` with user iovecs and space for `num_handles` handles.
-///
-/// # Safety
-///
-/// `out` must point to valid writable memory capable of storing `*mut MessagePacket`.
+/// Creates a `MessagePacket` from userspace iovecs and space for `num_handles` handles.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_create_iovecs(
+pub extern "C" fn rust_message_packet_create_iovecs(
     iovecs_uaddr: usize,
     num_iovecs: usize,
     num_handles: usize,
-    out: *mut *mut MessagePacket,
+    out: &mut *mut MessagePacket,
 ) -> zx_types::zx_status_t {
     let user_iovecs =
-        UserInPtr::new(core::ptr::with_exposed_provenance::<zx_channel_iovec_t>(iovecs_uaddr));
+        UserInPtr::new(ptr::with_exposed_provenance::<zx_channel_iovec_t>(iovecs_uaddr));
     match MessagePacket::create_from_iovecs(user_iovecs, num_iovecs, num_handles) {
         Ok(packet) => {
-            // SAFETY: Caller guarantees `out` is valid writable memory.
-            unsafe { *out = packet.into_raw() };
+            *out = packet.into_raw();
             zx_types::ZX_OK
         }
         Err(status) => status.into_raw(),
@@ -539,13 +562,12 @@ pub unsafe extern "C" fn rust_message_packet_create_iovecs(
 /// # Safety
 ///
 /// - If `data` is non-null and `data_size > 0`, `data` must point to `data_size` valid bytes.
-/// - `out` must point to valid writable memory capable of storing `*mut MessagePacket`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_message_packet_create_kernel(
     data: *const u8,
     data_size: usize,
     num_handles: usize,
-    out: *mut *mut MessagePacket,
+    out: &mut *mut MessagePacket,
 ) -> zx_types::zx_status_t {
     let payload = if data.is_null() || data_size == 0 {
         &[]
@@ -555,8 +577,7 @@ pub unsafe extern "C" fn rust_message_packet_create_kernel(
     };
     match MessagePacket::create_from_kernel(payload, num_handles) {
         Ok(packet) => {
-            // SAFETY: Caller guarantees `out` is valid writable memory.
-            unsafe { *out = packet.into_raw() };
+            *out = packet.into_raw();
             zx_types::ZX_OK
         }
         Err(status) => status.into_raw(),
@@ -580,142 +601,93 @@ pub unsafe extern "C" fn rust_message_packet_delete(packet: *mut MessagePacket) 
 }
 
 /// Copies payload data to userspace memory.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_copy_data_to(
-    packet: *const MessagePacket,
+pub extern "C" fn rust_message_packet_copy_data_to(
+    packet: &MessagePacket,
     buf_uaddr: usize,
 ) -> zx_types::zx_status_t {
-    let user_out = UserOutPtr::new(core::ptr::with_exposed_provenance_mut::<u8>(buf_uaddr));
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    match unsafe { (*packet).copy_data_to(user_out) } {
+    let user_out = UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(buf_uaddr));
+    match packet.copy_data_to(user_out) {
         Ok(()) => zx_types::ZX_OK,
         Err(status) => status.into_raw(),
     }
 }
 
 /// Returns the size of the payload in bytes.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_get_data_size(packet: *const MessagePacket) -> usize {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    unsafe { (*packet).data_size() }
+pub extern "C" fn rust_message_packet_get_data_size(packet: &MessagePacket) -> usize {
+    packet.data_size()
 }
 
 /// Returns the number of handles attached to the packet.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_get_num_handles(
-    packet: *const MessagePacket,
-) -> usize {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    unsafe { (*packet).num_handles() }
+pub extern "C" fn rust_message_packet_get_num_handles(packet: &MessagePacket) -> usize {
+    packet.num_handles()
 }
 
 /// Returns a const pointer to the attached handle pointers.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_get_handles(
-    packet: *const MessagePacket,
-) -> *const *mut c_void {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    unsafe { (*packet).handles() }
+pub extern "C" fn rust_message_packet_get_handles(packet: &MessagePacket) -> *const *mut c_void {
+    packet.handles()
 }
 
 /// Returns a mutable pointer to the attached handle pointers.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_get_mutable_handles(
-    packet: *mut MessagePacket,
+pub extern "C" fn rust_message_packet_get_mutable_handles(
+    packet: &mut MessagePacket,
 ) -> *mut *mut c_void {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    unsafe { (*packet).handles_mut() }
+    packet.handles_mut()
 }
 
 /// Sets whether this packet owns its attached handles.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_set_owns_handles(
-    packet: *mut MessagePacket,
+pub extern "C" fn rust_message_packet_set_owns_handles(
+    packet: &mut MessagePacket,
     owns_handles: bool,
 ) {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    unsafe { (*packet).set_owns_handles(owns_handles) };
+    packet.set_owns_handles(owns_handles);
 }
 
 /// Returns the transaction ID from the packet payload.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_get_txid(packet: *const MessagePacket) -> zx_txid_t {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    unsafe { (*packet).get_txid() }
+pub extern "C" fn rust_message_packet_get_txid(packet: &MessagePacket) -> zx_txid_t {
+    packet.get_txid()
 }
 
 /// Sets the transaction ID in the packet payload.
-///
-/// # Safety
-///
-/// `packet` must point to a valid, initialized `MessagePacket`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_set_txid(packet: *mut MessagePacket, txid: zx_txid_t) {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    unsafe { (*packet).set_txid(txid) };
+pub extern "C" fn rust_message_packet_set_txid(packet: &mut MessagePacket, txid: zx_txid_t) {
+    packet.set_txid(txid);
 }
 
 /// Returns the first contiguous chunk of the payload.
-///
-/// # Safety
-///
-/// - `packet` must point to a valid, initialized `MessagePacket`.
-/// - `out_ptr` and `out_len` must point to valid writable memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_get_start_of_payload(
-    packet: *const MessagePacket,
-    out_ptr: *mut *const u8,
-    out_len: *mut usize,
+pub extern "C" fn rust_message_packet_get_start_of_payload(
+    packet: &MessagePacket,
+    out_ptr: &mut *const u8,
+    out_len: &mut usize,
 ) {
-    // SAFETY: Caller guarantees `packet` is a valid pointer to a MessagePacket.
-    let slice = unsafe { (*packet).start_of_payload() };
-    // SAFETY: Caller guarantees `out_ptr` and `out_len` are valid writable memory.
-    unsafe {
-        *out_ptr = slice.as_ptr();
-        *out_len = slice.len();
-    }
+    let slice = packet.start_of_payload();
+    *out_ptr = slice.as_ptr();
+    *out_len = slice.len();
 }
 
 /// In-tree kernel unit tests for `MessagePacket`.
 #[cfg(ktest)]
 #[unittest::suite(name = "message_packet_rust")]
 mod tests {
-    use super::{CONTIGUOUS_SIZE, IOVEC_CHUNK_SIZE, MessagePacket, MessagePacketPtr};
+    use super::{
+        CONTIGUOUS_SIZE, IOVEC_CHUNK_SIZE, MessagePacket, MessagePacketPtr, RawChannelIovec,
+    };
     use crate::user_copy::{UserInPtr, UserOutPtr};
     use crate::user_memory::UserMemory;
-    use core::mem::{self, MaybeUninit, size_of};
+    use core::mem::{MaybeUninit, size_of};
     use core::{array, cmp, ptr, slice};
     use fbl::DoublyLinkedList;
     use pin_init::stack_pin_init;
     use unittest::{expect_eq, expect_false, expect_ok, expect_true, unwrap_ok};
+    use zerocopy::IntoBytes;
+    use zx_status::Status;
     use zx_types::{
         ZX_CHANNEL_MAX_MSG_BYTES, ZX_CHANNEL_MAX_MSG_HANDLES, zx_channel_iovec_t, zx_txid_t,
     };
@@ -728,6 +700,18 @@ mod tests {
         flags: [u8; 3],
         magic: u8,
         ordinal: u64,
+    }
+
+    fn create_user_memory(size: usize) -> Result<UserMemory, Status> {
+        let mem = UserMemory::create(size).ok_or(Status::NO_MEMORY)?;
+        mem.commit_and_map(0..size)?;
+        Ok(mem)
+    }
+
+    macro_rules! create_user_memory {
+        ($size:expr) => {
+            unwrap_ok!(create_user_memory($size))
+        };
     }
 
     fn fill_user_memory(mem: &UserMemory, byte: u8, offset: usize, size: usize) -> bool {
@@ -763,15 +747,6 @@ mod tests {
         true
     }
 
-    fn iovec_as_bytes(iovec: &zx_channel_iovec_t) -> &[u8] {
-        iovec_slice_as_bytes(slice::from_ref(iovec))
-    }
-
-    fn iovec_slice_as_bytes(iovecs: &[zx_channel_iovec_t]) -> &[u8] {
-        // SAFETY: `zx_channel_iovec_t` contains plain-old-data bytes.
-        unsafe { slice::from_raw_parts(iovecs.as_ptr().cast::<u8>(), mem::size_of_val(iovecs)) }
-    }
-
     /// Tests creating a MessagePacket from kernel data, matching C++ create_void_star.
     #[test]
     fn test_create_from_kernel() {
@@ -783,8 +758,7 @@ mod tests {
         expect_eq!(packet.num_handles(), 0);
         expect_true!(packet.get_txid() != 0);
 
-        let mem_out = unwrap_ok!(UserMemory::create(SIZE).ok_or(Status::NO_MEMORY));
-        unwrap_ok!(mem_out.commit_and_map(0..SIZE));
+        let mem_out = create_user_memory!(SIZE);
         let user_out = UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(mem_out.base()));
         expect_ok!(packet.copy_data_to(user_out));
 
@@ -799,8 +773,7 @@ mod tests {
     /// Tests creating a zero-length packet from user memory, matching C++ create_zero.
     #[test]
     fn test_create_zero() {
-        let mem = unwrap_ok!(UserMemory::create(1).ok_or(Status::NO_MEMORY));
-        unwrap_ok!(mem.commit_and_map(0..1));
+        let mem = create_user_memory!(1);
         let user_in = UserInPtr::new(ptr::with_exposed_provenance::<u8>(mem.base()));
         let user_out = UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(mem.base()));
 
@@ -825,8 +798,7 @@ mod tests {
     /// Tests that creating a MessagePacket with too many handles fails with OUT_OF_RANGE.
     #[test]
     fn test_create_too_many_handles() {
-        let mem = unwrap_ok!(UserMemory::create(1).ok_or(Status::NO_MEMORY));
-        unwrap_ok!(mem.commit_and_map(0..1));
+        let mem = create_user_memory!(1);
         let user_in = UserInPtr::new(ptr::with_exposed_provenance::<u8>(mem.base()));
         let res_user =
             MessagePacket::create_from_user(user_in, 1, ZX_CHANNEL_MAX_MSG_HANDLES as usize + 1);
@@ -844,18 +816,14 @@ mod tests {
         expect_eq!(packet.handles(), packet.handles_mut().cast_const());
         // Initialize handles to null pointers so recycle doesn't attempt to drop invalid pointers.
         unsafe {
-            let handles = packet.handles_mut();
-            *handles = ptr::null_mut();
-            *handles.add(1) = ptr::null_mut();
+            slice::from_raw_parts_mut(packet.handles_mut(), 2).fill(ptr::null_mut());
         }
         packet.set_owns_handles(true);
         packet.set_owns_handles(false);
 
         let mut packet2 = unwrap_ok!(MessagePacket::create_from_kernel(&[], 2));
         unsafe {
-            let handles = packet2.handles_mut();
-            *handles = ptr::null_mut();
-            *handles.add(1) = ptr::null_mut();
+            slice::from_raw_parts_mut(packet2.handles_mut(), 2).fill(ptr::null_mut());
         }
         packet2.set_owns_handles(true);
     }
@@ -864,9 +832,7 @@ mod tests {
     #[test]
     fn test_create_from_user_and_copy_out() {
         let size = 128;
-        let mem_in =
-            unwrap_ok!(UserMemory::create(size).ok_or(Status::NO_MEMORY), "failed to alloc");
-        unwrap_ok!(mem_in.commit_and_map(0..size), "failed to commit user memory");
+        let mem_in = create_user_memory!(size);
         let payload: [u8; 128] = array::from_fn(|i| (i as u8).wrapping_mul(3));
         unwrap_ok!(mem_in.vmo_write(&payload, 0), "failed to write payload");
 
@@ -878,9 +844,7 @@ mod tests {
         expect_eq!(packet.data_size(), size);
         expect_eq!(packet.num_handles(), 0);
 
-        let mem_out =
-            unwrap_ok!(UserMemory::create(size).ok_or(Status::NO_MEMORY), "failed to alloc");
-        unwrap_ok!(mem_out.commit_and_map(0..size), "failed to commit user memory");
+        let mem_out = create_user_memory!(size);
         let user_out = UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(mem_out.base()));
         expect_ok!(packet.copy_data_to(user_out));
 
@@ -896,8 +860,7 @@ mod tests {
         const SIZE: usize = 62234;
         const NUM_HANDLES: usize = 64;
 
-        let mem_in = unwrap_ok!(UserMemory::create(SIZE).ok_or(Status::NO_MEMORY));
-        unwrap_ok!(mem_in.commit_and_map(0..SIZE));
+        let mem_in = create_user_memory!(SIZE);
         expect_true!(fill_user_memory(&mem_in, b'A', 0, SIZE));
 
         let user_in = UserInPtr::new(ptr::with_exposed_provenance::<u8>(mem_in.base()));
@@ -906,8 +869,7 @@ mod tests {
         expect_eq!(packet.num_handles(), NUM_HANDLES);
         expect_true!(packet.get_txid() != 0);
 
-        let mem_out = unwrap_ok!(UserMemory::create(SIZE).ok_or(Status::NO_MEMORY));
-        unwrap_ok!(mem_out.commit_and_map(0..SIZE));
+        let mem_out = create_user_memory!(SIZE);
         let user_out = UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(mem_out.base()));
         expect_ok!(packet.copy_data_to(user_out));
 
@@ -921,8 +883,7 @@ mod tests {
         let chunk2 = b"chunk two";
         let total_size = chunk1.len() + chunk2.len();
 
-        let mem = unwrap_ok!(UserMemory::create(4096).ok_or(Status::NO_MEMORY), "failed to alloc");
-        unwrap_ok!(mem.commit_and_map(0..4096), "failed to commit user memory");
+        let mem = create_user_memory!(4096);
 
         let offset_iovecs = 0;
         let offset_chunk1 = 128;
@@ -932,19 +893,19 @@ mod tests {
         unwrap_ok!(mem.vmo_write(chunk2, offset_chunk2), "failed to write chunk2");
 
         let base = mem.base();
-        let mut iovec1 = zx_channel_iovec_t::default();
-        iovec1.buffer = ptr::with_exposed_provenance::<u8>(base + offset_chunk1 as usize);
-        iovec1.capacity = chunk1.len() as u32;
-
-        let mut iovec2 = zx_channel_iovec_t::default();
-        iovec2.buffer = ptr::with_exposed_provenance::<u8>(base + offset_chunk2 as usize);
-        iovec2.capacity = chunk2.len() as u32;
-
-        let iovecs = [iovec1, iovec2];
-        unwrap_ok!(
-            mem.vmo_write(iovec_slice_as_bytes(&iovecs), offset_iovecs),
-            "failed to write iovecs"
-        );
+        let iovecs = [
+            RawChannelIovec {
+                buffer: base + offset_chunk1 as usize,
+                capacity: chunk1.len() as u32,
+                reserved: 0,
+            },
+            RawChannelIovec {
+                buffer: base + offset_chunk2 as usize,
+                capacity: chunk2.len() as u32,
+                reserved: 0,
+            },
+        ];
+        unwrap_ok!(mem.vmo_write(iovecs.as_bytes(), offset_iovecs), "failed to write iovecs");
 
         let user_iovecs = UserInPtr::new(ptr::with_exposed_provenance::<zx_channel_iovec_t>(
             base + offset_iovecs as usize,
@@ -955,9 +916,7 @@ mod tests {
         );
         expect_eq!(packet.data_size(), total_size);
 
-        let mem_out =
-            unwrap_ok!(UserMemory::create(total_size).ok_or(Status::NO_MEMORY), "failed to alloc");
-        unwrap_ok!(mem_out.commit_and_map(0..total_size), "failed to commit user memory");
+        let mem_out = create_user_memory!(total_size);
         let user_out = UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(mem_out.base()));
         expect_ok!(packet.copy_data_to(user_out));
 
@@ -973,8 +932,7 @@ mod tests {
             let n_iovecs = $num_iovecs;
             let n_handles = $num_handles;
             let num_bytes: usize = n_iovecs * (n_iovecs - 1) / 2;
-            let bytes_mem = unwrap_ok!(UserMemory::create(num_bytes).ok_or(Status::NO_MEMORY));
-            unwrap_ok!(bytes_mem.commit_and_map(0..num_bytes));
+            let bytes_mem = create_user_memory!(num_bytes);
 
             // Populate bytes with incrementing values: bytes[i] = i as u8.
             let mut chunk = [0u8; 256];
@@ -990,32 +948,32 @@ mod tests {
 
             // Create iovecs where iovec[i] has capacity i.
             let iovec_mem_size = n_iovecs * size_of::<zx_channel_iovec_t>();
-            let iovec_mem = unwrap_ok!(UserMemory::create(iovec_mem_size).ok_or(Status::NO_MEMORY));
-            unwrap_ok!(iovec_mem.commit_and_map(0..iovec_mem_size));
+            let iovec_mem = create_user_memory!(iovec_mem_size);
 
             let mut byte_offset: usize = 0;
             for i in 0..n_iovecs {
-                let mut iovec = zx_channel_iovec_t::default();
-                iovec.buffer = ptr::with_exposed_provenance::<u8>(bytes_mem.base() + byte_offset);
-                iovec.capacity = i as u32;
+                let iovec = RawChannelIovec {
+                    buffer: bytes_mem.base() + byte_offset,
+                    capacity: i as u32,
+                    reserved: 0,
+                };
                 byte_offset += i;
-                unwrap_ok!(iovec_mem.vmo_write(
-                    iovec_as_bytes(&iovec),
-                    (i * size_of::<zx_channel_iovec_t>()) as u64,
-                ));
+                unwrap_ok!(
+                    iovec_mem
+                        .vmo_write(iovec.as_bytes(), (i * size_of::<zx_channel_iovec_t>()) as u64,)
+                );
             }
 
             let user_iovecs = UserInPtr::new(ptr::with_exposed_provenance::<zx_channel_iovec_t>(
                 iovec_mem.base(),
             ));
             let packet =
-                unwrap_ok!(MessagePacket::create_from_iovecs(user_iovecs, n_iovecs, n_handles,));
+                unwrap_ok!(MessagePacket::create_from_iovecs(user_iovecs, n_iovecs, n_handles));
 
             expect_eq!(packet.num_handles(), n_handles);
             expect_eq!(packet.data_size(), num_bytes);
 
-            let result_mem = unwrap_ok!(UserMemory::create(num_bytes).ok_or(Status::NO_MEMORY));
-            unwrap_ok!(result_mem.commit_and_map(0..num_bytes));
+            let result_mem = create_user_memory!(num_bytes);
             let user_out =
                 UserOutPtr::new(ptr::with_exposed_provenance_mut::<u8>(result_mem.base()));
             expect_ok!(packet.copy_data_to(user_out));
@@ -1063,18 +1021,11 @@ mod tests {
     #[test]
     fn test_iovec_non_zero_reserved() {
         // Test bounded path (1 iovec).
-        let mem = unwrap_ok!(UserMemory::create(4096).ok_or(Status::NO_MEMORY));
-        unwrap_ok!(mem.commit_and_map(0..4096));
+        let mem = create_user_memory!(4096);
         let base = mem.base();
 
-        let mut iovec = zx_channel_iovec_t::default();
-        iovec.buffer = ptr::with_exposed_provenance::<u8>(base + 1024);
-        iovec.capacity = 16;
-        let mut iovec_bytes = [0u8; size_of::<zx_channel_iovec_t>()];
-        iovec_bytes.copy_from_slice(iovec_as_bytes(&iovec));
-        // Set reserved field (bytes 12..16) to non-zero.
-        iovec_bytes[12] = 1;
-        unwrap_ok!(mem.vmo_write(&iovec_bytes, 0));
+        let iovec = RawChannelIovec { buffer: base + 1024, capacity: 16, reserved: 1 };
+        unwrap_ok!(mem.vmo_write(iovec.as_bytes(), 0));
 
         let user_iovecs = UserInPtr::new(ptr::with_exposed_provenance::<zx_channel_iovec_t>(base));
         let res_bounded = MessagePacket::create_from_iovecs(user_iovecs, 1, 0);
@@ -1082,12 +1033,8 @@ mod tests {
 
         // Test unbounded path (> IOVEC_CHUNK_SIZE iovecs).
         let num_iovecs = IOVEC_CHUNK_SIZE + 1;
-        let mem_unbounded = unwrap_ok!(
-            UserMemory::create(num_iovecs * size_of::<zx_channel_iovec_t>())
-                .ok_or(Status::NO_MEMORY)
-        );
-        unwrap_ok!(mem_unbounded.commit_and_map(0..num_iovecs * size_of::<zx_channel_iovec_t>()));
-        unwrap_ok!(mem_unbounded.vmo_write(&iovec_bytes, 0));
+        let mem_unbounded = create_user_memory!(num_iovecs * size_of::<zx_channel_iovec_t>());
+        unwrap_ok!(mem_unbounded.vmo_write(iovec.as_bytes(), 0));
         let user_iovecs_unbounded = UserInPtr::new(ptr::with_exposed_provenance::<
             zx_channel_iovec_t,
         >(mem_unbounded.base()));
@@ -1122,15 +1069,14 @@ mod tests {
     #[test]
     fn test_start_of_payload_max_message() {
         let max_msg_bytes = ZX_CHANNEL_MAX_MSG_BYTES as usize;
-        let mem = unwrap_ok!(UserMemory::create(max_msg_bytes).ok_or(Status::NO_MEMORY));
-        unwrap_ok!(mem.commit_and_map(0..max_msg_bytes));
+        let mem = create_user_memory!(max_msg_bytes);
         expect_true!(fill_user_memory(&mem, b'A', 0, max_msg_bytes));
 
         let user_in = UserInPtr::new(ptr::with_exposed_provenance::<u8>(mem.base()));
         let packet = unwrap_ok!(MessagePacket::create_from_user(user_in, max_msg_bytes, 0));
         expect_eq!(packet.data_size(), max_msg_bytes);
 
-        let expected_len = CONTIGUOUS_SIZE - (packet.payload_offset as usize);
+        let expected_len = CONTIGUOUS_SIZE - packet.payload_offset();
         let start = packet.start_of_payload();
         expect_eq!(start.len(), expected_len);
         for &b in start {

@@ -1426,7 +1426,7 @@ inline usb_pd::ConfigChannelTermination ConfigChannelTerminationFromFixedCompara
 constexpr uint8_t TransmitToken::PacketData(int8_t data_bytes) {
   ZX_DEBUG_ASSERT_MSG(data_bytes >= 2, "Missing header bytes");
   ZX_DEBUG_ASSERT_MSG(data_bytes <= 30, "At most 2 header bytes and 7x4 data object bytes");
-  return (0b100 << 5) | data_bytes;
+  return static_cast<uint8_t>((0b100 << 5) | data_bytes);
 }
 
 // static

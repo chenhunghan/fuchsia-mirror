@@ -8,7 +8,6 @@ import logging
 import os
 import socket
 import subprocess
-import tarfile
 import tempfile
 import threading
 import time
@@ -313,7 +312,6 @@ class AdbServer:
         assert self._serial_id
         assert self._process is None
         assert not self._server_is_ready.is_set(), "Already running"
-        temp_keys_dir = None
 
         try:
             self._kill_shared_server()
@@ -349,32 +347,9 @@ class AdbServer:
                 server_env["ADB_MDNS_OPENSCREEN"] = "0"
 
                 if self._vendor_keys_path:
-                    if self._vendor_keys_path.endswith(".tar"):
-                        temp_keys_dir = tempfile.TemporaryDirectory()
-                        target_dir = Path(temp_keys_dir.name).resolve()
-                        with tarfile.open(self._vendor_keys_path, "r") as tar:
-                            for member in tar.getmembers():
-                                if member.issym() or member.islnk():
-                                    raise adb_errors.AdbServerError(
-                                        f"Symbolic or hard links are not allowed in key tar: {member.name}"
-                                    )
-                                # Prevent path traversal
-                                member_path = target_dir.joinpath(
-                                    member.name
-                                ).resolve()
-                                try:
-                                    member_path.relative_to(target_dir)
-                                except ValueError:
-                                    raise adb_errors.AdbServerError(
-                                        f"Unsafe member in tar file: {member.name}"
-                                    )
-                            tar.extractall(path=temp_keys_dir.name)
-                        server_env["ADB_VENDOR_KEYS"] = temp_keys_dir.name
-                        _LOGGER.info(
-                            f"Extracted adb keys from {self._vendor_keys_path} to {temp_keys_dir.name}"
-                        )
-                    else:
-                        server_env["ADB_VENDOR_KEYS"] = self._vendor_keys_path
+                    server_env["ADB_VENDOR_KEYS"] = self._vendor_keys_path
+                else:
+                    server_env.pop("ADB_VENDOR_KEYS", None)
 
                 log_file_path = self._output_dir / f"{server_name}_log.txt"
                 output_file = open(log_file_path, "w", encoding="utf-8")
@@ -437,11 +412,6 @@ class AdbServer:
             _LOGGER.info(f"{server_name} output is saved to {log_file_path}")
 
         finally:
-            if temp_keys_dir:
-                try:
-                    temp_keys_dir.cleanup()
-                except Exception as e:
-                    _LOGGER.warning(f"Failed to cleanup temp keys dir: {e}")
             with self._lock:
                 if self._process:
                     if self._process.poll() is None:

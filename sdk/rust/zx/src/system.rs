@@ -201,6 +201,35 @@ pub fn system_get_feature_count(kind: FeatureKind) -> Result<u32, Status> {
         .and_then(|_status| Ok(raw_features))
 }
 
+/// The types of system events that may be requested via `system_get_event`.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SystemEventKind {
+    OutOfMemory = sys::ZX_SYSTEM_EVENT_OUT_OF_MEMORY,
+    MemoryPressureCritical = sys::ZX_SYSTEM_EVENT_MEMORY_PRESSURE_CRITICAL,
+    MemoryPressureWarning = sys::ZX_SYSTEM_EVENT_MEMORY_PRESSURE_WARNING,
+    MemoryPressureNormal = sys::ZX_SYSTEM_EVENT_MEMORY_PRESSURE_NORMAL,
+    ImminentOutOfMemory = sys::ZX_SYSTEM_EVENT_IMMINENT_OUT_OF_MEMORY,
+}
+
+/// Retrieve a system event handle from the kernel.
+///
+/// Wraps the
+/// [zx_system_get_event](https://fuchsia.dev/fuchsia-src/reference/syscalls/system_get_event)
+/// syscall.
+pub fn system_get_event(
+    root_job: &crate::Job,
+    kind: SystemEventKind,
+) -> Result<crate::Event, Status> {
+    let mut event_handle = sys::ZX_HANDLE_INVALID;
+    // SAFETY: `root_job` is a valid job handle, and `event_handle` is a valid out-pointer.
+    Status::ok(unsafe {
+        sys::zx_system_get_event(root_job.raw_handle(), kind as u32, &mut event_handle)
+    })?;
+    // SAFETY: `event_handle` is a valid event handle returned by `zx_system_get_event` on success.
+    Ok(unsafe { crate::Event::from(crate::NullableHandle::from_raw(event_handle)) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +254,14 @@ mod tests {
         assert!(system_get_feature_flags::<AddressTaggingFeatureFlags>().is_ok());
         assert!(system_get_feature_count(FeatureKind::HardwareBreakpointCount).is_ok());
         assert!(system_get_feature_count(FeatureKind::HardwareWatchpointCount).is_ok());
+    }
+
+    #[test]
+    fn system_get_event_access_denied() {
+        let job = fuchsia_runtime::job_default();
+        assert_eq!(
+            zx::system_get_event(&job, zx::SystemEventKind::MemoryPressureNormal),
+            Err(zx::Status::ACCESS_DENIED)
+        );
     }
 }

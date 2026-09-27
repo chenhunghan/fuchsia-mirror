@@ -7,13 +7,13 @@ use discovery::{DiscoverySources, TargetHandle};
 use ffx_config::keys::TARGET_DEFAULT_KEY;
 
 use ffx_config::{ConfigLevel, EnvironmentContext};
-use fidl_fuchsia_developer_ffx::{self as ffx, DaemonError};
+use fidl_fuchsia_developer_ffx as ffx;
 use fuchsia_async::Timer;
 use futures::Future;
 use futures::future::{Either, pending};
 use log::{debug, info};
 use std::time::Duration;
-use target_errors::{FfxTargetError, TargetSource};
+use target_errors::{FfxTargetError, TargetSource, target_string};
 use thiserror::Error;
 
 #[cfg(test)]
@@ -243,15 +243,12 @@ async fn wait_for_discovered_state(
         Either::Right(pending())
     };
 
+    let target_str = target_string(target_spec);
     futures_lite::FutureExt::or(discover_fut, async move {
         timer.await;
-        Err(ffx_command_error::Error::User(
-            FfxTargetError::DaemonError {
-                err: DaemonError::Timeout,
-                target: target_spec.clone().into(),
-            }
-            .into(),
-        ))
+        Err(ffx_command_error::Error::User(anyhow::anyhow!(
+            "Timeout attempting to reach the target {target_str}."
+        )))
     })
     .await
 }
@@ -317,24 +314,17 @@ async fn wait_for_device_inner(
     } else {
         Either::Right(pending())
     };
+    let target_str = target_string(target_spec);
     futures_lite::FutureExt::or(knock_fut, async move {
         timer.await;
         let was_knocked = ever_knocked_clone.load(std::sync::atomic::Ordering::Relaxed);
         Err(ffx_command_error::Error::User(match behavior {
             WaitFor::DeviceOnline | WaitFor::Fastboot | WaitFor::Product => {
-                FfxTargetError::DaemonError {
-                    err: DaemonError::Timeout,
-                    target: target_spec.clone().into(),
-                }
-                .into()
+                anyhow::anyhow!("Timeout attempting to reach the target {target_str}.").into()
             }
             WaitFor::DeviceOffline => {
                 if was_knocked {
-                    FfxTargetError::DaemonError {
-                        err: DaemonError::ShutdownTimeout,
-                        target: target_spec.clone().into(),
-                    }
-                    .into()
+                    anyhow::anyhow!("Timeout awaiting target {target_str} shutdown.").into()
                 } else if ever_found.load(std::sync::atomic::Ordering::Relaxed) {
                     let msg = match target_spec {
                         Some(spec) if !spec.is_empty() => format!("Timeout waiting for device to shut down. Device \"{spec}\" was found but never responsive."),
@@ -811,17 +801,12 @@ mod test {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
-        // This step is essential for converting the error properly. Otherwise converting it to top
-        // level anyhow error will lost context and turn the error into a string, making
-        // downcasting infeasible.
-        let anyhow_err: anyhow::Error =
-            res.unwrap_err().source().expect("should have an anyhow error source");
-        let FfxTargetError::DaemonError { err, .. } =
-            anyhow_err.downcast_ref::<FfxTargetError>().expect("expected target error")
-        else {
-            panic!("Received unexpected error: {anyhow_err:?}");
-        };
-        assert!(matches!(err, DaemonError::ShutdownTimeout));
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout awaiting target \"foo\" shutdown."),
+            "expected shutdown timeout message, got: {err_msg}"
+        );
     }
 
     #[fuchsia::test]

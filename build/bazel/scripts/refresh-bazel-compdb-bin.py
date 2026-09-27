@@ -14,7 +14,7 @@ from typing import Any
 
 import bazel_compdb_utils
 
-_OPT_PATTERN = re.compile("[\W]+")
+_OPT_PATTERN = re.compile(r"[\W]+")
 
 _BAZEL_CPU_ALIASES = {
     "k8": "x86_64",

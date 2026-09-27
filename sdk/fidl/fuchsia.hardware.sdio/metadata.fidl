@@ -1,0 +1,19 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.hardware.sdio;
+
+/// Metadata describing an SDIO function.
+type FunctionMetadata = table {
+    /// The SDIO function number (1-7). Mandatory.
+    1: function uint32;
+    /// The global ID assigned to this function node for driver binding. Optional.
+    2: id uint32;
+};
+
+/// SDIO metadata passed from the board driver to the SDMMC driver.
+@serializable
+type Metadata = table {
+    /// List of functions exposed by the SDIO device. Mandatory.
+    1: functions vector<FunctionMetadata>:7;
+};

@@ -4,7 +4,6 @@
 
 #include "src/storage/blobfs/blobfs_checker.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/fit/function.h>
 #include <lib/sync/completion.h>
 #include <lib/zx/time.h>

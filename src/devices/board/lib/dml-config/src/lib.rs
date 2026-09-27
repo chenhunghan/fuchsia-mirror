@@ -2,11 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use anyhow::Context;
 use fidl_fuchsia_board_dml_config as fbdc;
 use fidl_fuchsia_driver_metadata as fdr;
 
 // Re-export FIDL types for convenience
-pub use fbdc::{AggregateEntry, BoardConfig, Device, ResourceEntry, StaticMetadata};
+pub use fbdc::{
+    AggregateEntry, ArmSmmu, BoardConfig, Device, Iommu, IommuType, ResourceEntry, StaticMetadata,
+    StubIommu,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct Mmio {
@@ -21,11 +25,14 @@ pub struct Irq {
     pub number: u32,
     pub mode: Option<String>,
     pub wake_vector: Option<bool>,
+    pub controller: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Bti {
     pub id: u32,
+    pub name: Option<String>,
+    pub iommu_id: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,7 +111,8 @@ pub fn irq_list(dict: &fdr::Dictionary) -> Vec<Irq> {
             let name = get_string(dict, &format!("{}.name", prefix));
             let mode = get_string(dict, &format!("{}.mode", prefix));
             let wake_vector = get_bool(dict, &format!("{}.wake_vector", prefix));
-            list.push(Irq { name, number, mode, wake_vector });
+            let controller = get_uint32(dict, &format!("{}.controller", prefix));
+            list.push(Irq { name, number, mode, wake_vector, controller });
         } else {
             break;
         }
@@ -112,17 +120,23 @@ pub fn irq_list(dict: &fdr::Dictionary) -> Vec<Irq> {
     list
 }
 
-pub fn bti_list(dict: &fdr::Dictionary) -> Vec<Bti> {
+pub fn bti_list(dict: &fdr::Dictionary) -> anyhow::Result<Vec<Bti>> {
     let mut list = Vec::new();
+    let entries = dict.entries.as_deref().unwrap_or(&[]);
     for i in 0.. {
-        let prefix = format!("btis.{}", i);
-        if let Some(id) = get_uint32(dict, &format!("{}.id", prefix)) {
-            list.push(Bti { id });
-        } else {
+        let prefix = format!("btis.{i}.");
+        if !entries.iter().any(|e| e.key.starts_with(&prefix)) {
             break;
         }
+
+        let id = get_uint32(dict, &format!("btis.{i}.id"))
+            .with_context(|| format!("BTI at index {i} is missing required \"id\""))?;
+        let iommu_id = get_uint32(dict, &format!("btis.{i}.iommu_id"))
+            .with_context(|| format!("BTI with ID {id} at index {i} is missing \"iommu_id\""))?;
+        let name = get_string(dict, &format!("btis.{i}.name"));
+        list.push(Bti { id, name, iommu_id });
     }
-    list
+    Ok(list)
 }
 
 pub fn smc_list(dict: &fdr::Dictionary) -> Vec<Smc> {
@@ -178,5 +192,116 @@ pub fn pdev_constraints<'a>(
         })
 }
 
+pub fn is_node_force_enabled(dev_name: &str, enabled_nodes: &[String]) -> bool {
+    enabled_nodes.iter().any(|n| {
+        n == dev_name
+            || n.trim_start_matches('/').replace('@', "-") == dev_name
+            || n.rsplit('/').next().unwrap_or(n).replace('@', "-") == dev_name
+    })
+}
+
+pub fn is_device_disabled(dev: &Device, enabled_nodes: &[String]) -> bool {
+    if !dev.disabled.unwrap_or(false) {
+        return false;
+    }
+    let name = dev.name.as_deref().unwrap_or("");
+    !is_node_force_enabled(name, enabled_nodes)
+}
+
+#[cfg(target_os = "fuchsia")]
+pub use board_structured_config::Config as StructuredConfig;
+
 #[cfg(target_os = "fuchsia")]
 pub mod parser;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_device_disabled_and_runtime_override() {
+        let dev_enabled = Device { name: Some("dev_a".to_string()), ..Default::default() };
+        let dev_explicit_enabled =
+            Device { name: Some("dev_b".to_string()), disabled: Some(false), ..Default::default() };
+        let dev_disabled = Device {
+            name: Some("pcie-c500000".to_string()),
+            disabled: Some(true),
+            ..Default::default()
+        };
+
+        assert!(!is_device_disabled(&dev_enabled, &[]));
+        assert!(!is_device_disabled(&dev_explicit_enabled, &[]));
+        assert!(is_device_disabled(&dev_disabled, &[]));
+
+        // Runtime override by exact DML node name
+        assert!(!is_device_disabled(&dev_disabled, &["pcie-c500000".to_string()]));
+
+        // Runtime override by devicetree path format (e.g. "/pcie@c500000")
+        assert!(!is_device_disabled(&dev_disabled, &["/pcie@c500000".to_string()]));
+
+        // Unrelated enabled_nodes entry leaves it disabled
+        assert!(is_device_disabled(&dev_disabled, &["other-node".to_string()]));
+    }
+
+    #[test]
+    fn test_bti_list() {
+        let dict = fdr::Dictionary {
+            entries: Some(vec![
+                fdr::DictionaryEntry {
+                    key: "btis.0.id".to_string(),
+                    value: fdr::DictionaryValue::Int64(1),
+                },
+                fdr::DictionaryEntry {
+                    key: "btis.0.iommu_id".to_string(),
+                    value: fdr::DictionaryValue::Int64(10),
+                },
+                fdr::DictionaryEntry {
+                    key: "btis.0.name".to_string(),
+                    value: fdr::DictionaryValue::Str("dma_bti".to_string()),
+                },
+                fdr::DictionaryEntry {
+                    key: "btis.1.id".to_string(),
+                    value: fdr::DictionaryValue::Int64(2),
+                },
+                fdr::DictionaryEntry {
+                    key: "btis.1.iommu_id".to_string(),
+                    value: fdr::DictionaryValue::Int64(0),
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let btis = bti_list(&dict).unwrap();
+        assert_eq!(btis.len(), 2);
+        assert_eq!(btis[0].id, 1);
+        assert_eq!(btis[0].name.as_deref(), Some("dma_bti"));
+        assert_eq!(btis[0].iommu_id, 10);
+        assert_eq!(btis[1].id, 2);
+        assert_eq!(btis[1].name, None);
+        assert_eq!(btis[1].iommu_id, 0);
+
+        let dict_missing_iommu = fdr::Dictionary {
+            entries: Some(vec![fdr::DictionaryEntry {
+                key: "btis.0.id".to_string(),
+                value: fdr::DictionaryValue::Int64(1),
+            }]),
+            ..Default::default()
+        };
+        assert!(bti_list(&dict_missing_iommu).is_err());
+
+        let dict_missing_id = fdr::Dictionary {
+            entries: Some(vec![
+                fdr::DictionaryEntry {
+                    key: "btis.0.name".to_string(),
+                    value: fdr::DictionaryValue::Str("dma_bti".to_string()),
+                },
+                fdr::DictionaryEntry {
+                    key: "btis.0.iommu_id".to_string(),
+                    value: fdr::DictionaryValue::Int64(10),
+                },
+            ]),
+            ..Default::default()
+        };
+        assert!(bti_list(&dict_missing_id).is_err());
+    }
+}

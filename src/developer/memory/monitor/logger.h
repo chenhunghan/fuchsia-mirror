@@ -9,14 +9,28 @@
 #include <lib/async/dispatcher.h>
 #include <lib/inspect/cpp/bounded_list_node.h>
 
+#include <array>
+#include <cstdint>
+
 #include "src/developer/memory/metrics/capture.h"
 #include "src/developer/memory/metrics/digest.h"
 #include "src/developer/memory/monitor/high_water.h"
 #include "src/developer/memory/monitor/memory_monitor_config.h"
-#include "src/developer/memory/pressure_signaler/pressure_observer.h"
 #include "src/lib/fxl/macros.h"
 
 namespace monitor {
+
+// Memory pressure levels
+enum PressureLevel : std::uint8_t {
+  kImminentOOM = 0,
+  kCritical,
+  kWarning,
+  kNormal,
+  kNumLevels,
+};
+constexpr size_t kNameLength = 15;
+constexpr std::array<char[kNameLength], PressureLevel::kNumLevels + 1> kLevelNames = {
+    "IMMINENT-OOM", "CRITICAL", "WARNING", "NORMAL", "UNSET"};
 
 class Logger {
  public:
@@ -28,7 +42,7 @@ class Logger {
          inspect::Node node);
 
   // SetPressureLevel needs to be called at least once for the Logger to start.
-  void SetPressureLevel(pressure_signaler::Level l);
+  void SetPressureLevel(PressureLevel l);
 
  private:
   void Log();

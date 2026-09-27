@@ -181,7 +181,8 @@ impl<'c> PProfProfileBuilder<'c> {
                     let symbolized_lines = if mapping_id != 0
                         && let Some(symbolizer) = &symbolizer
                     {
-                        match symbolizer.resolve_addr(*address) {
+                        match symbolizer.resolve_addr(*address, ffx_symbolize::AddressType::Return)
+                        {
                             Ok(resolved_locations) => {
                                 let mut result = Vec::with_capacity(resolved_locations.len());
                                 for resolved_location in resolved_locations {

@@ -23,6 +23,7 @@
 
 #include <fidl/fuchsia.wlan.fullmac/cpp/driver/wire.h>
 #include <fidl/fuchsia.wlan.fullmac/cpp/fidl.h>
+#include <fidl/fuchsia.wlan.ieee80211/cpp/fidl.h>
 #include <fidl/fuchsia.wlan.phy/cpp/fidl.h>
 #include <fidl/fuchsia.wlan.phy/cpp/wire.h>
 #include <lib/stdcompat/span.h>
@@ -42,7 +43,6 @@
 #include <wlan/drivers/components/frame_container.h>
 
 #include "bus.h"
-#include "fuchsia/wlan/ieee80211/cpp/fidl.h"
 #include "fweh.h"
 #include "fwil_types.h"
 #include "linuxisms.h"
@@ -135,6 +135,10 @@ struct brcmf_pub {
   /* Dongle media info */
   char fwver[BRCMF_DRIVER_FIRMWARE_VERSION_LEN];
 
+  // TODO(b/518036183): Expand the use of this mutex to protect iflist and if2bss in more places.
+  // Since this mutex is used in performance sensitive code, such as the data path, it's a shared
+  // mutex to allow multiple reads, which is the most common use case when accessing this data.
+  std::shared_mutex if_mutex;
   struct brcmf_if* iflist[BRCMF_MAX_IFS];
   int32_t if2bss[BRCMF_MAX_IFS];
 
@@ -254,7 +258,12 @@ void brcmf_netdev_set_allmulti(struct net_device* ndev);
 zx_status_t brcmf_net_attach(struct brcmf_if* ifp, bool rtnl_locked);
 zx_status_t brcmf_add_if(struct brcmf_pub* drvr, int32_t bsscfgidx, int32_t ifidx, const char* name,
                          uint8_t* mac_addr, struct brcmf_if** if_out);
+zx_status_t brcmf_add_if_locked(struct brcmf_pub* drvr, int32_t bsscfgidx, int32_t ifidx,
+                                const char* name, uint8_t* mac_addr, struct brcmf_if** if_out)
+    __TA_REQUIRES(drvr->if_mutex);
 void brcmf_remove_interface(struct brcmf_if* ifp, bool rtnl_locked);
+void brcmf_remove_interface_locked(struct brcmf_pub* drvr, struct brcmf_if* ifp, bool rtnl_locked)
+    __TA_REQUIRES(drvr->if_mutex);
 void brcmf_txflowblock_if(struct brcmf_if* ifp, enum brcmf_netif_stop_reason reason, bool state);
 void brcmf_txfinalize(struct brcmf_if* ifp, const struct ethhdr* eh, bool success);
 void brcmf_net_setcarrier(struct brcmf_if* ifp, bool on);

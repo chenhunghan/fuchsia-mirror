@@ -71,7 +71,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecOutputFormatChange() override {}
 
-  void onCoreCodecInputPacketDone(CodecPacket *packet) override {
+  void onCoreCodecInputPacketDone(const CodecPacket *packet) override {
     std::lock_guard lock(lock_);
     input_packets_done_.push_back(packet);
     cond_.notify_all();

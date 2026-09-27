@@ -6,8 +6,10 @@
             "fuchsia-boot:///aml-saradc#meta/aml-saradc.cm",
             "fuchsia-boot:///amlogic-clk#meta/amlogic-clk.cm",
             "fuchsia-boot:///clock#meta/clock.cm",
-            "fuchsia-boot:///nelson-module#meta/nelson-module.cm",
-            "fuchsia-boot:///nelson-module#meta/nelson-post-init.cm",
+            "?fuchsia-boot:///nelson-module#meta/nelson-module.cm",
+            "?fuchsia-boot:///nelson-module#meta/nelson-post-init.cm",
+            "?fuchsia-boot:///nelson-dml#meta/nelson-dml.cm",
+            "?fuchsia-boot:///nelson-dml#meta/nelson-post-init.cm",
             "fuchsia-boot:///platform-bus#meta/platform-bus.cm"
         ]
     },

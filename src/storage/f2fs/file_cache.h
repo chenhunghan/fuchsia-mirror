@@ -82,7 +82,7 @@ class Page : public PageRefCounted<Page>,
   Page &operator=(const Page &) = delete;
   Page(const Page &&) = delete;
   Page &operator=(const Page &&) = delete;
-  virtual ~Page() = default;
+  virtual ~Page();
 
   void fbl_recycle() { RecyclePage(); }
 
@@ -111,12 +111,6 @@ class Page : public PageRefCounted<Page>,
   bool IsColdData() const { return TestFlag(PageFlag::kPageColdData); }
   bool IsCommit() const { return TestFlag(PageFlag::kPageCommit); }
   bool IsSync() const { return TestFlag(PageFlag::kPageSync); }
-
-  // Each Setxxx() method atomically sets a flag and returns the previous value.
-  // It is called when the first reference is made.
-  bool SetActive() { return SetFlag(PageFlag::kPageActive); }
-  // It is called after the last reference is destroyed in FileCache::Downgrade().
-  void ClearActive() { ClearFlag(PageFlag::kPageActive); }
 
   void ClearWriteback();
   void WaitOnWriteback();
@@ -171,11 +165,21 @@ class Page : public PageRefCounted<Page>,
     return flags_[static_cast<uint8_t>(flag)].test_and_set(std::memory_order_acquire);
   }
 
+  // Atomically marks the page as active and acquires a reference to the owning vnode.
+  // Returns true if the page was already active.
+  bool SetActive();
+  // Clears the active flag and returns the strong reference to the owning vnode.
+  // It is called after the last reference is destroyed in FileCache::Downgrade().
+  [[nodiscard]] fbl::RefPtr<VnodeF2fs> ClearActive();
+
   // It is used to track the status of a page by using PageFlag
   std::array<std::atomic_flag, static_cast<uint8_t>(PageFlag::kPageFlagSize)> flags_ = {
       ATOMIC_FLAG_INIT};
   // It indicates FileCache to which |this| belongs.
   FileCache *file_cache_ = nullptr;
+  // Strong reference to the owning VnodeF2fs while |this| is active (externally referenced).
+  // Kept null for node/meta vnodes (managed as singletons by F2fs) and when |this| is inactive.
+  fbl::RefPtr<VnodeF2fs> vnode_;
   void *addr_ = nullptr;
   // It is used as the key of |this| in a lookup table (i.e., FileCache::page_tree_).
   // It indicates different information according to the type of FileCache::vnode_ such as file,
@@ -184,6 +188,7 @@ class Page : public PageRefCounted<Page>,
   const pgoff_t index_;
   block_t block_addr_ = kNullAddr;
   friend class LockedPage;
+  friend class FileCache;
   std::mutex mutex_;
 };
 
@@ -331,6 +336,7 @@ class FileCache {
   void ClearDirtyPages() __TA_EXCLUDES(tree_lock_);
 
   VnodeF2fs &GetVnode() const { return *vnode_; }
+  fbl::RefPtr<VnodeF2fs> GetVnodeRefPtr();
   // Only Page::RecyclePage() is allowed to call it.
   void Downgrade(Page *raw_page) __TA_EXCLUDES(tree_lock_);
   // It returns a proper read size within the range of [size, size + max_size) according to the

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <elf.h>
 #include <fcntl.h>
 #include <sys/fsuid.h>
 #include <sys/stat.h>
@@ -10,9 +11,13 @@
 #include <unistd.h>
 
 #include <string>
+#include <vector>
+
+#include <fbl/unique_fd.h>
 
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
+#include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 namespace {
@@ -23,6 +28,57 @@ constexpr gid_t kTestGid = 65534;
 
 std::string GetCredsBinaryPath() {
   return test_helper::GetTestResourcePath("print_uid_gid_exec_child");
+}
+
+#if defined(__LP64__)
+using ElfEhdr = Elf64_Ehdr;
+using ElfPhdr = Elf64_Phdr;
+constexpr uint8_t kElfClass = ELFCLASS64;
+#else
+using ElfEhdr = Elf32_Ehdr;
+using ElfPhdr = Elf32_Phdr;
+constexpr uint8_t kElfClass = ELFCLASS32;
+#endif
+
+#if defined(__x86_64__)
+constexpr uint16_t kElfMachine = EM_X86_64;
+#elif defined(__i386__)
+constexpr uint16_t kElfMachine = EM_386;
+#elif defined(__aarch64__)
+constexpr uint16_t kElfMachine = EM_AARCH64;
+#elif defined(__arm__)
+constexpr uint16_t kElfMachine = EM_ARM;
+#elif defined(__riscv)
+constexpr uint16_t kElfMachine = EM_RISCV;
+#endif
+
+test_helper::ScopedTempFD CreateTestElf(const std::vector<ElfPhdr> &phdrs) {
+  ElfEhdr ehdr = {};
+  ehdr.e_ident[EI_MAG0] = ELFMAG0;
+  ehdr.e_ident[EI_MAG1] = ELFMAG1;
+  ehdr.e_ident[EI_MAG2] = ELFMAG2;
+  ehdr.e_ident[EI_MAG3] = ELFMAG3;
+  ehdr.e_ident[EI_CLASS] = kElfClass;
+  ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
+  ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+  ehdr.e_type = ET_EXEC;
+  ehdr.e_machine = kElfMachine;
+  ehdr.e_version = EV_CURRENT;
+  ehdr.e_phoff = sizeof(ehdr);
+  ehdr.e_ehsize = sizeof(ehdr);
+  ehdr.e_phentsize = sizeof(ElfPhdr);
+  ehdr.e_phnum = static_cast<uint16_t>(phdrs.size());
+
+  test_helper::ScopedTempFD temp_file;
+  EXPECT_TRUE(temp_file.is_valid());
+  SAFE_SYSCALL(fchmod(temp_file.fd(), 0755));
+  EXPECT_EQ(write(temp_file.fd(), &ehdr, sizeof(ehdr)), static_cast<ssize_t>(sizeof(ehdr)));
+  if (!phdrs.empty()) {
+    const size_t phdrs_bytes = phdrs.size() * sizeof(ElfPhdr);
+    EXPECT_EQ(write(temp_file.fd(), phdrs.data(), phdrs_bytes), static_cast<ssize_t>(phdrs_bytes));
+  }
+  temp_file.fd_.reset();
+  return temp_file;
 }
 
 }  // namespace
@@ -98,4 +154,60 @@ TEST(ExecTest, FsuidFsgidResetOnExec) {
   EXPECT_EQ(fsgid, static_cast<int>(kTestGid));
 
   fclose(fp);
+}
+
+// An ELF with zero program headers (e_phnum == 0) is rejected with ENOEXEC.
+TEST(ExecTest, ElfWithNoProgramHeaders) {
+  test_helper::ScopedTempFD temp_file = CreateTestElf({});
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    char *const argv[] = {const_cast<char *>(temp_file.name().c_str()), nullptr};
+    char *const envp[] = {nullptr};
+    EXPECT_THAT(execve(temp_file.name().c_str(), argv, envp), SyscallFailsWithErrno(ENOEXEC));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// An ELF with a non-empty program header table (e_phnum == 1, PT_NULL) but zero
+// PT_LOAD segments succeeds in replacing the process image with no mapped executable
+// segments and faults with SIGSEGV upon jumping to e_entry (0x0).
+TEST(ExecTest, ElfWithNoLoadSegments) {
+  ElfPhdr null_phdr = {};
+  null_phdr.p_type = PT_NULL;
+  test_helper::ScopedTempFD temp_file = CreateTestElf({null_phdr});
+
+  test_helper::ForkHelper helper;
+  helper.ExpectSignal(SIGSEGV);
+  helper.RunInForkedProcess([&] {
+    char *const argv[] = {const_cast<char *>(temp_file.name().c_str()), nullptr};
+    char *const envp[] = {nullptr};
+    execve(temp_file.name().c_str(), argv, envp);
+    ADD_FAILURE() << "execve unexpectedly returned: " << strerror(errno);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// An ELF whose PT_LOAD segment has p_offset not congruent with p_vaddr modulo
+// the page size fails while mapping segments after tearing down the old address
+// space, terminating the process with SIGSEGV.
+TEST(ExecTest, ElfWithUnalignedLoadOffset) {
+  ElfPhdr load_phdr = {};
+  load_phdr.p_type = PT_LOAD;
+  load_phdr.p_flags = PF_R | PF_X;
+  load_phdr.p_offset = 1;
+  load_phdr.p_vaddr = 0x20000000;
+  load_phdr.p_filesz = sizeof(ElfEhdr);
+  load_phdr.p_memsz = sizeof(ElfEhdr);
+  test_helper::ScopedTempFD temp_file = CreateTestElf({load_phdr});
+
+  test_helper::ForkHelper helper;
+  helper.ExpectSignal(SIGSEGV);
+  helper.RunInForkedProcess([&] {
+    char *const argv[] = {const_cast<char *>(temp_file.name().c_str()), nullptr};
+    char *const envp[] = {nullptr};
+    execve(temp_file.name().c_str(), argv, envp);
+    ADD_FAILURE() << "execve unexpectedly returned: " << strerror(errno);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }

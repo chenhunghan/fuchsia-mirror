@@ -52,3 +52,25 @@ fuchsia_package_resource_group(
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = ["//:__subpackages__"],
 )
+
+# @prebuilt_clang is bootstrapped lazily at Bazel fetch/analysis time via a
+# repository_rule (`use_repo_rule` in toplevel.MODULE.bazel) rather than a
+# pre-generated Bzlmod module with a MODULE.bazel file.
+#
+# Repositories defined via `bazel_dep` + `local_path_override` (such as
+# @fuchsia_platform_sysroot) have isolated Bzlmod repository mappings and cannot
+# `bazel_dep` on or directly reference root-module `use_repo_rule` repositories
+# like `@prebuilt_clang`. Exposing these aliases in the root module (`@@//`)
+# allows `local_path_override` repositories to select on `@prebuilt_clang`'s
+# sanitizer variant config_settings via `@@//build/bazel/toolchains/clang:...`.
+alias(
+    name = "asan_variant",
+    actual = "@prebuilt_clang//:asan_variant",
+    visibility = ["@fuchsia_platform_sysroot//:__pkg__"],
+)
+
+alias(
+    name = "hwasan_variant",
+    actual = "@prebuilt_clang//:hwasan_variant",
+    visibility = ["@fuchsia_platform_sysroot//:__pkg__"],
+)

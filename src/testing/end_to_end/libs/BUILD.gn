@@ -22,7 +22,7 @@ python_library("libs") {
     "//src/testing/end_to_end/libs/*",
     "//src/testing/end_to_end/mobly_base_tests/*",
     "//src/testing/end_to_end/mobly_controller:*",
-    "//src/testing/end_to_end/mobly_controller/openwrt_access_point:*",
+    "//src/testing/end_to_end/mobly_controller/*",
     "//src/testing/end_to_end/mobly_driver/*",
   ]
 

@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use alloc::sync::Arc;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use netstack3_base::{
     AddressMatcher, InspectableValue, InterfaceMatcher, InterfaceProperties, Matcher,
@@ -70,7 +69,7 @@ pub trait BindingsPacketMatcher<D> {
     ) -> bool;
 }
 
-impl<D> BindingsPacketMatcher<D> for Never {
+impl<D> BindingsPacketMatcher<D> for ! {
     fn matches<I: FilterIpExt, P: FilterIpPacket<I>>(
         &self,
         _packet: &P,

@@ -234,6 +234,18 @@ func TestParseArgsAndEnv(t *testing.T) {
 			},
 		},
 		{
+			name: "autodir and sanitizer",
+			args: []string{"core.x64", "--variant", "hwasan", "--sanitizer"},
+			expected: setArgs{
+				product:         "core",
+				board:           "x64",
+				includeClippy:   false,
+				compilationMode: "sanitizer",
+				buildDir:        "out/core.x64-hwasan-sanitizer",
+				variants:        []string{"hwasan"},
+			},
+		},
+		{
 			name: "variants with explicit include-clippy",
 			args: []string{"core.x64", "--variant", "kasan", "--include-clippy=true"},
 			expected: setArgs{
@@ -440,6 +452,19 @@ func TestConstructStaticSpec(t *testing.T) {
 				IdeFiles:        []string{"json"},
 				JsonIdeScripts:  []string{"foo.py"},
 				GnArgs:          []string{"args", rbe_mode_off},
+			},
+		},
+		{
+			name: "sanitizer compilation mode",
+			args: &setArgs{
+				board:           "arm64",
+				product:         "bringup",
+				compilationMode: "sanitizer",
+			},
+			expected: &fintpb.Static{
+				Board:           "boards/arm64.gni",
+				Product:         "products/bringup.gni",
+				CompilationMode: fintpb.Static_COMPILATION_MODE_SANITIZER,
 			},
 		},
 		{

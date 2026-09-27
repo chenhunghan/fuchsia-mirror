@@ -314,6 +314,7 @@ template("syscall_test_suite") {
   if (defined(invoker.test_srcs_target)) {
     test_srcs_target = invoker.test_srcs_target
   }
+
   test(test_target_label) {
     deps = [
       "${test_srcs_target}",
@@ -325,6 +326,7 @@ template("syscall_test_suite") {
   component_label = "${test_package_label}_tests"
 
   expectations_target_name = "${component_label}_expectations"
+
   generated_expectations_file(expectations_target_name) {
     includes = [ "expects/${suite_label}.json5" ]
   }
@@ -360,6 +362,7 @@ template("syscall_test_suite") {
 
 syscall_test_suite(generic_test_label) {
 }
+
 syscall_test_suite(loopback_test_label) {
   # The loopback suite was previously manually sharded into multiple different
   # suites because it is longer-running and has more cases than many of the
@@ -371,22 +374,29 @@ syscall_test_suite(loopback_test_label) {
   # These tests are generating too much logging.  https://fxbug.dev/328822330
   log_less = true
 }
+
 syscall_test_suite(loopback_isolated_test_label) {
   # The loopback_isolated suite was previously manually sharded into multiple
   # different suites because it is longer-running and has more cases than many
   # of the other suites. To compensate for this, use additional shards.
   num_shards = 10
 }
+
 syscall_test_suite(raw_packet_test_label) {
 }
+
 syscall_test_suite(udp_test_label) {
 }
+
 syscall_test_suite(udp_raw_test_label) {
 }
+
 syscall_test_suite(udp_unbound_test_label) {
 }
+
 syscall_test_suite(tcp_blocking_test_label) {
 }
+
 syscall_test_suite(tcp_test_label) {
   # The TCP suite is particularly large and needs to be sharded further
   # in order to complete within a reasonable period of time on RISC-V.

@@ -1,69 +1,69 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "CommandStatus",
-  "oneOf": [
-    {
-      "description": "Successful execution with an optional informational string.",
-      "type": "object",
-      "required": [
-        "ok"
-      ],
-      "properties": {
-        "ok": {
-          "type": "object",
-          "required": [
-            "message"
-          ],
-          "properties": {
-            "message": {
-              "type": "string"
-            }
-          }
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "CommandStatus",
+    "oneOf": [
+        {
+            "description": "Successful execution with an optional informational string.",
+            "type": "object",
+            "properties": {
+                "ok": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "message"
+                    ]
+                }
+            },
+            "required": [
+                "ok"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "description": "Unexpected error with string.",
+            "type": "object",
+            "properties": {
+                "unexpected_error": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "message"
+                    ]
+                }
+            },
+            "required": [
+                "unexpected_error"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "description": "A known kind of error that can be reported usefully to the user",
+            "type": "object",
+            "properties": {
+                "user_error": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "message"
+                    ]
+                }
+            },
+            "required": [
+                "user_error"
+            ],
+            "additionalProperties": false
         }
-      },
-      "additionalProperties": false
-    },
-    {
-      "description": "Unexpected error with string.",
-      "type": "object",
-      "required": [
-        "unexpected_error"
-      ],
-      "properties": {
-        "unexpected_error": {
-          "type": "object",
-          "required": [
-            "message"
-          ],
-          "properties": {
-            "message": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    {
-      "description": "A known kind of error that can be reported usefully to the user",
-      "type": "object",
-      "required": [
-        "user_error"
-      ],
-      "properties": {
-        "user_error": {
-          "type": "object",
-          "required": [
-            "message"
-          ],
-          "properties": {
-            "message": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "additionalProperties": false
-    }
-  ]
+    ]
 }

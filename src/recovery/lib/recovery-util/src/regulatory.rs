@@ -192,7 +192,7 @@ mod tests {
 
         assert!(result.is_err());
         // try_next will return error if there are no messages waiting, and the channel is closed.
-        assert!(receiver.try_next().is_err());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[fuchsia::test]

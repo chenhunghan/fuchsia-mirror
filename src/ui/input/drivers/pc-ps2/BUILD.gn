@@ -7,8 +7,13 @@ import("//build/components.gni")
 import("//build/drivers.gni")
 import("//build/test.gni")
 
+fuchsia_driver_dml("pc-ps2-dml") {
+  dml = "meta/pc-ps2.dml"
+  driver_name = "pc-ps2"
+}
+
 driver_bind_rules("i8042_bind") {
-  rules = "meta/pc-ps2.bind"
+  dml_label = ":pc-ps2-dml"
   tests = "meta/bind_tests.json"
   deps = [
     "//src/devices/bind/fuchsia",
@@ -64,7 +69,7 @@ fuchsia_driver_component("pc-ps2") {
     ":pc-ps2-driver",
   ]
   info = "meta/pc-ps2-info.json"
-  manifest = "meta/pc-ps2.cml"
+  dml_label = ":pc-ps2-dml"
 }
 
 fuchsia_driver_package("package") {

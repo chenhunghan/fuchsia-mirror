@@ -33,6 +33,28 @@
             },
         },
         {
+            from: "#self",
+            to: "#gpio-buttons",
+            driver_config: "fuchsia.buttons.GpioButtonsMetadata",
+            buttons: [
+                {
+                    type: {
+                        direct: {},
+                    },
+                    gpio_a_index: 0,
+                    id: "POWER",
+                },
+            ],
+            gpios: [
+                {
+                    type: {
+                        interrupt: {},
+                    },
+                    flags: 0x80,
+                },
+            ],
+        },
+        {
             name: "pin-states-0",
             service: "fuchsia.hardware.pin.PinStatesService",
             from: "#gpio-controller-ff634400",

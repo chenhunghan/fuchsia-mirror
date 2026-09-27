@@ -21,9 +21,13 @@ cc_library(
     ],
     copts = [
         "-Wno-strict-prototypes",
+        "-Wno-call-graph-section-no-prototype",
+        "-Wno-conversion",
     ],
     includes = [
         "include",
     ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//zircon/system/public",
+    ],
 )

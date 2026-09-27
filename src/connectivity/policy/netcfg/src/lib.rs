@@ -37,7 +37,6 @@ use fidl_fuchsia_net_dhcp as fnet_dhcp;
 use fidl_fuchsia_net_dhcp_ext as fnet_dhcp_ext;
 use fidl_fuchsia_net_dhcpv6 as fnet_dhcpv6;
 use fidl_fuchsia_net_filter as fnet_filter;
-use fidl_fuchsia_net_filter_deprecated as fnet_filter_deprecated;
 use fidl_fuchsia_net_interfaces as fnet_interfaces;
 use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 use fidl_fuchsia_net_masquerade as fnet_masquerade;
@@ -70,7 +69,7 @@ use thiserror::Error;
 
 use self::devices::DeviceInfo;
 use self::errors::{ContextExt as _, accept_error};
-use self::filter::{FilterControl, FilterEnabledState};
+use self::filter::FilterControl;
 use self::interface::{
     DeviceInfoRef, InterfaceNamingIdentifier, NetstackManagedRoutesDesignation, ProvisioningAction,
     ProvisioningType,
@@ -243,7 +242,7 @@ pub struct DnsConfig {
     pub servers: Vec<std::net::IpAddr>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilterConfig {
     pub rules: Vec<String>,
@@ -263,6 +262,23 @@ pub enum InterfaceType {
     WlanAp,
     Lowpan,
     Blackhole,
+}
+
+impl InterfaceType {
+    fn port_classes(&self) -> &[fnet_interfaces_ext::PortClass] {
+        match &self {
+            InterfaceType::Ethernet => &[
+                fnet_interfaces_ext::PortClass::Virtual,
+                fnet_interfaces_ext::PortClass::Ethernet,
+                fnet_interfaces_ext::PortClass::Ppp,
+                fnet_interfaces_ext::PortClass::Bridge,
+            ],
+            InterfaceType::WlanClient => &[fnet_interfaces_ext::PortClass::WlanClient],
+            InterfaceType::WlanAp => &[fnet_interfaces_ext::PortClass::WlanAp],
+            InterfaceType::Lowpan => &[fnet_interfaces_ext::PortClass::Lowpan],
+            InterfaceType::Blackhole => &[fnet_interfaces_ext::PortClass::Blackhole],
+        }
+    }
 }
 
 impl TryFrom<fidl_fuchsia_hardware_network::PortClass> for InterfaceType {
@@ -693,8 +709,6 @@ pub struct NetCfg<'a> {
     locally_provisioned_network_rule_set:
         Option<(fnet_routes_admin::RuleSetV4Proxy, fnet_routes_admin::RuleSetV6Proxy)>,
 
-    filter_enabled_state: FilterEnabledState,
-
     // TODO(https://fxbug.dev/42146318): These hashmaps are all indexed by
     // interface ID and store per-interface state, and should be merged.
     interface_states: HashMap<InterfaceId, InterfaceState>,
@@ -985,7 +999,6 @@ const TELEMETRY_INSPECT_NODE_NAME: &str = "telemetry";
 
 impl<'a> NetCfg<'a> {
     async fn new(
-        filter_enabled_interface_types: HashSet<InterfaceType>,
         interface_metrics: InterfaceMetrics,
         enable_dhcpv6: bool,
         forwarded_device_classes: ForwardedDeviceClasses,
@@ -1004,14 +1017,10 @@ impl<'a> NetCfg<'a> {
             .context("could not connect to lookup admin")?;
 
         let filter_control = {
-            let filter_deprecated =
-                optional_svc_connect::<fnet_filter_deprecated::FilterMarker>(&svc_dir)
-                    .await
-                    .context("could not connect to filter deprecated")?;
-            let filter_current = optional_svc_connect::<fnet_filter::ControlMarker>(&svc_dir)
+            let filter_current = svc_connect::<fnet_filter::ControlMarker>(&svc_dir)
                 .await
                 .context("could not connect to filter")?;
-            filter::FilterControl::new(filter_deprecated, filter_current).await?
+            filter::FilterControl::new(filter_current).await?
         };
 
         let interface_state = svc_connect::<fnet_interfaces::StateMarker>(&svc_dir)
@@ -1068,7 +1077,6 @@ impl<'a> NetCfg<'a> {
             route_set_v4_provider,
             locally_provisioned_network_rule_set: None,
             interface_naming_config,
-            filter_enabled_state: FilterEnabledState::new(filter_enabled_interface_types),
             interface_properties: Default::default(),
             interface_states: Default::default(),
             interface_metrics,
@@ -1678,8 +1686,6 @@ impl<'a> NetCfg<'a> {
                                 masquerade::Event::FactoryRequestStream(req_stream),
                                 masquerade_events,
                                 &mut self.filter_control,
-                                &mut self.filter_enabled_state,
-                                &self.interface_states,
                             )
                             .await
                     }
@@ -1850,13 +1856,7 @@ impl<'a> NetCfg<'a> {
             }
             ProvisioningEvent::MasqueradeEvent(event) => {
                 masquerade_handler
-                    .handle_event(
-                        event,
-                        masquerade_events,
-                        &mut self.filter_control,
-                        &mut self.filter_enabled_state,
-                        &self.interface_states,
-                    )
+                    .handle_event(event, masquerade_events, &mut self.filter_control)
                     .await
             }
         };
@@ -2050,7 +2050,6 @@ impl<'a> NetCfg<'a> {
             dhcpv6_prefixes_streams,
             allowed_upstream_device_classes,
             dhcpv6_prefix_provider_handler,
-            filter_enabled_state,
             ndp_dns_servers,
             enable_socket_proxy,
             ..
@@ -2105,7 +2104,6 @@ impl<'a> NetCfg<'a> {
             dhcpv4_client_provider,
             dhcpv6_client_provider,
             route_set_v4_provider,
-            filter_enabled_state,
             ndp_dns_servers,
             *enable_socket_proxy,
         )
@@ -2161,7 +2159,6 @@ impl<'a> NetCfg<'a> {
         dhcpv4_client_provider: &Option<fnet_dhcp::ClientProviderProxy>,
         dhcpv6_client_provider: &Option<fnet_dhcpv6::ClientProviderProxy>,
         route_set_v4_provider: &fnet_routes_admin::RouteTableV4Proxy,
-        filter_enabled_state: &mut FilterEnabledState,
         ndp_dns_servers: &mut HashMap<
             (InterfaceId, net_types::ip::Ipv6Addr),
             Vec<fnet_name::DnsServer_>,
@@ -2484,7 +2481,6 @@ impl<'a> NetCfg<'a> {
                     // nothing.
                     None => return Ok(None),
                     Some(InterfaceState { config, control, provisioning, .. }) => {
-                        filter_enabled_state.remove_interface(interface_id);
                         // TODO(https://fxbug.dev/498654191): Add locally provisioned networks to
                         // the network registry even when socket-proxy is absent.
                         if enable_socket_proxy {
@@ -2982,17 +2978,9 @@ impl<'a> NetCfg<'a> {
 
             if let Some(dhcp_server) = &self.dhcp_server {
                 info!("configuring DHCP server for WLAN AP (interface ID={})", interface_id);
-                Self::configure_wlan_ap_and_dhcp_server(
-                    &mut self.filter_enabled_state,
-                    &mut self.filter_control,
-                    interface_id,
-                    dhcp_server,
-                    control,
-                    interface_name,
-                    device_info,
-                )
-                .await
-                .context("error configuring wlan ap and dhcp server")?;
+                Self::configure_wlan_ap_and_dhcp_server(dhcp_server, control, interface_name)
+                    .await
+                    .context("error configuring wlan ap and dhcp server")?;
             } else {
                 warn!(
                     "cannot configure DHCP server for WLAN AP (interface ID={}) \
@@ -3052,11 +3040,8 @@ impl<'a> NetCfg<'a> {
             info!("discovered host interface with id={}, configuring interface", interface_id);
 
             Self::configure_host(
-                &mut self.filter_enabled_state,
-                &mut self.filter_control,
                 &self.stack,
                 interface_id,
-                device_info,
                 // Disable in-stack DHCPv4 when provisioning is ignored.
                 self.dhcpv4_client_provider.is_none()
                     && provisioning_type == interface::ProvisioningType::Local,
@@ -3104,22 +3089,10 @@ impl<'a> NetCfg<'a> {
 
     /// Configure host interface.
     async fn configure_host(
-        filter_enabled_state: &mut FilterEnabledState,
-        filter_control: &mut FilterControl,
         stack: &fnet_stack::StackProxy,
         interface_id: InterfaceId,
-        device_info: &DeviceInfoRef<'_>,
         start_in_stack_dhcpv4: bool,
     ) -> Result<(), errors::Error> {
-        // Handle on-demand interface enabling by using either implementation of Filter.
-        filter_enabled_state
-            .maybe_update(Some(device_info.interface_type()), interface_id, filter_control)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("failed to update filter on nic {interface_id} with error = {e:?}")
-            })
-            .map_err(errors::Error::NonFatal)?;
-
         // Enable DHCP.
         if start_in_stack_dhcpv4 {
             stack
@@ -3139,26 +3112,13 @@ impl<'a> NetCfg<'a> {
     /// with the parameters so it is ready to be started when an interface UP event
     /// is received for the WLAN AP.
     async fn configure_wlan_ap_and_dhcp_server(
-        filter_enabled_state: &mut FilterEnabledState,
-        filter_control: &mut FilterControl,
-        interface_id: InterfaceId,
         dhcp_server: &fnet_dhcp::Server_Proxy,
         control: &fidl_fuchsia_net_interfaces_ext::admin::Control,
         name: String,
-        device_info: &DeviceInfoRef<'_>,
     ) -> Result<(), errors::Error> {
         let (address_state_provider, server_end) = fidl::endpoints::create_proxy::<
             fidl_fuchsia_net_interfaces_admin::AddressStateProviderMarker,
         >();
-
-        // Handle on-demand interface enabling by using either implementation of Filter.
-        filter_enabled_state
-            .maybe_update(Some(device_info.interface_type()), interface_id, filter_control)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("failed to update filter on nic {interface_id} with error = {e:?}")
-            })
-            .map_err(errors::Error::NonFatal)?;
 
         // Calculate and set the interface address based on the network address.
         // The interface address should be the first available address.
@@ -3880,7 +3840,6 @@ pub async fn run<M: Mode>() -> Result<(), anyhow::Error> {
     fuchsia_inspect::component::serve_inspect_stats();
 
     let mut netcfg = NetCfg::new(
-        filter_enabled_interface_types,
         interface_metrics,
         enable_dhcpv6,
         forwarded_device_classes,
@@ -3921,7 +3880,7 @@ pub async fn run<M: Mode>() -> Result<(), anyhow::Error> {
     // setting filters when interfaces are in Delegated provisioning mode.
     netcfg
         .filter_control
-        .update_filters(filter_config, &netcfg.filter_enabled_state)
+        .update_filters(filter_config, &filter_enabled_interface_types)
         .await
         .context("update filters based on config")?;
 
@@ -4191,9 +4150,10 @@ mod tests {
         let (stack, _stack_server) = fidl::endpoints::create_proxy::<fnet_stack::StackMarker>();
         let (lookup_admin, lookup_admin_server) =
             fidl::endpoints::create_proxy::<fnet_name::LookupAdminMarker>();
-        let (filter, _filter_server) =
-            fidl::endpoints::create_proxy::<fnet_filter_deprecated::FilterMarker>();
-        let filter_control = FilterControl::Deprecated(filter);
+        let (filter_control, _filter_server) = crate::masquerade::test::MockFilter::default()
+            .into_client_and_server()
+            .now_or_never()
+            .expect("create filter control");
         let (interface_state, _interface_state_server) =
             fidl::endpoints::create_proxy::<fnet_interfaces::StateMarker>();
         let (dhcp_server, dhcp_server_server_end) =
@@ -4220,7 +4180,6 @@ mod tests {
                 dhcpv6_client_provider: Some(dhcpv6_client_provider),
                 route_set_v4_provider,
                 locally_provisioned_network_rule_set: None,
-                filter_enabled_state: Default::default(),
                 interface_properties: Default::default(),
                 interface_states: Default::default(),
                 interface_metrics: Default::default(),

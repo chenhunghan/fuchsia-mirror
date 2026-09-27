@@ -401,7 +401,7 @@ impl UpdateTool {
                         .map_err(|e| UpdateError::Fho(bug!(e)))?
                         .ok_or_else(|| UpdateError::Fho(bug!("Failed to get the repo url")))?;
                 // If package_server_task enters connection loop, we want to get the latest address.
-                while let Ok(Some(url)) = server_task.repo_url_rx.try_next() {
+                while let Ok(url) = server_task.repo_url_rx.try_recv() {
                     repo_url = url;
                 }
                 let url = format!("{repo_url}/ota_manifest");

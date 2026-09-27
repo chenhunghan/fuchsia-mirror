@@ -23,8 +23,8 @@ bt-pacs = { path = "bt-pacs" }
 # Intended to match Fuchsia versions.
 assert_matches = "1.5.0"
 bitfield = "0.19.4"
-futures = "=0.3.31"
-futures-test = "=0.3.31"
+futures = "=0.3.34"
+futures-test = "=0.3.34"
 log = { version = "0.4.29", features = ["kv", "std"] }
 num = { version = "0.4.3", features = ["rand"] }
 parking_lot = "0.12.5"

@@ -63,8 +63,14 @@ async fn notify_phy_event_watchers(
                                 }
                             }
                         }
-                        PhyEvent::OnCountryCodeChange { .. } => {
-                            warn!("Received country code change indication");
+                        PhyEvent::OnCountryCodeChange { phy_country } => {
+                            let locked = inner.lock();
+                            for (watcher_id, watcher) in locked.watchers.iter() {
+                                if let Err(e) = watcher.send_on_country_code_change(phy_id, &phy_country) {
+                                    warn!("Failed to send country code change event for watcher {}: {}",
+                                    watcher_id, e);
+                                }
+                            }
                         }
                     }
                 }

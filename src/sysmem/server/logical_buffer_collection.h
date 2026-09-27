@@ -57,8 +57,10 @@ struct ConstraintInfoSnapshot {
 class TrackedParentVmo {
  public:
   using DoDelete = fit::callback<void(TrackedParentVmo* parent)>;
-  // The do_delete callback will be invoked upon the sooner of (A) the client code causing
-  // ~TrackedParentVmo, or (B) ZX_VMO_ZERO_CHILDREN occurring async after StartWait() is called.
+  // The do_delete callback will be invoked upon the sooner of (A) the client code taking and
+  // invoking the callback via TakeDeleteCallback() prior to ~TrackedParentVmo (such as during
+  // ~LogicalBuffer or an error path), or (B) ZX_VMO_ZERO_CHILDREN occurring async after
+  // StartWait() is called. TakeDeleteCallback() must be called before ~TrackedParentVmo.
   //
   // Each TrackedParentVmo associated with a LogicalBufferCollection keeps the
   // LogicalBufferCollection alive. Once a (child) VMO has been given out by sysmem, the only
@@ -91,6 +93,8 @@ class TrackedParentVmo {
   }
 
   uint32_t buffer_index() { return buffer_index_; }
+
+  DoDelete TakeDeleteCallback();
 
   // no copy, no move (async::WaitMethod isn't anyway, but just to be clear about it)
   TrackedParentVmo(const TrackedParentVmo&) = delete;
@@ -145,6 +149,8 @@ class LogicalBuffer {
   zx::vmo TakeStrongChildVmo();
 
   fit::result<zx_status_t, zx::eventpair> DupCloseWeakAsapClientEnd();
+
+  ~LogicalBuffer();
 
   // move-only
   LogicalBuffer(const LogicalBuffer& to_copy) = delete;

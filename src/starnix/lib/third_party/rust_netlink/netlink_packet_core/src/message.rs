@@ -239,8 +239,7 @@ mod tests {
 
     #[test]
     fn test_error() {
-        // SAFETY: value is non-zero.
-        const ERROR_CODE: NonZeroI32 = unsafe { NonZeroI32::new_unchecked(-8765) };
+        const ERROR_CODE: NonZeroI32 = NonZeroI32::new(-8765).unwrap();
 
         let header = NetlinkHeader::default();
         let error_msg = ErrorMessage { code: Some(ERROR_CODE), header: vec![] };

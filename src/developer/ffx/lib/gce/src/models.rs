@@ -12,6 +12,9 @@ pub struct Image {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// GCE image architecture ("X86_64" or "ARM64"); VMs only boot images matching their CPU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_disk: Option<RawDisk>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

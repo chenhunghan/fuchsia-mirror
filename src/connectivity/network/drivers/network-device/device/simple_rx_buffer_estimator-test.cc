@@ -48,6 +48,28 @@ TEST(SimpleRxBufferEstimatorTest, CalculateTargetBuffersOverflow) {
   EXPECT_EQ(estimator.CalculateTargetBuffers(), std::numeric_limits<uint16_t>::max());
 }
 
+TEST(SimpleRxBufferEstimatorTest, Intercept) {
+  // Same parameters as CalculationAndBurst, but with an intercept.
+  internal::SimpleRxBufferEstimator estimator(0.5, zx::msec(5), zx::sec(1), 2.0, 100);
+
+  // The intercept applies even when no traffic has been observed.
+  EXPECT_EQ(estimator.CalculateTargetBuffers(), 100);
+
+  // EWMA: 5000 pps. Target = 100 + 5000 * 0.005s = 125 buffers.
+  estimator.Update(10'000);
+  EXPECT_EQ(estimator.CalculateTargetBuffers(), 125);
+
+  // Bursts are shifted by the intercept too.
+  EXPECT_EQ(estimator.NeedImmediateBuffers(100'000), 600);
+}
+
+TEST(SimpleRxBufferEstimatorTest, InterceptOverflow) {
+  internal::SimpleRxBufferEstimator estimator(1.0, zx::sec(1), zx::sec(1), 2.0,
+                                              std::numeric_limits<uint16_t>::max());
+  estimator.Update(1'000);
+  EXPECT_EQ(estimator.CalculateTargetBuffers(), std::numeric_limits<uint16_t>::max());
+}
+
 TEST(SimpleRxBufferEstimatorTest, EstimatorFromFidl) {
   netdriver::Simple simple_defaults;
   netdriver::RxBufferManagement default_params =
@@ -58,12 +80,14 @@ TEST(SimpleRxBufferEstimatorTest, EstimatorFromFidl) {
   EXPECT_EQ(default_estimator->delay_budget(), zx::msec(1));
   EXPECT_EQ(default_estimator->sample_interval(), zx::sec(1));
   EXPECT_EQ(default_estimator->variance_threshold(), 2.0);
+  EXPECT_EQ(default_estimator->intercept(), 0);
 
   netdriver::Simple simple;
   simple.alpha(0.25);
   simple.delay_budget(ZX_MSEC(10));
   simple.sample_interval(ZX_MSEC(500));
   simple.variance_threshold(3.0);
+  simple.intercept(7);
   netdriver::RxBufferManagement simple_params = netdriver::RxBufferManagement::WithSimple(simple);
 
   std::optional estimator = internal::RxBufferEstimatorFromFidl(simple_params);
@@ -72,6 +96,7 @@ TEST(SimpleRxBufferEstimatorTest, EstimatorFromFidl) {
   EXPECT_EQ(estimator->delay_budget(), zx::msec(10));
   EXPECT_EQ(estimator->sample_interval(), zx::msec(500));
   EXPECT_EQ(estimator->variance_threshold(), 3.0);
+  EXPECT_EQ(estimator->intercept(), 7);
 
   netdriver::RxBufferManagement static_params =
       netdriver::RxBufferManagement::WithStatic_(netdriver::Static{});

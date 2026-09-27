@@ -14,10 +14,7 @@ use std::marker::PhantomData;
 use std::str::FromStr;
 
 #[cfg(feature = "json_schema")]
-use schemars::schema::{
-    InstanceType, Metadata, ObjectValidation, Schema, SchemaObject, SingleOrVec,
-    SubschemaValidation,
-};
+use schemars::Schema;
 
 struct RootVisitor<Key> {
     // Key is unused.
@@ -646,60 +643,46 @@ impl Visitor<'_> for NumericValueVisitor {
 // the rust definition, so must be implemented manually here.
 #[cfg(feature = "json_schema")]
 impl<T> schemars::JsonSchema for DiagnosticsHierarchy<T> {
-    fn schema_name() -> String {
-        "DiagnosticsHierarchy".to_owned()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DiagnosticsHierarchy".into()
     }
 
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
-        let property_schema = SchemaObject {
-            metadata: Some(Box::new(Metadata {
-                description: Some(
-                    "A property, which can be any standard object, or an array, or a histogram"
-                        .to_owned(),
-                ),
-                ..Default::default()
-            })),
-            subschemas: Some(Box::new(SubschemaValidation {
-                any_of: Some(vec![
-                    String::json_schema(generator),
-                    Vec::<f64>::json_schema(generator),
-                    Vec::<i64>::json_schema(generator),
-                    Vec::<u64>::json_schema(generator),
-                    Vec::<String>::json_schema(generator),
-                    LinearHistogram::<u64>::json_schema(generator),
-                    LinearHistogram::<i64>::json_schema(generator),
-                    LinearHistogram::<f64>::json_schema(generator),
-                    ExponentialHistogram::<u64>::json_schema(generator),
-                    ExponentialHistogram::<i64>::json_schema(generator),
-                    ExponentialHistogram::<f64>::json_schema(generator),
-                    i64::json_schema(generator),
-                    u64::json_schema(generator),
-                    f64::json_schema(generator),
-                    bool::json_schema(generator),
-                    // Includes a recursive self-reference.
-                    SchemaObject {
-                        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Object))),
-                        reference: Some(format!("#/definitions/{}", Self::schema_name())),
-                        ..Default::default()
-                    }
-                    .into(),
-                ]),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-        SchemaObject {
-            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Object))),
-            object: Some(Box::new(ObjectValidation {
-                min_properties: Some(1),
-                pattern_properties: [("^.*$".to_owned(), property_schema.into())]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let defs_path =
+            generator.settings().definitions_path.trim_start_matches('#').trim_end_matches('/');
+        let self_ref = format!("#{}/{}", defs_path, Self::schema_name());
+        let property_schema = schemars::json_schema!({
+            "description": "A property, which can be any standard object, or an array, or a histogram",
+            "anyOf": [
+                String::json_schema(generator),
+                Vec::<f64>::json_schema(generator),
+                Vec::<i64>::json_schema(generator),
+                Vec::<u64>::json_schema(generator),
+                Vec::<String>::json_schema(generator),
+                LinearHistogram::<u64>::json_schema(generator),
+                LinearHistogram::<i64>::json_schema(generator),
+                LinearHistogram::<f64>::json_schema(generator),
+                ExponentialHistogram::<u64>::json_schema(generator),
+                ExponentialHistogram::<i64>::json_schema(generator),
+                ExponentialHistogram::<f64>::json_schema(generator),
+                i64::json_schema(generator),
+                u64::json_schema(generator),
+                f64::json_schema(generator),
+                bool::json_schema(generator),
+                // Includes a recursive self-reference.
+                {
+                    "type": "object",
+                    "$ref": self_ref
+                }
+            ]
+        });
+        schemars::json_schema!({
+            "type": "object",
+            "minProperties": 1,
+            "patternProperties": {
+                "^.*$": property_schema
+            }
+        })
     }
 }
 

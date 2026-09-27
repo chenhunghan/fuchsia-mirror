@@ -51,14 +51,27 @@ struct symbolizer_location_t {
 };
 
 typedef void (*location_callback)(const symbolizer_location_t* location, void* context);
+
+// LINT.IfChange
+// AddressType controls whether the symbolizer adjusts an address before lookup.
+// For Return addresses, the symbolizer subtracts 1 to resolve the call site
+// instead of the subsequent instruction. Exact addresses are looked up directly.
+enum class AddressType : uint8_t {
+  Return = 0,
+  Exact = 1,
+  Unknown = 2,
+};
+// LINT.ThenChange(//src/developer/ffx/lib/symbolize/src/lib.rs,
+// //src/developer/ffx/lib/symbolize/sys/src/lib.rs)
+
 enum class ResolveAddressStatus : uint8_t {
   Ok,
   SymbolFileUnavailable,
   NoOverlappingModule,
 };
 ResolveAddressStatus symbolizer_resolve_address(symbolizer::SymbolizerImpl* symbolizer,
-                                                uint64_t address, location_callback output,
-                                                void* output_context);
+                                                uint64_t address, AddressType address_type,
+                                                location_callback output, void* output_context);
 }
 
-#endif /* SRC_DEVELOPER_FFX_LIB_SYMBOLIZE_SYS_WRAPPER_H_ */
+#endif  // SRC_DEVELOPER_FFX_LIB_SYMBOLIZE_SYS_WRAPPER_H_

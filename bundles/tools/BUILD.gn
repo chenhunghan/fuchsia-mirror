@@ -42,7 +42,7 @@ _host_tools = [
   "//src/developer/debug/zxdb:zxdb",
   "//src/developer/ffx/tools/speedtest/target:speedtest",
   "//src/diagnostics/triage:install",
-  "//src/lib/chunked-compression:chunked-compress-host-tool",
+  "//src/lib/chunked-compression:chunked-compress",
   "//src/lib/icu/tools/extractor:host",
   "//src/performance/lib/trace_processing:run_cpu_breakdown",
   "//src/performance/lib/trace_processing:run_graphics_metrics",
@@ -54,6 +54,7 @@ _host_tools = [
   "//tools/check-licenses",
   "//tools/whereiscl",
 ]
+
 group("host_tools") {
   testonly = true
   public_deps = []

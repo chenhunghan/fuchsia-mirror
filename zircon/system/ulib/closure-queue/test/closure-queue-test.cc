@@ -15,8 +15,6 @@ namespace {
 class ClosureQueueTest : public zxtest::Test {
  protected:
   ClosureQueueTest();
-  // deprecated; to be removed
-  ClosureQueueTest(bool deprecated_construction);
   async::Loop loop_;
   ClosureQueue queue_;
 };

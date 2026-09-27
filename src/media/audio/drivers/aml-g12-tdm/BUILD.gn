@@ -12,8 +12,20 @@ import("//build/drivers.gni")
 import("//build/toolchain/variant_tags.gni")
 
 # TDM driver.
+fuchsia_driver_dml("aml-g12-tdm-dml") {
+  dml = "meta/aml-g12-tdm.dml"
+  golden_bind = "meta/aml_tdm.bind"
+  driver_name = "aml-g12-tdm"
+}
+
+fuchsia_driver_dml("aml-g12-tdm-dai-dml") {
+  dml = "meta/aml-g12-tdm-dai.dml"
+  golden_bind = "meta/aml_tdm_dai.bind"
+  driver_name = "aml-g12-tdm-dai"
+}
+
 driver_bind_rules("aml-g12-tdm-bind") {
-  rules = "meta/aml_tdm.bind"
+  dml_label = ":aml-g12-tdm-dml"
   bind_output = "aml-g12-tdm.bindbc"
   tests = "meta/tests-stream.json"
   deps = [
@@ -87,7 +99,7 @@ fuchsia_driver_component("aml-g12-tdm") {
   component_name = "aml-g12-tdm"
   deps = [ ":aml-g12-tdm-driver" ]
   info = "meta/aml-g12-tdm-info.json"
-  manifest = "meta/aml-g12-tdm.cml"
+  dml_label = ":aml-g12-tdm-dml"
 }
 
 fuchsia_driver_package("aml-g12-tdm-package") {
@@ -98,7 +110,7 @@ fuchsia_driver_package("aml-g12-tdm-package") {
 
 # DAI driver.
 driver_bind_rules("aml-g12-tdm-dai-bind") {
-  rules = "meta/aml_tdm_dai.bind"
+  dml_label = ":aml-g12-tdm-dai-dml"
   bind_output = "aml-g12-tdm-dai.bindbc"
   tests = "meta/tests-dai.json"
   deps = [
@@ -160,7 +172,7 @@ fuchsia_driver_component("aml-g12-tdm-dai") {
   component_name = "aml-g12-tdm-dai"
   deps = [ ":aml-g12-tdm-dai-driver" ]
   info = "meta/aml-g12-tdm-dai-info.json"
-  manifest = "meta/aml-g12-tdm-dai.cml"
+  dml_label = ":aml-g12-tdm-dai-dml"
 }
 
 fuchsia_driver_package("aml-g12-tdm-dai-package") {

@@ -298,15 +298,13 @@ async fn inspect_success() {
                 "active": {},
                 "recent": {
                     "0": {
-                        "0": {
-                            "start_boot_ns": AnyProperty,
-                            "url": "fuchsia-pkg://example.org/test-package",
-                            "blob_source":
-                                format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
-                            "hash": package.hash().to_string(),
-                            "result": "success",
-                            "end_boot_ns": AnyProperty,
-                        }
+                        "start_boot_ns": AnyProperty,
+                        "url": "fuchsia-pkg://example.org/test-package",
+                        "blob_source":
+                            format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                        "hash": package.hash().to_string(),
+                        "result": "success",
+                        "end_boot_ns": AnyProperty,
                     },
                 },
             }
@@ -351,17 +349,15 @@ async fn inspect_failure() {
                 "active": {},
                 "recent": {
                     "0": {
-                        "0": {
-                            "start_boot_ns": AnyProperty,
-                            "url": "fuchsia-pkg://example.org/test-package",
-                            "blob_source":
-                                format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
-                            "hash": package.hash().to_string(),
-                            "result":
-                                "error: forwarding to the package fetcher: fetching blob: error \
-                                 while calling fuchsia.pkg.http.Client.DownloadBlob Network",
-                            "end_boot_ns": AnyProperty,
-                        }
+                        "start_boot_ns": AnyProperty,
+                        "url": "fuchsia-pkg://example.org/test-package",
+                        "blob_source":
+                            format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                        "hash": package.hash().to_string(),
+                        "result":
+                            "error: forwarding to the package fetcher: fetching blob: error \
+                                while calling fuchsia.pkg.http.Client.DownloadBlob Network",
+                        "end_boot_ns": AnyProperty,
                     },
                 },
             }

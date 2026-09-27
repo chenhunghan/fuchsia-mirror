@@ -4,11 +4,16 @@
 
 #include <fidl/fuchsia.hardware.clock/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.clock/cpp/wire.h>
+#include <lib/async/cpp/irq.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/devfs/cpp/connector.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
+#include <lib/fit/defer.h>
+#include <lib/zx/interrupt.h>
+
+#include <atomic>
 
 namespace fake_device {
 
@@ -16,6 +21,19 @@ class FakeDeviceDriver : public fdf::DriverBase2,
                          public fidl::WireServer<fuchsia_hardware_clock::Clock> {
  public:
   FakeDeviceDriver() : fdf::DriverBase2("fake-device") {}
+
+  void HandleInterrupt(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_status_t status,
+                       const zx_packet_interrupt_t* interrupt_packet) {
+    if (status != ZX_OK) {
+      if (status != ZX_ERR_CANCELED) {
+        fdf::error("HandleInterrupt received error status: {}", zx_status_get_string(status));
+      }
+      return;
+    }
+    auto ack_interrupt = fit::defer([this] { interrupt_.ack(); });
+    fdf::info("fake-device received interrupt from fake-clock!");
+    interrupt_received_.store(true);
+  }
 
   zx::result<> Start(fdf::DriverContext context) final {
     fdf::info("Starting fake-device driver");
@@ -30,7 +48,22 @@ class FakeDeviceDriver : public fdf::DriverBase2,
     }
     auto pdev = std::move(pdev_result.value());
 
-    // 2. Connect to clock service "my-clock"
+    // 2. Acquire interrupt from pdev
+    auto irq_result = pdev.GetInterrupt(0);
+    if (irq_result.is_error()) {
+      fdf::error("Failed to get interrupt: {}", irq_result);
+      return irq_result.take_error();
+    }
+    interrupt_ = std::move(irq_result.value());
+    interrupt_handler_.set_object(interrupt_.get());
+    zx_status_t status = interrupt_handler_.Begin(dispatcher());
+    if (status != ZX_OK) {
+      fdf::error("Failed to begin interrupt handler: {}", zx_status_get_string(status));
+      return zx::error(status);
+    }
+    fdf::info("fake-device listening on interrupt 0");
+
+    // 3. Connect to clock service "my-clock"
     auto clock_connect = incoming_->Connect<fuchsia_hardware_clock::Service::Clock>("my-clock");
     if (clock_connect.is_error()) {
       fdf::error("Failed to connect to clock service: {}", clock_connect);
@@ -58,7 +91,7 @@ class FakeDeviceDriver : public fdf::DriverBase2,
       }
     }
 
-    // 6. Export to devfs
+    // 4. Export to devfs
     zx::result connector = devfs_connector_.Bind(dispatcher());
     if (connector.is_error()) {
       fdf::error("Failed to bind devfs connector: {}", connector);
@@ -84,10 +117,12 @@ class FakeDeviceDriver : public fdf::DriverBase2,
     return zx::ok();
   }
 
-  // fidl::WireServer<fuchsia_hardware_clock::Clock> implementation (dummy)
+  // fidl::WireServer<fuchsia_hardware_clock::Clock> implementation
   void Enable(EnableCompleter::Sync& completer) override { completer.ReplySuccess(); }
   void Disable(DisableCompleter::Sync& completer) override { completer.ReplySuccess(); }
-  void IsEnabled(IsEnabledCompleter::Sync& completer) override { completer.ReplySuccess(true); }
+  void IsEnabled(IsEnabledCompleter::Sync& completer) override {
+    completer.ReplySuccess(interrupt_received_.load());
+  }
   void SetRate(SetRateRequestView request, SetRateCompleter::Sync& completer) override {
     completer.ReplySuccess();
   }
@@ -113,6 +148,10 @@ class FakeDeviceDriver : public fdf::DriverBase2,
   void Connect(fidl::ServerEnd<fuchsia_hardware_clock::Clock> request) {
     bindings_.AddBinding(dispatcher(), std::move(request), this, fidl::kIgnoreBindingClosure);
   }
+
+  std::atomic<bool> interrupt_received_{false};
+  zx::interrupt interrupt_;
+  async::IrqMethod<FakeDeviceDriver, &FakeDeviceDriver::HandleInterrupt> interrupt_handler_{this};
 
   fdf::OwnedChildNode child_node_;
   driver_devfs::Connector<fuchsia_hardware_clock::Clock> devfs_connector_{

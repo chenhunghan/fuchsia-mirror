@@ -7,7 +7,7 @@
 //! SMBIOS support for PC platform.
 
 #[cfg(console_enabled)]
-use crate::console_rust::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
 use crate::vm::arch_vm_aspace::{ARCH_MMU_FLAG_CACHED, ARCH_MMU_FLAG_PERM_READ};
 use crate::vm::vm_aspace::VmAspace;
 use core::ptr::NonNull;

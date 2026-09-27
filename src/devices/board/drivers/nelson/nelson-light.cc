@@ -194,7 +194,7 @@ zx_status_t Nelson::LightInit() {
 
   fdf::Arena arena('LIGH');
   auto aml_light_spec =
-      fuchsia_driver_framework::CompositeNodeSpec{{.name = "aml_light", .parents2 = parents}};
+      fuchsia_driver_framework::CompositeNodeSpec{{.name = "gpio-light", .parents2 = parents}};
   fdf::WireUnownedResult result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, light_node), fidl::ToWire(fidl_arena, aml_light_spec));
   if (!result.ok()) {

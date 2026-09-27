@@ -104,7 +104,6 @@
 
 pub(crate) use lock_order::Unlocked;
 
-use core::convert::Infallible as Never;
 use core::marker::PhantomData;
 
 use lock_order::impl_lock_after;
@@ -119,59 +118,59 @@ use net_types::ip::{Ipv4, Ipv6};
 // order declared below.
 pub enum UnlockedState {}
 
-pub struct IcmpAllSocketsSet<I>(PhantomData<I>, Never);
-pub struct IcmpSocketState<I>(PhantomData<I>, Never);
-pub struct IcmpBoundMap<I>(PhantomData<I>, Never);
+pub struct IcmpAllSocketsSet<I>(PhantomData<I>, !);
+pub struct IcmpSocketState<I>(PhantomData<I>, !);
+pub struct IcmpBoundMap<I>(PhantomData<I>, !);
 
-pub struct IcmpTokenBucket<I>(PhantomData<I>, Never);
+pub struct IcmpTokenBucket<I>(PhantomData<I>, !);
 
-pub struct TcpAllSocketsSet<I>(PhantomData<I>, Never);
-pub struct TcpSocketState<I>(PhantomData<I>, Never);
-pub struct TcpDemux<I>(PhantomData<I>, Never);
-pub struct UdpAllSocketsSet<I>(PhantomData<I>, Never);
-pub struct UdpSocketState<I>(PhantomData<I>, Never);
-pub struct UdpBoundMap<I>(PhantomData<I>, Never);
+pub struct TcpAllSocketsSet<I>(PhantomData<I>, !);
+pub struct TcpSocketState<I>(PhantomData<I>, !);
+pub struct TcpDemux<I>(PhantomData<I>, !);
+pub struct UdpAllSocketsSet<I>(PhantomData<I>, !);
+pub struct UdpSocketState<I>(PhantomData<I>, !);
+pub struct UdpBoundMap<I>(PhantomData<I>, !);
 
-pub struct IpDeviceConfiguration<I>(PhantomData<I>, Never);
-pub struct IpDeviceGmp<I>(PhantomData<I>, Never);
-pub struct IpDeviceAddresses<I>(PhantomData<I>, Never);
-pub struct IpDeviceFlags<I>(PhantomData<I>, Never);
-pub struct IpDeviceDefaultHopLimit<I>(PhantomData<I>, Never);
-pub struct IpDeviceAddressDad<I>(PhantomData<I>, Never);
-pub struct IpDeviceAddressData<I>(PhantomData<I>, Never);
+pub struct IpDeviceConfiguration<I>(PhantomData<I>, !);
+pub struct IpDeviceGmp<I>(PhantomData<I>, !);
+pub struct IpDeviceAddresses<I>(PhantomData<I>, !);
+pub struct IpDeviceFlags<I>(PhantomData<I>, !);
+pub struct IpDeviceDefaultHopLimit<I>(PhantomData<I>, !);
+pub struct IpDeviceAddressDad<I>(PhantomData<I>, !);
+pub struct IpDeviceAddressData<I>(PhantomData<I>, !);
 
 pub enum Ipv6DeviceRouterSolicitations {}
 pub enum Ipv6DeviceRouteDiscovery {}
 pub enum Ipv6DeviceLearnedParams {}
 pub enum Ipv6DeviceSlaac {}
-pub struct NudConfig<I>(PhantomData<I>, Never);
+pub struct NudConfig<I>(PhantomData<I>, !);
 
 // This is not a real lock level, but it is useful for writing bounds that
 // require "before IPv4" or "before IPv6".
-pub struct IpState<I>(PhantomData<I>, Never);
-pub struct IpStatePmtuCache<I>(PhantomData<I>, Never);
-pub struct IpStateFragmentCache<I>(PhantomData<I>, Never);
-pub struct IpStateRulesTable<I>(PhantomData<I>, Never);
-pub struct IpStateRoutingTables<I>(PhantomData<I>, Never);
-pub struct IpStateRoutingTable<I>(PhantomData<I>, Never);
+pub struct IpState<I>(PhantomData<I>, !);
+pub struct IpStatePmtuCache<I>(PhantomData<I>, !);
+pub struct IpStateFragmentCache<I>(PhantomData<I>, !);
+pub struct IpStateRulesTable<I>(PhantomData<I>, !);
+pub struct IpStateRoutingTables<I>(PhantomData<I>, !);
+pub struct IpStateRoutingTable<I>(PhantomData<I>, !);
 // Lock level attributed to the state of an individual raw IP sockets.
-pub struct RawIpSocketState<I>(PhantomData<I>, Never);
+pub struct RawIpSocketState<I>(PhantomData<I>, !);
 // Lock level attributed to the collection of all raw IP sockets.
-pub struct AllRawIpSockets<I>(PhantomData<I>, Never);
+pub struct AllRawIpSockets<I>(PhantomData<I>, !);
 
 // Lock level attributed to all multicast forwarding state.
-pub struct IpMulticastForwardingState<I>(PhantomData<I>, Never);
+pub struct IpMulticastForwardingState<I>(PhantomData<I>, !);
 // Lock level attributed to the multicast routing table.
-pub struct IpMulticastRouteTable<I>(PhantomData<I>, Never);
+pub struct IpMulticastRouteTable<I>(PhantomData<I>, !);
 // Lock level attributed to the table of pending multicast packets.
-pub struct IpMulticastForwardingPendingPackets<I>(PhantomData<I>, Never);
+pub struct IpMulticastForwardingPendingPackets<I>(PhantomData<I>, !);
 
 pub enum DeviceLayerState {}
 pub enum AllDeviceSockets {}
 pub enum AnyDeviceSockets {}
 pub enum DeviceSocketState {}
 pub enum DeviceSockets {}
-pub struct EthernetDeviceIpState<I>(PhantomData<I>, Never);
+pub struct EthernetDeviceIpState<I>(PhantomData<I>, !);
 pub enum EthernetDeviceDynamicState {}
 pub enum PureIpDeviceDynamicState {}
 
@@ -200,7 +199,7 @@ pub enum PureIpDeviceTxDequeue {}
 // queue is introduced in the future, this lock-level may be trivially used.
 pub enum PureIpDeviceRxDequeue {}
 
-pub struct FilterState<I>(PhantomData<I>, Never);
+pub struct FilterState<I>(PhantomData<I>, !);
 
 impl LockAfter<Unlocked> for LoopbackTxDequeue {}
 impl_lock_after!(LoopbackTxDequeue => EthernetTxDequeue);

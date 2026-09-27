@@ -4,8 +4,8 @@
 path chargers on Fuchsia.
 
 It connects to `fuchsia.hardware.power.battery.Service` (Fuel Gauge data plane),
-`fuchsia.hardware.power.charger.Service` (Charger enable control), and `fuchsia.power.battery`
-services.
+`fuchsia.hardware.power.charger.Service` (charger enable control, via its `Controller` member),
+and `fuchsia.power.battery` services.
 
 ## Specifying Paths & Multiple Devices
 
@@ -91,10 +91,10 @@ Enable or disable battery charging:
 
 ```console
 $ batteryutil enable 1
-Successfully enabled charging via fuchsia.hardware.power.charger.Charger (/svc/fuchsia.hardware.power.charger.Service/default/charger)
+Successfully enabled charging via fuchsia.hardware.power.charger.Controller (/svc/fuchsia.hardware.power.charger.Service/default/controller)
 
 $ batteryutil enable 0
-Successfully disabled charging via fuchsia.hardware.power.charger.Charger (/svc/fuchsia.hardware.power.charger.Service/default/charger)
+Successfully disabled charging via fuchsia.hardware.power.charger.Controller (/svc/fuchsia.hardware.power.charger.Service/default/controller)
 ```
 
 ### 4. Low-Level Power Source Override (`power`) — *Sorrel Only*

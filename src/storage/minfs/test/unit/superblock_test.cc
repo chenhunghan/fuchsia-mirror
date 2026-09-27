@@ -23,10 +23,11 @@ namespace {
 using ::block_client::FakeBlockDevice;
 using ::testing::_;
 
-constexpr size_t abm_block = 5;
-constexpr size_t ibm_block = 6;
-constexpr size_t data_block = 7;
-constexpr size_t integrity_block = 8;
+constexpr size_t ibm_block = 1;
+constexpr size_t abm_block = 2;
+constexpr size_t ino_block = 3;
+constexpr size_t integrity_block = 4;
+constexpr size_t data_block = 30;
 
 // Mock TransactionHandler class to be used in superblock tests.
 class MockTransactionHandler : public fs::DeviceTransactionHandler {
@@ -68,7 +69,7 @@ void FillSuperblockFields(Superblock* info) {
   info->integrity_start_block = integrity_block;
   info->ibm_block = ibm_block;
   info->abm_block = abm_block;
-  info->ino_block = abm_block;
+  info->ino_block = ino_block;
   info->block_count = 4;
   info->inode_count = 4;
   info->alloc_block_count = 2;
@@ -379,6 +380,64 @@ TEST(SuperblockTest, BackupSuperblock) {
 
   SetMinfsFlagFvm(info);
   ASSERT_EQ(info.BackupSuperblockStart(), kFvmSuperblockBackup);
+}
+
+TEST(SuperblockTest, SuperblockOverflowDetection) {
+  constexpr uint64_t kTestBlockCount = 1000;
+  auto device = std::make_unique<FakeBlockDevice>(kTestBlockCount * kMinfsBlockSize / 512, 512);
+  auto bcache = Bcache::Create(device.get(), kTestBlockCount);
+  ASSERT_TRUE(bcache.is_ok());
+
+  Superblock info = {};
+  FillSuperblockFields(&info);
+
+  // We craft an overflow where dat_block + block_count overflows 32-bit to equal kTestBlockCount.
+  // E.g. dat_block = 0xFFFFFFF0, block_count = kTestBlockCount - 0xFFFFFFF0 (which wraps to
+  // kTestBlockCount).
+  uint32_t dat_block = 0xFFFFFFF0;
+  uint32_t block_count = static_cast<uint32_t>(kTestBlockCount) - dat_block;
+
+  info.dat_block = dat_block;
+  info.block_count = block_count;
+
+  // Recompute checksum
+  minfs::UpdateChecksum(&info);
+
+  // Write this bad superblock to block 0
+  ASSERT_TRUE(bcache->Writeblk(kSuperblockStart, &info).is_ok());
+
+  // Attempt to load the superblock, it should fail with ZX_ERR_IO_DATA_INTEGRITY
+  auto superblock = LoadSuperblock(bcache.value().get());
+  ASSERT_TRUE(superblock.is_error());
+  EXPECT_EQ(superblock.error_value(), ZX_ERR_IO_DATA_INTEGRITY);
+}
+
+TEST(SuperblockTest, SuperblockJournalUnderflowDetection) {
+  constexpr uint64_t kTestBlockCount = 1000;
+  auto device = std::make_unique<FakeBlockDevice>(kTestBlockCount * kMinfsBlockSize / 512, 512);
+  auto bcache = Bcache::Create(device.get(), kTestBlockCount);
+  ASSERT_TRUE(bcache.is_ok());
+
+  Superblock info = {};
+  FillSuperblockFields(&info);
+
+  // dat_block < integrity_start_block, so subtraction underflows.
+  // We want dat_block - integrity_start_block to wrap to a large number so it passes the old check,
+  // but dat_block + block_count = kTestBlockCount.
+  info.dat_block = 10;
+  info.integrity_start_block = 20;
+  info.block_count = static_cast<uint32_t>(kTestBlockCount) - info.dat_block;
+
+  // Recompute checksum
+  minfs::UpdateChecksum(&info);
+
+  // Write this bad superblock to block 0
+  ASSERT_TRUE(bcache->Writeblk(kSuperblockStart, &info).is_ok());
+
+  // Attempt to load the superblock, it should fail with ZX_ERR_BAD_STATE (for journal too small).
+  auto superblock = LoadSuperblock(bcache.value().get());
+  ASSERT_TRUE(superblock.is_error());
+  EXPECT_EQ(superblock.error_value(), ZX_ERR_BAD_STATE);
 }
 
 }  // namespace

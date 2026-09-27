@@ -42,7 +42,7 @@ pub use zx::MessageBuf;
 
 #[cfg(not(feature = "fdomain"))]
 #[cfg(not(target_os = "fuchsia"))]
-pub use fuchsia_async::emulated_handle::MessageBuf;
+pub use fuchsia_emulated_handle::MessageBuf;
 
 #[cfg(feature = "fdomain")]
 pub type NullableHandle = fdomain_client::Handle;

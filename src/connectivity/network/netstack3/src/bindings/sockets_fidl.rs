@@ -5,7 +5,6 @@
 //! FIDL Worker for the `fuchsia.net.sockets` API.
 
 use std::collections::VecDeque;
-use std::convert::Infallible as Never;
 use std::sync::Arc;
 
 use fidl::endpoints::{ProtocolMarker, Responder as _};
@@ -468,7 +467,7 @@ impl TcpSocketDestructionContext for BindingsCtx {
 impl TryFromFidl<fnet_sockets_ext::IpSocketMatcher>
     for IpSocketMatcher<<BindingsCtx as MatcherBindingsTypes>::DeviceClass>
 {
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(fidl: fnet_sockets_ext::IpSocketMatcher) -> Result<Self, Self::Error> {
         match fidl {
@@ -498,7 +497,7 @@ impl TryFromFidl<fnet_sockets_ext::IpSocketMatcher>
 }
 
 impl<I: Ip> TryIntoFidl<fnet_sockets_ext::IpSocketState> for UdpSocketDiagnostics<I> {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fnet_sockets_ext::IpSocketState, Self::Error> {
         let UdpSocketDiagnostics { state, cookie, marks } = self;
@@ -529,7 +528,7 @@ impl<I: Ip> TryIntoFidl<fnet_sockets_ext::IpSocketState> for UdpSocketDiagnostic
 }
 
 impl TryIntoFidl<fnet_tcp::State> for TcpSocketState {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fnet_tcp::State, Self::Error> {
         Ok(match self {
@@ -549,7 +548,7 @@ impl TryIntoFidl<fnet_tcp::State> for TcpSocketState {
 }
 
 impl TryIntoFidl<fnet_tcp::CongestionControlState> for CongestionControlState {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fnet_tcp::CongestionControlState, Self::Error> {
         Ok(match self {
@@ -565,7 +564,7 @@ impl TryIntoFidl<fnet_tcp::CongestionControlState> for CongestionControlState {
 }
 
 impl TryIntoFidl<fnet_sockets_ext::TcpInfo> for TcpSocketInfo<StackTime> {
-    type Error = Never;
+    type Error = !;
     fn try_into_fidl(self) -> Result<fnet_sockets_ext::TcpInfo, Self::Error> {
         let TcpSocketInfo {
             state,
@@ -613,7 +612,7 @@ impl TryIntoFidl<fnet_sockets_ext::TcpInfo> for TcpSocketInfo<StackTime> {
 }
 
 impl<I: Ip> TryIntoFidl<fnet_sockets_ext::IpSocketState> for TcpSocketDiagnostics<I, StackTime> {
-    type Error = Never;
+    type Error = !;
 
     fn try_into_fidl(self) -> Result<fnet_sockets_ext::IpSocketState, Self::Error> {
         let TcpSocketDiagnostics { tuple, state_machine, cookie, marks, tcp_info } = self;

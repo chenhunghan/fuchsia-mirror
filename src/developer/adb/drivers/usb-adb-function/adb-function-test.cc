@@ -68,18 +68,20 @@ static constexpr uint32_t kBulkInEp = 2;
 class DelayedCancelEndpoint : public fake_usb_endpoint::FakeEndpoint {
  public:
   void CancelAll(CancelAllCompleter::Sync& completer) override {
+    zx_status_t reply_status = ZX_OK;
     {
       std::lock_guard<std::mutex> _(lock_);
-      if (cancel_status_ != ZX_OK) {
-        completer.Reply(fit::error(cancel_status_));
-        return;
-      }
-      if (hold_cancel_) {
+      reply_status = cancel_status_;
+      if (reply_status == ZX_OK && hold_cancel_) {
         delayed_cancels_.push_back(completer.ToAsync());
         return;
       }
     }
-    DoCancelAll(completer.ToAsync());
+    // Requests are drained even when replying an error. This mirrors
+    // Dwc3::EpServer::CancelAll(), which completes all active requests when the
+    // controller is stopped or powered off. Replying an error without draining
+    // would leave requests permanently outstanding and stall teardown.
+    DoCancelAll(completer.ToAsync(), reply_status);
   }
 
   void ReleaseCancelAll() {
@@ -105,7 +107,7 @@ class DelayedCancelEndpoint : public fake_usb_endpoint::FakeEndpoint {
   }
 
  private:
-  void DoCancelAll(CancelAllCompleter::Async completer) {
+  void DoCancelAll(CancelAllCompleter::Async completer, zx_status_t reply_status = ZX_OK) {
     std::vector<fuchsia_hardware_usb_endpoint::Completion> completions;
     std::optional<fidl::ServerBindingRef<fuchsia_hardware_usb_endpoint::Endpoint>> local_binding;
     {
@@ -124,7 +126,11 @@ class DelayedCancelEndpoint : public fake_usb_endpoint::FakeEndpoint {
     if (!completions.empty() && local_binding.has_value()) {
       EXPECT_TRUE(fidl::SendEvent(*local_binding)->OnCompletion(std::move(completions)).is_ok());
     }
-    completer.Reply(fit::ok());
+    if (reply_status == ZX_OK) {
+      completer.Reply(fit::ok());
+    } else {
+      completer.Reply(fit::error(reply_status));
+    }
   }
 
   zx_status_t cancel_status_ __TA_GUARDED(lock_) = ZX_OK;
@@ -210,6 +216,7 @@ class AdbFakeUsb
     {
       std::lock_guard<std::mutex> _(lock_);
       deconfigured_ = true;
+      deconfigure_count_++;
       configured_ = false;
       if (hold_deconfigure_) {
         delayed_deconfigure_completer_ = completer.ToAsync();
@@ -221,6 +228,11 @@ class AdbFakeUsb
     if (cb) {
       cb();
     }
+  }
+
+  size_t deconfigure_count() const {
+    std::lock_guard<std::mutex> _(lock_);
+    return deconfigure_count_;
   }
 
   bool is_configured() const {
@@ -241,7 +253,11 @@ class AdbFakeUsb
     bool call_now = false;
     {
       std::lock_guard<std::mutex> _(lock_);
-      if (configured_) {
+      // Only report "already configured" when a fresh iface client is actually
+      // available to hand out. Otherwise WaitConfigured() would re-register and
+      // be signalled immediately on every iteration, spinning until the driver
+      // finishes teardown and rebinds.
+      if (configured_ && iface_client_.is_valid()) {
         call_now = true;
       } else {
         on_configured_ = std::move(on_configured);
@@ -287,6 +303,35 @@ class AdbFakeUsb
     disabled_endpoints_.clear();
   }
 
+  void ConfigureEndpoint(
+      fidl::Request<fuchsia_hardware_usb_function::UsbFunction::ConfigureEndpoint>& request,
+      fidl::internal::NaturalCompleter<
+          fuchsia_hardware_usb_function::UsbFunction::ConfigureEndpoint>::Sync& completer)
+      override {
+    bool fail = false;
+    {
+      std::lock_guard<std::mutex> _(lock_);
+      fail = fail_configure_endpoint_ ||
+             (fail_configure_endpoint_addr_.has_value() &&
+              *fail_configure_endpoint_addr_ == request.endpoint_address());
+    }
+    if (fail) {
+      completer.Reply(fit::error(ZX_ERR_NO_RESOURCES));
+      return;
+    }
+    Base::ConfigureEndpoint(request, completer);
+  }
+
+  void set_fail_configure_endpoint(bool fail) {
+    std::lock_guard<std::mutex> _(lock_);
+    fail_configure_endpoint_ = fail;
+  }
+
+  void set_fail_configure_endpoint_addr(std::optional<uint8_t> ep_addr) {
+    std::lock_guard<std::mutex> _(lock_);
+    fail_configure_endpoint_addr_ = ep_addr;
+  }
+
   void set_alloc_resources_status(zx_status_t status) {
     std::lock_guard<std::mutex> _(lock_);
     alloc_resources_status_ = status;
@@ -309,11 +354,14 @@ class AdbFakeUsb
   zx_status_t alloc_resources_status_ __TA_GUARDED(lock_) = ZX_OK;
   zx_status_t configure_status_ __TA_GUARDED(lock_) = ZX_OK;
   bool omit_endpoints_ __TA_GUARDED(lock_) = false;
+  bool fail_configure_endpoint_ __TA_GUARDED(lock_) = false;
+  std::optional<uint8_t> fail_configure_endpoint_addr_ __TA_GUARDED(lock_);
   bool hold_deconfigure_ __TA_GUARDED(lock_) = false;
   std::optional<fidl::internal::NaturalCompleter<
       fuchsia_hardware_usb_function::UsbFunction::Deconfigure>::Async>
       delayed_deconfigure_completer_ __TA_GUARDED(lock_);
   bool deconfigured_ __TA_GUARDED(lock_) = false;
+  size_t deconfigure_count_ __TA_GUARDED(lock_) = 0;
   bool configured_ __TA_GUARDED(lock_) = false;
   std::vector<uint8_t> disabled_endpoints_ __TA_GUARDED(lock_);
   mutable std::mutex lock_;
@@ -571,6 +619,12 @@ class UsbAdbTest : public testing::Test {
     });
   }
 
+  // Safety net that drains any fake endpoint requests still outstanding at
+  // deconfigure time. The driver now issues its own CancelAll() at the start of
+  // teardown, which is what actually drains requests, and Deconfigure() only runs
+  // once all requests have already been returned. This therefore matters only via
+  // set_on_deconfigured()'s immediate-callback path, when a previous teardown has
+  // already set deconfigured_.
   void CancelAllUsbRequestsOnDeconfigure() {
     driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
       if (env.fake_dev_.has_value()) {
@@ -741,6 +795,19 @@ TEST_F(UsbAdbTest, VerifyShutdownCompletesWhenHardwareUnresponsive) {
   fidl::WireClient async_iface(std::move(iface_client_end),
                                fdf::Dispatcher::GetCurrent()->async_dispatcher());
 
+  CancelAllUsbRequestsOnDeconfigure();
+
+  // Simulate hardware power-off or inactive controller endpoints where CancelAll
+  // returns ZX_ERR_IO_NOT_PRESENT. This is armed *before* teardown is triggered so the
+  // driver's CancelAll() deterministically observes the failure. Arming it afterwards
+  // would race the background dispatcher, which usually processes SetConfigured(false)
+  // first and therefore exercises the ZX_OK path instead.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_cancel_status(ZX_ERR_IO_NOT_PRESENT);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_cancel_status(ZX_ERR_IO_NOT_PRESENT);
+  });
+
+  // The driver should handle the error and still complete shutdown.
   async_iface->SetConfigured(false, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kHigh)
       .ThenExactlyOnce([&](auto& result) {
         EXPECT_TRUE(result.ok() || result.status() == ZX_ERR_PEER_CLOSED ||
@@ -748,15 +815,6 @@ TEST_F(UsbAdbTest, VerifyShutdownCompletesWhenHardwareUnresponsive) {
       });
 
   driver_test_.runtime().RunUntilIdle();
-
-  CancelAllUsbRequestsOnDeconfigure();
-
-  // Simulate hardware power-off or inactive controller endpoints where CancelAll
-  // returns ZX_ERR_IO_NOT_PRESENT. The driver should handle the error and complete shutdown.
-  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
-    env.fake_dev_->fake_endpoint(kBulkOutEp).set_cancel_status(ZX_ERR_IO_NOT_PRESENT);
-    env.fake_dev_->fake_endpoint(kBulkInEp).set_cancel_status(ZX_ERR_IO_NOT_PRESENT);
-  });
 
   EXPECT_TRUE(driver_test_.StopDriver().is_ok());
   driver_stopped_ = true;
@@ -916,8 +974,11 @@ TEST_F(UsbAdbTest, StartAdbTwiceFails) {
 
 TEST_F(UsbAdbTest, IsConfiguredReflectsDeconfigureState) {
   auto usb_impl = NormalStartAdb();
-  driver_test_.RunInEnvironmentTypeContext(
-      [&](UsbAdbEnvironment& env) { EXPECT_TRUE(env.fake_dev_->is_configured()); });
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    EXPECT_TRUE(env.fake_dev_->is_configured());
+    EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u);
+    EXPECT_TRUE(env.fake_dev_->disabled_endpoints().empty());
+  });
 
   driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
     env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(true);
@@ -933,12 +994,17 @@ TEST_F(UsbAdbTest, IsConfiguredReflectsDeconfigureState) {
   EXPECT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
   driver_test_.runtime().RunUntilIdle();
 
-  driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
-    EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kStoppingForReconnect);
+  // 1. Endpoints should have been disabled immediately upon deconfigure request:
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    auto eps = env.fake_dev_->disabled_endpoints();
+    EXPECT_EQ(eps.size(), 2u);
   });
-  driver_test_.RunInEnvironmentTypeContext(
-      [&](UsbAdbEnvironment& env) { EXPECT_FALSE(env.fake_dev_->is_configured()); });
 
+  // 2. Deconfigure() should NOT have been called yet while CancelAll is pending:
+  driver_test_.RunInEnvironmentTypeContext(
+      [&](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
+
+  // 3. Release CancelAll:
   driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
     env.fake_dev_->fake_endpoint(kBulkOutEp).ReleaseCancelAll();
     env.fake_dev_->fake_endpoint(kBulkInEp).ReleaseCancelAll();
@@ -946,6 +1012,16 @@ TEST_F(UsbAdbTest, IsConfiguredReflectsDeconfigureState) {
     env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(false);
     env.CancelAllUsbRequests();
   });
+
+  // 4. Now Deconfigure() should have been called:
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        size_t count = 0;
+        driver_test_.RunInEnvironmentTypeContext(
+            [&](UsbAdbEnvironment& env) { count = env.fake_dev_->deconfigure_count(); });
+        return count >= 1;
+      },
+      zx::sec(5)));
 }
 
 TEST_F(UsbAdbTest, OfflineTxQueuedAndFlushedOnline) {
@@ -1026,6 +1102,9 @@ TEST_F(UsbAdbTest, UsbFunctionBindingReconfigure) {
       .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
   }});
   ASSERT_TRUE(deconfig_result.is_ok());
+
+  // Wait for requests to drain and the driver to restart USB before re-binding.
+  WaitForState(State::kAwaitingUsbConnection);
 
   iface_client_ = {};
   ASSERT_NO_FATAL_FAILURE(EnsureIfaceBound());
@@ -1108,7 +1187,6 @@ TEST_F(UsbAdbTest, TeardownWhileRequestsPending) {
   // Verify the driver is waiting for CancelAll and in stopping state:
   driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
     EXPECT_FALSE(UsbAdbTestHelper::CancelAllCompleted(dev));
-    EXPECT_FALSE(UsbAdbTestHelper::AllRequestsReturned(dev));
     EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kStoppingForReconnect);
   });
 
@@ -1238,7 +1316,6 @@ TEST_F(UsbAdbTest, ReconnectHandlesConfigureFailureGracefully) {
   EventHandler handler;
   handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
   ExpectHandleOneEventSafe(usb_impl, handler);
-
   // Set the fake device to reject subsequent Configure calls (simulating peripheral
   // stopping/tearing down).
   driver_test_.RunInEnvironmentTypeContext(
@@ -1264,6 +1341,208 @@ TEST_F(UsbAdbTest, ReconnectHandlesConfigureFailureGracefully) {
   auto stop_res = client_->StopAdb();
   ASSERT_TRUE(stop_res.ok());
   EXPECT_TRUE(stop_res->is_ok());
+
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+// Verifies that when endpoint configuration fails during SetConfigured(true) (e.g. Bulk OUT
+// fails due to resource exhaustion in the controller), EnableEndpoints() propagates the error
+// cleanly via the FIDL completer instead of calling ZX_PANIC. Verifies that the driver remains
+// in State::kAwaitingUsbConnection and can successfully recover when endpoint configuration
+// succeeds on a subsequent retry.
+TEST_F(UsbAdbTest, ConfigureEndpointFailureDoesNotPanic) {
+  // Connect ADB client while USB is not yet configured.
+  auto [client_end, server_end] = fidl::Endpoints<fadb::UsbAdbImpl>::Create();
+  ASSERT_TRUE(client_->StartAdb(std::move(server_end)).ok());
+
+  WaitConfigured();
+  ASSERT_TRUE(iface_client_.is_valid());
+
+  // Set the fake device to fail endpoint configuration.
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { env.fake_dev_->set_fail_configure_endpoint(true); });
+
+  // SetConfigured(true) should fail gracefully with ZX_ERR_NO_RESOURCES rather than panicking.
+  auto result = iface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
+  }});
+  EXPECT_TRUE(result.is_error());
+  EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_NO_RESOURCES);
+
+  // The driver should remain in kAwaitingUsbConnection rather than transitioning to kOnline.
+  driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
+    EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kAwaitingUsbConnection);
+  });
+
+  // Clear the endpoint configuration failure on the fake device and retry.
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { env.fake_dev_->set_fail_configure_endpoint(false); });
+
+  auto retry_result = iface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
+  }});
+  EXPECT_TRUE(retry_result.is_ok());
+  WaitForState(State::kOnline);
+
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+// Verifies that when Bulk IN endpoint configuration fails after Bulk OUT has already been
+// successfully configured, EnableEndpoints() rolls back the partial configuration by calling
+// DisableEndpoint() on the Bulk OUT endpoint. Verifies that the driver does not leave orphan
+// active endpoints in the controller, remains in State::kAwaitingUsbConnection, and can
+// recover to State::kOnline when the failure condition clears.
+TEST_F(UsbAdbTest, ConfigureEndpointFailureBulkInRollsBackBulkOut) {
+  // Connect ADB client while USB is not yet configured.
+  auto [client_end, server_end] = fidl::Endpoints<fadb::UsbAdbImpl>::Create();
+  ASSERT_TRUE(client_->StartAdb(std::move(server_end)).ok());
+
+  WaitConfigured();
+  ASSERT_TRUE(iface_client_.is_valid());
+
+  // Fail specifically on Bulk IN endpoint configuration (after Bulk OUT has succeeded).
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { env.fake_dev_->set_fail_configure_endpoint_addr(kBulkInEp); });
+
+  // SetConfigured(true) should fail with ZX_ERR_NO_RESOURCES.
+  auto result = iface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
+  }});
+  EXPECT_TRUE(result.is_error());
+  EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_NO_RESOURCES);
+
+  // Bulk OUT must have been rolled back via DisableEndpoint.
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    auto disabled = env.fake_dev_->disabled_endpoints();
+    ASSERT_EQ(disabled.size(), 1u);
+    EXPECT_EQ(disabled[0], kBulkOutEp);
+    env.fake_dev_->clear_disabled_endpoints();
+  });
+
+  // The driver should remain in kAwaitingUsbConnection rather than transitioning to kOnline.
+  driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
+    EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kAwaitingUsbConnection);
+  });
+
+  // Clear the endpoint configuration failure on the fake device and retry.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->set_fail_configure_endpoint_addr(std::nullopt);
+  });
+
+  auto retry_result = iface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
+  }});
+  EXPECT_TRUE(retry_result.is_ok());
+  WaitForState(State::kOnline);
+
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+// Verifies that during a USB disconnect/reconnect cycle, if endpoint configuration fails when the
+// host reconfigures USB, the driver handles the error gracefully without panicking. Verifies
+// that SetConfigured(true) returns an error, the driver maintains State::kAwaitingUsbConnection,
+// and full connectivity to State::kOnline is restored once endpoint configuration succeeds.
+TEST_F(UsbAdbTest, ReconnectHandlesConfigureEndpointFailureGracefully) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  // Trigger disconnect by deconfiguring USB.
+  auto deconfig_result = iface_client_->SetConfigured({{
+      .configured = false,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+  }});
+  ASSERT_TRUE(deconfig_result.is_ok());
+
+  // Wait for requests to drain and driver to reach kAwaitingUsbConnection.
+  WaitForState(State::kAwaitingUsbConnection);
+
+  // Re-acquire the newly bound iface_client after driver restarted USB.
+  iface_client_ = {};
+  WaitConfigured();
+  ASSERT_TRUE(iface_client_.is_valid());
+
+  // Set the fake USB device to fail endpoint configuration on reconnect.
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { env.fake_dev_->set_fail_configure_endpoint(true); });
+
+  // Host attempts to re-enable USB. Configuration should fail gracefully.
+  auto reconfig_result = iface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+  }});
+  EXPECT_TRUE(reconfig_result.is_error());
+  EXPECT_EQ(reconfig_result.error_value().domain_error(), ZX_ERR_NO_RESOURCES);
+
+  // Driver must remain in kAwaitingUsbConnection.
+  driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
+    EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kAwaitingUsbConnection);
+  });
+
+  // Clear the endpoint configuration failure and re-attempt connection.
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { env.fake_dev_->set_fail_configure_endpoint(false); });
+
+  auto retry_result = iface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+  }});
+  EXPECT_TRUE(retry_result.is_ok());
+  WaitForState(State::kOnline);
+
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+// Verifies that if SetConfigured(true) arrives while the driver is stopping for reconnect
+// (e.g. rapid host reconnect while CancelAll is still draining), the driver records
+// pending_reconfigure_ and immediately re-enables endpoints and transitions to State::kOnline
+// once the stopping cycle completes.
+TEST_F(UsbAdbTest, SetConfiguredTrueDuringStoppingReconfiguresCleanly) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  // 1. Hold CancelAll so that the driver remains in State::kStoppingForReconnect.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(true);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(true);
+  });
+
+  EnsureIfaceBound();
+  ASSERT_TRUE(iface_client_.is_valid());
+
+  // 2. Disconnect USB: SetConfigured(false).
+  auto res_unconfig = iface_client_->SetConfigured({{
+      .configured = false,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
+  }});
+  EXPECT_TRUE(res_unconfig.is_ok());
+  WaitForState(State::kStoppingForReconnect);
+
+  // 3. While still in kStoppingForReconnect, host reconnects: SetConfigured(true).
+  auto res_config = iface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
+  }});
+  EXPECT_TRUE(res_config.is_ok());
+
+  // 4. Release CancelAll so the stopping process completes.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkInEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(false);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(false);
+    env.CancelAllUsbRequests();
+  });
+
+  // 5. The driver should complete its stop and immediately transition to State::kOnline.
+  WaitForState(State::kOnline);
 
   ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
 }

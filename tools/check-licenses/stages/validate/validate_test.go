@@ -62,7 +62,7 @@ func TestValidator_Run(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "third_party", "bar", "LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "third_party", "bar"),
 		IsLicenseFile: true,
-		HasReadme:     true,
+		ReadmePath:    filepath.Join(fuchsiaDir, "third_party", "bar", "README.fuchsia"),
 		Matches:       []pipeline.LicenseMatch{},
 	}
 
@@ -71,7 +71,7 @@ func TestValidator_Run(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "third_party", "foo", "LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "third_party", "foo"),
 		IsLicenseFile: true,
-		HasReadme:     true,
+		ReadmePath:    filepath.Join(fuchsiaDir, "third_party", "foo", "README.fuchsia"),
 		Matches:       []pipeline.LicenseMatch{},
 	}
 
@@ -105,7 +105,7 @@ func TestValidator_Run(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "third_party", "foo", "main.cc"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "third_party", "foo"),
 		IsLicenseFile: false,
-		HasReadme:     true,
+		ReadmePath:    filepath.Join(fuchsiaDir, "third_party", "foo", "README.fuchsia"),
 		Matches:       []pipeline.LicenseMatch{},
 	}
 
@@ -122,7 +122,7 @@ func TestValidator_Run(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "third_party", "bad_gpl", "LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "third_party", "bad_gpl"),
 		IsLicenseFile: true,
-		HasReadme:     true,
+		ReadmePath:    filepath.Join(fuchsiaDir, "third_party", "bad_gpl", "README.fuchsia"),
 		Matches:       []pipeline.LicenseMatch{{SPDXID: "GPL-2.0", MatchType: "Restricted"}},
 	}
 
@@ -131,7 +131,7 @@ func TestValidator_Run(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "third_party", "legacy_gpl", "LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "third_party", "legacy_gpl"),
 		IsLicenseFile: true,
-		HasReadme:     true,
+		ReadmePath:    filepath.Join(fuchsiaDir, "third_party", "legacy_gpl", "README.fuchsia"),
 		Matches:       []pipeline.LicenseMatch{{SPDXID: "GPL-2.0", MatchType: "Restricted"}},
 	}
 
@@ -245,11 +245,12 @@ func TestValidator_RunFailure_MissingLicense(t *testing.T) {
 
 	inChan := make(chan pipeline.ClassifiedFile, 1)
 
+	expectedDefaultReadme := filepath.Join(fuchsiaDir, "third_party/foo/README.fuchsia")
 	inChan <- pipeline.ClassifiedFile{
 		Path:          filepath.Join(fuchsiaDir, "third_party/foo/main.cc"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "third_party/foo"),
 		IsLicenseFile: false,
-		HasReadme:     true,
+		ReadmePath:    expectedDefaultReadme,
 		Matches:       []pipeline.LicenseMatch{},
 	}
 	close(inChan)
@@ -274,10 +275,43 @@ func TestValidator_RunFailure_MissingLicense(t *testing.T) {
 	if errors[0].CheckName != PolicyNoLicense {
 		t.Errorf("Expected check name %s, got: %s", PolicyNoLicense, errors[0].CheckName)
 	}
+	if errors[0].FilePath != expectedDefaultReadme {
+		t.Errorf("Expected FilePath %q, got %q", expectedDefaultReadme, errors[0].FilePath)
+	}
 	if !strings.Contains(errors[0].Issue, "Project has no recognized license files") {
 		t.Errorf("Expected error to contain missing license issue description, got: %v", errors[0].Issue)
 	}
+	if !strings.Contains(errors[0].Issue, "Omit 'License' and 'License File'") {
+		t.Errorf("Expected error to instruct omitting License and License File fields, got: %v", errors[0].Issue)
+	}
 	assertFindingStructure(t, errors[0].Issue, true)
+
+	// Verify virtual ReadmePath is preserved as FilePath when set
+	virtualReadme := filepath.Join(fuchsiaDir, "tools/check-licenses/assets/readmes/prebuilt/third_party/bar/README.fuchsia")
+	inChanVirtual := make(chan pipeline.ClassifiedFile, 1)
+	inChanVirtual <- pipeline.ClassifiedFile{
+		Path:          filepath.Join(fuchsiaDir, "prebuilt/third_party/bar/bin"),
+		ProjectRoot:   filepath.Join(fuchsiaDir, "prebuilt/third_party/bar"),
+		ReadmePath:    virtualReadme,
+		IsLicenseFile: false,
+		Matches:       []pipeline.LicenseMatch{},
+	}
+	close(inChanVirtual)
+
+	outChanVirtual, err := validator.Run(ctx, inChanVirtual)
+	if err != nil {
+		t.Fatalf("Failed to run validator on virtual readme project: %v", err)
+	}
+	var virtualErrors []pipeline.ComplianceError
+	for err := range outChanVirtual {
+		virtualErrors = append(virtualErrors, err)
+	}
+	if len(virtualErrors) != 1 {
+		t.Fatalf("Expected 1 error for virtual readme project, got %d", len(virtualErrors))
+	}
+	if virtualErrors[0].FilePath != virtualReadme {
+		t.Errorf("Expected FilePath %q for virtual readme project, got %q", virtualReadme, virtualErrors[0].FilePath)
+	}
 }
 
 func TestValidator_RunFailure_MissingReadme(t *testing.T) {
@@ -290,7 +324,6 @@ func TestValidator_RunFailure_MissingReadme(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "third_party/foo/LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "third_party/foo"),
 		IsLicenseFile: true,
-		HasReadme:     false,
 		Matches:       []pipeline.LicenseMatch{{SPDXID: "Apache-2.0", MatchType: "Approved"}},
 	}
 	close(inChan)
@@ -334,7 +367,6 @@ func TestValidator_RunFailure_MissingReadme_PrivateAndVendor(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "vendor/google/secret/LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "vendor/google/secret"),
 		IsLicenseFile: true,
-		HasReadme:     false,
 		Matches:       []pipeline.LicenseMatch{{SPDXID: "Apache-2.0", MatchType: "Approved"}},
 	}
 	close(inChan)
@@ -384,14 +416,12 @@ func TestValidator_RunFailure_MissingReadme_PrivateAndVendor(t *testing.T) {
 		Path:          filepath.Join(fuchsiaDir, "prebuilt/internal/firmware/LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "prebuilt/internal/firmware"),
 		IsLicenseFile: true,
-		HasReadme:     false,
 		Matches:       []pipeline.LicenseMatch{{SPDXID: "Apache-2.0", MatchType: "Approved"}},
 	}
 	inChan2 <- pipeline.ClassifiedFile{
 		Path:          filepath.Join(fuchsiaDir, "vendor/partner/pkg/LICENSE"),
 		ProjectRoot:   filepath.Join(fuchsiaDir, "vendor/partner/pkg"),
 		IsLicenseFile: true,
-		HasReadme:     false,
 		Matches:       []pipeline.LicenseMatch{{SPDXID: "Apache-2.0", MatchType: "Approved"}},
 	}
 	close(inChan2)

@@ -34,6 +34,10 @@ type HeapProperties = table {
 };
 
 /// Manages resources on a specific sysmem heap.
+///
+/// NOTE: Clients looking to allocate buffers from sysmem should use
+/// [`fuchsia.sysmem2/Allocator`]. This protocol is implemented only by drivers
+/// that provide a custom backing heap to sysmem via [`Sysmem.RegisterHeap`].
 closed protocol Heap {
     /// Request a new memory allocation of `size` on heap. For heaps which don't
     /// permit CPU access to the buffer data, this will create a VMO with an

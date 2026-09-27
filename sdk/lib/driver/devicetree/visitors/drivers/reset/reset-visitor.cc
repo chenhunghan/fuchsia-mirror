@@ -117,6 +117,7 @@ zx::result<> ResetVisitor::ParseReferenceChild(fdf_devicetree::Node& child,
   }
   fuchsia_hardware_reset::ResetDescriptor desc;
   desc.reset_id() = reset_id;
+  desc.id() = reset_id;
   controller.metadata.resets()->push_back(std::move(desc));
 
   return AddChildNodeSpec(child, controller_id, reset_id, reset_name);

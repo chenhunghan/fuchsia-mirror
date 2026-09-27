@@ -541,9 +541,9 @@ class Actor {
       }
     } else if (action.value.is_double_t()) {
       if (auto* val = GetFromValueMap<inspect::LinearDoubleHistogram>(action.id)) {
-        val->Insert(action.value.double_t(), action.count);
+        val->Insert(action.value.double_t(), static_cast<double>(action.count));
       } else if (auto* val = GetFromValueMap<inspect::ExponentialDoubleHistogram>(action.id)) {
-        val->Insert(action.value.double_t(), action.count);
+        val->Insert(action.value.double_t(), static_cast<double>(action.count));
       } else {
         return TestResult::FAILED;
       }

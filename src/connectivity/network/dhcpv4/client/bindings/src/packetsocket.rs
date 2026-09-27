@@ -330,12 +330,12 @@ mod test {
 
         let network = sandbox.create_network("dhcp-test-network").await.expect("create network");
         let realm_a: netemul::TestRealm<'_> = sandbox
-            .create_netstack_realm::<netstack_testing_common::realms::Netstack2, _>(
+            .create_netstack_realm::<netstack_testing_common::realms::Netstack3, _>(
                 "dhcp-test-realm-a",
             )
             .expect("create realm");
         let realm_b: netemul::TestRealm<'_> = sandbox
-            .create_netstack_realm::<netstack_testing_common::realms::Netstack2, _>(
+            .create_netstack_realm::<netstack_testing_common::realms::Netstack3, _>(
                 "dhcp-test-realm-b",
             )
             .expect("create realm");
@@ -429,7 +429,7 @@ mod test {
 
         let network = sandbox.create_network("dhcp-test-network").await.expect("create network");
         let realm: netemul::TestRealm<'_> = sandbox
-            .create_netstack_realm::<netstack_testing_common::realms::Netstack2, _>(
+            .create_netstack_realm::<netstack_testing_common::realms::Netstack3, _>(
                 "dhcp-test-realm-a",
             )
             .expect("create realm");

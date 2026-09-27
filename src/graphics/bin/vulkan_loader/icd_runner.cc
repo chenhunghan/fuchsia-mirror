@@ -19,8 +19,7 @@
 ComponentControllerImpl::ComponentControllerImpl(async_dispatcher_t* dispatcher)
     : vfs_(dispatcher) {}
 
-zx::result<std::unique_ptr<fidl::Server<fuchsia_component_runner::ComponentController>>>
-ComponentControllerImpl::Bind(
+zx::result<> ComponentControllerImpl::Bind(
     async_dispatcher_t* dispatcher,
     fidl::ServerEnd<fuchsia_component_runner::ComponentController> controller,
     fidl::ServerEnd<fuchsia_io::Directory> outgoing_dir,
@@ -36,8 +35,8 @@ ComponentControllerImpl::Bind(
     FX_PLOGS(ERROR, status) << "Failed to serve package directory!";
     return zx::error(status);
   }
-  server->binding_ = fidl::BindServer(dispatcher, std::move(controller), server.get());
-  return zx::ok(std::move(server));
+  fidl::BindServer(dispatcher, std::move(controller), std::move(server));
+  return zx::ok();
 }
 
 zx::result<> IcdRunnerImpl::Add(std::unique_ptr<IcdRunnerImpl> component_runner,
@@ -83,11 +82,9 @@ void IcdRunnerImpl::Start(StartRequest& request, StartCompleter::Sync& completer
     return;
   }
 
-  zx::result controller_server = ComponentControllerImpl::Bind(
+  zx::result<> result = ComponentControllerImpl::Bind(
       dispatcher_, std::move(controller), std::move(outgoing_dir), std::move(pkg_directory));
-  if (controller_server.is_ok()) {
-    controller_server_ = *std::move(controller_server);
-  } else {
-    FX_LOGS(ERROR) << "Failed to bind controller: " << controller_server.status_string();
+  if (result.is_error()) {
+    FX_LOGS(ERROR) << "Failed to bind controller: " << result.status_string();
   }
 }

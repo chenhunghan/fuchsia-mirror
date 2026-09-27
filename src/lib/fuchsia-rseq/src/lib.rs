@@ -107,7 +107,8 @@ thread_local! {
     /// This structure is used to store the restartable sequence information for the current thread.
     /// It is registered with the kernel when the thread is created and unregistered when the thread
     /// is destroyed.
-    static RSEQ: std::cell::Cell<*mut zx_rseq_t> = Default::default();
+    static RSEQ: std::cell::Cell<*mut zx_rseq_t> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
 /// The restartable sequence for the current thread.
@@ -132,9 +133,22 @@ impl Rseq {
     ///
     /// The returned object must not be used after the current thread calls
     /// `rseq_unregister_thread()`.
+    #[inline]
     pub unsafe fn get() -> Self {
         let abi = NonNull::new(RSEQ.with(|rseq| rseq.get())).expect("thread not registered");
         Self { abi }
+    }
+
+    /// Returns the restartable sequence for the current thread if registered.
+    ///
+    /// # Safety
+    ///
+    /// The returned object must not be used after the current thread calls
+    /// `rseq_unregister_thread()`.
+    #[inline]
+    pub unsafe fn try_get() -> Option<Self> {
+        let abi = NonNull::new(RSEQ.with(|rseq| rseq.get()))?;
+        Some(Self { abi })
     }
 
     /// Returns a pointer to the `zx_rseq_t` structure.
@@ -143,6 +157,7 @@ impl Rseq {
     /// `rseq_unregister_thread()`.
     ///
     /// Useful for accessing the `zx_rseq_t` structure from inline assembly.
+    #[inline]
     pub fn as_ptr(&self) -> *mut zx_rseq_t {
         self.abi.as_ptr()
     }
@@ -155,6 +170,7 @@ impl Rseq {
     ///
     /// This method cannot be used after the current thread calls `rseq_unregister_thread()`. That
     /// invariant is required by the safety contract of `get()` as well.
+    #[inline]
     pub unsafe fn current_cpu(&self) -> u32 {
         let abi = self.as_ptr();
         unsafe {
@@ -242,12 +258,13 @@ impl Drop for RseqScope {
 ///
 /// # Panics
 ///
-/// Panics if the thread is already registered, if the maximum number of supported
-/// threads (`MAX_THREADS`) has been exhausted, or if setting the thread RSEQ via syscall fails.
+/// Panics if the maximum number of supported threads (`MAX_THREADS`) has been
+/// exhausted, or if setting the thread RSEQ via syscall fails.
 pub fn rseq_register_thread() {
-    RSEQ.with(|rseq| {
-        assert!(rseq.get().is_null(), "thread already registered");
-    });
+    let already_registered = RSEQ.with(|rseq| !rseq.get().is_null());
+    if already_registered {
+        return;
+    }
 
     let (vmo_handle, slot, abi) = {
         let mut allocator = ALLOCATOR.lock();
@@ -270,14 +287,29 @@ pub fn rseq_register_thread() {
     });
 }
 
+/// Register the current thread for restartable sequences with an initial critical section.
+///
+/// # Panics
+///
+/// Panics if the thread is already registered, if the maximum number of supported
+/// threads (`MAX_THREADS`) has been exhausted, or if setting the thread RSEQ via syscall fails.
+pub fn rseq_register_thread_with_cs(critical_section: RseqCriticalSection) {
+    rseq_register_thread();
+    // SAFETY: `rseq_register_thread()` just registered the current thread, and the temporary
+    // `Rseq` handle does not outlive this call.
+    unsafe { Rseq::get() }.set_critical_section(critical_section);
+}
+
 /// Unregister the current thread from the restartable sequence.
 ///
 /// # Panics
 ///
-/// Panics if the thread is not registered, or if unsetting the thread RSEQ via syscall fails.
+/// Panics if unsetting the thread RSEQ via syscall fails.
 pub fn rseq_unregister_thread() {
     let abi = RSEQ.with(|rseq| rseq.take());
-    assert!(!abi.is_null(), "thread not registered");
+    if abi.is_null() {
+        return;
+    }
 
     let status = unsafe { zx::sys::zx_thread_set_rseq(0, 0, 0) };
     zx::Status::ok(status).expect("failed to unregister thread from RSEQ");
@@ -373,15 +405,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "thread already registered"]
-    fn test_double_registration_panics() {
+    fn test_double_registration() {
         let _guard = TestRegistrationGuard::new();
         rseq_register_thread();
     }
 
     #[test]
-    #[should_panic = "thread not registered"]
-    fn test_unregistered_unregister_panics() {
+    fn test_unregistered_unregister() {
         rseq_unregister_thread();
     }
 

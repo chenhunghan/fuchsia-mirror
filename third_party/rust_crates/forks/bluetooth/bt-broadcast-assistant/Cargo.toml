@@ -13,7 +13,7 @@ bt-bap = { path = "../bt-bap" }
 bt-bass = { path = "../bt-bass" }
 bt-common = { path = "../bt-common" }
 bt-gatt = { path = "../bt-gatt" }
-futures = "=0.3.31"
+futures = "=0.3.34"
 log = { version = "0.4.29", features = ["kv", "std"] }
 num = { version = "0.4.3", features = ["rand"] }
 parking_lot = "0.12.5"

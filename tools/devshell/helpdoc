@@ -452,10 +452,11 @@ function handle-command {
     echo ""
     echo "${summary}"
     echo
-    echo '```none'
+    echo '~~~~none'
     fx-print-command-help "$cmd_path" |
       ( [[ ${escape_jinja} -eq 0 ]] && cat || escape-jinja )
-    echo '```'
+    echo
+    echo '~~~~'
     if [[ -z "${vendor}" ]]; then
       echo
       echo "[${cmd_name} source code](https://cs.opensource.google/fuchsia/fuchsia/+/main:${rel_path})"

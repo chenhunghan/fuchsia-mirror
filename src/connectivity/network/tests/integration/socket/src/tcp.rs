@@ -26,7 +26,7 @@ use net_types::ip::{Ip, IpAddress as _, IpVersion, Ipv4, Ipv6};
 use netemul::{RealmTcpListener as _, RealmTcpStream as _};
 use netstack_testing_common::ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
-use netstack_testing_common::realms::{Netstack, Netstack3, NetstackVersion, TestSandboxExt as _};
+use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
 use packet::{
     NestableSerializer as _, NoOpSerializationContext, ParsablePacket as _, Serializer as _,
@@ -122,8 +122,6 @@ pub(super) async fn run_tcp_socket_test(
 // test within the context where the endpoints are still alive.
 async fn tcp_socket_accept_cross_ns<
     I: TestIpExt,
-    Client: Netstack,
-    Server: Netstack,
     Fut: Future,
     F: FnOnce(fasync::net::TcpStream, fasync::net::TcpStream) -> Fut,
 >(
@@ -135,7 +133,7 @@ async fn tcp_socket_accept_cross_ns<
 
     let _packet_capture = net.start_capture(name).await.expect("starting packet capture");
     let client = sandbox
-        .create_netstack_realm::<Client, _>(format!("{}_client", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
         .expect("failed to create client realm");
     let client_interface =
         client.join_network(&net, "client-ep").await.expect("failed to join network in realm");
@@ -146,7 +144,7 @@ async fn tcp_socket_accept_cross_ns<
     client_interface.apply_nud_flake_workaround().await.expect("nud flake workaround");
 
     let server = sandbox
-        .create_netstack_realm::<Server, _>(format!("{}_server", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
         .expect("failed to create server realm");
     let server_interface =
         server.join_network(&net, "server-ep").await.expect("failed to join network in realm");
@@ -177,17 +175,13 @@ async fn tcp_socket_accept_cross_ns<
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(Client, Netstack)]
-#[variant(Server, Netstack)]
-async fn tcp_socket_accept<I: TestIpExt, Client: Netstack, Server: Netstack>(name: &str) {
-    tcp_socket_accept_cross_ns::<I, Client, Server, _, _>(name, |_client, _server| async {}).await
+async fn tcp_socket_accept<I: TestIpExt>(name: &str) {
+    tcp_socket_accept_cross_ns::<I, _, _>(name, |_client, _server| async {}).await
 }
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(Client, Netstack)]
-#[variant(Server, Netstack)]
-async fn tcp_socket_send_recv<I: TestIpExt, Client: Netstack, Server: Netstack>(name: &str) {
+async fn tcp_socket_send_recv<I: TestIpExt>(name: &str) {
     async fn send_recv(mut sender: fasync::net::TcpStream, mut receiver: fasync::net::TcpStream) {
         const PAYLOAD: &'static [u8] = b"Hello World";
         let write_count = sender.write(PAYLOAD).await.expect("write to tcp client stream failed");
@@ -206,17 +200,13 @@ async fn tcp_socket_send_recv<I: TestIpExt, Client: Netstack, Server: Netstack>(
             read_count
         );
     }
-    tcp_socket_accept_cross_ns::<I, Client, Server, _, _>(name, send_recv).await
+    tcp_socket_accept_cross_ns::<I, _, _>(name, send_recv).await
 }
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(Client, Netstack)]
-#[variant(Server, Netstack)]
-async fn tcp_socket_shutdown_connection<I: TestIpExt, Client: Netstack, Server: Netstack>(
-    name: &str,
-) {
-    tcp_socket_accept_cross_ns::<I, Client, Server, _, _>(
+async fn tcp_socket_shutdown_connection<I: TestIpExt>(name: &str) {
+    tcp_socket_accept_cross_ns::<I, _, _>(
         name,
         |mut client: fasync::net::TcpStream, mut server: fasync::net::TcpStream| async move {
             client.shutdown(std::net::Shutdown::Both).expect("failed to shutdown the client");
@@ -240,15 +230,10 @@ async fn tcp_socket_shutdown_connection<I: TestIpExt, Client: Netstack, Server: 
 // other end. Same applies when closing the socket, (`close()` implies `shutdown(RDWR)`).
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(Client, Netstack)]
-#[variant(Server, Netstack)]
 #[test_case(false; "shutdown")]
 #[test_case(true; "close")]
-async fn tcp_socket_send_after_shutdown<I: TestIpExt, Client: Netstack, Server: Netstack>(
-    name: &str,
-    close: bool,
-) {
-    tcp_socket_accept_cross_ns::<I, Client, Server, _, _>(
+async fn tcp_socket_send_after_shutdown<I: TestIpExt>(name: &str, close: bool) {
+    tcp_socket_accept_cross_ns::<I, _, _>(
         name,
         |mut client: fasync::net::TcpStream, server: fasync::net::TcpStream| async move {
             // Either close or shutdown the server end of the socket.
@@ -264,13 +249,7 @@ async fn tcp_socket_send_after_shutdown<I: TestIpExt, Client: Netstack, Server: 
                 // Keep writing until we get an error.
                 loop {
                     if let Err(e) = client.write(b"Hello").await {
-                        // NS2 returns EPIPE, which is incorrect. Check the error only with NS3.
-                        if !matches!(
-                            Client::VERSION,
-                            NetstackVersion::Netstack2 { .. } | NetstackVersion::ProdNetstack2
-                        ) {
-                            assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset);
-                        }
+                        assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset);
                         break;
                     }
                 }
@@ -286,13 +265,12 @@ async fn tcp_socket_send_after_shutdown<I: TestIpExt, Client: Netstack, Server: 
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn tcp_socket_shutdown_listener<I: TestIpExt, N: Netstack>(name: &str) {
+async fn tcp_socket_shutdown_listener<I: TestIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_client", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
         .expect("failed to create client realm");
     let client_interface =
         client.join_network(&net, "client-ep").await.expect("failed to join network in realm");
@@ -303,7 +281,7 @@ async fn tcp_socket_shutdown_listener<I: TestIpExt, N: Netstack>(name: &str) {
     client_interface.apply_nud_flake_workaround().await.expect("nud flake workaround");
 
     let server = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_server", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
         .expect("failed to create server realm");
     let server_interface =
         server.join_network(&net, "server-ep").await.expect("failed to join network in realm");
@@ -350,12 +328,12 @@ async fn tcp_socket_shutdown_listener<I: TestIpExt, N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn tcpv4_tcpv6_listeners_coexist<N: Netstack>(name: &str) {
+async fn tcpv4_tcpv6_listeners_coexist(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
-    let host = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create server realm");
+    let host =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create server realm");
     let interface =
         host.join_network(&net, "server-ep").await.expect("failed to join network in realm");
     interface
@@ -380,17 +358,16 @@ async fn tcpv4_tcpv6_listeners_coexist<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(100; "large positive")]
 #[test_case(1; "min positive")]
 #[test_case(0; "zero")]
 #[test_case(-1; "negative")]
-async fn tcp_socket_listen<N: Netstack, I: TestIpExt>(name: &str, backlog: i16) {
+async fn tcp_socket_listen<I: TestIpExt>(name: &str, backlog: i16) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
 
     let host = sandbox
-        .create_netstack_realm::<N, _>(format!("{}host", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}host", name))
         .expect("failed to create realm");
 
     const PORT: u16 = 8080;
@@ -431,13 +408,12 @@ async fn tcp_socket_listen<N: Netstack, I: TestIpExt>(name: &str, backlog: i16) 
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn tcp_socket<N: Netstack>(name: &str) {
+async fn tcp_socket(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_client", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
         .expect("failed to create client realm");
     let client_ep = client
         .join_network_with(
@@ -452,7 +428,7 @@ async fn tcp_socket<N: Netstack>(name: &str) {
     client_ep.apply_nud_flake_workaround().await.expect("nud flake workaround");
 
     let server = sandbox
-        .create_netstack_realm::<N, _>(format!("{}_server", name))
+        .create_netstack_realm::<Netstack3, _>(format!("{}_server", name))
         .expect("failed to create server realm");
     let server_ep = server
         .join_network_with(
@@ -472,12 +448,12 @@ async fn tcp_socket<N: Netstack>(name: &str) {
 // This is a regression test for https://fxbug.dev/361402347.
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn tcp_bind_listen_on_same_port_different_address<I: TestIpExt, N: Netstack>(name: &str) {
+async fn tcp_bind_listen_on_same_port_different_address<I: TestIpExt>(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let net = sandbox.create_network("net").await.expect("create network");
-    let netstack =
-        sandbox.create_netstack_realm::<N, _>(format!("{}", name)).expect("create netstack realm");
+    let netstack = sandbox
+        .create_netstack_realm::<Netstack3, _>(format!("{}", name))
+        .expect("create netstack realm");
     let interface = netstack.join_network(&net, "ep").await.expect("join network");
     interface.add_address_and_subnet_route(I::CLIENT_SUBNET).await.expect("configure address");
     interface.add_address_and_subnet_route(I::SERVER_SUBNET).await.expect("configure address");
@@ -502,11 +478,10 @@ enum WhichEnd {
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
 #[test_case(WhichEnd::Send; "send buffer")]
 #[test_case(WhichEnd::Receive; "receive buffer")]
-async fn tcp_buffer_size<I: TestIpExt, N: Netstack>(name: &str, which: WhichEnd) {
-    tcp_socket_accept_cross_ns::<I, N, N, _, _>(name, |mut sender, mut receiver| async move {
+async fn tcp_buffer_size<I: TestIpExt>(name: &str, which: WhichEnd) {
+    tcp_socket_accept_cross_ns::<I, _, _>(name, |mut sender, mut receiver| async move {
         // Set either the sender SO_SNDBUF or receiver SO_RECVBUF so that a
         // large amount of data can be buffered even if the receiver isn't
         // reading.
@@ -544,8 +519,7 @@ async fn tcp_buffer_size<I: TestIpExt, N: Netstack>(name: &str, which: WhichEnd)
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[variant(N, Netstack)]
-async fn decrease_tcp_sendbuf_size<I: TestIpExt, N: Netstack>(name: &str) {
+async fn decrease_tcp_sendbuf_size<I: TestIpExt>(name: &str) {
     // This is a regression test for https://fxbug.dev/42072897. With Netstack3,
     // if a TCP socket had a full send buffer and a decrease of the send buffer
     // size was requested, the new size would not take effect immediately as
@@ -554,7 +528,7 @@ async fn decrease_tcp_sendbuf_size<I: TestIpExt, N: Netstack>(name: &str) {
     // test verifies that this is no longer the case by filling up the send
     // buffer for a TCP socket, requesting a smaller size, then observing the
     // size as the buffer is drained (by transferring to the receiver).
-    tcp_socket_accept_cross_ns::<I, N, N, _, _>(name, |mut sender, mut receiver| async move {
+    tcp_socket_accept_cross_ns::<I, _, _>(name, |mut sender, mut receiver| async move {
         // Fill up the sender and receiver buffers by writing a lot of data.
         const LARGE_BUFFER_SIZE: usize = 1024 * 1024;
         SockRef::from(sender.std()).set_send_buffer_size(LARGE_BUFFER_SIZE).expect("can set");
@@ -607,8 +581,7 @@ async fn decrease_tcp_sendbuf_size<I: TestIpExt, N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn tcp_connect_bound_to_device<N: Netstack>(name: &str) {
+async fn tcp_connect_bound_to_device(name: &str) {
     const NUM_PEERS: u8 = 2;
     const PORT: u16 = 90;
 
@@ -635,7 +608,7 @@ async fn tcp_connect_bound_to_device<N: Netstack>(name: &str) {
         MultiNicAndPeerConfig { multinic_ip, multinic_socket, peer_ip, peer_socket }
     }
 
-    crate::with_multinic_and_peers::<N, TcpSocket, Ipv4, _, _>(
+    crate::with_multinic_and_peers::<TcpSocket, Ipv4, _, _>(
         name,
         NUM_PEERS,
         net_subnet_v4!("192.168.0.0/16").into(),
@@ -685,7 +658,6 @@ async fn tcp_connect_bound_to_device<N: Netstack>(name: &str) {
 }
 
 async fn tcp_communicate_with_remote_with_zone<
-    N: Netstack,
     M: for<'a, 's> Fn(
         &'s netemul::TestRealm<'a>,
         &'s Interface<'a, net_types::ip::Ipv6Addr>,
@@ -699,7 +671,7 @@ async fn tcp_communicate_with_remote_with_zone<
     const NUM_BYTES: usize = 10;
 
     let make_multinic_conn = &make_multinic_conn;
-    crate::with_multinic_and_peer_networks::<N, net_types::ip::Ipv6, _>(
+    crate::with_multinic_and_peer_networks::<net_types::ip::Ipv6, _>(
         name,
         2,
         net_types::ip::Ipv6::LINK_LOCAL_UNICAST_SUBNET,
@@ -747,11 +719,10 @@ async fn tcp_communicate_with_remote_with_zone<
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn tcp_connect_to_remote_with_zone<N: Netstack>(name: &str) {
+async fn tcp_connect_to_remote_with_zone(name: &str) {
     const PORT: u16 = 80;
 
-    tcp_communicate_with_remote_with_zone::<N, _>(name, |realm, interface, peer_ip| {
+    tcp_communicate_with_remote_with_zone(name, |realm, interface, peer_ip| {
         Box::pin(async move {
             let Interface { iface: interface, ip: _ } = interface;
             let id: u8 = interface.id().try_into().unwrap();
@@ -767,11 +738,10 @@ async fn tcp_connect_to_remote_with_zone<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn tcp_bind_with_zone_connect_unzoned<N: Netstack>(name: &str) {
+async fn tcp_bind_with_zone_connect_unzoned(name: &str) {
     const PORT: u16 = 80;
 
-    tcp_communicate_with_remote_with_zone::<N, _>(name, |realm, interface, peer_ip| {
+    tcp_communicate_with_remote_with_zone(name, |realm, interface, peer_ip| {
         Box::pin(async move {
             let Interface { iface: interface, ip } = interface;
             let id: u8 = interface.id().try_into().unwrap();
@@ -790,7 +760,6 @@ async fn tcp_bind_with_zone_connect_unzoned<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     PhantomData::<Ipv4>, IcmpDestUnreachable::default(),
     Icmpv4DestUnreachableCode::DestNetworkUnreachable => libc::ENETUNREACH
@@ -919,7 +888,7 @@ async fn tcp_bind_with_zone_connect_unzoned<N: Netstack>(name: &str) {
     PhantomData::<Ipv6>, IcmpTimeExceeded::default(),
     Icmpv6TimeExceededCode::FragmentReassemblyTimeExceeded => libc::EHOSTUNREACH
 )]
-async fn tcp_connect_icmp_error<N: Netstack, I: TestIpExt, M: IcmpMessage<I> + Debug>(
+async fn tcp_connect_icmp_error<I: TestIpExt, M: IcmpMessage<I> + Debug>(
     name: &str,
     _ip_version: PhantomData<I>,
     message: M,
@@ -934,7 +903,10 @@ async fn tcp_connect_icmp_error<N: Netstack, I: TestIpExt, M: IcmpMessage<I> + D
     let fake_ep = &fake_ep;
 
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_{}", format!("{code:?}").to_snake_case()))
+        .create_netstack_realm::<Netstack3, _>(format!(
+            "{name}_{}",
+            format!("{code:?}").to_snake_case()
+        ))
         .expect("failed to create client realm");
     let client_interface =
         client.join_network(&net, "client-ep").await.expect("failed to join network in realm");
@@ -1013,14 +985,14 @@ async fn tcp_connect_icmp_error<N: Netstack, I: TestIpExt, M: IcmpMessage<I> + D
 // compare with linux. Also there's a slight difference between how
 // fuchsia-async and fdio report errors, so it's good to show both here.
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(true; "sync-block")]
 #[test_case(false; "async-nonblock")]
-async fn tcp_connect_timeout<N: Netstack, I: TestIpExt>(name: &str, sync: bool) {
+async fn tcp_connect_timeout<I: TestIpExt>(name: &str, sync: bool) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
-    let realm = sandbox.create_netstack_realm::<N, _>(name).expect("failed to create client realm");
+    let realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create client realm");
     let client_interface =
         realm.join_network(&net, "client-ep").await.expect("failed to join network in realm");
     client_interface
@@ -1048,21 +1020,7 @@ async fn tcp_connect_timeout<N: Netstack, I: TestIpExt>(name: &str, sync: bool) 
         .expect("failed to cast to std::io::Result")
     };
 
-    // NS2 returns the wrong error here. We don't have a linux syscall to prove
-    // it, but this is what sockscripter says, showing that ETIMEDOUT is the
-    // right value:
-    //
-    // $ fx sockscripter -C tcp set-tcp-user-timeout 200 connect '192.168.4.2:8080'
-    // sockscripter.cc[477]:Opened IPv4-STREAM socket (proto:TCP) fd:3
-    // sockscripter.cc[557]:Set IPPROTO_TCP:TCP_USER_TIMEOUT = 200
-    // sockscripter.cc[1140]:Connect(fd:3) to 192.168.4.2:8080
-    // sockscripter.cc[1145]:Error-Connect(fd:3) failed-[110]Connection timed out
-    let expect_error = match N::VERSION {
-        NetstackVersion::Netstack2 { .. } => libc::EHOSTUNREACH,
-        NetstackVersion::Netstack3 => libc::ETIMEDOUT,
-        v => panic!("unexpected netstack version {v:?}"),
-    };
-    assert_eq!(error.raw_os_error(), Some(expect_error));
+    assert_eq!(error.raw_os_error(), Some(libc::ETIMEDOUT));
 }
 
 fn try_parse_frame_as_tcp<I: TestIpExt>(
@@ -1100,7 +1058,6 @@ fn try_parse_frame_as_tcp<I: TestIpExt>(
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     PhantomData::<Ipv4>, IcmpDestUnreachable::default(),
     Icmpv4DestUnreachableCode::DestNetworkUnreachable => libc::ENETUNREACH
@@ -1229,7 +1186,7 @@ fn try_parse_frame_as_tcp<I: TestIpExt>(
     PhantomData::<Ipv6>, IcmpTimeExceeded::default(),
     Icmpv6TimeExceededCode::FragmentReassemblyTimeExceeded => libc::EHOSTUNREACH
 )]
-async fn tcp_established_icmp_error<N: Netstack, I: TestIpExt, M: IcmpMessage<I> + Debug>(
+async fn tcp_established_icmp_error<I: TestIpExt, M: IcmpMessage<I> + Debug>(
     name: &str,
     _ip_version: PhantomData<I>,
     message: M,
@@ -1240,7 +1197,10 @@ async fn tcp_established_icmp_error<N: Netstack, I: TestIpExt, M: IcmpMessage<I>
     let fake_ep = net.create_fake_endpoint().expect("failed to create fake endpoint");
 
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_{}", format!("{code:?}").to_snake_case()))
+        .create_netstack_realm::<Netstack3, _>(format!(
+            "{name}_{}",
+            format!("{code:?}").to_snake_case()
+        ))
         .expect("failed to create client realm");
     let client_interface =
         client.join_network(&net, "client-ep").await.expect("failed to join network in realm");
@@ -1389,11 +1349,10 @@ impl TestPmtuIpExt for Ipv6 {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
 #[test_case(true; "start by priming cache")]
 #[test_case(false; "start with empty cache")]
-async fn tcp_update_mss_from_pmtu<N: Netstack, I: TestPmtuIpExt>(name: &str, prime_cache: bool) {
+async fn tcp_update_mss_from_pmtu<I: TestPmtuIpExt>(name: &str, prime_cache: bool) {
     use packet::NestableSerializer as _;
     use packet_formats::ip::IpPacket as _;
 
@@ -1401,7 +1360,7 @@ async fn tcp_update_mss_from_pmtu<N: Netstack, I: TestPmtuIpExt>(name: &str, pri
     let net = sandbox.create_network("net").await.expect("failed to create network");
     let fake_ep = net.create_fake_endpoint().expect("failed to create fake endpoint");
     let client =
-        sandbox.create_netstack_realm::<N, _>(name).expect("failed to create client realm");
+        sandbox.create_netstack_realm::<Netstack3, _>(name).expect("failed to create client realm");
     let client_interface =
         client.join_network(&net, "ep").await.expect("failed to join network in realm");
     client_interface
@@ -1595,17 +1554,16 @@ async fn tcp_update_mss_from_pmtu<N: Netstack, I: TestPmtuIpExt>(name: &str, pri
 /// returns the expected scope id even if the device the scope id matches has
 /// been removed from the stack.
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn tcp_accept_with_removed_device_scope<N: Netstack>(name: &str) {
+async fn tcp_accept_with_removed_device_scope(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let net = sandbox.create_network("net").await.expect("failed to create network");
 
     let client = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_client"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_client"))
         .expect("failed to create client realm");
 
     let server = sandbox
-        .create_netstack_realm::<N, _>(format!("{name}_server"))
+        .create_netstack_realm::<Netstack3, _>(format!("{name}_server"))
         .expect("failed to create client realm");
 
     let client_iface =

@@ -37,6 +37,7 @@ fidl("fuchsia.net.stack") {
   sources = [ "stack.fidl" ]
   enable_hlcpp = true
   visibility = [
+    ":*",
     "//src/connectivity/lib/fidl_fuchsia_net_stack_ext/*",
     "//src/connectivity/lowpan/*",
     "//src/connectivity/network/net-cli/*",

@@ -390,16 +390,28 @@ impl Drop for Transport {
 /// State of a socket that is or has been read from.
 struct SocketReadState {
     wakers: Vec<Waker>,
-    queued: VecDeque<Result<proto::SocketData, Error>>,
+    queued: VecDeque<Result<SocketReadChunk, Error>>,
     read_request_pending: bool,
     is_streaming: bool,
+}
+
+#[derive(Debug)]
+struct SocketReadChunk {
+    data: proto::SocketData,
+    offset: usize,
+}
+
+impl SocketReadChunk {
+    fn new(data: proto::SocketData) -> Self {
+        Self { data, offset: 0 }
+    }
 }
 
 impl SocketReadState {
     /// Handle an incoming message, which is either a channel streaming event or
     /// response to a `ChannelRead` request.
     fn handle_incoming_message(&mut self, msg: Result<proto::SocketData, Error>) -> Vec<Waker> {
-        self.queued.push_back(msg);
+        self.queued.push_back(msg.map(SocketReadChunk::new));
         std::mem::replace(&mut self.wakers, Vec::new())
     }
 }
@@ -1118,25 +1130,40 @@ impl Client {
             read_request_pending: false,
         });
 
-        if let Some(got) = state.queued.front_mut() {
-            match got.as_mut() {
-                Ok(data) => {
-                    let read_size = std::cmp::min(data.data.len(), out.len());
-                    out[..read_size].copy_from_slice(&data.data[..read_size]);
+        let mut total_read = 0;
+        while let Some(got) = state.queued.pop_front() {
+            match got {
+                Ok(mut chunk) => {
+                    let available = &chunk.data.data[chunk.offset..];
+                    let remaining_out = &mut out[total_read..];
+                    let read_size = std::cmp::min(available.len(), remaining_out.len());
+                    remaining_out[..read_size].copy_from_slice(&available[..read_size]);
+                    total_read += read_size;
+                    chunk.offset += read_size;
 
-                    if data.data.len() > read_size && !data.is_datagram {
-                        let _ = data.data.drain(..read_size);
-                    } else {
-                        let _ = state.queued.pop_front();
+                    let is_datagram = chunk.data.is_datagram;
+                    let is_done = chunk.offset == chunk.data.data.len() || is_datagram;
+
+                    if !is_done {
+                        state.queued.push_front(Ok(chunk));
                     }
 
-                    return Poll::Ready(Ok(read_size));
+                    if is_datagram || total_read == out.len() {
+                        break;
+                    }
                 }
-                Err(_) => {
-                    let err = state.queued.pop_front().unwrap().unwrap_err();
+                Err(err) => {
+                    if total_read > 0 {
+                        state.queued.push_front(Err(err));
+                        break;
+                    }
                     return Poll::Ready(Err(err));
                 }
             }
+        }
+
+        if total_read > 0 {
+            return Poll::Ready(Ok(total_read));
         } else if !state.wakers.iter().any(|x| ctx.waker().will_wake(x)) {
             state.wakers.push(ctx.waker().clone());
         }

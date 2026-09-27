@@ -187,6 +187,11 @@ impl RegisteredDevices {
         self.minors.insert(devt, entry);
     }
 
+    /// Unregister a minor device.
+    fn unregister_minor(&mut self, devt: DeviceId) {
+        self.minors.remove(&devt);
+    }
+
     /// Get the ops for a given `DeviceId`.
     ///
     /// If there is a major device registered with the major device number of the
@@ -515,9 +520,6 @@ impl DeviceRegistry {
     }
 
     /// Remove a device directly added with `add_device`.
-    ///
-    /// This function should be used only by device that have registered an entire major device
-    /// number. Individually registered minor device cannot be removed at this time.
     pub fn remove_device(&self, current_task: &CurrentTask, device: Device) {
         if let Some(metadata) = &device.metadata {
             self.dispatch_uevent(UEventAction::Remove, device.clone());
@@ -525,6 +527,8 @@ impl DeviceRegistry {
             if let Err(err) = devtmpfs_remove_path(current_task, metadata.devname.as_ref()) {
                 log_error!("Cannot remove device {:?} ({:?})", device, err);
             }
+
+            self.devices(metadata.mode).unregister_minor(metadata.devt);
         }
 
         self.objects.remove(&device);
@@ -961,6 +965,26 @@ mod tests {
                     .lookup("devices/virtual/thermal/cooling_device0".into())
                     .is_none()
             );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn registry_remove_minor_device() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let registry = &kernel.device_registry;
+
+            let dev = registry
+                .register_misc_device(kernel, "test_misc".into(), simple_device_ops::<DevNull>)
+                .expect("register misc device");
+            let devt = dev.metadata.as_ref().expect("metadata").devt;
+
+            assert!(registry.get_device(devt, DeviceMode::Char).is_ok());
+
+            registry.remove_device(&current_task, dev);
+
+            assert_eq!(registry.get_device(devt, DeviceMode::Char).map(|_| ()), error!(ENODEV));
         })
         .await;
     }

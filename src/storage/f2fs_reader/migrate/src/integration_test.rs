@@ -369,7 +369,10 @@ async fn test_fxfs_read_lblk32_ino_file() {
         .expect("open object");
     if let Some(expected_data) = expected_data {
         let mut buf = fxfs_object.allocate_buffer(4096).await;
-        assert_eq!(fxfs_object.read(0, buf.as_mut()).await.expect("read"), EXPECTED_CONTENTS.len());
+        assert_eq!(
+            fxfs_object.read_aligned(0, buf.as_mut()).await.expect("read"),
+            EXPECTED_CONTENTS.len()
+        );
         assert_eq!(
             &buf.to_vec()[..EXPECTED_CONTENTS.len()],
             &expected_data[..EXPECTED_CONTENTS.len()]

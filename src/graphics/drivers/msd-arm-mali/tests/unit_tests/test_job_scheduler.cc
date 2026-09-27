@@ -38,7 +38,10 @@ class TestOwner : public JobScheduler::Owner {
     has_pending_work_ = has_pending_work;
   }
   bool IsInProtectedMode() override { return in_protected_mode_; }
-  void EnterProtectedMode() override { in_protected_mode_ = true; }
+  bool EnterProtectedMode() override {
+    in_protected_mode_ = true;
+    return true;
+  }
   bool ExitProtectedMode() override {
     in_protected_mode_ = false;
     return true;

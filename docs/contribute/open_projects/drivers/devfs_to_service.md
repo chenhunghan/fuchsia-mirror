@@ -376,11 +376,11 @@ protocol in the service definition.
   - auto devfs = fuchsia_driver_framework::wire::DevfsAddArgs::Builder(arena)
   -                 .connector(std::move(connector.value()))
   -                 .class_name("echo-example");
- auto offers = compat_server_.CreateOffers2();
- offers.push_back(fdf::MakeOffer2<fuchsia_example::EchoService>());
- zx::result result = AddChild(kDeviceName,
--                               devfs.Build(),
-                               *properties, offers);
+    auto offers = compat_server_.CreateOffers2();
+    offers.push_back(fdf::MakeOffer2<fuchsia_example::EchoService>());
+    zx::result result = AddChild(kDeviceName,
+  -                               devfs.Build(),
+                                  *properties, offers);
   ```
 
 ### Expose the service from your driver  {:#expose-service .numbered}

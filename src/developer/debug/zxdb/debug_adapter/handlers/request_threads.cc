@@ -15,7 +15,8 @@ namespace dap {
 
 DAP_IMPLEMENT_STRUCT_TYPEINFO_EXT(ThreadZxdb, Thread, "", DAP_FIELD(processId, "processId"))
 DAP_IMPLEMENT_STRUCT_TYPEINFO_EXT(ThreadEventZxdb, ThreadEvent, "thread",
-                                  DAP_FIELD(processId, "processId"))
+                                  DAP_FIELD(processId, "processId"),
+                                  DAP_FIELD(isStopped, "isStopped"))
 DAP_IMPLEMENT_STRUCT_TYPEINFO(ThreadsResponseZxdb, "", DAP_FIELD(threads, "threads"))
 
 }  // namespace dap

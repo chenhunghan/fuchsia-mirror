@@ -763,14 +763,19 @@ impl Type {
                     Err(format!("{id2:?} Resource already released for index {index}"))
                 }
             }
-            (_, Type::Releasable { inner, .. }) => inner.match_parameter_type(
-                verification_context,
-                context,
-                helper_name,
-                parameter_type,
-                index,
-                next,
-            ),
+            (_, Type::Releasable { id, inner }) => {
+                if !next.resources.contains(id) {
+                    return Err(format!("Resource already released for index {index}"));
+                }
+                inner.match_parameter_type(
+                    verification_context,
+                    context,
+                    helper_name,
+                    parameter_type,
+                    index,
+                    next,
+                )
+            }
             (Type::AnyParameter, _) => Ok(()),
 
             _ => Err(format!("incorrect parameter for index {index}")),
@@ -883,14 +888,6 @@ pub struct VerifiedEbpfProgram {
 }
 
 impl VerifiedEbpfProgram {
-    // Convert the program to raw code. Can be used only when the program doesn't access any
-    // structs and maps.
-    pub fn to_code(self) -> Vec<EbpfInstruction> {
-        debug_assert!(self.struct_access_instructions.is_empty());
-        debug_assert!(self.maps.is_empty());
-        self.code
-    }
-
     pub fn code(&self) -> &[EbpfInstruction] {
         &self.code
     }
@@ -956,30 +953,21 @@ pub fn verify_program(
         context.set_reg((i + 1) as u8, t.clone()).map_err(EbpfError::ProgramVerifyError)?;
     }
     let states = vec![context];
-    let mut verification_context = VerificationContext {
-        calling_context,
-        logger,
-        states,
-        code: &code,
-        counter: 0,
-        iteration: 0,
-        terminating_contexts: Default::default(),
-        struct_access_instructions: Default::default(),
-    };
+    let mut verification_context = VerificationContext::new(calling_context, logger, &code, states);
     while let Some(mut context) = verification_context.states.pop() {
         if let Some(terminating_contexts) =
-            verification_context.terminating_contexts.get(&context.pc)
+            verification_context.terminating_contexts.get(context.pc)
         {
             // Check whether there exist a context that terminate and prove that this context does
             // also terminate.
             if let Some(ending_context) =
-                terminating_contexts.iter().find(|c| c.computation_context >= context)
+                terminating_contexts.iter().rev().find(|c| c.computation_context >= context)
             {
                 // One such context has been found, this proves the current context terminates.
                 // If the context has a parent, register the data dependencies and try to terminate
                 // it.
                 if let Some(parent) = context.parent.take() {
-                    parent.dependencies.lock().push(ending_context.dependencies.clone());
+                    parent.dependencies.lock().merge(ending_context.dependencies);
                     if let Some(parent) = Arc::into_inner(parent) {
                         parent
                             .terminate(&mut verification_context)
@@ -1027,8 +1015,8 @@ struct VerificationContext<'a> {
     iteration: usize,
     /// Keep track of the context that terminates at a given pc. The list of context will all be
     /// incomparables as each time a bigger context is computed, the smaller ones are removed from
-    /// the list.
-    terminating_contexts: BTreeMap<ProgramCounter, Vec<TerminatingContext>>,
+    /// the list. Indexed directly by `ProgramCounter` (`0..code.len()`) for O(1) lookup.
+    terminating_contexts: Vec<Vec<TerminatingContext>>,
     /// The current set of struct access instructions that will need to be updated when the
     /// program is linked. This is also used to ensure that a given instruction always loads the
     /// same field. If this is not the case, the verifier will reject the program.
@@ -1036,6 +1024,24 @@ struct VerificationContext<'a> {
 }
 
 impl<'a> VerificationContext<'a> {
+    fn new(
+        calling_context: CallingContext,
+        logger: &'a mut dyn VerifierLogger,
+        code: &'a [EbpfInstruction],
+        states: Vec<ComputationContext>,
+    ) -> Self {
+        Self {
+            calling_context,
+            logger,
+            states,
+            code,
+            counter: 0,
+            iteration: 0,
+            terminating_contexts: (0..code.len()).map(|_| Vec::new()).collect(),
+            struct_access_instructions: Default::default(),
+        }
+    }
+
     fn next_id(&mut self) -> MemoryId {
         let id = self.counter;
         self.counter += 1;
@@ -1109,7 +1115,7 @@ impl StackOffset {
 /// The state of the stack
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Stack {
-    data: HashMap<usize, Type>,
+    data: BTreeMap<usize, Type>,
 }
 
 impl Stack {
@@ -1338,29 +1344,38 @@ impl PartialOrd for Stack {
         let mut data_iter1 = self.data.iter().peekable();
         let mut data_iter2 = other.data.iter().peekable();
         loop {
-            let k1 = data_iter1.peek().map(|(k, _)| *k);
-            let k2 = data_iter2.peek().map(|(k, _)| *k);
-            let k = match (k1, k2) {
+            let (v1, v2) = match (data_iter1.peek(), data_iter2.peek()) {
                 (None, None) => return Some(result),
-                (Some(k), None) => {
+                (Some((_, v1)), None) => {
+                    let v1 = *v1;
                     data_iter1.next();
-                    *k
+                    (v1, &Type::UNINITIALIZED)
                 }
-                (None, Some(k)) => {
+                (None, Some((_, v2))) => {
+                    let v2 = *v2;
                     data_iter2.next();
-                    *k
+                    (&Type::UNINITIALIZED, v2)
                 }
-                (Some(k1), Some(k2)) => {
-                    if k1 <= k2 {
+                (Some((k1, v1)), Some((k2, v2))) => match k1.cmp(k2) {
+                    Ordering::Less => {
+                        let v1 = *v1;
                         data_iter1.next();
+                        (v1, &Type::UNINITIALIZED)
                     }
-                    if k2 <= k1 {
+                    Ordering::Greater => {
+                        let v2 = *v2;
                         data_iter2.next();
+                        (&Type::UNINITIALIZED, v2)
                     }
-                    *std::cmp::min(k1, k2)
-                }
+                    Ordering::Equal => {
+                        let (v1, v2) = (*v1, *v2);
+                        data_iter1.next();
+                        data_iter2.next();
+                        (v1, v2)
+                    }
+                },
             };
-            result = associate_orderings(result, self.get(k).partial_cmp(other.get(k))?)?;
+            result = associate_orderings(result, v1.partial_cmp(v2)?)?;
         }
     }
 }
@@ -1390,7 +1405,7 @@ struct ComputationContext {
     parent: Option<Arc<ComputationContext>>,
     /// The data dependencies of this context. This is used to broaden a known ending context to
     /// help cutting computation branches.
-    dependencies: Mutex<Vec<DataDependencies>>,
+    dependencies: Mutex<DataDependencies>,
     /// Whether this context has reached an exit instruction. The main loop uses this flag to
     /// call terminate() on the owned context, avoiding the extra Arc reference that would be
     /// created by cloning self in the exit handler.
@@ -1692,6 +1707,14 @@ impl ComputationContext {
                 let buffer_size = size.size(self)?;
                 let id = verification_context.next_id();
                 Ok(Type::PtrToMemory { id, offset: 0.into(), buffer_size })
+            }
+            Type::PtrToMemory { id, offset, buffer_size } => {
+                let id = id.prepended(verification_context.next_id());
+                Ok(Type::PtrToMemory { id, offset: *offset, buffer_size: *buffer_size })
+            }
+            Type::PtrToStruct { id, offset, descriptor } => {
+                let id = id.prepended(verification_context.next_id());
+                Ok(Type::PtrToStruct { id, offset: *offset, descriptor: descriptor.clone() })
             }
             t => Ok(t.clone()),
         }
@@ -2100,10 +2123,7 @@ impl ComputationContext {
 
             // 1. Compute the dependencies of the context using the dependencies of its children
             //    and the actual operation.
-            let mut dependencies = DataDependencies::default();
-            for dependency in current.dependencies.get_mut().iter() {
-                dependencies.merge(dependency);
-            }
+            let mut dependencies = *current.dependencies.get_mut();
 
             dependencies.visit(
                 &mut DataDependenciesVisitorContext {
@@ -2115,15 +2135,18 @@ impl ComputationContext {
 
             // 2. Clear the state depending on the dependencies states
             for register in 0..GENERAL_REGISTER_COUNT {
-                if !dependencies.registers.contains(&register) {
+                if !dependencies.has_reg(register) {
                     current.set_reg(register, Default::default())?;
                 }
             }
-            current.stack.data.retain(|k, _| dependencies.stack.contains(k));
+            if dependencies.stack == 0 {
+                current.stack.data.clear();
+            } else if dependencies.stack != !0 {
+                current.stack.data.retain(|k, _| dependencies.has_stack(*k));
+            }
 
             // 3. Add the cleared state to the set of `terminating_contexts`
-            let terminating_contexts =
-                verification_context.terminating_contexts.entry(current.pc).or_default();
+            let terminating_contexts = &mut verification_context.terminating_contexts[current.pc];
             let mut is_dominated = false;
             terminating_contexts.retain(|c| match c.computation_context.partial_cmp(&current) {
                 Some(Ordering::Less) => false,
@@ -2136,18 +2159,16 @@ impl ComputationContext {
                 _ => true,
             });
             if !is_dominated {
-                terminating_contexts.push(TerminatingContext {
-                    computation_context: current,
-                    dependencies: dependencies.clone(),
-                });
+                terminating_contexts
+                    .push(TerminatingContext { computation_context: current, dependencies });
             }
 
             // 4. Register the computed dependencies in our parent, and terminate it if all
             //    dependencies has been computed.
             if let Some(parent) = parent {
-                parent.dependencies.lock().push(dependencies);
-                // To check whether all dependencies have been computed, rely on the fact that the Arc
-                // count of the parent keep track of how many dependencies are left.
+                parent.dependencies.lock().merge(dependencies);
+                // To check whether all dependencies have been computed, rely on the fact that the
+                // Arc count of the parent keep track of how many dependencies are left.
                 next = Arc::into_inner(parent);
             }
         }
@@ -2169,14 +2190,14 @@ impl Drop for ComputationContext {
 /// a proof that a program in a state `t2` finish.
 impl PartialOrd for ComputationContext {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.pc != other.pc || self.resources != other.resources {
+        if self.pc != other.pc || self.resources.len() != other.resources.len() {
             return None;
         }
-        let mut result = self.stack.partial_cmp(&other.stack)?;
-        result = associate_orderings(
-            result,
-            Type::compare_list(self.registers.iter(), other.registers.iter())?,
-        )?;
+        let mut result = Type::compare_list(self.registers.iter(), other.registers.iter())?;
+        result = associate_orderings(result, self.stack.partial_cmp(&other.stack)?)?;
+        if self.resources != other.resources {
+            return None;
+        }
         let mut array_bound_iter1 = self.array_bounds.iter().peekable();
         let mut array_bound_iter2 = other.array_bounds.iter().peekable();
         let result = loop {
@@ -2219,34 +2240,79 @@ impl PartialOrd for ComputationContext {
 ///
 /// The verifier assumes that data not read by a terminated branch is irrelevant
 /// for future execution paths and can be safely cleared.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DataDependencies {
-    /// The set of registers read by the children of a context.
-    registers: HashSet<Register>,
-    /// The stack positions read by the children of a context.
-    stack: HashSet<usize>,
+    /// A bitset of registers read by the children of a context.
+    registers: u16,
+    /// A bitset of stack positions read by the children of a context.
+    stack: u64,
 }
 
 impl DataDependencies {
-    fn merge(&mut self, other: &DataDependencies) {
-        self.registers.extend(other.registers.iter());
-        self.stack.extend(other.stack.iter());
+    #[inline]
+    fn has_reg(&self, reg: Register) -> bool {
+        (self.registers & (1_u16 << reg)) != 0
+    }
+
+    #[inline]
+    fn add_reg(&mut self, reg: Register) {
+        self.registers |= 1_u16 << reg;
+    }
+
+    #[inline]
+    fn remove_reg(&mut self, reg: Register) -> bool {
+        let mask = 1_u16 << reg;
+        let was_set = (self.registers & mask) != 0;
+        self.registers &= !mask;
+        was_set
+    }
+
+    #[inline]
+    fn has_stack(&self, slot: usize) -> bool {
+        (self.stack & (1_u64 << slot)) != 0
+    }
+
+    #[inline]
+    fn add_stack(&mut self, slot: usize) {
+        self.stack |= 1_u64 << slot;
+    }
+
+    #[inline]
+    fn remove_stack(&mut self, slot: usize) -> bool {
+        let mask = 1_u64 << slot;
+        let was_set = (self.stack & mask) != 0;
+        self.stack &= !mask;
+        was_set
+    }
+
+    #[inline]
+    fn add_stack_range(&mut self, start: usize, end: usize) {
+        if end > start {
+            let count = end - start;
+            let mask = if count >= 64 { !0 } else { ((1_u64 << count) - 1) << start };
+            self.stack |= mask;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.registers |= other.registers;
+        self.stack |= other.stack;
     }
 
     fn alu(&mut self, dst: Register, src: Source) -> Result<(), String> {
         // Only do something if the dst is read, otherwise the computation doesn't matter.
-        if self.registers.contains(&dst) {
+        if self.has_reg(dst) {
             if let Source::Reg(src) = src {
-                self.registers.insert(src);
+                self.add_reg(src);
             }
         }
         Ok(())
     }
 
     fn jmp(&mut self, dst: Register, src: Source) -> Result<(), String> {
-        self.registers.insert(dst);
+        self.add_reg(dst);
         if let Source::Reg(src) = src {
-            self.registers.insert(src);
+            self.add_reg(src);
         }
         Ok(())
     }
@@ -2262,10 +2328,10 @@ impl DataDependencies {
         is_cmpxchg: bool,
     ) -> Result<(), String> {
         let mut is_read = false;
-        if is_cmpxchg && self.registers.contains(&0) {
+        if is_cmpxchg && self.has_reg(0) {
             is_read = true;
         }
-        if fetch && self.registers.contains(&src) {
+        if fetch && self.has_reg(src) {
             is_read = true;
         }
         let addr = context.reg(dst)?;
@@ -2274,16 +2340,17 @@ impl DataDependencies {
             if !stack_offset.is_valid_offset() {
                 return Err(format!("Invalid stack offset at {}", context.pc));
             }
-            if is_read || self.stack.contains(&stack_offset.array_index()) {
+            let slot = stack_offset.array_index();
+            if is_read || self.has_stack(slot) {
                 is_read = true;
-                self.stack.insert(stack_offset.array_index());
+                self.add_stack(slot);
             }
         }
         if is_read {
-            self.registers.insert(0);
-            self.registers.insert(src);
+            self.add_reg(0);
+            self.add_reg(src);
         }
-        self.registers.insert(dst);
+        self.add_reg(dst);
         Ok(())
     }
 }
@@ -2479,13 +2546,13 @@ impl BpfVisitor for DataDependencies {
         dst: Register,
         src: Source,
     ) -> Result<(), String> {
-        if src == Source::Reg(dst) || !self.registers.contains(&dst) {
+        if src == Source::Reg(dst) || !self.has_reg(dst) {
             return Ok(());
         }
         if let Source::Reg(src) = src {
-            self.registers.insert(src);
+            self.add_reg(src);
         }
-        self.registers.remove(&dst);
+        self.remove_reg(dst);
         Ok(())
     }
     fn mov64<'a>(
@@ -2545,30 +2612,27 @@ impl BpfVisitor for DataDependencies {
                 if let Type::PtrToStack { offset } = comp.reg((arg_index + 1) as Register)? {
                     let end = offset.add(size.size(comp)?);
                     if offset.is_valid_offset() && end.is_within_stack() {
-                        for slot in offset.array_index()..end.array_index() {
-                            self.stack.insert(slot);
-                        }
+                        let start_idx = offset.array_index();
+                        let end_idx = end.array_index();
+                        self.add_stack_range(start_idx, end_idx);
                         if end.sub_index() != 0 {
-                            self.stack.insert(end.array_index());
+                            self.add_stack(end_idx);
                         }
                     }
                 }
             }
         }
         // 0 is overwritten and 1 to 5 are scratch registers
-        for register in 0..helper.signature.args.len() + 1 {
-            self.registers.remove(&(register as Register));
-        }
+        self.registers &= !0b0011_1111;
         // 1 to k are parameters.
-        for register in 0..helper.signature.args.len() {
-            self.registers.insert((register + 1) as Register);
-        }
+        let num_args = helper.signature.args.len();
+        self.registers |= ((1_u16 << num_args) - 1) << 1;
         Ok(())
     }
 
     fn exit<'a>(&mut self, _context: &mut Self::Context<'a>) -> Result<(), String> {
         // This read r0 unconditionally.
-        self.registers.insert(0);
+        self.add_reg(0);
         Ok(())
     }
 
@@ -2915,17 +2979,17 @@ impl BpfVisitor for DataDependencies {
         width: DataWidth,
     ) -> Result<(), String> {
         let context = &context.computation_context;
-        if self.registers.contains(&dst) {
+        if self.has_reg(dst) {
             let addr = context.reg(src)?;
             if let Type::PtrToStack { offset: stack_offset } = addr {
                 let stack_offset = stack_offset.add(offset);
                 if !stack_offset.is_valid_offset() {
                     return Err(format!("Invalid stack offset at {}", context.pc));
                 }
-                self.stack.insert(stack_offset.array_index());
+                self.add_stack(stack_offset.array_index());
             }
         }
-        self.registers.insert(src);
+        self.add_reg(src);
         Ok(())
     }
 
@@ -2936,7 +3000,7 @@ impl BpfVisitor for DataDependencies {
         _src: u8,
         _lower: u32,
     ) -> Result<(), String> {
-        self.registers.remove(&dst);
+        self.remove_reg(dst);
         Ok(())
     }
 
@@ -2949,15 +3013,13 @@ impl BpfVisitor for DataDependencies {
         register_offset: Option<Register>,
         _width: DataWidth,
     ) -> Result<(), String> {
-        // 1 to 5 are scratch registers
-        for register in 1..6 {
-            self.registers.remove(&(register as Register));
-        }
+        // 1 to 5 are scratch registers (bits 1..=5)
+        self.registers &= !0b0011_1110;
         // Only do something if the dst is read, otherwise the computation doesn't matter.
-        if self.registers.remove(&dst) {
-            self.registers.insert(src);
+        if self.remove_reg(dst) {
+            self.add_reg(src);
             if let Some(reg) = register_offset {
-                self.registers.insert(reg);
+                self.add_reg(reg);
             }
         }
         Ok(())
@@ -2978,16 +3040,16 @@ impl BpfVisitor for DataDependencies {
             if !stack_offset.is_valid_offset() {
                 return Err(format!("Invalid stack offset at {}", context.pc));
             }
-            if self.stack.remove(&stack_offset.array_index()) {
+            if self.remove_stack(stack_offset.array_index()) {
                 if let Source::Reg(src) = src {
-                    self.registers.insert(src);
+                    self.add_reg(src);
                 }
             }
         } else {
             if let Source::Reg(src) = src {
-                self.registers.insert(src);
+                self.add_reg(src);
             }
-            self.registers.insert(dst);
+            self.add_reg(dst);
         }
 
         Ok(())
@@ -4765,5 +4827,112 @@ mod tests {
         )
         .unwrap();
         assert_eq!(context.array_bounds.get(&id), Some(&22));
+    }
+
+    fn make_verification_context<'a>(
+        logger: &'a mut dyn VerifierLogger,
+    ) -> VerificationContext<'a> {
+        VerificationContext::new(CallingContext::default(), logger, &[], vec![])
+    }
+
+    /// Verifies that multiple invocations returning PtrToMemory receive
+    /// distinct MemoryIds to prevent ASLR pointer arithmetic between separate
+    /// allocations, while still matching the static parameter templates.
+    #[test]
+    fn test_resolve_return_value_unique_ids() {
+        let mut logger = NullVerifierLogger;
+        let mut verification_context = make_verification_context(&mut logger);
+        let comp_ctx = ComputationContext::default();
+
+        let static_id = MemoryId::from_raw(42);
+        let ret_template =
+            Type::PtrToMemory { id: static_id.clone(), offset: 0.into(), buffer_size: 64 };
+
+        let mut next1 = ComputationContext::default();
+        let t1 = comp_ctx
+            .resolve_return_value(&mut verification_context, &ret_template, &mut next1, false)
+            .unwrap();
+        let mut next2 = ComputationContext::default();
+        let t2 = comp_ctx
+            .resolve_return_value(&mut verification_context, &ret_template, &mut next2, false)
+            .unwrap();
+
+        assert_ne!(t1, t2);
+        let (Type::PtrToMemory { id: id1, .. }, Type::PtrToMemory { id: id2, .. }) = (&t1, &t2)
+        else {
+            panic!("Expected PtrToMemory");
+        };
+        assert_ne!(id1, id2);
+        assert!(static_id.matches(id1));
+        assert!(static_id.matches(id2));
+    }
+
+    /// Verifies that multiple releasable allocations are tracked individually
+    /// in resources, releasing one does not remove the other, and passing a
+    /// released resource to a helper parameter is rejected.
+    #[test]
+    fn test_resolve_return_value_releasable_resource_tracking() {
+        let mut logger = NullVerifierLogger;
+        let mut verification_context = make_verification_context(&mut logger);
+        let comp_ctx = ComputationContext::default();
+
+        let static_id = MemoryId::from_raw(99);
+        let releasable_template = Type::ReleasableParameter {
+            id: static_id.clone(),
+            inner: Box::new(Type::PtrToMemory {
+                id: static_id.clone(),
+                offset: 0.into(),
+                buffer_size: 64,
+            }),
+        };
+
+        let mut next = ComputationContext::default();
+        let t1 = comp_ctx
+            .resolve_return_value(&mut verification_context, &releasable_template, &mut next, false)
+            .unwrap();
+        let t2 = comp_ctx
+            .resolve_return_value(&mut verification_context, &releasable_template, &mut next, false)
+            .unwrap();
+
+        assert_eq!(next.resources.len(), 2);
+        let (Type::Releasable { id: id1, .. }, Type::Releasable { id: id2, .. }) = (&t1, &t2)
+        else {
+            panic!("Expected Releasable");
+        };
+        assert_ne!(id1, id2);
+        assert!(next.resources.contains(id1));
+        assert!(next.resources.contains(id2));
+
+        // Release one
+        let mut next_after_free = next.clone();
+        t1.match_parameter_type(
+            &verification_context,
+            &comp_ctx,
+            "test_free",
+            &Type::ReleaseParameter { id: static_id.clone() },
+            0,
+            &mut next_after_free,
+        )
+        .unwrap();
+        assert_eq!(next_after_free.resources.len(), 1);
+        assert!(!next_after_free.resources.contains(id1));
+        assert!(next_after_free.resources.contains(id2));
+
+        // Passing released t1 to general helper must fail
+        let mut next_uaf = next_after_free.clone();
+        let err = t1.match_parameter_type(
+            &verification_context,
+            &comp_ctx,
+            "test_helper",
+            &Type::MemoryParameter {
+                size: MemoryParameterSize::Value(64),
+                input: true,
+                output: false,
+            },
+            0,
+            &mut next_uaf,
+        );
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "Resource already released for index 0");
     }
 }

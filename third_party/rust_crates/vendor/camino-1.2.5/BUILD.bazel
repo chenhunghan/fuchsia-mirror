@@ -61,6 +61,13 @@ rust_library(
     edition = "2021",
     rustc_flags = [
         "--cap-lints=allow",
+        "--cfg=absolute_path",
+        "--cfg=os_str_bytes",
+        "--cfg=os_string_pathbuf_leak",
+        "--cfg=path_add_extension",
+        "--cfg=path_buf_deref_mut",
+        "--cfg=pathbuf_const_new",
+        "--cfg=try_reserve_2",
     ],
     tags = [
         "cargo-bazel",

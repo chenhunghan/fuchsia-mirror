@@ -84,6 +84,12 @@ template("publish_archive") {
     # other input is the `package-tool` binary itself.
     inputs += [ "${host_out_dir}/package-tool" ]
 
+    # Python script dependencies
+    inputs += [
+      "//build/python/modules/depfile/__init__.py",
+      "//build/python/modules/depfile/depfile.py",
+    ]
+
     script = "//build/packages/publish_archive.py"
     args = [
       "--package-tool",

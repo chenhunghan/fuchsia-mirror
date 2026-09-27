@@ -336,7 +336,27 @@ impl DriverHost for DriverHostComponent {
     async fn get_process_info_internal(
         &self,
     ) -> Result<crate::runtime_dir::ProcessInfo, zx::Status> {
-        self.process_info.get().await.cloned()
+        match self.driver_host.get_process_info().await {
+            Ok(Ok((job_koid, process_koid, main_thread_koid, threads, dispatchers))) => {
+                let info = crate::runtime_dir::ProcessInfo {
+                    job_koid: zx::Koid::from_raw(job_koid),
+                    process_koid: zx::Koid::from_raw(process_koid),
+                    main_thread_koid: zx::Koid::from_raw(main_thread_koid),
+                    threads,
+                    dispatchers,
+                };
+                self.process_info.cache_koids(&info).await;
+                Ok(info)
+            }
+            Ok(Err(e)) => Err(zx::Status::err_from_raw(e)),
+            Err(e) => {
+                if e.is_closed() {
+                    Err(zx::Status::PEER_CLOSED)
+                } else {
+                    Err(zx::Status::INTERNAL)
+                }
+            }
+        }
     }
 
     async fn get_crash_info(

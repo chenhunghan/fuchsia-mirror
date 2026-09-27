@@ -8,6 +8,7 @@ use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg as fpkg;
 use fidl_fuchsia_pkg_ext as fpkg_ext;
+use fidl_fuchsia_pkg_resolution as fpkg_resolution;
 use fuchsia_inspect as finspect;
 use fuchsia_sync::Mutex;
 use fuchsia_url::fuchsia_pkg::{AbsolutePackageUrl, PackageUrl};
@@ -377,12 +378,68 @@ impl Resolver {
     }
 
     fn move_inspect_node_to_recent(&self, node: finspect::Node) {
-        self.inspect_recent.lock().add_entry(|parent| {
-            let () = parent.adopt(&node).unwrap_or_else(|e| {
-                warn!("failed to move inspect node to recent: {:#}", anyhow!(e))
-            });
-            let () = parent.record(node);
-        });
+        let () = self
+            .inspect_recent
+            .lock()
+            .adopt_entry(node)
+            .map(|_: &finspect::Node| ())
+            .unwrap_or_else(|e| warn!("failed to move inspect node to recent: {:#}", anyhow!(e)));
+    }
+
+    pub(crate) async fn serve_toolbox_resolver_request_stream(
+        self: Arc<Self>,
+        stream: fpkg_resolution::PackageResolverRequestStream,
+    ) -> anyhow::Result<()> {
+        stream
+            .map_err(anyhow::Error::new)
+            .try_for_each_concurrent(None, |req| async {
+                match req {
+                    fpkg_resolution::PackageResolverRequest::Resolve { payload, responder } => {
+                        self.handle_toolbox_resolve_request(payload, responder).await
+                    }
+                    fpkg_resolution::PackageResolverRequest::_UnknownMethod {
+                        method_type,
+                        ordinal,
+                        ..
+                    } => {
+                        warn!(method_type:?, ordinal; "Unknown PackageResolverRequest");
+                        Ok(())
+                    }
+                }
+            })
+            .await
+    }
+
+    async fn handle_toolbox_resolve_request(
+        &self,
+        payload: fpkg_resolution::PackageResolverResolveRequest,
+        responder: fpkg_resolution::PackageResolverResolveResponder,
+    ) -> Result<(), anyhow::Error> {
+        match self.resolve_toolbox(&payload).await {
+            Ok(()) => responder.send(Ok(fpkg_resolution::ResolveResult { ..Default::default() })),
+            Err(e) => {
+                let fidl_error = internal_to_toolbox_error((&e).into());
+                error!("toolbox resolver failed to resolve {payload:?}: {:#}", anyhow!(e));
+                responder.send(Err(fidl_error))
+            }
+        }
+        .context("sending fuchsia.pkg.resolution/PackageResolver.Resolve response")
+    }
+
+    async fn resolve_toolbox(
+        &self,
+        payload: &fpkg_resolution::PackageResolverResolveRequest,
+    ) -> Result<(), Error> {
+        self.resolve_manage_inspect(
+            &payload
+                .package_url
+                .as_ref()
+                .ok_or(Error::MissingUrl)?
+                .parse()
+                .map_err(Error::InvalidUrl)?,
+        )
+        .await
+        .map(|_| ())
     }
 }
 
@@ -521,6 +578,9 @@ pub(crate) enum Error {
         source: package_directory::Error,
         subpackage: fuchsia_merkle::Hash,
     },
+
+    #[error("the url was not set in the fidl request")]
+    MissingUrl,
 }
 
 impl From<&Error> for fidl_fuchsia_component_resolution::ResolverError {
@@ -542,6 +602,7 @@ impl From<&Error> for fidl_fuchsia_component_resolution::ResolverError {
             ReadingSubpackages(_) => Err::Io,
             SubpackageNotFound { .. } => Err::PackageNotFound,
             CreatingSubpackageRootDir { .. } => Err::Io,
+            MissingUrl => Err::InvalidArgs,
         }
     }
 }
@@ -580,6 +641,7 @@ impl From<&Error> for fpkg::ResolveError {
             ReadingSubpackages(_) => Err::Io,
             SubpackageNotFound { .. } => Err::PackageNotFound,
             CreatingSubpackageRootDir { .. } => Err::Io,
+            MissingUrl => Err::InvalidUrl,
         }
     }
 }
@@ -601,6 +663,24 @@ impl From<&Error> for zx::Status {
             InvalidUrl => zx::Status::INVALID_ARGS,
             InvalidContext => zx::Status::INVALID_ARGS,
         }
+    }
+}
+
+fn internal_to_toolbox_error(err: fpkg::ResolveError) -> fpkg_resolution::ResolveError {
+    use fpkg::ResolveError::*;
+    use fpkg_resolution::ResolveError as Err;
+    match err {
+        Internal => Err::Internal,
+        AccessDenied => Err::AccessDenied,
+        Io => Err::Io,
+        BlobNotFound => Err::BlobNotFound,
+        PackageNotFound => Err::PackageNotFound,
+        RepoNotFound => Err::RepoNotFound,
+        NoSpace => Err::NoSpace,
+        UnavailableBlob => Err::UnavailableBlob,
+        UnavailableRepoMetadata => Err::UnavailableRepoMetadata,
+        InvalidUrl => Err::InvalidUrl,
+        InvalidContext => Err::InvalidContext,
     }
 }
 

@@ -133,7 +133,7 @@ impl Aggregator {
         // to get handles to persistent components.
         let mut first = first_rc.borrow_mut();
         if *first {
-            while let Ok(Some(_)) = receiver.try_next() {}
+            while receiver.try_recv().is_ok() {}
             for target_data in self.cached.borrow().values() {
                 for coverage_data in target_data.iter() {
                     let coverage_data_dup = duplicate_data(&coverage_data)
@@ -146,12 +146,12 @@ impl Aggregator {
             let cancel_fut = cancel_receiver.fuse();
             pin_mut!(cancel_fut);
             loop {
-                match receiver.try_next() {
-                    Ok(Some(coverage_data)) => {
+                match receiver.try_recv() {
+                    Ok(coverage_data) => {
                         batch.push(coverage_data);
                         continue;
                     }
-                    Ok(None) => break,
+                    Err(e) if e.is_closed() => break,
                     Err(_) => {
                         // This indicates that there are no messages available, but the channel is
                         // not yet closed. Return available updates.

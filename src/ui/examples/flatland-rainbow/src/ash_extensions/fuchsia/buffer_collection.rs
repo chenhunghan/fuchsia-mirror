@@ -27,7 +27,7 @@ impl BufferCollection {
         create_info: &vk::BufferCollectionCreateInfoFUCHSIA<'_>,
         allocation_callbacks: Option<&vk::AllocationCallbacks<'_>>,
     ) -> VkResult<vk::BufferCollectionFUCHSIA> {
-        let mut buffer_collection = unsafe { mem::zeroed() };
+        let mut buffer_collection = vk::BufferCollectionFUCHSIA::null();
         unsafe {
             (self.fp.create_buffer_collection_fuchsia)(
                 self.handle,

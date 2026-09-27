@@ -34,7 +34,6 @@ class GpuMapping {
   class Owner {
    public:
     virtual bool RemoveMapping(uint64_t address) = 0;
-    virtual bool UpdateCommittedMemory(GpuMapping* mapping) = 0;
   };
 
   GpuMapping(uint64_t addr, uint64_t page_offset, uint64_t size, uint64_t flags, Owner* owner,
@@ -90,7 +89,6 @@ class GpuMapping {
 
   std::weak_ptr<MsdArmBuffer> buffer() const;
   void Remove() { owner_->RemoveMapping(addr_); }
-  bool UpdateCommittedMemory() { return owner_->UpdateCommittedMemory(this); }
 
   const std::set<std::unique_ptr<magma::PlatformBusMapper::BusMapping>, BusMappingCompare>&
   bus_mappings() {

@@ -267,6 +267,22 @@ func (b *equalityCheckBuilder) visitList(actualExpr string, expectedValue []ir.V
 	if _, ok := decl.(*mixer.VectorDecl); ok {
 		b.assertEquals(fmt.Sprintf("%s.size()", actualVar), fmt.Sprintf("%d", len(expectedValue)))
 	}
+	if elemDecl, ok := decl.Elem().(mixer.PrimitiveDeclaration); ok && elemDecl.Subtype() != fidlgen.Bool && len(expectedValue) > 0 {
+		b.write("{\n")
+		valueBuild, valueVar := cpp.BuildValue(expectedValue, decl, cpp.HandleReprRaw)
+		b.write(valueBuild)
+		expectedVar := b.createAndAssignVar(valueVar)
+		expectedAccess := expectedVar
+		if decl.IsNullable() {
+			expectedAccess = fmt.Sprintf("%s.value()", expectedVar)
+		}
+		b.write(`for (size_t i = 0; i < %[1]s.size(); ++i) {
+	ASSERT_EQ(%[1]s[i], %[2]s[i]);
+}
+}
+`, actualVar, expectedAccess)
+		return
+	}
 	for i, item := range expectedValue {
 		lhs := fmt.Sprintf("%s[%d]", actualVar, i)
 		switch item.(type) {

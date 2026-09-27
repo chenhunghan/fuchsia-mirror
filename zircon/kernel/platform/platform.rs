@@ -3,5 +3,8 @@
 // found in the LICENSE file.
 
 pub mod debug;
+pub mod halt_token;
 pub mod power;
 pub mod timer;
+
+pub use halt_token::HaltToken;

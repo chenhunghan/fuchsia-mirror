@@ -38,6 +38,7 @@ rustc_library("rust_constants") {
   crate_name = "fidl_constants"
   edition = "2024"
   visibility = [
+    ":*",
     "//src/lib/dynfidl/rust/*",
     "//src/lib/fidl/rust/fidl/*",
     "//src/lib/fidl/rust_next/*",

@@ -436,7 +436,7 @@ class CodecAdapter {
       const fuchsia::media::FormatDetails& per_stream_override_format_details) = 0;
 
   // Only permitted between CoreCodecStartStream() and CoreCodecStopStream().
-  virtual void CoreCodecQueueInputPacket(CodecPacket* packet) = 0;
+  virtual void CoreCodecQueueInputPacket(const CodecPacket* packet) = 0;
 
   // Only permitted between CoreCodecStartStream() and CoreCodecStopStream().
   virtual void CoreCodecQueueInputEndOfStream() = 0;
@@ -585,7 +585,8 @@ class CodecAdapter {
   // CoreCodecCloseBufferLifetimeOrdinal, even though all handles to the old
   // buffers have been closed. For CodecAdapter(s) that never output a buffer
   // with old buffer_lifetime_ordinal, the CodecAdapter can keep no context for
-  // old buffer_lifetime_ordinal(s), and ignore this call if the packet isn't
+  // old buffer_lifetime_ordinal(s), and (after calling
+  // packet->SetBuffer(nullptr)) otherwise ignore this call if the packet isn't
   // for the current buffer_lifetime_ordinal.
   //
   // Despite this recycling mechanism, it's not permitted for a CodecAdapter to
@@ -606,6 +607,11 @@ class CodecAdapter {
   // buffer_lifetime_ordinal are only for the CodecAdapter to potentially use to
   // output another old output buffer in the output sequence that was filled
   // back when the buffer's buffer_lifetime_ordinal was current.
+  //
+  // The CodecAdapter must call packet->SetBuffer(nullptr) as soon as the
+  // CodecAdapter is done with the packet's old usage lifetime (during sync or
+  // async handling of CoreCodecRecycleOutputPacket, and before the packet can
+  // be reused) so that the CodecPacket's buffer keep-alive handle is released.
   virtual void CoreCodecRecycleOutputPacket(CodecPacket* packet) = 0;
 
   // De-configure input or output buffers. This will never occur at a time when

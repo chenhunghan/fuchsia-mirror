@@ -68,10 +68,10 @@ struct DebugStats {
 };
 
 struct TaskDebugInfo {
-  async_task_t* ptr;
-  async_task_handler_t* handler;
-  Dispatcher* initiating_dispatcher;
-  const void* initiating_driver;
+  async_task_t* ptr = nullptr;
+  async_task_handler_t* handler = nullptr;
+  Dispatcher* initiating_dispatcher = nullptr;
+  const void* initiating_driver = nullptr;
 };
 
 // Holds debug information for the current dispatcher state.
@@ -79,16 +79,18 @@ struct TaskDebugInfo {
 struct DumpState {
   // The dispatcher that is running on the current thread.
   // Will be NULL if the thread is not managed by the driver runtime.
-  Dispatcher* running_dispatcher;
-  const void* running_driver;
+  Dispatcher* running_dispatcher = nullptr;
+  const void* running_driver = nullptr;
   // The dispatcher that has been requested to be dumped to the log.
-  Dispatcher* dispatcher_to_dump;
+  Dispatcher* dispatcher_to_dump = nullptr;
   // State of |dispatcher_to_dump|.
-  const void* driver_owner;
+  const void* driver_owner = nullptr;
   fbl::String name;
-  bool synchronized;
-  bool allow_sync_calls;
-  DispatcherState state;
+  uint32_t options = 0;
+  std::string scheduler_role;
+  bool synchronized = false;
+  bool allow_sync_calls = false;
+  DispatcherState state = DispatcherState::kRunning;
   std::vector<TaskDebugInfo> queued_tasks;
   DebugStats debug_stats;
   // If a call to |Destroy| has been made, this will store the name of the dispatcher that made

@@ -1125,13 +1125,8 @@ impl CurrentTask {
         //
         // TODO(https://fxbug.dev/42082680): Implement thread destruction.
 
-        // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
-        //
-        //   POSIX timers (timer_create(2)) are not preserved.
-        //
-        // TODO: Implement this.
-
-        // TODO: Ensure that the filesystem context is un-shared, undoing the effect of CLONE_FS.
+        // Filesystem context sharing (via CLONE_FS with clone(2)) is preserved across
+        // execve under Linux, as verified by `CloneAndExecTest.ExecDoesNotUnshareCloneFs`.
 
         // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
         //
@@ -1171,6 +1166,11 @@ impl CurrentTask {
 
         let new_creds = Arc::new(resolved_program.creds.clone());
         writable_creds.update(self, new_creds);
+
+        // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
+        //
+        //   POSIX timers (timer_create(2)) are not preserved.
+        self.thread_group().timers.reset_for_exec(self);
 
         self.thread_group().signal_actions.reset_for_exec();
         security::bprm_committed_creds(self)?;

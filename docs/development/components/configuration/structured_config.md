@@ -208,7 +208,6 @@ Use the following functions from the library to read configuration values:
 
   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/rust/src/main.rs" region_tag="get_config" adjust_indentation="auto" %}
   ```
-  ```
 
 ## Export configuration to Inspect
 
@@ -226,6 +225,7 @@ Inspect tree:
 
   ```rust
   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/rust/src/main.rs" region_tag="inspect" adjust_indentation="auto" %}
+  ```
 
 Use `ffx inspect show` to print out the component's exported configuration:
 

@@ -9,6 +9,7 @@ pub use crate::resolve::{
 };
 use crate::{KnockCriticalError, KnockError, KnockNonCriticalError, TargetInfoQuery};
 
+use addr::TargetAddr;
 use anyhow::Result;
 use ffx_config::EnvironmentContext;
 use fuchsia_async::TimeoutExt;
@@ -29,17 +30,19 @@ async fn try_get_target_info(
     let resolution = resolve_target_address(&spec, false, context)
         .await
         .map_err(|e| KnockError::Critical(KnockCriticalError::TargetError(format!("{:?}", e))))?;
-    let (rcs_state, pc, bc, bi, sn) = match resolution.identify(context).await {
-        Ok(id_result) => (
+    match resolution.identify(context).await {
+        Ok(id_result) => Ok((
             info::RemoteControlState::Up,
             id_result.product_config,
             id_result.board_config,
             id_result.boot_id,
             id_result.serial_number,
-        ),
-        _ => (info::RemoteControlState::Down, None, None, None, None),
-    };
-    Ok((rcs_state, pc, bc, bi, sn))
+        )),
+        // Non-critical error allows get_target_info to fall back to subsequent addresses.
+        Err(e) => Err(KnockError::NonCritical(KnockNonCriticalError::RcsKnockFailed {
+            detail: format!("{:?}", e),
+        })),
+    }
 }
 
 async fn get_target_info(
@@ -51,7 +54,7 @@ async fn get_target_info(
         context.get("target.host_pipe_ssh_timeout").unwrap_or(DEFAULT_SSH_TIMEOUT_MS);
     let ssh_timeout = Duration::from_millis(ssh_timeout);
     for addr in addrs {
-        let query = TargetInfoQuery::from(*addr);
+        let query = TargetInfoQuery::from(addr.clone());
         log::debug!("Trying to make a connection to query {query:?}");
         match try_get_target_info(query, context)
             .on_timeout(ssh_timeout, || {
@@ -65,6 +68,8 @@ async fn get_target_info(
                 return Ok(res);
             }
             Err(KnockError::NonCritical(e)) => {
+                // If identification fails or times out on this transport, try the next
+                // address in priority order (e.g. falling back from network to USB or UART).
                 log::debug!("Could not connect to {addr:?}: {e:?}");
                 continue;
             }
@@ -141,7 +146,10 @@ fn merge_target_addrs(targets: Vec<TargetInfo>) -> Vec<TargetInfo> {
     let mut unmerged = HashSet::with_capacity(targets.len());
 
     for mut t in targets {
-        t.addresses.sort();
+        // Sort addresses by transport connection priority (VSOCK -> USB -> Network, with
+        // link-local IPv6 preferred -> UART) to ensure deterministic ordering and preferred
+        // connection order.
+        t.addresses.sort_by(TargetAddr::compare_by_priority);
         t.addresses.dedup();
 
         if let Some(boot_id) = t.boot_id {
@@ -165,8 +173,16 @@ fn merge_target_addrs(targets: Vec<TargetInfo>) -> Vec<TargetInfo> {
 
     let mut result = Vec::with_capacity(boot_merged.len() + serial_merged.len() + unmerged.len());
     result.extend(boot_merged.into_values());
+    merge_serial_targets(&mut result, serial_merged.into_values());
+    result.extend(unmerged);
+    result
+}
 
-    for t in serial_merged.into_values() {
+fn merge_serial_targets(
+    result: &mut Vec<TargetInfo>,
+    serial_targets: impl IntoIterator<Item = TargetInfo>,
+) {
+    for t in serial_targets {
         if let Some(serial) = &t.serial_number {
             let mut matches = result
                 .iter_mut()
@@ -186,14 +202,12 @@ fn merge_target_addrs(targets: Vec<TargetInfo>) -> Vec<TargetInfo> {
         }
         result.push(t);
     }
-
-    result.extend(unmerged);
-    result
 }
 
 fn merge_infos(a: &mut TargetInfo, b: TargetInfo) {
     a.addresses.extend(b.addresses);
-    a.addresses.sort();
+    // Maintain transport priority order (VSOCK -> USB -> Network -> UART).
+    a.addresses.sort_by(TargetAddr::compare_by_priority);
     a.addresses.dedup();
 
     a.serial_number = a.serial_number.take().or(b.serial_number);
@@ -282,10 +296,10 @@ mod test {
         assert_eq!(addrs[1], non_link_local_addr);
     }
 
-    fn make_target_info(addr: TargetAddr, boot_id: Option<u64>) -> TargetInfo {
+    fn make_target_info(addr: &TargetAddr, boot_id: Option<u64>) -> TargetInfo {
         TargetInfo {
             nodename: Some("t".to_string()),
-            addresses: vec![addr],
+            addresses: vec![addr.clone()],
             rcs_state: RemoteControlState::Up,
             target_state: TargetState::Product,
             product_config: Some("product".to_string()),
@@ -300,9 +314,9 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_ip_addrs() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let t1 = make_target_info(addr1, Some(999));
+        let t1 = make_target_info(&addr1, Some(999));
         let addr2: addr::TargetAddr = "[fe80::1]:2".parse().unwrap();
-        let t2 = make_target_info(addr2, Some(999));
+        let t2 = make_target_info(&addr2, Some(999));
         let targets = merge_target_addrs(vec![t1, t2]);
         assert_eq!(targets.len(), 1);
         let merged = vec![addr1, addr2];
@@ -316,8 +330,8 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_duplicate_addrs() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let t1 = make_target_info(addr1, Some(999));
-        let t2 = make_target_info(addr1, Some(999));
+        let t1 = make_target_info(&addr1, Some(999));
+        let t2 = make_target_info(&addr1, Some(999));
         let targets = merge_target_addrs(vec![t1, t2]);
         assert_eq!(targets.len(), 1);
         let target0 = targets[0].clone();
@@ -328,9 +342,9 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_non_ip_addrs() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let t1 = make_target_info(addr1, Some(999));
+        let t1 = make_target_info(&addr1, Some(999));
         let addr2: addr::TargetAddr = addr::TargetAddr::VSockCtx(123);
-        let t2 = make_target_info(addr2, Some(999));
+        let t2 = make_target_info(&addr2, Some(999));
         let targets = merge_target_addrs(vec![t1, t2]);
         assert_eq!(targets.len(), 1);
         let merged = vec![addr1, addr2];
@@ -344,9 +358,9 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_distinct_bootids() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let t1 = make_target_info(addr1, Some(888));
+        let t1 = make_target_info(&addr1, Some(888));
         let addr2: addr::TargetAddr = "[fe80::1]:2".parse().unwrap();
-        let t2 = make_target_info(addr2, Some(999));
+        let t2 = make_target_info(&addr2, Some(999));
         let targets = merge_target_addrs(vec![t1, t2]);
         assert_eq!(targets.len(), 2);
     }
@@ -354,9 +368,9 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_no_bootids() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let t1 = make_target_info(addr1, None);
+        let t1 = make_target_info(&addr1, None);
         let addr2: addr::TargetAddr = "[fe80::1]:2".parse().unwrap();
-        let t2 = make_target_info(addr2, None);
+        let t2 = make_target_info(&addr2, None);
         let targets = merge_target_addrs(vec![t1, t2]);
         assert_eq!(targets.len(), 2);
     }
@@ -364,9 +378,9 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_one_bootid() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let t1 = make_target_info(addr1, Some(999));
+        let t1 = make_target_info(&addr1, Some(999));
         let addr2: addr::TargetAddr = "[fe80::1]:2".parse().unwrap();
-        let t2 = make_target_info(addr2, None);
+        let t2 = make_target_info(&addr2, None);
         let targets = merge_target_addrs(vec![t1, t2]);
         assert_eq!(targets.len(), 2);
     }
@@ -374,9 +388,9 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_duplicate_targets_no_bootid() {
         let addr1: addr::TargetAddr = "127.0.0.1:1".parse().unwrap();
-        let t1 = make_target_info(addr1, None);
-        let t2 = make_target_info(addr1, None);
-        let t3 = make_target_info(addr1, None);
+        let t1 = make_target_info(&addr1, None);
+        let t2 = make_target_info(&addr1, None);
+        let t3 = make_target_info(&addr1, None);
         let targets = merge_target_addrs(vec![t1, t2, t3]);
         assert_eq!(targets.len(), 1);
     }
@@ -384,11 +398,11 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_by_serial() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let mut t1 = make_target_info(addr1, Some(999));
+        let mut t1 = make_target_info(&addr1, Some(999));
         t1.serial_number = Some("serial-123".to_string());
 
         let addr2: addr::TargetAddr = "[fe80::1]:2".parse().unwrap();
-        let mut t2 = make_target_info(addr2, None);
+        let mut t2 = make_target_info(&addr2, None);
         t2.serial_number = Some("serial-123".to_string());
 
         let targets = merge_target_addrs(vec![t1, t2]);
@@ -403,12 +417,12 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_is_default() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let mut t1 = make_target_info(addr1, Some(999));
+        let mut t1 = make_target_info(&addr1, Some(999));
         t1.serial_number = Some("serial-123".to_string());
         t1.is_default = Some(true);
 
         let addr2: addr::TargetAddr = "[fe80::1]:2".parse().unwrap();
-        let mut t2 = make_target_info(addr2, None);
+        let mut t2 = make_target_info(&addr2, None);
         t2.serial_number = Some("serial-123".to_string());
         t2.is_default = None;
 
@@ -434,17 +448,17 @@ mod test {
     #[fuchsia::test]
     fn test_merge_target_multiple_boots_same_serial() {
         let addr1: addr::TargetAddr = "[fe80::1]:1".parse().unwrap();
-        let mut t1 = make_target_info(addr1, Some(999));
+        let mut t1 = make_target_info(&addr1, Some(999));
         t1.serial_number = Some("serial-123".to_string());
         t1.nodename = Some("node-1".to_string());
 
         let addr2: addr::TargetAddr = "[fe80::1]:2".parse().unwrap();
-        let mut t2 = make_target_info(addr2, Some(888));
+        let mut t2 = make_target_info(&addr2, Some(888));
         t2.serial_number = Some("serial-123".to_string());
         t2.nodename = Some("node-2".to_string());
 
         let addr3: addr::TargetAddr = "[fe80::1]:3".parse().unwrap();
-        let mut t3 = make_target_info(addr3, None);
+        let mut t3 = make_target_info(&addr3, None);
         t3.serial_number = Some("serial-123".to_string());
         t3.nodename = Some("node-3".to_string());
 

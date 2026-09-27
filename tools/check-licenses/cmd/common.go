@@ -169,7 +169,7 @@ func (ic *InputContext) ResolveProjectRoot(inputPath string) (string, error) {
 		return "", err
 	}
 	absPath := filepath.Join(fuchsiaDir, relPath)
-	if _, err := os.Stat(absPath); err != nil {
+	if _, err := os.Stat(absPath); err != nil && !strings.Contains(filepath.ToSlash(absPath), "/tools/check-licenses/assets/readmes/") {
 		return "", fmt.Errorf("path does not exist: %s", inputPath)
 	}
 	grouper := boundary.NewGrouper(fuchsiaDir, ic.Config.Boundary)

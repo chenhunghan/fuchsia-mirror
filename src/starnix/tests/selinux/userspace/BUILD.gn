@@ -128,6 +128,7 @@ test_names = [
   "binder",
   "bpf",
   "capabilities",
+  "cgroupfs",
   "device_mapper",
   "fcntl",
   "fs_test",
@@ -198,6 +199,7 @@ policy_files = [
   "policies/prebuilt/binder_policy",
   "policies/prebuilt/bpf_policy",
   "policies/prebuilt/capabilities_policy",
+  "policies/prebuilt/cgroupfs_policy",
   "policies/prebuilt/fcntl_policy",
   "policies/prebuilt/file_transition_policy",
   "policies/prebuilt/fs_test_policy",
@@ -261,6 +263,7 @@ test_subprograms = []
 test_resources = []
 foreach(executable_name, test_subprogram_names) {
   test_subprograms += [ ":${executable_name}" ]
+
   executable("${executable_name}") {
     testonly = true
 
@@ -477,6 +480,7 @@ if (is_host) {
   foreach(name, test_subprogram_names) {
     target_name = "${name}_host"
     host_test_data_targets += [ ":$target_name" ]
+
     host_test_data(target_name) {
       testonly = true
       out_dir =
@@ -489,6 +493,7 @@ if (is_host) {
   foreach(name, test_names) {
     target_name = "${name}_bin_host"
     host_test_data_targets += [ ":$target_name" ]
+
     host_test_data(target_name) {
       testonly = true
       out_dir = get_label_info(":${name}_bin($target_linux_toolchain)",

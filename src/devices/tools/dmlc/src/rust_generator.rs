@@ -144,12 +144,15 @@ fn make_key(prefix: &str, field: &str) -> String {
                 continue;
             }
             rs_code.push_str(&format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum {name} {{
 "
             ));
             for (idx, variant) in enum_def.variants.iter().enumerate() {
+                if idx == 0 {
+                    rs_code.push_str("    #[default]\n");
+                }
                 rs_code.push_str(&format!("    {variant} = {idx},\n"));
             }
             rs_code.push_str("}\n\n");
@@ -351,6 +354,17 @@ fn get_value_getter(ty: &Type, field_name: &str, schema: &Schema) -> Result<Stri
             format!("{name}::parse(dict, &make_key(prefix, \"{field_name}\"))")
         }
         Type::Vector(inner) => match &**inner {
+            Type::Enum(name) => {
+                if !schema.enums.contains_key(name) {
+                    anyhow::bail!("Enum '{}' not found in schema", name);
+                }
+                format!(
+                    "get_str_vec(dict, &make_key(prefix, \"{field_name}\"))\
+                        .and_then(|v| v.into_iter().map(|s| {name}::from_str(&s)).collect())\
+                        .or_else(|| get_uint8_vec(dict, &make_key(prefix, \"{field_name}\"))\
+                            .and_then(|v| v.into_iter().map({name}::from_u8).collect()))"
+                )
+            }
             Type::Struct(name) => {
                 if !schema.structs.contains_key(name) {
                     anyhow::bail!("Struct {} referenced in vector not found in schema", name);
@@ -654,5 +668,42 @@ mod tests {
         assert!(code.contains("pub struct ResetMetadata {"));
         assert!(code.contains("impl DomainMetadata {"));
         assert!(code.contains("impl ResetMetadata {"));
+    }
+
+    #[test]
+    fn test_vector_of_enums_rust_generation() {
+        let mut enums = HashMap::new();
+        enums.insert(
+            "MyEnum".to_string(),
+            EnumDef {
+                name: "MyEnum".to_string(),
+                variants: vec!["Foo".to_string(), "Bar".to_string()],
+            },
+        );
+
+        let schema = Schema {
+            id: "fuchsia.test.Metadata".to_string(),
+            enums,
+            structs: HashMap::new(),
+            root_layout: StructDef {
+                name: "Metadata".to_string(),
+                fields: vec![Field {
+                    name: "items".to_string(),
+                    ty: Type::Vector(Box::new(Type::Enum("MyEnum".to_string()))),
+                    optional: false,
+                }],
+            },
+        };
+
+        let res = generate_rust_parser(&[schema], "test-driver", "2026");
+        assert!(res.is_ok());
+        let code = res.unwrap();
+        assert!(code.contains("pub enum MyEnum {"));
+        assert!(code.contains("    #[default]"));
+        assert!(code.contains("    Foo = 0,"));
+        assert!(code.contains("    pub items: Vec<MyEnum>,"));
+        assert!(code.contains(
+            "get_str_vec(dict, &make_key(prefix, \"items\")).and_then(|v| v.into_iter().map(|s| MyEnum::from_str(&s)).collect()).or_else(|| get_uint8_vec(dict, &make_key(prefix, \"items\")).and_then(|v| v.into_iter().map(MyEnum::from_u8).collect()))"
+        ));
     }
 }

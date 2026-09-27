@@ -1,0 +1,90 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fuchsia-inspect",
+    srcs = [
+        "src/health.rs",
+        "src/lib.rs",
+        "src/reader/error.rs",
+        "src/reader/mod.rs",
+        "src/reader/readable_tree.rs",
+        "src/reader/snapshot.rs",
+        "src/reader/tree_reader.rs",
+        "src/stats.rs",
+        "src/writer/error.rs",
+        "src/writer/heap.rs",
+        "src/writer/mod.rs",
+        "src/writer/state.rs",
+        "src/writer/testing_utils.rs",
+        "src/writer/types/base.rs",
+        "src/writer/types/bool_property.rs",
+        "src/writer/types/bytes_property.rs",
+        "src/writer/types/double_array.rs",
+        "src/writer/types/double_exponential_histogram.rs",
+        "src/writer/types/double_linear_histogram.rs",
+        "src/writer/types/double_property.rs",
+        "src/writer/types/inspector.rs",
+        "src/writer/types/int_array.rs",
+        "src/writer/types/int_exponential_histogram.rs",
+        "src/writer/types/int_linear_histogram.rs",
+        "src/writer/types/int_property.rs",
+        "src/writer/types/lazy_node.rs",
+        "src/writer/types/mod.rs",
+        "src/writer/types/node.rs",
+        "src/writer/types/property.rs",
+        "src/writer/types/string_array.rs",
+        "src/writer/types/string_property.rs",
+        "src/writer/types/string_reference.rs",
+        "src/writer/types/uint_array.rs",
+        "src/writer/types/uint_exponential_histogram.rs",
+        "src/writer/types/uint_linear_histogram.rs",
+        "src/writer/types/uint_property.rs",
+        "src/writer/types/value_list.rs",
+        "src/writer/utils.rs",
+    ] + select({
+        "@platforms//os:fuchsia": ["src/component.rs"],
+        "//conditions:default": [],
+    }),
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+        "//third_party/rust_crates/vendor:derivative",
+        "//third_party/rust_crates/vendor:paste",
+    ],
+    test_deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+    version = "0.1.0",
+    visibility = ["//:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/inspect/format/rust:lib",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/injectable-time",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:fragile",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:smallvec",
+        "//third_party/rust_crates/vendor:thiserror",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
+            "//sdk/rust/zx",
+            "//src/lib/fidl/rust/fidl",
+        ],
+        "//conditions:default": [],
+    }),
+)

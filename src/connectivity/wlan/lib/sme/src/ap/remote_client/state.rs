@@ -8,6 +8,8 @@ use crate::ap::remote_client::RemoteClient;
 use crate::ap::{Context, RsnCfg, aid};
 use anyhow::{ensure, format_err};
 
+use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
+use fidl_fuchsia_wlan_mlme as fidl_mlme;
 use fuchsia_sync::Mutex;
 use ieee80211::MacAddr;
 use log::error;
@@ -21,7 +23,6 @@ use wlan_rsn::nonce::NonceReader;
 use wlan_rsn::rsna::{SecAssocStatus, SecAssocUpdate, UpdateSink};
 use wlan_rsn::{NegotiatedProtection, ProtectionInfo};
 use wlan_statemachine::*;
-use {fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211, fidl_fuchsia_wlan_mlme as fidl_mlme};
 
 // This is not specified by 802.11, but we need some way of kicking out clients that authenticate
 // but don't intend to associate.
@@ -793,14 +794,14 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let (_, timed_event, _) = time_stream.try_next().unwrap().expect("expected timed event");
+        let (_, timed_event, _) = time_stream.try_recv().expect("expected timed event");
         assert_eq!(timed_event.id, _timeout_event.id());
         assert_matches!(timed_event.event, Event::Client { addr, event } => {
             assert_eq!(addr, *CLIENT_ADDR);
             assert_matches!(event, ClientEvent::AssociationTimeout);
         });
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AuthResponse(fidl_mlme::AuthenticateResponse {
             peer_sta_address,
             result_code,
@@ -824,7 +825,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AuthResponse(fidl_mlme::AuthenticateResponse {
             peer_sta_address,
             result_code,
@@ -857,7 +858,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             association_id,
@@ -889,7 +890,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AuthResponse(fidl_mlme::AuthenticateResponse {
             peer_sta_address,
             result_code,
@@ -914,7 +915,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
             peer_sta_address,
             reason_code,
@@ -952,7 +953,7 @@ mod tests {
         assert_matches!(rsna_link_state, None);
         assert_eq!(aid, 1);
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             result_code,
@@ -987,7 +988,7 @@ mod tests {
             None,
         );
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             capability_info,
             rates,
@@ -1027,7 +1028,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             result_code,
@@ -1037,7 +1038,7 @@ mod tests {
             assert_eq!(result_code, fidl_mlme::AssociateResultCode::RefusedReasonUnspecified);
         });
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
             peer_sta_address,
             reason_code,
@@ -1077,7 +1078,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             result_code,
@@ -1087,7 +1088,7 @@ mod tests {
             assert_eq!(result_code, fidl_mlme::AssociateResultCode::RefusedCapabilitiesMismatch);
         });
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
             peer_sta_address,
             reason_code,
@@ -1141,7 +1142,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             result_code,
@@ -1151,7 +1152,7 @@ mod tests {
             assert_eq!(result_code, fidl_mlme::AssociateResultCode::RefusedCapabilitiesMismatch);
         });
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
             peer_sta_address,
             reason_code,
@@ -1196,7 +1197,7 @@ mod tests {
         assert_eq!(aid, 1);
         assert_matches!(rsna_link_state, Some(_));
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             result_code,
@@ -1210,7 +1211,7 @@ mod tests {
             assert_eq!(rates, vec![0b11111000]);
         });
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Eapol(fidl_mlme::EapolRequest { .. }));
     }
 
@@ -1248,7 +1249,7 @@ mod tests {
         assert_eq!(aid, 1);
         assert_matches!(rsna_link_state, Some(_));
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::AssocResponse(fidl_mlme::AssociateResponse {
             peer_sta_address,
             result_code,
@@ -1268,7 +1269,7 @@ mod tests {
             assert_eq!(rates, vec![0b11111000]);
         });
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Eapol(fidl_mlme::EapolRequest { .. }));
     }
 
@@ -1294,7 +1295,7 @@ mod tests {
 
         assert_eq!(aid, aid_map.assign_aid().unwrap());
 
-        let (_, timed_event, _) = time_stream.try_next().unwrap().expect("expected timed event");
+        let (_, timed_event, _) = time_stream.try_recv().expect("expected timed event");
         assert_eq!(timed_event.id, _timeout_event.id());
         assert_matches!(timed_event.event, Event::Client { addr, event } => {
             assert_eq!(addr, *CLIENT_ADDR);
@@ -1323,7 +1324,7 @@ mod tests {
             _ => panic!("unexpected_state"),
         };
 
-        assert_matches!(time_stream.try_next(), Err(_));
+        assert_matches!(time_stream.try_recv(), Err(_));
     }
 
     #[test]
@@ -1347,7 +1348,7 @@ mod tests {
             _ => panic!("unexpected_state"),
         };
 
-        assert_matches!(time_stream.try_next(), Err(_));
+        assert_matches!(time_stream.try_recv(), Err(_));
     }
 
     #[test]
@@ -1395,10 +1396,10 @@ mod tests {
 
         assert_eq!(rsna_link_state.as_ref().unwrap().request_attempts, 1);
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Eapol(fidl_mlme::EapolRequest { .. }));
 
-        let (_, timed_event, _) = time_stream.try_next().unwrap().expect("expected timed event");
+        let (_, timed_event, _) = time_stream.try_recv().expect("expected timed event");
         assert_eq!(
             timed_event.id,
             rsna_link_state.as_ref().unwrap().request_timeout.as_ref().unwrap().id()
@@ -1452,7 +1453,7 @@ mod tests {
             _ => panic!("unexpected_state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
             peer_sta_address,
             reason_code,
@@ -1551,7 +1552,7 @@ mod tests {
             _ => panic!("unexpected state"),
         };
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
             peer_sta_address,
             reason_code,
@@ -1592,7 +1593,7 @@ mod tests {
             &Vec::<u8>::from(test_utils::eapol_key_frame())[..],
         );
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::Eapol(fidl_mlme::EapolRequest {
             src_addr,
             dst_addr,
@@ -1669,7 +1670,7 @@ mod tests {
             &Vec::<u8>::from(test_utils::eapol_key_frame())[..],
         );
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::SetKeys(fidl_mlme::SetKeysRequest { keylist }) => {
             assert_eq!(keylist.len(), 1);
             let k = keylist.first().expect("expect key descriptor");
@@ -1722,7 +1723,7 @@ mod tests {
         assert_matches!(&rsna_link_state.as_ref().unwrap().request_timeout, None);
         assert_matches!(&rsna_link_state.as_ref().unwrap().negotiation_timeout, None);
 
-        let mlme_event = mlme_stream.try_next().unwrap().expect("expected mlme event");
+        let mlme_event = mlme_stream.try_recv().expect("expected mlme event");
         assert_matches!(mlme_event, MlmeRequest::SetCtrlPort(fidl_mlme::SetControlledPortRequest {
             peer_sta_address,
             state,

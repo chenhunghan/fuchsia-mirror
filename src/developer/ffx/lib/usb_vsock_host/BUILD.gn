@@ -22,7 +22,10 @@ rustc_library("lib") {
     "//third_party/rust_crates:rand",
     "//third_party/rust_crates:thiserror",
   ]
-  test_deps = [ "//src/lib/fuchsia" ]
+  test_deps = [
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-emulated-handle",
+  ]
   sources = [ "src/lib.rs" ]
 }
 

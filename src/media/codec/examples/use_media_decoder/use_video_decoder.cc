@@ -1164,7 +1164,8 @@ void VideoDecoderRunner::Run() {
       // We have a non-empty packet of the stream.
 
       if (params_.test_params->require_sw) {
-        if ((packet.start_offset() + packet.valid_length_bytes()) % zx_system_get_page_size() ==
+        if ((buffer.vmo_offset() + packet.start_offset() + packet.valid_length_bytes()) %
+                zx_system_get_page_size() ==
             0) {
           // If this doesn't print, then it means the check for padding below isn't really checking
           // whether we force an extra 16 bytes after the output frame, since buffers are always
@@ -1173,7 +1174,10 @@ void VideoDecoderRunner::Run() {
           // 1080p_10_frames.h264 test file, this does print.
           printf("test is really checking for padding\n");
         }
-        if (buffer.size_bytes() - packet.valid_length_bytes() - packet.start_offset() <
+        uint64_t vmo_size = 0;
+        zx_status_t status = buffer.vmo().get_size(&vmo_size);
+        ZX_ASSERT(status == ZX_OK);
+        if (vmo_size - buffer.vmo_offset() - packet.valid_length_bytes() - packet.start_offset() <
             kFfmpegOutputFramePaddingBytes) {
           Exit("require_sw true decoder didn't pad as required by FFMPEG");
         }

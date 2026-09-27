@@ -26,7 +26,7 @@ Migrate GN templates to Bazel following the mapping below.
 | `deps`       | `deps`                      | Strict dependency checking: every direct import must be in `deps`.                      |
 | `importpath` | `importpath`                | Required in Bazel; must exactly match Go source imports (`go.fuchsia.dev/fuchsia/...`). |
 
-4. Scope visibility explicitly (e.g., `visibility = ["//tools/<pkg>:__subpackages__"]` or package-private). Avoid `package(default_visibility = [...]` and `default_visibility = ["//visibility:public"])`.
+4. Scope visibility explicitly using the [`determining-bazel-visibility`](../../determining_bazel_visibility/SKILL.md) skill. Avoid `package(default_visibility = [...])` and `default_visibility = ["//visibility:public"]`.
 
 
 ### Step 2: Migrate `go_binary` Target
@@ -40,7 +40,7 @@ Attributes mapping table for `go_binary` targets:
 | `deps`       | `deps`                      | Direct deps only. Do NOT over-declare deps of embedded libraries. |
 | `embed`      | `embed`                     | Embeds internal library target (e.g. `[":main"]` or `[":lib"]`).  |
 
-1. Refer to [target_compatible_with.md](target_compatible_with.md) to identify if the target is a tool in the IDK.
+1. Refer to [`target_compatible_with.md`](../../../../references/target_compatible_with.md) to identify if the target is a tool in the IDK.
    **For tools not in the IDK:**
    - Add `load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")` to `BUILD.bazel`.
    - Migrate GN `go_binary` to `go_binary_host_tool()`.
@@ -79,7 +79,7 @@ Attributes mapping table for `go_binary` targets:
 
 
 ### Step 5: Add `target_compatible_with` Attribute
-1. See [target_compatible_with.md](target_compatible_with.md) to set `target_compatible_with` to correct constraint values.
+1. See [`target_compatible_with.md`](../../../../references/target_compatible_with.md) to set `target_compatible_with` to correct constraint values.
 
 
 ### Step 6: Separate Non-Go Sources
@@ -107,9 +107,7 @@ Bazel enforces strict dependency checking for Go compile steps.
 
 ### 4. Visibility Management
 - **Pitfall:** Setting `package(default_visibility = ["//visibility:public"])` or exposing internal test targets repository-wide.
-- **Rule:**
-* Binary targets default to package-private (omit `visibility` unless external Bazel packages depend on them).
-* Library targets default to package-private unless they are needed by subpackages (omit `visibility` unless subpackages depend on them).
+- **Rule:** Follow the [`determining-bazel-visibility`](../../determining_bazel_visibility/SKILL.md) skill to determine proper target-level visibility. Binary and internal helper targets default to package-private.
 
 ### 5. Host Tool Installation Flags
 - **Pitfall:** Omitting `install_host_tool = true` for tools wrapped by `install_host_tools` in GN.

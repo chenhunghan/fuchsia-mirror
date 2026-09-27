@@ -47,11 +47,6 @@ cc_test_executable("json_parser_unittests_bin") {
     "//src/lib/fxl/test:gtest_main",
     "//third_party/rapidjson",
   ]
-
-  configs += [
-    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-    "//build/config:Wno-conversion",
-  ]
 }
 
 if (is_fuchsia) {

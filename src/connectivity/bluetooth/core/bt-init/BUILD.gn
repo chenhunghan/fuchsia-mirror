@@ -51,25 +51,14 @@ fuchsia_structured_config_rust_lib("bt_init_config") {
   cm_label = ":manifest"
 }
 
-fuchsia_structured_config_values("default_config_values") {
-  cm_label = ":manifest"
-  values = {
-    autostart_snoop = true
-    fastpair_provider_enabled = false
-    rfcomm_enabled = true
-  }
-}
-
 fuchsia_component("component") {
   cm_label = ":manifest"
   deps = [ ":bin" ]
 }
 
 fuchsia_package("bt-init") {
-  validate_structured_config = false
   deps = [
     ":component",
-    ":default_config_values",
     "//src/connectivity/bluetooth/core/bt-gap:component",
   ]
   subpackages = [ "//src/connectivity/bluetooth/core/bt-host" ]
@@ -82,18 +71,12 @@ fuchsia_component("testonly_component") {
 }
 
 fuchsia_package("bt-init-testonly") {
-  deps = [
-    ":default_config_values",
-    ":testonly_component",
-  ]
+  deps = [ ":testonly_component" ]
 }
 
 fuchsia_unittest_package("tests") {
   component_name = "bt-init-unittests"
   package_name = "bt-init-unittests"
 
-  deps = [
-    ":bin_test",
-    ":default_config_values",
-  ]
+  deps = [ ":bin_test" ]
 }

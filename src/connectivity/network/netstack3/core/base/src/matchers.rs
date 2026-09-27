@@ -6,7 +6,6 @@
 
 use alloc::format;
 use alloc::string::String;
-use core::convert::Infallible as Never;
 use core::fmt::Debug;
 use core::num::NonZeroU64;
 use core::ops::RangeInclusive;
@@ -362,7 +361,7 @@ pub trait TcpSocketProperties {
     fn state_matches(&self, matcher: &TcpStateMatcher) -> bool;
 }
 
-impl TcpSocketProperties for Never {
+impl TcpSocketProperties for ! {
     fn src_port_matches(&self, _matcher: &BoundPortMatcher) -> bool {
         unimplemented!()
     }
@@ -464,7 +463,7 @@ pub trait UdpSocketProperties {
     fn state_matches(&self, matcher: &UdpStateMatcher) -> bool;
 }
 
-impl UdpSocketProperties for Never {
+impl UdpSocketProperties for ! {
     fn src_port_matches(&self, _matcher: &BoundPortMatcher) -> bool {
         unimplemented!()
     }
@@ -537,14 +536,14 @@ pub trait MaybeSocketTransportProperties {
     fn udp_socket_properties(&self) -> Option<&Self::UdpProps<'_>>;
 }
 
-impl MaybeSocketTransportProperties for Never {
+impl MaybeSocketTransportProperties for ! {
     type TcpProps<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
     type UdpProps<'a>
-        = Never
+        = !
     where
         Self: 'a;
 
@@ -1156,7 +1155,7 @@ mod tests {
             Self: 'a;
 
         type UdpProps<'a>
-            = Never
+            = !
         where
             Self: 'a;
 
@@ -1191,7 +1190,7 @@ mod tests {
 
     impl MaybeSocketTransportProperties for FakeUdpSocket {
         type TcpProps<'a>
-            = Never
+            = !
         where
             Self: 'a;
 

@@ -10,7 +10,7 @@ use crate::mm::{
 use crate::security;
 use crate::task::CurrentTask;
 use crate::vdso::vdso_loader::ZX_TIME_VALUES_MEMORY;
-use crate::vfs::{FdNumber, FileMapping};
+use crate::vfs::{FdNumber, FileHandle, FileMapping};
 use process_builder::elf_load;
 use starnix_logging::{log_error, log_warn};
 use starnix_types::arch::ArchWidth;
@@ -30,7 +30,7 @@ use starnix_uapi::{
 };
 use std::ffi::{CStr, CString};
 use std::mem::size_of;
-use std::ops::Deref as _;
+use std::ops::{Deref as _, RangeInclusive};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -253,12 +253,40 @@ enum LoadElfUsage {
     Interpreter,
 }
 
-fn parse_elf_headers(vmo: &zx::Vmo) -> Result<elf_parse::Elf64Headers, Errno> {
-    if cfg!(target_arch = "aarch64") {
-        elf_parse::Elf64Headers::from_vmo_with_arch32(vmo).map_err(elf_parse_error_to_errno)
+/// Returns whether `[offset, offset + size)` lies within `0..=limit` without overflowing.
+fn is_within_bounds(offset: u64, size: u64, limit: u64) -> bool {
+    let Some(end) = offset.checked_add(size) else {
+        return false;
+    };
+    end <= limit
+}
+
+fn parse_elf_headers(
+    current_task: &CurrentTask,
+    file: &FileHandle,
+    memory: &MemoryObject,
+) -> Result<elf_parse::Elf64Headers, Errno> {
+    let vmo = memory.as_vmo().ok_or_else(|| errno!(ENOEXEC))?;
+    let headers = if cfg!(target_arch = "aarch64") {
+        elf_parse::Elf64Headers::from_vmo_with_arch32(vmo).map_err(elf_parse_error_to_errno)?
     } else {
-        elf_parse::Elf64Headers::from_vmo(vmo).map_err(elf_parse_error_to_errno)
+        elf_parse::Elf64Headers::from_vmo(vmo).map_err(elf_parse_error_to_errno)?
+    };
+
+    // `elf_parse` validates headers against the page-sized VMO and permits `phnum == 0`.
+    // Verify that at least one program header is present and that the table fits within the
+    // actual file size.
+    let file_header = headers.file_header();
+    if file_header.phnum == 0 {
+        return error!(ENOEXEC);
     }
+    let file_size = file.node().fetch_and_refresh_info(current_task)?.size as u64;
+    let program_header_table_size = u64::from(file_header.phnum) * u64::from(file_header.phentsize);
+    if !is_within_bounds(file_header.phoff as u64, program_header_table_size, file_size) {
+        return error!(ENOEXEC);
+    }
+
+    Ok(headers)
 }
 
 fn load_elf(
@@ -411,9 +439,8 @@ fn resolve_executable_impl(
     if recursion_depth > MAX_RECURSION_DEPTH {
         return error!(ELOOP);
     }
-    let memory = resolved_program
-        .file
-        .file()
+    let file = resolved_program.file.file();
+    let memory = file
         .get_memory(current_task, None, ProtectionFlags::READ | ProtectionFlags::EXEC)
         .map_err(|e| if e.code.error_code() == ENODEV { errno!(ENOEXEC) } else { e })?;
     let header = match memory.read_to_array::<u8, HASH_BANG_SIZE>(0) {
@@ -427,7 +454,7 @@ fn resolve_executable_impl(
     if &header == HASH_BANG {
         resolve_script(current_task, memory, resolved_program, script_path, recursion_depth)
     } else {
-        resolved_program.elf = Some(resolve_elf(memory)?);
+        resolved_program.elf = Some(resolve_elf(current_task, file, memory)?);
         Ok(())
     }
 }
@@ -511,9 +538,12 @@ fn parse_interpreter_line(line: &[u8]) -> Result<Vec<CString>, Errno> {
 }
 
 /// Resolves a [`MemoryObject`] into a validated [`ResolvedElf`].
-fn resolve_elf(memory: Arc<MemoryObject>) -> Result<ResolvedElf, Errno> {
-    let vmo = memory.as_vmo().ok_or_else(|| errno!(EINVAL))?;
-    let headers = parse_elf_headers(vmo)?;
+fn resolve_elf(
+    current_task: &CurrentTask,
+    file: &FileHandle,
+    memory: Arc<MemoryObject>,
+) -> Result<ResolvedElf, Errno> {
+    let headers = parse_elf_headers(current_task, file, &memory)?;
     let arch_width = get_arch_width(&headers);
     Ok(ResolvedElf { memory, headers, arch_width, interp: None })
 }
@@ -523,6 +553,7 @@ pub fn resolve_elf_interpreter(
     current_task: &CurrentTask,
     resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
+    let file_size = resolved_program.file.file().node().info().size as u64;
     let elf = resolved_program.elf.as_mut().ok_or_else(|| errno!(EINVAL))?;
     if let Some(interp_hdr) = elf
         .headers
@@ -535,19 +566,26 @@ pub fn resolve_elf_interpreter(
         //          The array element specifies the location and size of a
         //          null-terminated path name to invoke as an interpreter.
         //
-        // Reject segments smaller than 2 bytes (1 character plus NUL) or exceeding `PATH_MAX`.
-        if interp_hdr.filesz > starnix_uapi::PATH_MAX as u64 || interp_hdr.filesz < 2 {
+        // Reject segments smaller than 2 bytes (1 character plus NUL), exceeding `PATH_MAX`, or
+        // extending past the end of the file.
+        const VALID_PT_INTERP_FILESZ: RangeInclusive<u64> = 2..=(starnix_uapi::PATH_MAX as u64);
+        if !VALID_PT_INTERP_FILESZ.contains(&interp_hdr.filesz)
+            || !is_within_bounds(interp_hdr.offset as u64, interp_hdr.filesz, file_size)
+        {
             return error!(ENOEXEC);
         }
-        let interp = elf
+        let interp_bytes = elf
             .memory
             .read_to_vec(interp_hdr.offset as u64, interp_hdr.filesz)
             .map_err(|status| from_status_like_fdio!(status))?;
-        let interp = CStr::from_bytes_until_nul(&interp).map_err(|_| errno!(ENOEXEC))?;
+        // Only consider the interpreter path up to the first NUL byte. Linux is observed to
+        // require that the final byte of the buffer is always NUL, regardless of whether the path
+        // was already terminated by a NUL earlier in the buffer, which we do not replicate.
+        let interp_path = CStr::from_bytes_until_nul(&interp_bytes).map_err(|_| errno!(ENOEXEC))?;
 
         let interp_file = current_task.open_file_for_exec(
             FdNumber::AT_FDCWD,
-            interp.to_bytes().into(),
+            interp_path.to_bytes().into(),
             OpenFlags::empty(),
         )?;
         let interp_memory = interp_file
@@ -555,12 +593,16 @@ pub fn resolve_elf_interpreter(
             .get_memory(current_task, None, ProtectionFlags::READ | ProtectionFlags::EXEC)
             .map_err(|e| if e.code.error_code() == ENODEV { errno!(ENOEXEC) } else { e })?;
 
-        let vmo = interp_memory.as_vmo().ok_or_else(|| errno!(EINVAL))?;
-        let interp_headers = parse_elf_headers(vmo)?;
+        // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
+        //
+        //   ELIBBAD
+        //          An ELF interpreter was not in a recognized format.
+        let interp_headers = parse_elf_headers(current_task, interp_file.file(), &interp_memory)
+            .map_err(|_| errno!(ELIBBAD))?;
         let interp_arch_width = get_arch_width(&interp_headers);
         if elf.arch_width != interp_arch_width {
             log_warn!("interpreter elf and main elf are different architectures!");
-            return error!(ENOEXEC);
+            return error!(ELIBBAD);
         }
 
         elf.interp = Some(ResolvedElfInterp {

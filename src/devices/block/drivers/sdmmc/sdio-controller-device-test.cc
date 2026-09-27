@@ -4,7 +4,9 @@
 
 #include "sdio-controller-device.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.power/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.sdio/cpp/wire.h>
 #include <fidl/fuchsia.power.broker/cpp/test_base.h>
 #include <fidl/fuchsia.power.system/cpp/fidl.h>
 #include <fidl/fuchsia.power.system/cpp/test_base.h>
@@ -315,8 +317,42 @@ class FakePowerBroker : public fidl::Server<fuchsia_power_broker::Topology>,
 
 FakeSdmmcDevice TestSdmmcRootDevice::sdmmc_;
 
+class GenericMetadataServer final : public fidl::WireServer<fuchsia_driver_metadata::Metadata> {
+ public:
+  zx::result<> Serve(fdf::OutgoingDirectory& outgoing, async_dispatcher_t* dispatcher,
+                     std::string service_name,
+                     const fuchsia_driver_metadata::Dictionary& metadata) {
+    fit::result persisted_metadata = fidl::Persist(metadata);
+    if (persisted_metadata.is_error()) {
+      return zx::error(persisted_metadata.error_value().status());
+    }
+    persisted_metadata_ = std::move(persisted_metadata.value());
+
+    fuchsia_driver_metadata::Service::InstanceHandler handler(
+        {.metadata = bindings_.CreateHandler(this, dispatcher, fidl::kIgnoreBindingClosure)});
+
+    return outgoing.component().AddService(std::move(handler), std::move(service_name));
+  }
+
+  void GetPersistedMetadata(GetPersistedMetadataCompleter::Sync& completer) override {
+    if (!persisted_metadata_.has_value()) {
+      completer.ReplyError(ZX_ERR_NOT_FOUND);
+      return;
+    }
+    completer.ReplySuccess(fidl::VectorView<uint8_t>::FromExternal(persisted_metadata_.value()));
+  }
+
+ private:
+  fidl::ServerBindingGroup<fuchsia_driver_metadata::Metadata> bindings_;
+  std::optional<std::vector<uint8_t>> persisted_metadata_;
+};
+
 class Environment : public fdf_testing::Environment {
  public:
+  void set_sdio_metadata(fuchsia_driver_metadata::Dictionary metadata) {
+    sdio_metadata_ = std::move(metadata);
+  }
+
   zx::result<> Serve(fdf::OutgoingDirectory& to_driver_vfs) override {
     fuchsia_hardware_sdmmc::SdmmcMetadata metadata{{
         .vccq_off_with_controller_off = true,
@@ -325,6 +361,14 @@ class Environment : public fdf_testing::Environment {
             to_driver_vfs, fdf::Dispatcher::GetCurrent()->async_dispatcher(), metadata);
         result.is_error()) {
       return result.take_error();
+    }
+    if (sdio_metadata_.has_value()) {
+      if (zx::result result = sdio_metadata_server_.Serve(
+              to_driver_vfs, fdf::Dispatcher::GetCurrent()->async_dispatcher(),
+              fuchsia_hardware_sdio::wire::Metadata::kSerializableName, *sdio_metadata_);
+          result.is_error()) {
+        return result.take_error();
+      }
     }
     if (zx::result result = fake_power_broker_.Serve(to_driver_vfs); result.is_error()) {
       return result.take_error();
@@ -351,6 +395,8 @@ class Environment : public fdf_testing::Environment {
  private:
   fidl::Arena<> arena_;
   fdf_metadata::MetadataServer<fuchsia_hardware_sdmmc::SdmmcMetadata> metadata_server_;
+  std::optional<fuchsia_driver_metadata::Dictionary> sdio_metadata_;
+  GenericMetadataServer sdio_metadata_server_;
   FakePowerBroker fake_power_broker_;
   FakeActivityGovernor activity_governor_;
 };
@@ -2994,6 +3040,69 @@ TEST_F(SdioControllerDeviceTest, ProbeAfterControllerOffToOn) {
       });
   driver_test().runtime().RunUntilIdle();
   EXPECT_EQ(probe_count, 2u);
+}
+
+TEST_F(SdioControllerDeviceTest, SdioMetadataGlobalId) {
+  sdmmc_.set_command_callback(SDIO_SEND_OP_COND, [](uint32_t out_response[4]) -> void {
+    out_response[0] = OpCondFunctions(3);
+  });
+
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "functions._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(2)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "functions.0.function", fuchsia_driver_metadata::DictionaryValue::WithInt64(1)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "functions.0.id", fuchsia_driver_metadata::DictionaryValue::WithInt64(42)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "functions.1.function", fuchsia_driver_metadata::DictionaryValue::WithInt64(2)));
+  // Note: functions.1 has no id entry.
+  // Note: function 3 is not present in the metadata dictionary.
+
+  driver_test().RunInEnvironmentTypeContext<void>([&](Environment& env) {
+    env.set_sdio_metadata(fuchsia_driver_metadata::Dictionary{{.entries = std::move(entries)}});
+  });
+
+  ASSERT_OK(StartDriver());
+
+  driver_test().RunInNodeContext([&](fdf_testing::TestNode& node) {
+    fdf_testing::TestNode& sdmmc_node = node.children().at("sdmmc");
+    fdf_testing::TestNode& controller_node = sdmmc_node.children().at("sdmmc-sdio");
+
+    // Expected IDs for functions 1, 2, 3:
+    // Function 1: 42 (from metadata)
+    // Function 2: 2 (fallback to function index since id was not provided in metadata)
+    // Function 3: 3 (fallback to function index since function was not in metadata)
+    const uint32_t expected_ids[3] = {42, 2, 3};
+
+    for (size_t i = 0; i < 3; i++) {
+      const std::string node_name = "sdmmc-sdio-" + std::to_string(i + 1);
+      fdf_testing::TestNode& function_node = controller_node.children().at(node_name);
+
+      bool found_id = false;
+      for (const auto& prop : function_node.GetProperties()) {
+        if (prop.key() == bind_fuchsia::ID) {
+          EXPECT_EQ(prop.value().int_value().value(), expected_ids[i]);
+          found_id = true;
+          break;
+        }
+      }
+      EXPECT_TRUE(found_id);
+
+      const std::string driver_node_name = node_name + "-driver";
+      fdf_testing::TestNode& driver_node = controller_node.children().at(driver_node_name);
+
+      bool found_driver_id = false;
+      for (const auto& prop : driver_node.GetProperties()) {
+        if (prop.key() == bind_fuchsia::ID) {
+          EXPECT_EQ(prop.value().int_value().value(), expected_ids[i]);
+          found_driver_id = true;
+          break;
+        }
+      }
+      EXPECT_TRUE(found_driver_id);
+    }
+  });
 }
 
 }  // namespace sdmmc

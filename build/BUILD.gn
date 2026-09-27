@@ -84,6 +84,7 @@ if (is_host) {
       "//build/bazel/scripts/build_utils.py",
       "//build/bazel/scripts/bazel_tests_utils.py",
     ]
+    deps = [ "//build/python/modules/serialization" ]
   }
 }
 

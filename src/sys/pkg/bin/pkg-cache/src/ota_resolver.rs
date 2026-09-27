@@ -276,12 +276,12 @@ impl Resolver {
     }
 
     fn move_inspect_node_to_recent(&self, node: finspect::Node) {
-        self.inspect_recent.lock().add_entry(|parent| {
-            let () = parent.adopt(&node).unwrap_or_else(|e| {
-                warn!("failed to move inspect node to recent: {:#}", anyhow!(e))
-            });
-            let () = parent.record(node);
-        });
+        let () = self
+            .inspect_recent
+            .lock()
+            .adopt_entry(node)
+            .map(|_: &finspect::Node| ())
+            .unwrap_or_else(|e| warn!("failed to move inspect node to recent: {:#}", anyhow!(e)));
     }
 }
 

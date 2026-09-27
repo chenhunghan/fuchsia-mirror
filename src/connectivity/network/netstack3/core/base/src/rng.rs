@@ -84,7 +84,7 @@ pub(crate) mod testutil {
     }
 
     impl<R: Rng> TryRng for FakeCryptoRng<R> {
-        type Error = core::convert::Infallible;
+        type Error = !;
 
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.0.lock().next_u32())

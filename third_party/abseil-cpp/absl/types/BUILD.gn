@@ -88,3 +88,16 @@ source_set("compare") {
     "../meta:type_traits",
   ]
 }
+
+source_set("source_location") {
+  public_configs = [ "//third_party/abseil-cpp:abseil_config" ]
+
+  sources = [ "//third_party/abseil-cpp/src/absl/types/source_location.cc" ]
+  public = [ "//third_party/abseil-cpp/src/absl/types/source_location.h" ]
+
+  deps = [
+    "../base:config",
+    "../base:core_headers",
+    "../base:nullability",
+  ]
+}

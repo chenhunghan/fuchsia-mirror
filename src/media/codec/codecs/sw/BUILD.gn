@@ -32,6 +32,7 @@ source_set("codec_runner_sw") {
     "//sdk/lib/inspect/component/cpp",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
+    "//zircon/system/ulib/closure-queue",
     "//zircon/system/ulib/trace-provider",
   ]
 }

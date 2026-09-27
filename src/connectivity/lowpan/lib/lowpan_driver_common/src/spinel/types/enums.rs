@@ -378,6 +378,19 @@ impl From<u32> for MeshcopJoinerState {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub enum PropRcp {
+    MacKey,
+    MacFrameCounter,
+    Timestamp,
+    EnhAckProbing,
+    CslAccuracy,
+    CslUncertainty,
+
+    Unknown(u32),
+}
+impl_sub_enum!(Prop::Rcp, PropRcp);
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum Prop {
     LastStatus,
     ProtocolVersion,
@@ -402,6 +415,7 @@ pub enum Prop {
     Ipv6(PropIpv6),
     NestLegacy(PropNestLegacy),
     Meshcop(PropMeshcop),
+    Rcp(PropRcp),
     Unknown(u32),
 }
 impl_spinel_pack_uint!(Prop);
@@ -548,6 +562,14 @@ impl From<Prop> for u32 {
 
             Meshcop(PropMeshcop::JoinerState) => 0x80,
             Meshcop(PropMeshcop::JoinerCommissioning) => 0x81,
+
+            Rcp(PropRcp::MacKey) => 0x800,
+            Rcp(PropRcp::MacFrameCounter) => 0x801,
+            Rcp(PropRcp::Timestamp) => 0x802,
+            Rcp(PropRcp::EnhAckProbing) => 0x803,
+            Rcp(PropRcp::CslAccuracy) => 0x804,
+            Rcp(PropRcp::CslUncertainty) => 0x805,
+            Rcp(PropRcp::Unknown(x)) => x,
 
             Unknown(x) => x,
         }
@@ -707,6 +729,16 @@ impl From<u32> for Prop {
             0x3BC1 => NestLegacy(PropNestLegacy::UlaPrefix),
             0x3BC2 => NestLegacy(PropNestLegacy::LastNodeJoined),
             x if (0x3BC0..0x3C00).contains(&x) => NestLegacy(PropNestLegacy::Unknown(x)),
+
+            0x800 => Rcp(PropRcp::MacKey),
+            0x801 => Rcp(PropRcp::MacFrameCounter),
+            0x802 => Rcp(PropRcp::Timestamp),
+            0x803 => Rcp(PropRcp::EnhAckProbing),
+            0x804 => Rcp(PropRcp::CslAccuracy),
+            0x805 => Rcp(PropRcp::CslUncertainty),
+            x if (0xB0..0x100).contains(&x) || (0x800..0x900).contains(&x) => {
+                Rcp(PropRcp::Unknown(x))
+            }
 
             x => Unknown(x),
         }

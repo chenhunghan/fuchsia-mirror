@@ -62,7 +62,7 @@ zx_status_t Nelson::SecureMemInit() {
   auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
       fidl::ToWire(fidl_arena, secure_mem_dev),
       fidl::ToWire(fidl_arena, fuchsia_driver_framework::CompositeNodeSpec{
-                                   {.name = "aml_securemem", .parents2 = parents}}));
+                                   {.name = "aml-secure-mem", .parents2 = parents}}));
   if (!result.ok()) {
     zxlogf(ERROR, "AddCompositeNodeSpec SecureMem(secure_mem_dev) request failed: %s",
            result.FormatDescription().data());

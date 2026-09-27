@@ -19,7 +19,6 @@ extern crate alloc;
 
 #[path = "."]
 mod internal {
-    pub(super) mod settings;
     pub(super) mod socket;
 }
 
@@ -29,5 +28,3 @@ pub use internal::socket::{
     IcmpSocketId, IcmpSocketSet, IcmpSocketState, IcmpSocketTxMetadata, IcmpSockets,
     ReceiveIcmpEchoError,
 };
-
-pub use internal::settings::IcmpEchoSettings;

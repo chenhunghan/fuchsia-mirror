@@ -131,7 +131,7 @@ fn find_mermaid_blocks_helper<'a, 'b>(
     blocks: &mut Vec<(&'a CowStr<'b>, &'a [Element<'b>], &'a Element<'b>)>,
 ) {
     match element {
-        Element::CodeBlock(lang, elements, _) => {
+        Element::CodeBlock(lang, elements, _, _) => {
             if lang.as_ref() == "mermaid" {
                 blocks.push((lang, elements, element));
             }
@@ -192,10 +192,10 @@ mod tests {
 
         // Test flowchart diagram
         let elements = vec![Element::Text("graph TD\n  A --> B".into(), doc_line.clone())];
-        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone());
+        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone(), None);
         let res = checker.check_mermaid_block(
             match &block {
-                Element::CodeBlock(_, e, _) => e,
+                Element::CodeBlock(_, e, _, _) => e,
                 _ => unreachable!(),
             },
             &block,
@@ -207,10 +207,10 @@ mod tests {
             "%% This is a comment\n\n  timeline\n  2026 : Release".into(),
             doc_line.clone(),
         )];
-        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone());
+        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone(), None);
         let res = checker.check_mermaid_block(
             match &block {
-                Element::CodeBlock(_, e, _) => e,
+                Element::CodeBlock(_, e, _, _) => e,
                 _ => unreachable!(),
             },
             &block,
@@ -222,10 +222,10 @@ mod tests {
             "---\ntitle: \"VMO Inspect Layout\"\n---\npacket-beta\n0-3: \"order\"".into(),
             doc_line.clone(),
         )];
-        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone());
+        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone(), None);
         let res = checker.check_mermaid_block(
             match &block {
-                Element::CodeBlock(_, e, _) => e,
+                Element::CodeBlock(_, e, _, _) => e,
                 _ => unreachable!(),
             },
             &block,
@@ -240,10 +240,10 @@ mod tests {
 
         // Test empty diagram
         let elements = vec![];
-        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone());
+        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone(), None);
         let res = checker.check_mermaid_block(
             match &block {
-                Element::CodeBlock(_, e, _) => e,
+                Element::CodeBlock(_, e, _, _) => e,
                 _ => unreachable!(),
             },
             &block,
@@ -256,10 +256,10 @@ mod tests {
 
         // Test invalid diagram type
         let elements = vec![Element::Text("invalidType TD\n  A --> B".into(), doc_line.clone())];
-        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone());
+        let block = Element::CodeBlock("mermaid".into(), elements, doc_line.clone(), None);
         let res = checker.check_mermaid_block(
             match &block {
-                Element::CodeBlock(_, e, _) => e,
+                Element::CodeBlock(_, e, _, _) => e,
                 _ => unreachable!(),
             },
             &block,

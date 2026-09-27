@@ -22,9 +22,6 @@ test("fidl-metadata-unittest") {
     "spi-test.cc",
     "tee-test.cc",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_unittest_package("fidl-metadata-tests") {

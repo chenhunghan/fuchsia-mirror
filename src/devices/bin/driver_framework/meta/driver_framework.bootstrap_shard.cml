@@ -344,6 +344,12 @@
         },
         {
             protocol: [
+                // Note: Most drivers should `use` fuchsia.sysmem2.Allocator, NOT
+                // fuchsia.hardware.sysmem.Sysmem. fuchsia.hardware.sysmem.Sysmem is a privileged
+                // protocol for registering custom heaps (RegisterHeap) or secure memory
+                // (RegisterSecureMem). Only drivers whose packaged .cm explicitly declares `use`
+                // for fuchsia.hardware.sysmem.Sysmem can access it, and only drivers that
+                // legitimately implement an external heap or securemem should do so.
                 "fuchsia.hardware.sysmem.Sysmem",
                 "fuchsia.sysmem.Allocator",
                 "fuchsia.sysmem2.Allocator",
@@ -436,7 +442,10 @@
             source_availability: "unknown",
         },
         {
-            config: [ "fuchsia.power.WaitForSuspendingToken" ],
+            config: [
+                "fuchsia.power.StoragePowerManagementEnabled",
+                "fuchsia.power.WaitForSuspendingToken",
+            ],
             from: "parent",
             to: "#driver_manager",
         },

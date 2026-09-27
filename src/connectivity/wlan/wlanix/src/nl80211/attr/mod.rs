@@ -40,6 +40,7 @@ pub enum Nl80211Attr {
     StaInfo(Vec<Nl80211StaInfoAttr>),
     WiphyBands(Vec<Vec<Nl80211BandAttr>>),
     RegulatoryRegionAlpha2([u8; 2]),
+    RegulatoryRegionType(u8),
     MaxScanSsids(u8),
     Bss(Vec<Nl80211BssAttr>),
     StatusCode(u16),
@@ -81,6 +82,7 @@ impl Nla for Nl80211Attr {
             // Under Netlink, NLA_STRINGs must include the null-terminating '\0' byte.
             // Android daemons (like wificond) rely on this 3-byte C-string representation.
             RegulatoryRegionAlpha2(_) => REG_ALPHA2_NULL_STR_LEN,
+            RegulatoryRegionType(val) => size_of_val(val),
             MaxScanSsids(val) => size_of_val(val),
             ScanFrequencies(val) => to_nested_values(val).as_slice().buffer_len(),
             ScanSsids(val) => to_nested_values(val).as_slice().buffer_len(),
@@ -119,6 +121,7 @@ impl Nla for Nl80211Attr {
             StaInfo(_) => NL80211_ATTR_STA_INFO,
             WiphyBands(_) => NL80211_ATTR_WIPHY_BANDS,
             RegulatoryRegionAlpha2(_) => NL80211_ATTR_REG_ALPHA2,
+            RegulatoryRegionType(_) => NL80211_ATTR_REG_TYPE,
             MaxScanSsids(_) => NL80211_ATTR_MAX_NUM_SCAN_SSIDS,
             ScanFrequencies(_) => NL80211_ATTR_SCAN_FREQUENCIES,
             ScanSsids(_) => NL80211_ATTR_SCAN_SSIDS,
@@ -170,6 +173,7 @@ impl Nla for Nl80211Attr {
                 buffer[..REG_ALPHA2_LEN].copy_from_slice(&reg[..]);
                 buffer[REG_ALPHA2_LEN] = 0;
             }
+            RegulatoryRegionType(val) => buffer[0] = *val,
             MaxScanSsids(val) => buffer[0] = *val,
             ScanFrequencies(val) => to_nested_values(val).as_slice().emit(buffer),
             ScanSsids(val) => to_nested_values(val).as_slice().emit(buffer),
@@ -240,6 +244,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>> for Nl80211Attr {
                 reg.copy_from_slice(&payload[..REG_ALPHA2_LEN]);
                 Self::RegulatoryRegionAlpha2(reg)
             }
+            NL80211_ATTR_REG_TYPE => Self::RegulatoryRegionType(payload[0]),
             NL80211_ATTR_MAX_NUM_SCAN_SSIDS => Self::MaxScanSsids(payload[0]),
             NL80211_ATTR_SCAN_FREQUENCIES => NlasIterator::new(payload)
                 .map(|nla| nla.map_err(DecodeError::from).and_then(|v| parse_u32(v.value())))
@@ -360,6 +365,7 @@ mod tests {
             Mac([1, 2, 3, 4, 5, 6]),
             // WiphyBands is not parseable right now, so we skip it.
             RegulatoryRegionAlpha2(*b"AB"),
+            RegulatoryRegionType(1),
             MaxScanSsids(10),
             ScanFrequencies(vec![1, 2, 3]),
             ScanSsids(vec![]),

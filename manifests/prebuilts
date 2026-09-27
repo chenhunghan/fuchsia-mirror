@@ -200,7 +200,7 @@
              path="prebuilt/tools/cgpt/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
     <package name="fuchsia/tools/futility/${platform}"
-             version="git_revision:3de317093f57a8b7b301db38bffe022be23b36ee"
+             version="git_revision:71ae999e1edf707f9c20aec83b760d7367feced5"
              path="prebuilt/tools/futility/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
     <package name="fuchsia/tools/buildstats/${platform}"
@@ -435,7 +435,7 @@
 
     <!-- AOSP GKI kernels intended for virtualization -->
     <package name="fuchsia/third_party/aosp_gki/virt"
-             version="bid:13906628"
+             version="bid:16411494"
              path="prebuilt/virtualization/packages/aosp_gki"
              platforms="linux-amd64,linux-arm64"/>
 
@@ -499,7 +499,7 @@
     <!-- SHAC static analysis tooling -->
     <package name="fuchsia/shac/${platform}"
              path="prebuilt/tools/shac"
-             version="git_revision:f1e8d250084c99a163eec9d9dba51db502d6782b"
+             version="git_revision:e7fcb039bd1ded76366a8e6358273bf260735533"
              platforms="linux-amd64,linux-arm64"/>
 
     <!-- keep-sorted tool -->
@@ -523,20 +523,20 @@
     <!-- Packages in /infra/tools/ -->
     <package name="infra/tools/bb/${platform}"
              path="prebuilt/tools/buildbucket"
-             version="git_revision:1e8a86e7a2aab9090d884944ab04db3cb717a23a"
+             version="git_revision:ed2f1af28c621f1d15a461cb8aa3c9ea8c8ce2a5"
              platforms="linux-amd64,linux-arm64"/>
     <package name="infra/tools/luci/gsutil/${platform}"
              path="prebuilt/tools/gsutil"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:1e8a86e7a2aab9090d884944ab04db3cb717a23a"/>
+             version="git_revision:ed2f1af28c621f1d15a461cb8aa3c9ea8c8ce2a5"/>
     <package name="infra/tools/luci/logdog/logdog/${platform}"
              path="prebuilt/tools/logdog"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:1e8a86e7a2aab9090d884944ab04db3cb717a23a"/>
+             version="git_revision:ed2f1af28c621f1d15a461cb8aa3c9ea8c8ce2a5"/>
     <package name="infra/tools/luci/cas/${platform}"
              path="prebuilt/tools/cas"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:1e8a86e7a2aab9090d884944ab04db3cb717a23a"/>
+             version="git_revision:ed2f1af28c621f1d15a461cb8aa3c9ea8c8ce2a5"/>
     <package name="infra/tools/rdb/${platform}"
              path="prebuilt/tools/resultdb"
              platforms="linux-amd64,linux-arm64"
@@ -625,45 +625,45 @@
      <!-- Components built OOT -->
     <package name="fuchsia/prebuilt/bt-host/arm64"
              path="prebuilt/connectivity/bluetooth/bt-host/arm64"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"/>
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-arm64"
              path="prebuilt/.build-id"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"
              attributes="debug-symbols,debug-symbols-arm64"/>
     <package name="fuchsia/prebuilt/bt-host/x86_64"
              path="prebuilt/connectivity/bluetooth/bt-host/x64"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"/>
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-x86_64"
              path="prebuilt/.build-id"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"
              attributes="debug-symbols,debug-symbols-x64"/>
     <package name="fuchsia/prebuilt/bt-host/riscv64"
              path="prebuilt/connectivity/bluetooth/bt-host/riscv64"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"/>
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-riscv64"
              path="prebuilt/.build-id"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"
              attributes="debug-symbols,debug-symbols-riscv64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/arm64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/arm64"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"/>
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-arm64"
              path="prebuilt/.build-id"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"
              attributes="debug-symbols,debug-symbols-arm64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/x86_64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/x64"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"/>
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-x86_64"
              path="prebuilt/.build-id"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"
              attributes="debug-symbols,debug-symbols-x64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/riscv64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/riscv64"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"/>
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-riscv64"
              path="prebuilt/.build-id"
-             version="git_revision:75bff331e9d4967bf6ba503e8516a47b5e8d7abb"
+             version="git_revision:d8fabb737157f155ee77e3c72f0f7ecac09f659c"
              attributes="debug-symbols,debug-symbols-riscv64"/>
 
      <!-- Linux iptables binary used for Starnix tests.
@@ -692,7 +692,7 @@
          such that the .so is findable from python.
          See tools/build/scripts/extract_pydantic_core_wheel.sh.
     -->
-    <package name="infra/python/wheels/pydantic_core/linux-amd64_cp311_cp311"
+    <package name="infra/python/wheels/pydantic_core/linux-amd64_cp313_cp313"
              version="version:2.33.2"
              path="prebuilt/third_party/pydantic-core-wheel"
              platforms="linux-amd64"/>

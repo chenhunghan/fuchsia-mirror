@@ -61,6 +61,13 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
     def _get_ssh_private_key(self) -> None:
         if self.ssh_private_key:
             return
+        ssh_keys = self.dut.ffx.config.ssh_private_keys
+        if isinstance(ssh_keys, list) and ssh_keys and ssh_keys[0]:
+            self.ssh_private_key = ssh_keys[0]
+            return
+        elif isinstance(ssh_keys, str) and ssh_keys:
+            self.ssh_private_key = ssh_keys
+            return
         ssh_priv_output = json.loads(
             self.run_ffx(["config", "get", "-s", "first", "ssh.priv"])
         )
@@ -73,13 +80,13 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         self.ssh_private_key = ssh_priv
 
     # Build the default configs passed to strict invocations of ffx
-    def _build_strict_config_args(self, extra_configs: List[str]) -> List[Text]:
+    def _build_strict_configs(self, extra_configs: List[str]) -> List[str]:
         environ = os.environ
-        configs = extra_configs
+        configs: List[str] = []
         # Get output directory
         out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
         caller_frame = inspect.currentframe()
-        if caller_frame:
+        while caller_frame and caller_frame.f_code.co_name.startswith("_"):
             caller_frame = caller_frame.f_back
         if out_dir and caller_frame:
             out_dir = os.path.join(
@@ -96,6 +103,7 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         # ssh.priv: path to private key for ssh connection to target
         # fastboot.devices_file.path: path for discovering Pontis fastboot devices
         # log.dir: directory to write logs
+        # shared_data: directory for data shared among programs
         ffx_path = self.dut.ffx.config.binary_path
         subtool_path = Path(ffx_path).resolve().parent
         configs.append(f"ffx.subtool-search-paths={subtool_path}")
@@ -106,17 +114,30 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
             f"fastboot.devices_file.path={environ['HOME']}/.fastboot/devices"
         )
         configs.append(f"log.dir={environ['FUCHSIA_TEST_OUTDIR']}/ffx_logs")
-        # Return as list of args: ["-c, "key1=val1", "-c", "key2=val2", ...]
-        retval = []
-        for c in configs:
-            retval.append("--config")
-            retval.append(c)
-        return retval
+        if self.dut.ffx.config.shared_data:
+            configs.append(f"shared_data={self.dut.ffx.config.shared_data}")
+        else:
+            configs.append(f"shared_data={environ['FUCHSIA_TEST_OUTDIR']}/ffx")
+        configs.extend(extra_configs)
+        return configs
+
+    def _format_strict_config_args(self, configs: List[str]) -> List[str]:
+        # Return as list of args: ["-c", "key1=val1", "-c", "key2=val2", ...]
+        args: List[str] = []
+        for config in configs:
+            args.extend(["-c", config])
+        return args
+
+    # Build the default config arguments passed to strict invocations of ffx
+    def _build_strict_config_args(self, extra_configs: List[str]) -> List[str]:
+        return self._format_strict_config_args(
+            self._build_strict_configs(extra_configs)
+        )
 
     # Run ffx --strict <cmd> with the specified configs, and
     # optionally with a target
     def _run_strict_ffx_with_configs(
-        self, cmd: List[str], configs: List[str], target: Optional[str]
+        self, cmd: List[str], config_args: List[str], target: Optional[str]
     ) -> Any:
         all_args = [
             "--strict",
@@ -124,7 +145,7 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
             "json",
             "-o",
             "/dev/null",
-            *configs,
+            *config_args,
         ]
         if target is not None:
             all_args += ["-t", target]
@@ -132,15 +153,21 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         return json.loads(self.run_ffx(all_args))
 
     def _run_strict_ffx_unchecked_with_format(
-        self, cmd: List[str], target: Optional[str], format: str
+        self,
+        cmd: List[str],
+        target: Optional[str],
+        format: str,
+        config_args: Optional[List[str]] = None,
     ) -> Tuple[int, str, str]:
+        if config_args is None:
+            config_args = self._build_strict_config_args([])
         all_args = [
             "--strict",
             "--machine",
             format,
             "-o",
             "/dev/null",
-            *self._build_strict_config_args([]),
+            *config_args,
         ]
         if target is not None:
             all_args += ["-t", target]
@@ -149,9 +176,14 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         return (code, stdout.strip().replace("\n", ""), stderr)
 
     def _run_strict_ffx_unchecked(
-        self, cmd: List[str], target: Optional[str] = None
+        self,
+        cmd: List[str],
+        target: Optional[str] = None,
+        config_args: Optional[List[str]] = None,
     ) -> Tuple[int, str, str]:
-        return self._run_strict_ffx_unchecked_with_format(cmd, target, "json")
+        return self._run_strict_ffx_unchecked_with_format(
+            cmd, target, "json", config_args=config_args
+        )
 
     # Run ffx --strict <cmd> with the default configs, and
     # optionally with a target
@@ -205,13 +237,17 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
 
     def test_strict_may_require_shared_data(self) -> None:
         """Test `ffx --strict` will error out if $SHARED_DATA is required but not supplied"""
+        strict_configs = [
+            c
+            for c in self._build_strict_configs([])
+            if not c.startswith("shared_data=")
+        ]
         (_code, stdout, _stderr) = self._run_strict_ffx_unchecked(
             ["repository", "server", "list"],
-            f"{self.dut_ssh_address}",
+            target=f"{self.dut_ssh_address}",
+            config_args=self._format_strict_config_args(strict_configs),
         )
-        _LOGGER.info(f"code: {_code}")
-        _LOGGER.info(f"stdout: {stdout}")
-        _LOGGER.info(f"stderr: {_stderr}")
+
         # We can't actually load the output into json, because `ffx repository server list`
         # has technically not been ported to ffx-strict, and it can produce multiple error
         # lines, which is not valid JSON. But it is the only built-in plugin that requires
@@ -223,10 +259,15 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
 
     def test_strict_uses_shared_data(self) -> None:
         """Test `ffx --strict` will use the value passed in for $SHARED_DATA"""
+        strict_configs = [
+            "shared_data=foo" if c.startswith("shared_data=") else c
+            for c in self._build_strict_configs([])
+        ]
         (_code, stdout, _stderr) = self._run_strict_ffx_unchecked_with_format(
-            ["-c", "shared_data=foo", "config", "get", "monitor.pid_file"],
+            ["config", "get", "monitor.pid_file"],
             None,
             "raw",
+            config_args=self._format_strict_config_args(strict_configs),
         )
         asserts.assert_true(
             "foo/monitor" in stdout,
@@ -236,51 +277,48 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
 
     def test_target_list_strict_fails(self) -> None:
         """Test `ffx --strict target list` correctly reports RCS=N."""
-        emu_config = self._get_configs(["emu.instance_dir"])
-        configs = self._build_strict_config_args(emu_config)
+        emu_config = (
+            [f"emu.instance_dir={self.dut.ffx.config.emu_instance_dir}"]
+            if self.dut.ffx.config.emu_instance_dir
+            else self._get_configs(["emu.instance_dir"])
+        )
         # Ensure that we cannot find the ssh.priv file
-        new_configs = []
-        for c in configs:
-            if c.startswith("ssh.priv="):
-                new_configs.append(c + "NONEXISTENT")
-            else:
-                new_configs.append(c)
+        new_configs = [
+            c + "NONEXISTENT" if c.startswith("ssh.priv=") else c
+            for c in self._build_strict_configs(emu_config)
+        ]
         output = self._run_strict_ffx_with_configs(
             [
                 "target",
                 "list",
                 self.dut_name,
             ],
-            new_configs,
+            self._format_strict_config_args(new_configs),
             None,
         )
         asserts.assert_equal(output[0]["rcs_state"], "N")
 
     def test_target_list_strict_omitted_ssh_priv(self) -> None:
         """Test `ffx --strict target list` reports an error if ssh.priv is omitted."""
-        emu_config = self._get_configs(["emu.instance_dir"])
-        configs = self._build_strict_config_args(emu_config)
+        emu_config = (
+            [f"emu.instance_dir={self.dut.ffx.config.emu_instance_dir}"]
+            if self.dut.ffx.config.emu_instance_dir
+            else self._get_configs(["emu.instance_dir"])
+        )
         # Filter out ssh.priv completely
-        new_configs: List[str] = []
-        for c in configs:
-            if c.startswith("ssh.priv="):
-                new_configs.pop()  # remove the preceding "--config"
-            else:
-                new_configs.append(c)
-        all_args = [
-            "--strict",
-            "--machine",
-            "json",
-            "-o",
-            "/dev/null",
-            *new_configs,
-            "target",
-            "list",
-            self.dut_name,
-        ]
-        (code, stdout, stderr) = self.run_ffx_unchecked(all_args)
+        new_config_args = self._format_strict_config_args(
+            [
+                c
+                for c in self._build_strict_configs(emu_config)
+                if not c.startswith("ssh.priv=")
+            ]
+        )
+        (code, stdout, _stderr) = self._run_strict_ffx_unchecked(
+            ["target", "list", self.dut_name],
+            config_args=new_config_args,
+        )
         asserts.assert_equal(code, 1)
-        message = json.loads(stdout.strip().replace("\n", ""))
+        message = json.loads(stdout)
         asserts.assert_equal(message["type"], "user")
         asserts.assert_equal(message["code"], 1)
         asserts.assert_equal(
@@ -289,19 +327,10 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         )
 
         # But with --no-probe, omitting ssh.priv succeeds
-        all_args_no_probe = [
-            "--strict",
-            "--machine",
-            "json",
-            "-o",
-            "/dev/null",
-            *new_configs,
-            "target",
-            "list",
-            "--no-probe",
-            self.dut_name,
-        ]
-        (code, stdout, stderr) = self.run_ffx_unchecked(all_args_no_probe)
+        (code, stdout, _stderr) = self._run_strict_ffx_unchecked(
+            ["target", "list", "--no-probe", self.dut_name],
+            config_args=new_config_args,
+        )
         asserts.assert_equal(code, 0)
 
     def test_target_wait_strict(self) -> None:

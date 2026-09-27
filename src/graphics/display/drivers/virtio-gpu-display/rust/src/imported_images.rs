@@ -2,17 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(https://fxbug.dev/504722357): Remove this in favor of more granular
-// attributes when the Rust port is completed.
-#![allow(dead_code)]
-
 use crate::imported_image::ImportedImage;
 use fidl_next_fuchsia_hardware_display_engine as fidl_display_engine;
 use fidl_next_fuchsia_images2 as fidl_images2;
 use fidl_next_fuchsia_math as fidl_math;
 use fidl_next_fuchsia_sysmem2 as fidl_sysmem2;
 use fuchsia_runtime;
-use log;
 use std::collections::HashMap;
 use std::num::NonZero;
 
@@ -29,26 +24,36 @@ pub struct SysmemBufferInfo {
     pub pixel_format: fidl_images2::PixelFormat,
     pub pixel_format_modifier: fidl_images2::PixelFormatModifier,
 
+    // Retained for future display layout validation.
+    #[expect(dead_code)]
     pub minimum_size: fidl_math::SizeU,
 
     pub minimum_bytes_per_row: u32,
     pub bytes_per_row_divisor: NonZero<u32>,
 
+    // Retained for cache coherency management.
+    #[expect(dead_code)]
     pub coherency_domain: fidl_sysmem2::CoherencyDomain,
 }
 
 impl SysmemBufferInfo {
-    // Obtains the relevant information from sysmem.
+    /// Obtains the relevant information from sysmem.
+    ///
+    /// Errors with [`zx::Status::SHOULD_WAIT`] if sysmem has not finished
+    /// allocating the collection's buffers.
+    ///
+    /// All error conditions are logged.
     pub async fn new(
         sysmem_buffer_collection: &mut fidl_next::Client<fidl_sysmem2::BufferCollection>,
         buffer_index: u32,
     ) -> Result<Self, zx::Status> {
         // Ensure that the wait_for_all_buffers_allocated() call below will
         // return quickly.
-        let check_result = sysmem_buffer_collection
-            .check_all_buffers_allocated()
-            .await
-            .map_err(|_| zx::Status::INTERNAL)?;
+        let check_result =
+            sysmem_buffer_collection.check_all_buffers_allocated().await.map_err(|error| {
+                log::warn!("Failed to check the sysmem buffer allocation state: {:?}", error);
+                zx::Status::INTERNAL
+            })?;
 
         match check_result {
             Ok(_) => {}
@@ -56,18 +61,27 @@ impl SysmemBufferInfo {
                 return Err(zx::Status::SHOULD_WAIT);
             }
             Err(sysmem_error) => {
+                log::warn!(
+                    "Sysmem failed to allocate the collection's buffers: {:?}",
+                    sysmem_error
+                );
                 return Err(zx_status_from_sysmem_error(sysmem_error));
             }
         }
 
-        let wait_result = sysmem_buffer_collection
-            .wait_for_all_buffers_allocated()
-            .await
-            .map_err(|_| zx::Status::INTERNAL)?;
+        let wait_result =
+            sysmem_buffer_collection.wait_for_all_buffers_allocated().await.map_err(|error| {
+                log::warn!("Failed to retrieve the sysmem buffer allocation: {:?}", error);
+                zx::Status::INTERNAL
+            })?;
 
         let mut buffer_collection_info = match wait_result {
             Ok(info) => info.buffer_collection_info.unwrap(),
             Err(sysmem_error) => {
+                log::warn!(
+                    "Sysmem failed to allocate the collection's buffers: {:?}",
+                    sysmem_error
+                );
                 return Err(zx_status_from_sysmem_error(sysmem_error));
             }
         };
@@ -135,8 +149,8 @@ impl SysmemBufferInfo {
 }
 
 struct ImportedImageData {
-    pub sysmem_info: SysmemBufferInfo,
-    pub image: Option<ImportedImage>,
+    sysmem_info: SysmemBufferInfo,
+    image: Option<ImportedImage>,
 }
 
 /// Facilitates debugging sysmem resource leaks.
@@ -151,8 +165,8 @@ async fn initialize_sysmem_debug_info(sysmem: &mut fidl_next::Client<fidl_sysmem
         ..Default::default()
     };
     let debug_info_result = sysmem.set_debug_client_info_with(debug_info_request).await;
-    if let Err(e) = debug_info_result {
-        log::warn!("Failed to set sysmem debug info: {:?}", e);
+    if let Err(error) = debug_info_result {
+        log::warn!("Failed to set sysmem debug info: {:?}", error);
     }
 }
 
@@ -161,7 +175,6 @@ async fn initialize_sysmem_debug_info(sysmem: &mut fidl_next::Client<fidl_sysmem
 /// Instances are not thread-safe, and must be used on a single thread or
 /// synchronized dispatcher.
 pub struct ImportedImages {
-    scope: fuchsia_async::ScopeHandle,
     sysmem: fidl_next::Client<fidl_sysmem2::Allocator>,
     buffer_collections: HashMap<
         fidl_display_engine::BufferCollectionId,
@@ -174,15 +187,13 @@ pub struct ImportedImages {
 impl ImportedImages {
     /// Returns an empty collection of images.
     ///
-    /// `scope` must outlive this instance. `sysmem` must be valid.
+    /// `sysmem` must be valid.
     pub async fn new(
-        scope: fuchsia_async::ScopeHandle,
         mut sysmem: fidl_next::Client<fidl_sysmem2::Allocator>,
     ) -> Result<Self, zx::Status> {
         initialize_sysmem_debug_info(&mut sysmem).await;
 
         Ok(Self {
-            scope,
             sysmem,
             buffer_collections: HashMap::new(),
             images_data: HashMap::new(),
@@ -191,6 +202,8 @@ impl ImportedImages {
     }
 
     /// Similar contract to [`fuchsia.hardware.display.engine/Engine.ImportBufferCollection`].
+    ///
+    /// All error conditions are logged.
     pub async fn import_buffer_collection(
         &mut self,
         buffer_collection_id: fidl_display_engine::BufferCollectionId,
@@ -210,16 +223,12 @@ impl ImportedImages {
             buffer_collection_request: Some(collection_server_end),
             ..Default::default()
         };
-        self.sysmem
-            .bind_shared_collection_with(bind_request)
-            .await
-            .map_err(|_| zx::Status::INTERNAL)?;
+        self.sysmem.bind_shared_collection_with(bind_request).await.map_err(|error| {
+            log::warn!("Failed to bind the sysmem BufferCollection: {:?}", error);
+            zx::Status::INTERNAL
+        })?;
 
-        let (tx, rx) = futures::channel::oneshot::channel();
-        self.scope.spawn(async move {
-            let _ = tx.send(collection_client_end.spawn());
-        });
-        let collection = rx.await.map_err(|_| zx::Status::INTERNAL)?;
+        let collection = collection_client_end.spawn();
 
         self.buffer_collections.insert(buffer_collection_id, collection);
         Ok(())
@@ -245,14 +254,21 @@ impl ImportedImages {
     /// information retrieved from sysmem, and [`find_image()`] will return an
     /// empty instance. The driver code calling this method should check that
     /// the sysmem buffer and image constraints are acceptable, and should then
-    /// populate the `ImportedImage` instance with valid data.
+    /// populate the [`ImportedImage`] instance with valid data.
+    ///
+    /// All error conditions are logged.
     pub async fn import_image(
         &mut self,
         buffer_collection_id: fidl_display_engine::BufferCollectionId,
         buffer_index: u32,
     ) -> Result<fidl_display_engine::ImageId, zx::Status> {
-        let buffer_collection =
-            self.buffer_collections.get_mut(&buffer_collection_id).ok_or(zx::Status::NOT_FOUND)?;
+        let Some(buffer_collection) = self.buffer_collections.get_mut(&buffer_collection_id) else {
+            log::warn!(
+                "Rejected request to import an image from a BufferCollection with unknown ID: {}",
+                buffer_collection_id.value
+            );
+            return Err(zx::Status::NOT_FOUND);
+        };
 
         let sysmem_info = SysmemBufferInfo::new(buffer_collection, buffer_index).await?;
 
@@ -266,6 +282,8 @@ impl ImportedImages {
 
     /// Similar contract to [`fuchsia.hardware.display.engine/Engine.ReleaseImage`].
     ///
+    /// All error conditions are logged.
+    ///
     /// SAFETY: The display engine hardware must no longer access the image.
     /// This can happen for two reasons:
     ///
@@ -275,9 +293,13 @@ impl ImportedImages {
     // after we successfully turn off the virtio device.
     pub unsafe fn release_image(
         &mut self,
-        id: fidl_display_engine::ImageId,
+        image_id: fidl_display_engine::ImageId,
     ) -> Result<(), zx::Status> {
-        let mut image_data = self.images_data.remove(&id).ok_or(zx::Status::NOT_FOUND)?;
+        let Some(mut image_data) = self.images_data.remove(&image_id) else {
+            log::error!("Rejected request to release an image with unknown ID: {}", image_id.value);
+            return Err(zx::Status::NOT_FOUND);
+        };
+
         if let Some(mut image) = image_data.image.take() {
             // SAFETY: The called method has the same invariant as this method.
             unsafe {

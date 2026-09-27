@@ -124,6 +124,25 @@ impl SerialNumberFinder for DefaultSerialFinder {
     }
 }
 
+/// A SerialNumberFinder that targets a specific known serial number, using direct
+/// sysfs inspection to avoid enumerating all USB devices on the host bus.
+pub struct TargetSerialFinder<S: AsRef<str> = String> {
+    serial: S,
+    sysfs_path: PathBuf,
+}
+
+impl<S: AsRef<str>> TargetSerialFinder<S> {
+    pub fn new(serial: S) -> Self {
+        Self { serial, sysfs_path: PathBuf::from("/sys/bus/usb/devices") }
+    }
+}
+
+impl<S: AsRef<str> + Send + 'static> SerialNumberFinder for TargetSerialFinder<S> {
+    async fn find_serial_numbers(&mut self) -> Vec<String> {
+        find_target_serial_in_sysfs(self.serial.as_ref(), &self.sysfs_path).await
+    }
+}
+
 pub fn recommended_watcher<F>(event_handler: F) -> FastbootUsbWatcher
 where
     F: FastbootEventHandler,
@@ -269,40 +288,44 @@ impl TryFrom<PathBuf> for InterfaceHelper {
     }
 }
 
+/// Returns true if the given sysfs device directory matches Fastboot vendor and interface
+/// descriptors.
+fn is_fastboot_sysfs_path(sysfs_path: &Path) -> bool {
+    let vendor_path = sysfs_path.join("idVendor");
+    let Ok(vendor_str) = std::fs::read_to_string(vendor_path) else {
+        return false;
+    };
+    let Ok(vendor_id) = u16::from_str_radix(vendor_str.trim(), 16) else {
+        return false;
+    };
+    if vendor_id != USB_DEV_VENDOR {
+        return false;
+    }
+
+    let Ok(entries) = std::fs::read_dir(sysfs_path) else {
+        return false;
+    };
+
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| InterfaceHelper::try_from(p).ok())
+        .any(|i| {
+            i == InterfaceHelper {
+                class: FASTBOOT_USB_INTERFACE_CLASS,
+                subclass: FASTBOOT_USB_INTERFACE_SUBCLASS,
+                protocol: FASTBOOT_USB_INTERFACE_PROTOCOL,
+            }
+        })
+}
+
 /// Inspects sysfs device attributes without opening device nodes or issuing ioctls.
 /// Returns Some(true) if the device matches Fastboot vendor and interface descriptors in sysfs,
 /// Some(false) if it is known not to match, or None if sysfs is unavailable on the platform.
 pub fn is_fastboot_sysfs_match(device: &usb_rs::DeviceHandle) -> Option<bool> {
     let sysfs_path = device.sysfs_path()?;
-    let vendor_path = sysfs_path.join("idVendor");
-    let Ok(vendor_str) = std::fs::read_to_string(vendor_path) else {
-        return Some(false);
-    };
-    let Ok(vendor_id) = u16::from_str_radix(vendor_str.trim(), 16) else {
-        return Some(false);
-    };
-    if vendor_id != USB_DEV_VENDOR {
-        return Some(false);
-    }
-
-    let Ok(entries) = std::fs::read_dir(&sysfs_path) else {
-        return Some(false);
-    };
-
-    Some(
-        entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .filter_map(|p| InterfaceHelper::try_from(p).ok())
-            .any(|i| {
-                i == InterfaceHelper {
-                    class: FASTBOOT_USB_INTERFACE_CLASS,
-                    subclass: FASTBOOT_USB_INTERFACE_SUBCLASS,
-                    protocol: FASTBOOT_USB_INTERFACE_PROTOCOL,
-                }
-            }),
-    )
+    Some(is_fastboot_sysfs_path(&sysfs_path))
 }
 
 /// Checks whether a USB device is a Fastboot target, trying sysfs first and falling
@@ -404,6 +427,57 @@ async fn find_serial_numbers() -> Vec<String> {
     return serials;
 }
 
+fn find_fastboot_serial_in_sysfs(target_serial: &str, sysfs_dir: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(sysfs_dir).ok()?;
+    for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.contains(':')
+        {
+            continue;
+        }
+        if let Ok(dev_serial) = std::fs::read_to_string(path.join("serial"))
+            && dev_serial.trim() == target_serial
+            && is_fastboot_sysfs_path(&path)
+        {
+            return Some(target_serial.to_string());
+        }
+    }
+    None
+}
+
+async fn find_target_serial_in_sysfs(target_serial: &str, sysfs_dir: &Path) -> Vec<String> {
+    log::debug!("finding target serial number: {}", target_serial);
+    let serial = target_serial.to_string();
+    let sysfs_dir = sysfs_dir.to_path_buf();
+    let check_fut = unblock(move || {
+        // Fast path: inspect sysfs directly for the target serial without full bus enumeration
+        if let Some(matched) = find_fastboot_serial_in_sysfs(&serial, &sysfs_dir) {
+            return Some(matched);
+        }
+
+        if let Ok(Some(device)) = usb_rs::find_device_by_serial(&serial)
+            && is_fastboot_device(&device)
+        {
+            return Some(serial);
+        }
+
+        // Fallback (e.g. unit tests with fake USB environment):
+        if let Ok(devices) = enumerate_devices() {
+            for device in devices {
+                if device.serial().as_deref() == Some(&serial) && is_fastboot_device(&device) {
+                    return Some(serial);
+                }
+            }
+        }
+        None
+    });
+
+    match check_fut.on_timeout(SCAN_TIMEOUT, || None).await {
+        Some(s) => vec![s],
+        None => vec![],
+    }
+}
+
 fn check_and_log_usb_speed(device: &usb_rs::DeviceHandle, target_serial: &str) {
     if let Some(speed) = device.speed() {
         log::info!("USB Fastboot device '{}' negotiated speed: {}", target_serial, speed);
@@ -464,6 +538,12 @@ mod test {
     use pretty_assertions::assert_eq;
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
+
+    impl<S: AsRef<str>> TargetSerialFinder<S> {
+        fn new_with_sysfs_path(serial: S, sysfs_path: impl Into<PathBuf>) -> Self {
+            Self { serial, sysfs_path: sysfs_path.into() }
+        }
+    }
 
     struct TestFastbootUsbTester {
         serial_to_is_fastboot: HashMap<String, bool>,
@@ -533,7 +613,7 @@ mod test {
 
         drop(watcher);
         let mut events = Vec::<FastbootEvent>::new();
-        while let Ok(Some(event)) = queue.try_next() {
+        while let Ok(event) = queue.try_recv() {
             events.push(event);
         }
 
@@ -579,5 +659,56 @@ mod test {
         wait_for_live("some-awesome-serial", &mut tester, Duration::from_millis(10)).await;
 
         assert_eq!(tester.call_count, 4);
+    }
+
+    #[fuchsia::test]
+    async fn test_target_serial_finder_nonexistent() {
+        let mut finder = TargetSerialFinder::new("nonexistent-device-serial");
+        let results = finder.find_serial_numbers().await;
+        assert_eq!(results, Vec::<String>::new());
+    }
+
+    #[fuchsia::test]
+    async fn test_target_serial_finder_existent() {
+        struct TempSysfsDir(PathBuf);
+        impl Drop for TempSysfsDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let sysfs_root = std::env::temp_dir().join(format!(
+            "usb_fastboot_test_sysfs_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let _guard = TempSysfsDir(sysfs_root.clone());
+
+        let dev_dir = sysfs_root.join("1-1");
+        let iface_dir = dev_dir.join("1-1:1.0");
+        std::fs::create_dir_all(&iface_dir).unwrap();
+
+        std::fs::write(dev_dir.join("serial"), "fastboot-device-123\n").unwrap();
+        std::fs::write(dev_dir.join("idVendor"), format!("{:04x}\n", USB_DEV_VENDOR)).unwrap();
+        std::fs::write(
+            iface_dir.join("bInterfaceClass"),
+            format!("{:02x}\n", FASTBOOT_USB_INTERFACE_CLASS),
+        )
+        .unwrap();
+        std::fs::write(
+            iface_dir.join("bInterfaceSubClass"),
+            format!("{:02x}\n", FASTBOOT_USB_INTERFACE_SUBCLASS),
+        )
+        .unwrap();
+        std::fs::write(
+            iface_dir.join("bInterfaceProtocol"),
+            format!("{:02x}\n", FASTBOOT_USB_INTERFACE_PROTOCOL),
+        )
+        .unwrap();
+
+        let mut finder =
+            TargetSerialFinder::new_with_sysfs_path("fastboot-device-123", &sysfs_root);
+        let results = finder.find_serial_numbers().await;
+        assert_eq!(results, vec!["fastboot-device-123".to_string()]);
     }
 }

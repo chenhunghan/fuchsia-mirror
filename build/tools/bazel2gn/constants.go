@@ -97,6 +97,9 @@ var bazelRuleToGNTemplate = map[string]string{
 	"fidl_library":        "fidl",
 	"zither_fidl_library": "fidl",
 
+	// Components
+	"expect_includes": "expect_includes",
+
 	// Host tools
 	"cc_binary_host_tool": "executable",
 	"ffx_tool":            "ffx_tool",

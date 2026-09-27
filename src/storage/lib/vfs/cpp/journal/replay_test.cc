@@ -4,7 +4,6 @@
 
 #include "src/storage/lib/vfs/cpp/journal/replay.h"
 
-#include <fuchsia/hardware/block/driver/c/banjo.h>
 #include <lib/fit/function.h>
 #include <lib/zx/vmo.h>
 #include <zircon/assert.h>
@@ -21,6 +20,7 @@
 
 #include <gtest/gtest.h>
 
+#include "src/storage/lib/block_protocol/block-fifo.h"
 #include "src/storage/lib/buffer/block_buffer_view.h"
 #include "src/storage/lib/buffer/vmo_buffer.h"
 #include "src/storage/lib/buffer/vmoid_registry.h"

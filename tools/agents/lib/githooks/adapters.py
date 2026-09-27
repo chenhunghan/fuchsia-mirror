@@ -11,6 +11,7 @@ with the generic git_staging engine.
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -42,6 +43,12 @@ DEFAULT_FORMATTABLE_EXTENSIONS: tuple[str, ...] = (
     ".ts",
 )
 
+# Linters that are prohibitively slow to run on every interactive commit.
+# `check_licenses` can take over a minute when it is triggered, so human
+# commits skip it and rely on CQ. Agents run the full set so that automated
+# changes are CQ-clean before upload.
+HUMAN_SKIPPED_LINTERS: tuple[str, ...] = ("check_licenses",)
+
 
 @dataclass(frozen=True)
 class HookContext(git_staging.ActionContext):
@@ -70,6 +77,64 @@ class HookAction:
     remediation_cmd_fn: Callable[[Sequence[str]], Sequence[str]] | None = None
 
 
+def _resolve_fx_cmd(context: HookContext, purpose: str) -> str | None:
+    """Resolves the `fx` executable, reporting to the console when missing.
+
+    Prefers the in-tree `scripts/fx` over any `fx` on `PATH` so hooks always
+    run the tooling belonging to the checkout being committed to.
+
+    Args:
+        context: HookContext with repo_root, is_agent, and reporter.
+        purpose: Description of the skipped work, used in the warning message.
+
+    Returns:
+        Path to the `fx` executable, or None if it could not be resolved.
+    """
+    try:
+        candidate = find_fuchsia_dir(context.repo_root) / "scripts" / "fx"
+        if candidate.is_file():
+            return str(candidate)
+    except RuntimeError:
+        pass
+
+    if shutil.which("fx"):
+        return "fx"
+
+    if context.is_agent:
+        context.reporter.on_error(
+            "`fx` command not found on PATH or in scripts/fx in agent environment."
+        )
+    else:
+        context.reporter.on_warning(
+            f"`fx` not found on PATH or in scripts/fx. Skipping {purpose}."
+        )
+    return None
+
+
+def _run_reporting_errors(
+    context: HookContext,
+    cmd: Sequence[str],
+) -> subprocess.CompletedProcess[str] | None:
+    """Runs a command, reporting its combined output as an error on failure.
+
+    Args:
+        context: HookContext with repo_root and reporter.
+        cmd: Command and arguments to execute from the repository root.
+
+    Returns:
+        The completed process on success, or None if the command failed.
+    """
+    res = run_cmd(cmd, cwd=context.repo_root)
+    if res.returncode == 0:
+        return res
+
+    output = "\n".join(filter(None, [res.stdout.strip(), res.stderr.strip()]))
+    if not output:
+        output = f"Command {cmd[0]} failed with exit code {res.returncode}"
+    context.reporter.on_error(output)
+    return None
+
+
 def format_code_action(
     context: HookContext,
     files: Sequence[str],
@@ -86,42 +151,12 @@ def format_code_action(
     if not files:
         return True
 
-    reporter = context.reporter
-    is_agent = context.is_agent
-
-    fx_cmd = None
-    try:
-        candidate = find_fuchsia_dir(context.repo_root) / "scripts" / "fx"
-        if candidate.is_file():
-            fx_cmd = str(candidate)
-    except RuntimeError:
-        pass
-
-    if fx_cmd is None and shutil.which("fx"):
-        fx_cmd = "fx"
-
+    fx_cmd = _resolve_fx_cmd(context, "code formatting")
     if fx_cmd is None:
-        if not is_agent:
-            reporter.on_warning(
-                "`fx` not found on PATH or in scripts/fx. Skipping code formatting."
-            )
-            return True
-        reporter.on_error(
-            "`fx` command not found on PATH or in scripts/fx in agent environment."
-        )
-        return False
+        return not context.is_agent
 
     cmd = [fx_cmd, "format-code", f"--files={','.join(files)}"]
-
-    res = run_cmd(cmd, cwd=context.repo_root)
-
-    if res.returncode != 0:
-        output = "\n".join(
-            filter(None, [res.stdout.strip(), res.stderr.strip()])
-        )
-        if not output:
-            output = f"Command {cmd[0]} failed with exit code {res.returncode}"
-        reporter.on_error(output)
+    if _run_reporting_errors(context, cmd) is None:
         return False
 
     if context.check_only:
@@ -135,6 +170,53 @@ def format_code_action(
     return True
 
 
+def lint_code_action(
+    context: HookContext,
+    files: Sequence[str],
+) -> bool:
+    """Executes fx lint on target files.
+
+    Outside of check-only runs the linters are first invoked with `--fix` so
+    auto-fixable findings are applied in place and re-staged by the pipeline.
+    That pass is advisory only: `fx lint --fix` delegates to `shac fix`, which
+    skips formatter checks and exits 0 even when it leaves findings behind. A
+    second check-mode pass is what actually gates the commit.
+
+    Partially staged files are linted in check-only mode under stash isolation
+    to avoid clobbering unstaged hunks.
+
+    Human commits skip the linters in `HUMAN_SKIPPED_LINTERS` to keep
+    interactive commit latency low. Agents run the full linter set so that
+    automated changes match what CQ enforces.
+
+    Args:
+        context: HookContext with repo_root, check_only, is_agent, and reporter.
+        files: Sequence of file paths relative to repo_root.
+
+    Returns:
+        True if lint checks passed, False otherwise.
+    """
+    if not files:
+        return True
+
+    fx_cmd = _resolve_fx_cmd(context, "lint checks")
+    if fx_cmd is None:
+        return not context.is_agent
+
+    base_cmd = [fx_cmd, "lint"]
+    if not context.is_agent:
+        base_cmd.append(f"--skip={','.join(HUMAN_SKIPPED_LINTERS)}")
+    files_arg = f"--files={','.join(files)}"
+
+    if not context.check_only:
+        # Advisory pass: apply whatever `shac fix` can repair. Its exit code is
+        # deliberately ignored because it reports success even when findings
+        # remain; the check pass below is the real gate.
+        run_cmd([*base_cmd, "--fix", files_arg], cwd=context.repo_root)
+
+    return _run_reporting_errors(context, [*base_cmd, files_arg]) is not None
+
+
 DEFAULT_PRE_COMMIT_ACTIONS: tuple[HookAction, ...] = (
     HookAction(
         name="fx_format_code",
@@ -144,6 +226,13 @@ DEFAULT_PRE_COMMIT_ACTIONS: tuple[HookAction, ...] = (
         remediation_cmd_fn=lambda files: [
             f"fx format-code --files={','.join(files)}"
         ],
+    ),
+    HookAction(
+        name="fx_lint",
+        action_fn=lint_code_action,
+        is_mutating=True,
+        extensions=DEFAULT_FORMATTABLE_EXTENSIONS,
+        remediation_cmd_fn=lambda files: [f"fx lint --files={','.join(files)}"],
     ),
 )
 
@@ -192,15 +281,8 @@ def commit_msg_action(
     if is_agent:
         cmd.append("--strict")
 
-    res = run_cmd(cmd, cwd=context.repo_root)
-
-    if res.returncode != 0:
-        output = "\n".join(
-            filter(None, [res.stdout.strip(), res.stderr.strip()])
-        )
-        if not output:
-            output = f"Command {cmd[0]} failed with exit code {res.returncode}"
-        reporter.on_error(output)
+    res = _run_reporting_errors(context, cmd)
+    if res is None:
         return False
 
     # In non-strict mode (human developer), surface advisory warnings if any

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use crate::watchable_map::WatchableMap;
 use crate::{device_watch, inspect};
 
-#[expect(dead_code)]
 #[derive(Debug)]
 pub enum PhyEvent {
     OnCriticalError { reason_code: fidl_internal::CriticalErrorReason },

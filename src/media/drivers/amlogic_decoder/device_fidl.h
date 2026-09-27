@@ -6,10 +6,12 @@
 #define SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_DEVICE_FIDL_H_
 
 #include <fuchsia/mediacodec/cpp/fidl.h>
+#include <lib/closure-queue/closure_queue.h>
 #include <lib/fidl/cpp/interface_request.h>
 #include <lib/media/codec_impl/codec_impl.h>
 
 #include <map>
+#include <memory>
 
 #include "local_codec_factory.h"
 
@@ -20,6 +22,8 @@ class DeviceFidl {
  public:
   explicit DeviceFidl(DeviceCtx* device);
   ~DeviceFidl();
+
+  void InitializeClosureQueue();
 
   // The one FIDL method supported by the driver is to connect a CodecFactory
   // request channel to a server.  This method associates that request with
@@ -82,6 +86,8 @@ class DeviceFidl {
   //
   // Only touched from shared_fidl_thread().
   std::map<CodecImpl*, std::unique_ptr<CodecImpl>> codecs_;
+
+  ClosureQueue closure_queue_;
 };
 
 }  // namespace amlogic_decoder

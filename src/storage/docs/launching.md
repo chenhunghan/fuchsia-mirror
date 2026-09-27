@@ -112,8 +112,7 @@ handle to the block device (`PA_HND(PA_USER0, 1)`).
 
 The export directory should have the structure described at the beginning of this document.
 
-The block device should be a handle to something that speaks `fuchsia.hardware.block.Block`. Most
-block devices speak a handful of other protocols as well.
+The block device should be a handle to something that speaks `fuchsia.storage.block.Block`.
 
 Filesystems can use protocols from their namespace, but they should fail gracefully if they are not
 there. This is because many test environments don't construct consistent namespaces for the

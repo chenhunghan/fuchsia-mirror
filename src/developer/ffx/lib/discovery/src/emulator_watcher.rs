@@ -22,10 +22,10 @@ impl InstanceSource for EmulatorSource {
         emulator_instance::get_all_targets(&emu_instances)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|t| {
-                let name = t.nodename.clone()?;
-                let handle = TargetHandle::try_from(t).ok()?;
-                Some((name, handle))
+            .map(|t| {
+                let name = t.nodename.clone();
+                let handle = TargetHandle::from(t);
+                (name, handle)
             })
             .collect()
     }
@@ -38,7 +38,7 @@ impl InstanceSource for EmulatorSource {
         let name = self.instance_id_from_path(root, path)?;
         let emu_instances = EmulatorInstances::new(root.to_path_buf());
         let info = emulator_instance::get_target(&emu_instances, &name).ok()??;
-        TargetHandle::try_from(info).ok()
+        Some(TargetHandle::from(info))
     }
 }
 

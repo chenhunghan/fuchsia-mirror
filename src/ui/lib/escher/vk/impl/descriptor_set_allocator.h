@@ -84,8 +84,7 @@ class DescriptorSetAllocator {
   };
 
   // If this template is changed to have a non-default FramesUntilEviction
-  // value, be sure to change all other HashCaches used by the Frame class
-  // (e.g., FramebufferAllocator).
+  // value, be sure to change all other HashCaches used by the Frame class.
   HashCache<CacheItem, PoolPolicy> cache_;
 };
 

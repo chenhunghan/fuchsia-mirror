@@ -27,7 +27,6 @@
 #include "src/ui/lib/escher/vk/gpu_allocator.h"
 #include "src/ui/lib/escher/vk/impl/descriptor_set_allocator.h"
 #include "src/ui/lib/escher/vk/impl/descriptor_set_allocator_cache.h"
-#include "src/ui/lib/escher/vk/impl/framebuffer_allocator.h"
 #include "src/ui/lib/escher/vk/impl/pipeline_layout_cache.h"
 #include "src/ui/lib/escher/vk/impl/render_pass_cache.h"
 #include "src/ui/lib/escher/vk/pipeline_builder.h"
@@ -113,9 +112,6 @@ Escher::Escher(VulkanDeviceQueuesPtr device, HackFilesystemPtr filesystem,
       std::make_unique<impl::DescriptorSetAllocatorCache>(vk_device());
   pipeline_layout_cache_ = std::make_unique<impl::PipelineLayoutCache>(resource_recycler());
   render_pass_cache_ = std::make_unique<impl::RenderPassCache>(resource_recycler());
-  framebuffer_allocator_ =
-      std::make_unique<impl::FramebufferAllocator>(resource_recycler(), render_pass_cache_.get());
-  image_view_allocator_ = std::make_unique<ImageViewAllocator>(resource_recycler());
   shader_program_factory_ =
       std::make_unique<DefaultShaderProgramFactory>(GetWeakPtr(), std::move(filesystem));
 
@@ -141,8 +137,6 @@ Escher::~Escher() {
 
   // Everything that refers to a ResourceRecycler must be released before their
   // ResourceRecycler is.
-  image_view_allocator_.reset();
-  framebuffer_allocator_.reset();
   render_pass_cache_.reset();
   pipeline_layout_cache_.reset();
 
@@ -262,10 +256,6 @@ FramePtr Escher::NewFrame(const char* trace_literal, uint64_t frame_number, bool
     // adding a call to Clear() here would be dangerous.
     descriptor_set_allocator_cache_->BeginFrame();
     pipeline_layout_cache_->BeginFrame();
-  }
-  if (requested_type == CommandBuffer::Type::kGraphics) {
-    image_view_allocator_->BeginFrame();
-    framebuffer_allocator_->BeginFrame();
   }
 
   return frame_manager_->NewFrame(trace_literal, frame_number, enable_gpu_logging, requested_type,

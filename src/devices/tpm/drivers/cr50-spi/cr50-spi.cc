@@ -248,7 +248,7 @@ void Cr50SpiDevice::WakeUp() {
 zx::result<> Cr50SpiDevice::SendHeader(uint16_t address, size_t msg_length, bool writing) {
   // Start the transaction with the 4-byte magic header required by the TPM SPI protocol.
   uint8_t header[4];
-  header[0] = msg_length - 1;
+  header[0] = static_cast<uint8_t>(msg_length - 1);
   if (!writing) {
     header[0] |= 0x80;
   }
@@ -309,7 +309,7 @@ zx::result<> Cr50SpiDevice::DoSpiWrite(fidl::VectorView<uint8_t> &buf) {
 }
 
 zx::result<> Cr50SpiDevice::DoSpiRead(fidl::VectorView<uint8_t> &buf) {
-  auto ret_vec = spi_->ReceiveVector(buf.size());
+  auto ret_vec = spi_->ReceiveVector(static_cast<uint32_t>(buf.size()));
   if (!ret_vec.ok()) {
     return zx::error(ret_vec.status());
   }

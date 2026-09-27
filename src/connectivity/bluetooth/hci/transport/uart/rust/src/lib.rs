@@ -4,16 +4,24 @@
 
 mod serial;
 
-use serial::SerialConnection;
+use serial::{SerialConnection, SerialService};
 
-use fdf_component::{Driver, DriverContext, DriverError, Node, driver_register};
+use fdf_component::{
+    Driver, DriverContext, DriverError, Node, NodeBuilder, ServiceOffer, driver_register,
+};
+use fidl_next_fuchsia_hardware_serialimpl as serialimpl;
 use fuchsia_async as fasync;
+use fuchsia_component::server::ServiceFs;
+use futures::StreamExt;
 use log::info;
+
+pub const CHILD_NODE_NAME: &str = "bt-transport-uart";
+pub const HCI_SERVICE_NAME: &str = "fuchsia.hardware.bluetooth.HciService";
 
 /// Bluetooth HCI UART transport driver in Rust.
 pub struct BtTransportUart {
     _node: Node,
-    _scope: fasync::Scope,
+    scope: fasync::Scope,
     serial: SerialConnection,
 }
 
@@ -40,14 +48,34 @@ impl Driver for BtTransportUart {
         let node = context.take_node()?;
         let scope = fasync::Scope::new();
 
-        let serial = SerialConnection::connect_and_validate(&context).await?;
+        let serial = SerialConnection::connect_and_validate(&context, scope.as_handle()).await?;
 
-        Ok(Self { _node: node, _scope: scope, serial })
+        let mut outgoing = ServiceFs::new();
+        let serial_offer = ServiceOffer::<serialimpl::Service>::new_next()
+            .add_default_named_next(
+                &mut outgoing,
+                "default",
+                SerialService::new(serial.clone(), scope.to_handle()),
+            )
+            .build_driver_offer();
+
+        context.serve_outgoing(&mut outgoing)?;
+        scope.spawn(outgoing.collect());
+
+        let child_node = NodeBuilder::new(CHILD_NODE_NAME)
+            .add_property(bind_fuchsia::SERVICE, HCI_SERVICE_NAME)
+            .add_offer(serial_offer)
+            .build();
+        node.add_child(child_node).await?;
+
+        Ok(Self { _node: node, scope, serial })
     }
 
     async fn stop(&self) {
         info!("BtTransportUart (Rust)::stop() invoked");
         self.serial.cancel_all().await;
+        self.serial.close();
+        self.scope.to_handle().cancel().await;
     }
 }
 

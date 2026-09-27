@@ -8,8 +8,50 @@
             matchers: [
                 "*",
 
+                // TODO(https://fxbug.dev/391599171): Requires event-based userfaultfd
+                "cve-2022-2590",
+
+                // TODO(https://fxbug.dev/287114514): Pass all userfaultfd* tests
+                "userfaultfd02",
+                "userfaultfd03",
+                "userfaultfd04",
+                "userfaultfd05",
+                "userfaultfd06",
+
+                // Requires AF_ALG
+                "cve-2026-31431",
+
+                // Requires CONFIG_USER_NS, CONFIG_XFRM, CONFIG_INET_ESP, CONFIG_CRYPTO_GCM
+                "cve-2026-43284",
+                "cve-2026-46300",
+
+                // TODO(https://fxbug.dev/465929750): Requires CONFIG_AF_UNIX_OOB.
+                "cve-2025-38236",
+
+                // Requires CONFIG_BLK_DEV_INTEGRITY
+                "ioctl_getlbmd01",
+
                 // TODO(https://fxbug.dev/536048049): io_pgetevents AIO syscall is not implemented.
                 "io_pgetevents01",
+
+                // TODO(https://fxbug.dev/287705521): Requires key management support
+                "cve-2017-12192",
+
+                // fanotify support
+                "fanotify24",
+                "fanotify25",
+
+                // TODO(https://fxbug.dev/465929299): Requires __NR_file_[getattr|setattr].
+                "file_attr01",
+                "file_attr02",
+                "file_attr03",
+                "file_attr04",
+
+                // Requires name_to_handle
+                "name_to_handle_at03",
+
+                // Needs to run on ext4
+                "statx06",
             ],
         },
         {
@@ -56,6 +98,9 @@
                 // CLONE_THREAD because the test uses a shared VM to send back the result.
                 "clone09",
                 "cpuacct_1_1",
+
+                // Depends on real contents in /proc/sys/kernel/perf_event_mlock_kb
+                "cve-2015-3290",
                 "cve-2015-7550",
                 "cve-2016-9604",
                 "cve-2016-9793",
@@ -68,15 +113,12 @@
                 "cve-2017-6951",
                 "cve-2017-7308",
                 "cve-2017-7472",
-                "cve-2018-1000199",
                 "cve-2018-11508",
                 "cve-2018-19854",
                 "cve-2018-5803",
-                "cve-2018-8897",
                 "cve-2018-9568",
                 "cve-2020-11494",
                 "cve-2021-4034",
-                "cve-2022-2590",
 
                 // TODO(https://fxbug.dev/465930802)
                 "epoll_pwait06",
@@ -131,6 +173,12 @@
                 "getpriority01", // https://fxbug.dev/287118373
                 "getpriority02", // https://fxbug.dev/287118373
 
+                // AIO operations on non-seekable devices
+                "io_submit04",
+
+                // Does not run on tmpfs
+                "ioctl_fiemap01",
+
                 // TODO(https://fxbug.dev/547878640): Skipped with tmpfs.
                 "ioctl_loop05",
                 "ioprio_get01",
@@ -164,12 +212,17 @@
                 "msync04",
                 "munlockall01",
 
+                // TODO(https://fxbug.dev/391599171): Requires event-based userfaultfd
+                "mremap07",
+
+                // TODO(https://fxbug.dev/322874684): Requires /proc/sys/vm/max_map_count
+                // and the enforcement of maximum number of mappings during munmap() call
+                "munmap04",
+
                 // Needs /proc/sys/fs/pipe-user-pages-soft
                 "pipe15",
                 "prctl01",
                 "prctl02",
-                "prctl10",
-                "ptrace10",
 
                 // TODO(https://fxbug.dev/547878640): Requires O_DIRECT support.
                 "pwritev03",
@@ -187,8 +240,6 @@
                 "request_key04",
                 "request_key05",
                 "request_key06",
-                "runpwtests03",
-                "runpwtests06",
 
                 // TODO: https://fxbug.dev/287120797 - maybe we'll implement sched_getattr?
                 "sched_getattr01", // https://fxbug.dev/287120797
@@ -213,15 +264,15 @@
                 "splice07",
                 "sockioctl01",
                 "statx04",
-                "statx06",
                 "statx11",
 
                 // TODO(https://fxbug.dev/547878640): Requires block device write accounting.
                 "sync01",
                 "time-schedule01",
 
-                // Depends on real contents in /proc/sys/kernel/perf_event_mlock_kb
-                "cve-2015-3290",
+                // TODO(https://fxbug.dev/297374270): Requires system load and ram usage information
+                // in sysinfo()
+                "sysinfo01",
 
                 // Needs working sched_getcpu()
                 "perf_event_open02",
@@ -230,6 +281,16 @@
                 "times03",
                 "umount2_01",
                 "umount2_02",
+
+                // TODO(https://fxbug.dev/42080241): unshare(CLONE_FILES) needs to return EMFILE
+                // if number of file descriptors is higher than /proc/sys/fs/nr_open
+                "unshare03",
+
+                // TODO(https://fxbug.dev/42080241): CLONE_NEWNS needs to also do the CLONE_FS
+                "unshare04",
+
+                // TODO(https://fxbug.dev/322873462): Requires /proc/sys/kernel/hostname
+                "newuname01",
 
                 // These tests fail when an init is run in the container to set up /apex.
                 // TODO(https://fxbug.dev/42080241) re-enable these tests
@@ -262,7 +323,9 @@
                 "clone11",
                 "clone304",
                 "file_attr05",
-                "name_to_handle_at03",
+
+                // TODO(https://fxbug.dev/287114514): Pass all userfaultfd* tests
+                "userfaultfd01",
             ],
         },
         {
@@ -319,10 +382,6 @@
                 // TODO(https://fxbug.dev/561291072) deflake and re-enable
                 "rt_sigqueueinfo01",
 
-                // TODO(https://fxbug.dev/374984756) Crashes the kernel in debug builds
-                // (cycle in mutex deps).
-                "inotify08",
-
                 // TODO(https://fxbug.dev/403612570): This test requires CLONE_INTO_CGROUP.
                 "clone303",
 
@@ -337,54 +396,11 @@
                 // the latter, this flakes.
                 "sched_setscheduler04",
 
-                // TODO(https://fxbug.dev/287114514)
-                "userfaultfd01",
-                "userfaultfd02",
-                "userfaultfd03",
-                "userfaultfd04",
-                "userfaultfd05",
-
                 // Flaking, see b/457451482.
                 "fork06",
 
                 // Times out, see b/457525944
                 "epoll01",
-
-                // TODO(https://fxbug.dev/465929299): Requires __NR_file_[getattr|setattr].
-                "file_attr01",
-                "file_attr02",
-                "file_attr03",
-                "file_attr04",
-
-                // TODO(https://fxbug.dev/465929750): Requires CONFIG_AF_UNIX_OOB.
-                "cve-2025-38236",
-
-                // TODO(https://fxbug.dev/322874684): Needs /proc/sys/vm/max_map_count
-                "munmap04",
-
-                // Disabled to unblock roll
-                // TODO(https://fxbug.dev/437992858): Triage newly failing tests
-                "cve-2017-12192",
-                "fanotify24",
-                "ioctl_fiemap01",
-                "unshare03",
-                "unshare04",
-
-                // TODO(https://fxbug.dev/514885445): Triage newly failing tests in prebuilt roll
-                "chdir02",
-                "cve-2026-31431",
-                "cve-2026-43284",
-                "cve-2026-46300",
-                "fanotify25",
-                "io_submit04",
-                "io_uring03",
-                "ioctl_getlbmd01",
-                "mremap07",
-                "newuname01",
-                "poll03",
-                "poll04",
-                "sysinfo01",
-                "userfaultfd06",
             ],
         },
     ],

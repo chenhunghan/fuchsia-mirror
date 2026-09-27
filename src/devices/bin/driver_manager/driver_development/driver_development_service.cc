@@ -302,20 +302,88 @@ void DriverDevelopmentService::GetDriverHostInfo(GetDriverHostInfoRequestView re
     }
     std::vector<fdd::ThreadInfo> threads;
     for (const auto& thread : process_info->threads()) {
-      threads.emplace_back(fdd::ThreadInfo{{
+      fdd::ThreadInfo thread_info{{
           .koid = thread.koid(),
           .name = thread.name(),
-          .scheduler_role = thread.scheduler_role(),
-      }});
+      }};
+      if (!thread.scheduler_role().empty()) {
+        thread_info.scheduler_role(thread.scheduler_role());
+      }
+      threads.push_back(std::move(thread_info));
     }
     std::vector<fdd::DispatcherInfo> dispatchers;
     for (const auto& dispatcher : process_info->dispatchers()) {
-      dispatchers.emplace_back(fdd::DispatcherInfo{{
+      std::optional<fdd::DispatcherState> state;
+      switch (dispatcher.state()) {
+        case fuchsia_driver_host::DispatcherState::kRunning:
+          state = fdd::DispatcherState::kRunning;
+          break;
+        case fuchsia_driver_host::DispatcherState::kShuttingDown:
+          state = fdd::DispatcherState::kShuttingDown;
+          break;
+        case fuchsia_driver_host::DispatcherState::kShutdown:
+          state = fdd::DispatcherState::kShutdown;
+          break;
+        case fuchsia_driver_host::DispatcherState::kDestroyed:
+          state = fdd::DispatcherState::kDestroyed;
+          break;
+        default:
+          break;
+      }
+
+      std::vector<fdd::QueuedTaskInfo> queued_tasks;
+      for (const auto& task : dispatcher.queued_tasks()) {
+        fdd::QueuedTaskInfo task_info{{
+            .ptr = task.ptr(),
+            .handler = task.handler(),
+            .initiating_dispatcher = task.initiating_dispatcher(),
+            .initiating_driver = task.initiating_driver(),
+        }};
+        if (!task.initiating_dispatcher_name().empty()) {
+          task_info.initiating_dispatcher_name(task.initiating_dispatcher_name());
+        }
+        if (!task.initiating_driver_url().empty()) {
+          task_info.initiating_driver_url(task.initiating_driver_url());
+        }
+        queued_tasks.push_back(std::move(task_info));
+      }
+
+      const auto& non_inlined = dispatcher.debug_stats().non_inlined();
+      fdd::DispatcherDebugStats debug_stats{{
+          .num_total_requests = dispatcher.debug_stats().num_total_requests(),
+          .num_inlined_requests = dispatcher.debug_stats().num_inlined_requests(),
+          .non_inlined = fdd::NonInlinedRequestStats{{
+              .allow_sync_calls = non_inlined.allow_sync_calls(),
+              .parallel_dispatch = non_inlined.parallel_dispatch(),
+              .task = non_inlined.task(),
+              .unknown_thread = non_inlined.unknown_thread(),
+              .reentrant = non_inlined.reentrant(),
+              .channel_wait_not_yet_registered = non_inlined.channel_wait_not_yet_registered(),
+              .no_thread_migration = non_inlined.no_thread_migration(),
+          }},
+      }};
+
+      fdd::DispatcherInfo disp_info{{
           .driver = dispatcher.driver(),
           .name = dispatcher.name(),
           .options = dispatcher.options(),
           .scheduler_role = dispatcher.scheduler_role(),
-      }});
+          .dispatcher_ptr = dispatcher.dispatcher_ptr(),
+          .driver_ptr = dispatcher.driver_ptr(),
+          .synchronized_ = dispatcher.synchronized_(),
+          .allow_sync_calls = dispatcher.allow_sync_calls(),
+          .state = state,
+          .debug_stats = std::move(debug_stats),
+          .queued_tasks = std::move(queued_tasks),
+          .num_queued_tasks = dispatcher.num_queued_tasks(),
+      }};
+      if (!dispatcher.destroy_context().empty()) {
+        disp_info.destroy_context(dispatcher.destroy_context());
+      }
+      if (dispatcher.has_destroy_user_initiated()) {
+        disp_info.destroy_user_initiated(dispatcher.destroy_user_initiated());
+      }
+      dispatchers.push_back(std::move(disp_info));
     }
 
     std::vector<std::string> drivers;

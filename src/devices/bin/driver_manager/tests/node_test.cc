@@ -173,6 +173,10 @@ class FakeDictionaryUtil : public driver_manager::DictionaryUtil {
           receivers,
       fit::callback<void(zx::result<fuchsia_component_sandbox::CapabilityId>)> callback) override {
     receivers_ = std::move(receivers);
+    if (defer_create_dictionary_) {
+      pending_create_dictionary_ = std::move(callback);
+      return;
+    }
     callback(zx::ok(1234));
   }
 
@@ -202,8 +206,27 @@ class FakeDictionaryUtil : public driver_manager::DictionaryUtil {
   void CopyExportDictionary(
       fuchsia_component_sandbox::CapabilityId dictionary,
       fit::callback<void(zx::result<fuchsia_component_sandbox::DictionaryRef>)> callback) override {
+    if (defer_copy_export_) {
+      pending_copy_export_ = std::move(callback);
+      return;
+    }
     callback(zx::ok(fuchsia_component_sandbox::DictionaryRef(zx::eventpair{})));
   }
+
+  // Defer invoking the create-dictionary callback instead of invoking it immediately in
+  // `CreateDictionaryWith()`. Set to true by tests.
+  bool defer_create_dictionary_ = false;
+
+  // Stores the deferred create-dictionary callback. See `defer_create_dictionary_`.
+  fit::callback<void(zx::result<fuchsia_component_sandbox::CapabilityId>)>
+      pending_create_dictionary_;
+
+  // Defer invoking the copy-export callback instead of invoking it immediately in
+  // `CopyExportDictionary()`. Set to true by tests.
+  bool defer_copy_export_ = false;
+
+  // Stores the deferred copy-export callback. See `defer_copy_export_`.
+  fit::callback<void(zx::result<fuchsia_component_sandbox::DictionaryRef>)> pending_copy_export_;
 
   std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
       receivers_;
@@ -1448,4 +1471,159 @@ TEST_F(Dfv2NodeTest, CompositeNodeResourceDependents) {
   // resources' dependents list.
   EXPECT_TRUE(parent_1_resource->dependents().empty());
   EXPECT_TRUE(parent_2_resource->dependents().empty());
+}
+
+// Verify that if a node is freed before the asynchronous dictionary preparation completes
+// (non-composite path), it fails gracefully and does not cause a use-after-free.
+TEST_F(Dfv2NodeTest, PrepDictNonCompFreeBeforeExportReply) {
+  bool destroyed = false;
+  std::shared_ptr<driver_manager::Node> node(
+      new driver_manager::Node("N", root(), GetNodeManager(), dispatcher()),
+      [&destroyed](driver_manager::Node* n) {
+        delete n;
+        destroyed = true;
+      });
+  node->AddToDevfsForTesting(root_devnode());
+  node->devfs_device().publish();
+  std::weak_ptr<driver_manager::Node> weak_node = node;
+
+  // Prevent the copy-export callback that references `node` from being invoked immediately.
+  auto& fake_util = static_cast<FakeDictionaryUtil&>(node_manager->dictionary_util());
+  fake_util.defer_copy_export_ = true;
+
+  // Set dictionary_ref_ to trigger CopyExportDictionary which will invoke the copy-export callback
+  // that references `node`.
+  node->set_collection(driver_manager::Collection::kNone);
+  node->SetSubtreeDictionaryRef(fuchsia_component_sandbox::CapabilityId{1234});
+
+  // Prepare the dictionary, resulting in a copy-export callback being created.
+  bool result_seen = false;
+  node->PrepareDictionary([&](zx::result<> result) { result_seen = true; });
+  RunLoopUntilIdle();
+
+  // Verify that the preparation has not completed because we deferred invoking the copy-export
+  // callback.
+  ASSERT_FALSE(result_seen);
+  ASSERT_TRUE(static_cast<bool>(fake_util.pending_copy_export_));
+
+  // Free the node before the copy-export callback is called.
+  node.reset();
+  RunLoopUntilIdle();
+  ASSERT_TRUE(weak_node.expired());
+  ASSERT_TRUE(destroyed);
+
+  // Call the copy-export callback. This will panic if it tries to reference the freed `node`.
+  auto cb = std::move(fake_util.pending_copy_export_);
+  cb(zx::error(ZX_ERR_INTERNAL));
+  RunLoopUntilIdle();
+}
+
+// Verify that if a composite node is freed before the asynchronous dictionary preparation
+// completes (composite path, CreateDictionaryWith deferred), it fails gracefully.
+TEST_F(Dfv2NodeTest, PrepDictCompFreeBeforeCreateDictReply) {
+  auto node = CreateNode("test");
+  StartTestDriver(node);
+  ASSERT_TRUE(node->HasDriverComponent());
+  ASSERT_EQ(driver_manager::NodeState::kRunning, node->GetNodeState());
+
+  // Add parent nodes.
+
+  // Parent 1
+  auto [controller1, server1] = fidl::Endpoints<fuchsia_driver_framework::NodeController>::Create();
+  auto [node1, node_server1] = fidl::Endpoints<fuchsia_driver_framework::Node>::Create();
+
+  fuchsia_driver_framework::NodeAddArgs args_p1;
+  args_p1.name("parent_1");
+
+  fuchsia_component_decl::OfferService service_decl_1;
+  service_decl_1.source_name("service_1");
+  service_decl_1.target_name("service_1");
+  service_decl_1.renamed_instances(std::vector<::fuchsia_component_decl::NameMapping>{
+      fuchsia_component_decl::NameMapping("default", "default")});
+  service_decl_1.source_instance_filter(std::vector<std::string>{"default"});
+
+  fuchsia_driver_framework::Offer offer_1_fidl =
+      fuchsia_driver_framework::Offer::WithDictionaryOffer(
+          fuchsia_component_decl::Offer::WithService(service_decl_1));
+
+  args_p1.offers2(std::vector{std::move(offer_1_fidl)});
+  args_p1.offers_dictionary(fuchsia_component_sandbox::DictionaryRef{zx::eventpair{}});
+
+  std::shared_ptr<driver_manager::Node> parent_node_1;
+  node->AddChild(
+      std::move(args_p1), std::move(server1), std::move(node_server1),
+      [&](fit::result<fuchsia_driver_framework::NodeError, std::shared_ptr<driver_manager::Node>>
+              result) {
+        ASSERT_TRUE(result.is_ok());
+        parent_node_1 = result.value();
+      });
+
+  RunLoopUntilIdle();
+
+  // Parent 2
+  auto [controller2, server2] = fidl::Endpoints<fuchsia_driver_framework::NodeController>::Create();
+  auto [node2, node_server2] = fidl::Endpoints<fuchsia_driver_framework::Node>::Create();
+
+  fuchsia_driver_framework::NodeAddArgs args_p2;
+  args_p2.name("parent_2");
+
+  fuchsia_component_decl::OfferService service_decl_2;
+  service_decl_2.source_name("service_2");
+  service_decl_2.target_name("service_2");
+  service_decl_2.renamed_instances(std::vector<::fuchsia_component_decl::NameMapping>{
+      fuchsia_component_decl::NameMapping("default", "default")});
+  service_decl_2.source_instance_filter(std::vector<std::string>{"default"});
+
+  fuchsia_driver_framework::Offer offer_2_fidl =
+      fuchsia_driver_framework::Offer::WithDictionaryOffer(
+          fuchsia_component_decl::Offer::WithService(service_decl_2));
+
+  args_p2.offers2(std::vector{std::move(offer_2_fidl)});
+  args_p2.offers_dictionary(fuchsia_component_sandbox::DictionaryRef{zx::eventpair{}});
+
+  std::shared_ptr<driver_manager::Node> parent_node_2;
+  node->AddChild(
+      std::move(args_p2), std::move(server2), std::move(node_server2),
+      [&](fit::result<fuchsia_driver_framework::NodeError, std::shared_ptr<driver_manager::Node>>
+              result) {
+        ASSERT_TRUE(result.is_ok());
+        parent_node_2 = result.value();
+      });
+
+  RunLoopUntilIdle();
+
+  ASSERT_TRUE(parent_node_1);
+  ASSERT_TRUE(parent_node_2);
+
+  std::shared_ptr<driver_manager::Node> composite =
+      CreateCompositeNode("composite", {parent_node_1, parent_node_2}, {{}, {}});
+  std::weak_ptr<driver_manager::Node> weak_composite = composite;
+
+  // Prevent the create-dictionary callback that references `composite` from being invoked
+  // immediately.
+  auto& fake_util = static_cast<FakeDictionaryUtil&>(node_manager->dictionary_util());
+  fake_util.defer_create_dictionary_ = true;
+
+  // Prepare the dictionary for the composite node, resulting in a create-dictionary callback being
+  // created.
+  bool result_seen = false;
+  composite->PrepareDictionary([&](zx::result<> result) { result_seen = true; });
+  RunLoopUntilIdle();
+
+  // Verify that the preparation has not completed because we deferred invoking the
+  // create-dictionary callback.
+  ASSERT_FALSE(result_seen);
+  ASSERT_TRUE(static_cast<bool>(fake_util.pending_create_dictionary_));
+
+  // Free the composite.
+  composite->Remove(driver_manager::RemovalSet::kAll, nullptr);
+  composite.reset();
+  RunLoopUntilIdle();
+  ASSERT_TRUE(weak_composite.expired());
+
+  // Invoke the create-dictionary callback. This will panic if it tries to reference the freed
+  // `composite`.
+  auto cb = std::move(fake_util.pending_create_dictionary_);
+  cb(zx::error(ZX_ERR_INTERNAL));
+  RunLoopUntilIdle();
 }

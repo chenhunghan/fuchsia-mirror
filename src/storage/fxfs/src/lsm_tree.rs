@@ -27,7 +27,8 @@ pub mod testing;
 use crate::drop_event::DropEvent;
 use crate::log::*;
 use crate::metrics::DurationMeasureScope;
-use crate::object_handle::{ReadObjectHandle, WriteBytes};
+use crate::object_handle::{LayerObject, WriteBytes};
+use crate::object_store::ObjectStore;
 use crate::serialized_types::{LATEST_VERSION, Version};
 
 use anyhow::Error;
@@ -35,6 +36,7 @@ use cache::{ObjectCache, ObjectCacheResult};
 
 use fuchsia_inspect::HistogramProperty;
 use fuchsia_sync::RwLock;
+use fxfs_crypto::Crypt;
 use persistent_layer::{PersistentLayer, PersistentLayerWriter};
 use skip_list_layer::SkipListLayer;
 use std::fmt;
@@ -54,15 +56,16 @@ const SKIP_LIST_LAYER_ITEMS: usize = 512;
 // For serialization.
 pub use persistent_layer::{
     LayerHeader as PersistentLayerHeader, LayerHeaderV39 as PersistentLayerHeaderV39,
-    LayerInfo as PersistentLayerInfo, LayerInfoV39 as PersistentLayerInfoV39,
+    LayerInfo as PersistentLayerInfo, LayerInfoV39 as PersistentLayerInfoV39, SyncPersistentLayer,
+    layer_from_handle, open_layers,
 };
 
 pub async fn layers_from_handles<K: Key, V: Value>(
-    handles: impl IntoIterator<Item = impl ReadObjectHandle + 'static>,
+    handles: impl IntoIterator<Item = impl LayerObject + 'static>,
 ) -> Result<Vec<Arc<dyn Layer<K, V>>>, Error> {
     let mut layers = Vec::new();
     for handle in handles {
-        layers.push(PersistentLayer::open(handle).await? as Arc<dyn Layer<K, V>>);
+        layers.push(PersistentLayer::open(handle).await?);
     }
     Ok(layers)
 }
@@ -192,7 +195,7 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
     /// Opens an existing tree from the provided handles to the layer objects.
     pub async fn open(
         merge_fn: merge::MergeFn<K, V>,
-        handles: impl IntoIterator<Item = impl ReadObjectHandle + 'static>,
+        handles: impl IntoIterator<Item = impl LayerObject + 'static>,
         cache: Option<Box<dyn ObjectCache<K, V>>>,
     ) -> Result<Self, Error> {
         let layers = layers_from_handles(handles).await?;
@@ -220,19 +223,29 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         counters.max_layer_count = std::cmp::max(counters.max_layer_count, layer_count as u64);
     }
 
-    /// Appends to the given layers at the end i.e. they should be base layers.  This is supposed
-    /// to be used after replay when we are opening a tree and we have discovered the base layers.
+    /// Opens layers for `object_ids` from `store` and appends them to the end of the tree (i.e. as
+    /// base layers). This is supposed to be used after replay when we are opening a tree and we
+    /// have discovered the base layers.
+    ///
+    /// Returns the sum of the sizes in bytes of all appended layers.
     pub async fn append_layers(
         &self,
-        handles: impl IntoIterator<Item = impl ReadObjectHandle + 'static>,
-    ) -> Result<(), Error> {
-        let mut layers = layers_from_handles(handles).await?;
+        store: &Arc<ObjectStore>,
+        object_ids: impl IntoIterator<Item = u64>,
+        crypt: Option<Arc<dyn Crypt>>,
+    ) -> Result<u64, Error> {
+        let (layers, total_size) = open_layers(store, object_ids, crypt).await?;
+        self.append_open_layers(layers);
+        Ok(total_size)
+    }
+
+    /// Appends already-opened layers to the end of the tree.
+    pub fn append_open_layers(&self, mut layers: Vec<Arc<dyn Layer<K, V>>>) {
         let mut data = self.data.write();
         data.layers.append(&mut layers);
         let layer_count = data.layers.len() + 1;
         let mut counters = self.counters.compaction.lock().unwrap();
         counters.max_layer_count = std::cmp::max(counters.max_layer_count, layer_count as u64);
-        Ok(())
     }
 
     /// Resets the immutable layers.

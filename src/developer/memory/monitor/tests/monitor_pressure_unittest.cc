@@ -11,24 +11,24 @@
 #include "src/developer/memory/monitor/monitor.h"
 #include "src/lib/testing/loop_fixture/test_loop_fixture.h"
 
-namespace pressure_signaler {
+namespace monitor {
 // Teach gtest how to print levels
-extern void PrintTo(const pressure_signaler::Level& level, std::ostream* os) {
+extern void PrintTo(const PressureLevel& level, std::ostream* os) {
   std::string level_string;
   switch (level) {
-    case pressure_signaler::Level::kImminentOOM:
+    case PressureLevel::kImminentOOM:
       level_string = "ImminentOOM";
       break;
-    case pressure_signaler::Level::kCritical:
+    case PressureLevel::kCritical:
       level_string = "Critical";
       break;
-    case pressure_signaler::Level::kWarning:
+    case PressureLevel::kWarning:
       level_string = "Warning";
       break;
-    case pressure_signaler::Level::kNormal:
+    case PressureLevel::kNormal:
       level_string = "Normal";
       break;
-    case pressure_signaler::Level::kNumLevels:
+    case PressureLevel::kNumLevels:
       level_string = "Unset";
       break;
     default:
@@ -37,7 +37,7 @@ extern void PrintTo(const pressure_signaler::Level& level, std::ostream* os) {
   }
   *os << level_string;
 }
-}  // namespace pressure_signaler
+}  // namespace monitor
 
 namespace monitor::test {
 namespace {
@@ -97,67 +97,67 @@ class MonitorPressureTest : public gtest::TestLoopFixture {
     RunLoopUntilIdle();
     return {std::move(monitor), std::move(pressure_provider), std::move(imminent_oom_observer)};
   }
-  static pressure_signaler::Level ExposeLevel(Monitor* monitor) { return monitor->level_; }
+  static PressureLevel ExposeLevel(Monitor* monitor) { return monitor->level_; }
 };
 
 TEST_F(MonitorPressureTest, ImminentOom) {
   auto [monitor, pressure_provider, imminent_oom_observer] = CreateMonitorAndPressureHelpers();
-  ASSERT_NE(ExposeLevel(monitor.get()), pressure_signaler::Level::kImminentOOM);
+  ASSERT_NE(ExposeLevel(monitor.get()), PressureLevel::kImminentOOM);
   imminent_oom_observer->SetImminentOom(true);
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kCritical);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kImminentOOM);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kImminentOOM);
 }
 
 TEST_F(MonitorPressureTest, Critical) {
   auto [monitor, pressure_provider, imminent_oom_observer] = CreateMonitorAndPressureHelpers();
-  ASSERT_NE(ExposeLevel(monitor.get()), pressure_signaler::Level::kCritical);
+  ASSERT_NE(ExposeLevel(monitor.get()), PressureLevel::kCritical);
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kCritical);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kCritical);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kCritical);
 }
 
 TEST_F(MonitorPressureTest, AlternatingCriticalAndImminentOom) {
   auto [monitor, pressure_provider, imminent_oom_observer] = CreateMonitorAndPressureHelpers();
-  ASSERT_NE(ExposeLevel(monitor.get()), pressure_signaler::Level::kCritical);
+  ASSERT_NE(ExposeLevel(monitor.get()), PressureLevel::kCritical);
 
   // Critical
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kCritical);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kCritical);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kCritical);
 
   // While in critical, switch to imminent oom
   imminent_oom_observer->SetImminentOom(true);
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kCritical);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kImminentOOM);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kImminentOOM);
 
   // Switch back to critical
   imminent_oom_observer->SetImminentOom(false);
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kCritical);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kCritical);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kCritical);
 }
 
 TEST_F(MonitorPressureTest, OnlyTestImminentOomDuringCritical) {
   auto [monitor, pressure_provider, imminent_oom_observer] = CreateMonitorAndPressureHelpers();
-  ASSERT_NE(ExposeLevel(monitor.get()), pressure_signaler::Level::kCritical);
+  ASSERT_NE(ExposeLevel(monitor.get()), PressureLevel::kCritical);
   imminent_oom_observer->SetImminentOom(true);
 
   // Normal
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kNormal);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kNormal);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kNormal);
 
   // Warning
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kWarning);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kWarning);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kWarning);
 
   // Critical
   pressure_provider->NotifyPressure(fuchsia_memorypressure::Level::kCritical);
   RunLoopUntilIdle();
-  EXPECT_EQ(ExposeLevel(monitor.get()), pressure_signaler::Level::kImminentOOM);
+  EXPECT_EQ(ExposeLevel(monitor.get()), PressureLevel::kImminentOOM);
 }
 
 }  // namespace monitor::test

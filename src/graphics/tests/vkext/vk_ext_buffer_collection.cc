@@ -563,7 +563,7 @@ TEST_P(VulkanImageExtensionTest, MaxBufferCountCheck) {
   // supported on emulators.
   // TODO(https://fxbug.dev/321072153): Enable the test when YUV sysmem images are
   // supported on Lavapipe.
-  if (!device_supports_protected_memory_)
+  if (!SupportsSysmemYuv())
     GTEST_SKIP();
   auto tokens = MakeSharedCollection(2u);
 

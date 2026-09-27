@@ -177,9 +177,9 @@ impl AsyncWrite for AudioConsumerSink {
         ready!(self.poll_writable(cx));
         let mut flags = 0;
         loop {
-            match self.flags_receiver.try_next() {
-                Ok(Some(flag)) => flags |= flag,
-                Ok(None) | Err(_) => break,
+            match self.flags_receiver.try_recv() {
+                Ok(flag) => flags |= flag,
+                Err(_) => break,
             }
         }
         match self.send_frame(buf, flags) {

@@ -1,0 +1,74 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.driver.debug;
+
+using zx;
+
+const MAX_COMMAND_NAME_LENGTH uint32 = 256;
+const MAX_ARG_LENGTH uint32 = 1024;
+const MAX_ARG_COUNT uint32 = 128;
+const MAX_DESCRIPTION_LENGTH uint32 = 1024;
+const MAX_COMMAND_COUNT uint32 = 64;
+
+/// Metadata for a supported command in the Debug protocol.
+type CommandInfo = table {
+    /// The name of the command.
+    1: name string:MAX_COMMAND_NAME_LENGTH;
+
+    /// A human-readable description of what the command does and its usage.
+    2: description string:MAX_DESCRIPTION_LENGTH;
+};
+
+/// Protocol for executing interactive driver debug commands.
+@discoverable
+open protocol Debug {
+    /// Executes a command with the provided argument vector.
+    ///
+    /// The argument vector `args` is passed to the driver's command handler
+    /// as-is, without in-flight modification. The argument vector follows
+    /// standard command-line conventions (analogous to argv), where the first
+    /// argument (`args[0]`) is typically the command or subcommand name,
+    /// followed by any flags or positional arguments.
+    ///
+    /// Standard output and standard error from command execution are streamed
+    /// to the provided `stdout` and `stderr` sockets. The driver or command
+    /// handler writes to these sockets and closes them upon or before
+    /// returning the response.
+    ///
+    /// Returns the command's process exit code (`exit_code`), where 0
+    /// typically denotes success.
+    ///
+    /// ## Error
+    ///
+    /// Returns a `zx.Status` error if the execution request itself fails:
+    ///
+    /// * `ZX_ERR_INVALID_ARGS`: `args` is empty.
+    /// * `ZX_ERR_NOT_FOUND`: The requested command in `args[0]` is unknown.
+    flexible Execute(resource struct {
+        /// The argument vector passed to the driver's command handler as-is,
+        /// without in-flight modification. Follows standard command-line
+        /// conventions (analogous to argv), where the first argument
+        /// (`args[0]`) is typically the command or subcommand name, followed
+        /// by any flags or positional arguments.
+        args vector<string:MAX_ARG_LENGTH>:MAX_ARG_COUNT;
+
+        /// Socket to which standard output from command execution is streamed.
+        /// The driver or command handler writes to this socket and closes it
+        /// upon or before returning the response.
+        stdout zx.Handle:SOCKET;
+
+        /// Socket to which standard error from command execution is streamed.
+        /// The driver or command handler writes to this socket and closes it
+        /// upon or before returning the response.
+        stderr zx.Handle:SOCKET;
+    }) -> (struct {
+        /// The command's exit code, where 0 typically denotes success.
+        exit_code int32;
+    }) error zx.Status;
+
+    /// Lists all supported commands and their descriptions.
+    flexible ListCommands() -> (struct {
+        commands vector<CommandInfo>:MAX_COMMAND_COUNT;
+    }) error zx.Status;
+};

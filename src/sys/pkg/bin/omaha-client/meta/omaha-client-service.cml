@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 {
     include: [
-        "//src/lib/fuchsia-hyper/hyper.shard.cml",
         "inspect/client.shard.cml",
         "syslog/client.shard.cml",
     ],
@@ -29,6 +28,7 @@
                 "fuchsia.feedback.ComponentDataRegister",
                 "fuchsia.feedback.CrashReporter",
                 "fuchsia.metrics.MetricEventLoggerFactory",
+                "fuchsia.net.http.Loader",
                 "fuchsia.pkg.Cup",
 
                 // TODO(https://fxbug.dev/389134835): Remove the initiator
@@ -57,12 +57,6 @@
             from: "parent",
             rights: [ "r*" ],
             path: "/config/data",
-        },
-        {
-            directory: "root-ssl-certificates",
-            from: "parent",
-            rights: [ "r*" ],
-            path: "/config/ssl",
         },
         {
             //   periodic_interval_minutes

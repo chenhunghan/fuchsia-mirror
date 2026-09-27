@@ -1761,7 +1761,7 @@ mod tests {
         let _recv = sme.on_connect_command(req);
         assert_eq!(ClientSmeStatus::Connecting(Ssid::try_from("foo").unwrap()), sme.status());
 
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::Connect(..))));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::Connect(..)));
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -1773,8 +1773,8 @@ mod tests {
         let (receiver, mut session_event_stream) = sme.on_start_scheduled_scan_command(req.clone());
 
         assert_matches!(
-            mlme_stream.try_next(),
-            Ok(Some(MlmeRequest::StartScheduledScan(fidl_mlme::MlmeStartScheduledScanRequest { txn_id: id, req: _ }, responder))) => {
+            mlme_stream.try_recv(),
+            Ok(MlmeRequest::StartScheduledScan(fidl_mlme::MlmeStartScheduledScanRequest { txn_id: id, req: _ }, responder)) => {
                 assert_eq!(id, 1);
                 responder.respond(Ok(()));
             }
@@ -1815,8 +1815,8 @@ mod tests {
             sme.on_start_scheduled_scan_command(req.clone());
 
         assert_matches!(
-            mlme_stream.try_next(),
-            Ok(Some(MlmeRequest::StartScheduledScan(fidl_mlme::MlmeStartScheduledScanRequest { txn_id: id, req: _ }, responder))) => {
+            mlme_stream.try_recv(),
+            Ok(MlmeRequest::StartScheduledScan(fidl_mlme::MlmeStartScheduledScanRequest { txn_id: id, req: _ }, responder)) => {
                 assert_eq!(id, 1);
                 assert_eq!(session_event_stream1.txn_id, 1);
                 responder.respond(Ok(()));
@@ -1829,8 +1829,8 @@ mod tests {
             sme.on_start_scheduled_scan_command(req.clone());
 
         assert_matches!(
-            mlme_stream.try_next(),
-            Ok(Some(MlmeRequest::StartScheduledScan(fidl_mlme::MlmeStartScheduledScanRequest { txn_id: id, req: _ }, responder))) => {
+            mlme_stream.try_recv(),
+            Ok(MlmeRequest::StartScheduledScan(fidl_mlme::MlmeStartScheduledScanRequest { txn_id: id, req: _ }, responder)) => {
                 assert_eq!(id, 2);
                 assert_eq!(session_event_stream2.txn_id, 2);
                 responder.respond(Ok(()));
@@ -1897,7 +1897,7 @@ mod tests {
         let _recv = sme.on_connect_command(req);
         assert_eq!(ClientSmeStatus::Connecting(Ssid::try_from("foo").unwrap()), sme.status());
 
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::Connect(..))));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::Connect(..)));
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -1916,7 +1916,7 @@ mod tests {
         let _recv = sme.on_connect_command(req);
         assert_eq!(ClientSmeStatus::Connecting(Ssid::try_from("IEEE").unwrap()), sme.status());
 
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::Connect(..))));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::Connect(..)));
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -1936,8 +1936,8 @@ mod tests {
 
         // User should get a message that connection failed
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -1960,8 +1960,8 @@ mod tests {
 
         // User should get a message that connection failed
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -1984,8 +1984,8 @@ mod tests {
 
         // User should get a message that connection failed
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2003,9 +2003,9 @@ mod tests {
         let mut connect_txn_stream = sme.on_connect_command(req);
 
         assert_eq!(ClientSmeStatus::Connecting(Ssid::try_from("bssname").unwrap()), sme.status());
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::Connect(..))));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::Connect(..)));
         // There should be no message in the connect_txn_stream
-        assert_matches!(connect_txn_stream.try_next(), Err(_));
+        assert_matches!(connect_txn_stream.try_recv(), Err(_));
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -2023,9 +2023,9 @@ mod tests {
         let mut connect_txn_stream = sme.on_connect_command(req);
 
         assert_eq!(ClientSmeStatus::Connecting(Ssid::try_from("bssname").unwrap()), sme.status());
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::Connect(..))));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::Connect(..)));
         // There should be no message in the connect_txn_stream
-        assert_matches!(connect_txn_stream.try_next(), Err(_));
+        assert_matches!(connect_txn_stream.try_recv(), Err(_));
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -2044,8 +2044,8 @@ mod tests {
 
         // User should get a message that connection failed
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2070,8 +2070,8 @@ mod tests {
 
         // User should get a message that connection failed
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2100,8 +2100,8 @@ mod tests {
         ));
 
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2119,8 +2119,8 @@ mod tests {
             authentication_wep40(),
         ));
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2133,8 +2133,8 @@ mod tests {
             authentication_wpa1_passphrase(),
         ));
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2147,8 +2147,8 @@ mod tests {
             authentication_wpa2_personal_passphrase(),
         ));
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2178,8 +2178,8 @@ mod tests {
         );
 
         assert_matches!(
-            connect_txn_stream.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false })) => {
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
                 assert_eq!(result, SelectNetworkFailure::IncompatibleConnectRequest.into());
             }
         );
@@ -2208,11 +2208,11 @@ mod tests {
 
         // User should get a message that first connection attempt is canceled
         assert_matches!(
-            connect_txn_stream1.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult {
+            connect_txn_stream1.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult {
                 result: ConnectResult::Canceled,
                 is_reconnect: false
-            }))
+            })
         );
 
         // Report scan result to transition second connection attempt past scan. This is to verify
@@ -2232,11 +2232,11 @@ mod tests {
 
         // Verify that second connection attempt is canceled as new connect request comes in
         assert_matches!(
-            connect_txn_stream2.try_next(),
-            Ok(Some(ConnectTransactionEvent::OnConnectResult {
+            connect_txn_stream2.try_recv(),
+            Ok(ConnectTransactionEvent::OnConnectResult {
                 result: ConnectResult::Canceled,
                 is_reconnect: false
-            }))
+            })
         );
     }
 
@@ -2329,7 +2329,7 @@ mod tests {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let mut receiver = sme.wmm_status();
 
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::WmmStatusReq)));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::WmmStatusReq));
 
         let resp = fake_wmm_status_resp();
         #[allow(
@@ -2349,7 +2349,7 @@ mod tests {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let mut receiver = sme.wmm_status();
 
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::WmmStatusReq)));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::WmmStatusReq));
         sme.on_mlme_event(create_on_wmm_status_resp(zx::sys::ZX_ERR_IO));
         assert_eq!(receiver.try_recv(), Ok(Some(Err(zx::sys::ZX_ERR_IO))));
     }
@@ -2358,10 +2358,7 @@ mod tests {
     async fn test_query_apf_packet_filter_support() {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let mut _receiver = sme.query_apf_packet_filter_support();
-        assert_matches!(
-            mlme_stream.try_next(),
-            Ok(Some(MlmeRequest::QueryApfPacketFilterSupport(..)))
-        );
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::QueryApfPacketFilterSupport(..)));
     }
 
     #[fuchsia::test(allow_stalls = false)]
@@ -2369,7 +2366,7 @@ mod tests {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let program = vec![1, 2, 3];
         let mut _receiver = sme.install_apf_packet_filter(program.clone());
-        let req = assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::InstallApfPacketFilter(req, ..))) => req);
+        let req = assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::InstallApfPacketFilter(req, ..)) => req);
         assert_eq!(req.program, program);
     }
 
@@ -2377,14 +2374,14 @@ mod tests {
     async fn test_read_apf_packet_filter_data() {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let mut _receiver = sme.read_apf_packet_filter_data();
-        assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::ReadApfPacketFilterData(..))));
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::ReadApfPacketFilterData(..)));
     }
 
     #[fuchsia::test(allow_stalls = false)]
     async fn test_set_apf_packet_filter_enabled() {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let mut _receiver = sme.set_apf_packet_filter_enabled(true);
-        let req = assert_matches!(mlme_stream.try_next(), Ok(Some(MlmeRequest::SetApfPacketFilterEnabled(req, ..))) => req);
+        let req = assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::SetApfPacketFilterEnabled(req, ..)) => req);
         assert!(req.enabled);
     }
 
@@ -2392,26 +2389,17 @@ mod tests {
     async fn test_get_apf_packet_filter_enabled() {
         let (mut sme, mut mlme_stream, _time_stream) = create_sme().await;
         let mut _receiver = sme.get_apf_packet_filter_enabled();
-        assert_matches!(
-            mlme_stream.try_next(),
-            Ok(Some(MlmeRequest::GetApfPacketFilterEnabled(..)))
-        );
+        assert_matches!(mlme_stream.try_recv(), Ok(MlmeRequest::GetApfPacketFilterEnabled(..)));
     }
 
     fn assert_no_connect(mlme_stream: &mut mpsc::UnboundedReceiver<MlmeRequest>) {
         loop {
-            match mlme_stream.try_next() {
-                Ok(event) => match event {
-                    Some(MlmeRequest::Connect(..)) => {
-                        panic!("unexpected connect request sent to MLME")
-                    }
-                    None => break,
-                    _ => (),
-                },
-                Err(e) => {
-                    assert_eq!(e.to_string(), "receiver channel is empty");
-                    break;
+            match mlme_stream.try_recv() {
+                Ok(MlmeRequest::Connect(..)) => {
+                    panic!("unexpected connect request sent to MLME")
                 }
+                Ok(_) => (),
+                Err(_) => break,
             }
         }
     }

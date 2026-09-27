@@ -9,6 +9,7 @@
 extern crate self as fbl;
 
 mod array;
+mod bits;
 mod canary;
 mod conditional_select_nospec;
 mod confine_array_index;
@@ -37,6 +38,7 @@ mod wavl_tree;
 mod intrusive_container_test_support;
 
 pub use array::Array;
+pub use bits::{BitsSource, BitsTarget, extract_bit, extract_bits};
 pub use canary::{Canary, magic};
 pub use conditional_select_nospec::{conditional_select_nospec_eq, conditional_select_nospec_lt};
 pub use confine_array_index::confine_array_index;

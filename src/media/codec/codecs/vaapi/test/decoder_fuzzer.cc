@@ -46,7 +46,7 @@ void FakeCodecAdapterEvents::onCoreCodecMidStreamOutputConstraintsChange(
 
 void FakeCodecAdapterEvents::onCoreCodecOutputFormatChange() {}
 
-void FakeCodecAdapterEvents::onCoreCodecInputPacketDone(CodecPacket *packet) {
+void FakeCodecAdapterEvents::onCoreCodecInputPacketDone(const CodecPacket *packet) {
   std::lock_guard lock(lock_);
   input_packets_done_.push_back(packet);
   cond_.notify_all();

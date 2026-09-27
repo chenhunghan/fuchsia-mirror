@@ -457,7 +457,8 @@ impl Dispatcher {
     ///
     /// # Safety
     ///
-    /// `observer` must point to a valid `SignalObserver`. `handle` must be a valid handle pointer.
+    /// `observer` must point to a valid `SignalObserver`. `handle` must be a valid handle pointer
+    /// or null.
     pub unsafe fn add_observer(
         &self,
         observer: *mut core::ffi::c_void,

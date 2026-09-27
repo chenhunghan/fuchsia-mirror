@@ -51,7 +51,7 @@ rustc_library(
         "//third_party/rust_crates/vendor:thiserror",
     ] + select({
         "@platforms//os:fuchsia": ["//sdk/rust/zx"],
-        "//conditions:default": [],
+        "//conditions:default": ["//src/lib/fuchsia-emulated-handle"],
     }),
 )
 
@@ -77,7 +77,7 @@ rustc_test(
             "//third_party/rust_crates/vendor:anyhow",
             "//third_party/rust_crates/vendor:futures-test",
         ],
-        "//conditions:default": [],
+        "//conditions:default": ["//src/lib/fuchsia-emulated-handle"],
     }),
 )
 

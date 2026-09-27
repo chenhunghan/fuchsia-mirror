@@ -243,16 +243,29 @@ These goals are achieved by doing the following:
 
   // LINT.IfChange
   ```py
-    debug_info = {
+    _HOST_DEBUG_INFO = {
         "dbg": "2",
         "fastbuild": "1",  # default "0", i.e. no symbols.
         "opt": "1",  # default "0", i.e. no symbols.
-    },
-    strip_level = {
+    }
+
+    _HOST_STRIP_LEVEL = {
         "dbg": "none",
         "fastbuild": "none",
         "opt": "none",
-    },
+    }
+
+    _TARGET_DEBUG_INFO = {
+        "dbg": "2",
+        "fastbuild": "2",
+        "opt": "2",
+    }
+
+    _TARGET_STRIP_LEVEL = {
+        "dbg": "none",
+        "fastbuild": "none",
+        "opt": "none",
+    }
   ```
   // LINT.ThenChange(//build/bazel/toolchains/rust/rust.BUILD.bazel)
 

@@ -1854,6 +1854,7 @@ func TestInvalidAnnotations(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//foo/*" # @bazel2gn:skip,
 		"//path/to/bar:bar",
 		"//foo2:*" @bazel2gn:skip,
@@ -1884,6 +1885,7 @@ func TestInvalidAnnotations(t *testing.T) {
 	sources = [ "gn.cc" ] @bazel2gn:skip
 	public = [ "gn.h" ] # @bazel2gn:skip
 	visibility = [
+		":*",
 		"//path/to/foo2:*",
 	]
 }`,
@@ -1935,6 +1937,7 @@ func TestInvalidAnnotations(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//path/to/foo:*",
 		"//redundant/path/in/gn:*",
 	]
@@ -1952,6 +1955,7 @@ func TestInvalidAnnotations(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//path/to/foo:*",
 		"//path/to/bar/*",
 	]
@@ -1968,6 +1972,7 @@ func TestInvalidAnnotations(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//path/to/foo:*",
 	]
 }`,
@@ -1983,6 +1988,7 @@ func TestInvalidAnnotations(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//path/to/bar:bar",
 	]
 }`,
@@ -1998,6 +2004,7 @@ func TestInvalidAnnotations(t *testing.T) {
 )`,
 			wantGN: `go_library("test") {
 	visibility = [
+		":*",
 		"//path/to/baz:*",
 	]
 }`,

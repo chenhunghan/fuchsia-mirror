@@ -71,11 +71,12 @@ impl DriverHostInfoIterator {
         mut self,
         mut stream: fdd::DriverHostInfoIteratorRequestStream,
     ) -> Result<(), fidl::Error> {
+        const MAX_DRIVER_HOST_ENTRIES: usize = 4;
         while let Some(request) = stream.try_next().await? {
             match request {
                 fdd::DriverHostInfoIteratorRequest::GetNext { responder } => {
                     let next_infos: Vec<fdd::DriverHostInfo> =
-                        self.infos.by_ref().take(100).collect();
+                        self.infos.by_ref().take(MAX_DRIVER_HOST_ENTRIES).collect();
                     responder.send(&next_infos)?;
                 }
             }

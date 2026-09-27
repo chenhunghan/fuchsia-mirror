@@ -26,14 +26,8 @@ static_library("transaction") {
   if (is_fuchsia) {
     public += [ "device_transaction_handler.h" ]
     sources += [ "device_transaction_handler.cc" ]
-    public_deps += [
-      "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_c",
-      "//src/storage/lib/block_client/cpp:interface",
-    ]
-    deps += [
-      "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_c",
-      "//src/storage/lib/trace:cpp",
-    ]
+    public_deps += [ "//src/storage/lib/block_client/cpp:interface" ]
+    deps += [ "//src/storage/lib/trace:cpp" ]
   }
 }
 
@@ -50,7 +44,6 @@ test("fs-transaction-test") {
   ]
   deps = [
     ":transaction",
-    "//sdk/fidl/fuchsia.hardware.block.driver:fuchsia.hardware.block.driver_banjo_c",
     "//src/lib/fxl/test:gtest_main",
     "//src/storage/lib/block_client/cpp:fake_device",
     "//src/storage/lib/block_client/cpp:interface",

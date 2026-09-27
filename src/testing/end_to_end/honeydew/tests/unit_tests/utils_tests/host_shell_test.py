@@ -56,6 +56,43 @@ class HostShellTests(unittest.TestCase):
             check=True,  # to raise exception if cmd fails
             text=True,  # to decode the output to str
             timeout=None,  # default is None which means no timeout
+            env=None,
+        )
+
+    @mock.patch.object(
+        subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(
+            args=("ls",),
+            returncode=0,
+            stdout="",
+            stderr=None,
+        ),
+        autospec=True,
+    )
+    def test_run_with_env(
+        self,
+        mock_subprocess_run: mock.Mock,
+    ) -> None:
+        """Test case for host_shell.run() with custom env"""
+        custom_env = {"CUSTOM_VAR": "custom_value"}
+        host_shell.run(
+            cmd=[
+                "ls",
+            ],
+            env=custom_env,
+        )
+
+        mock_subprocess_run.assert_called_with(
+            [
+                "ls",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True,
+            timeout=None,
+            env=custom_env,
         )
 
     @parameterized.expand(
@@ -129,6 +166,7 @@ class HostShellTests(unittest.TestCase):
             check=True,  # to raise exception if cmd fails
             text=True,  # to decode the output to str
             timeout=None,  # default is None which means no timeout
+            env=None,
         )
 
     @mock.patch.object(

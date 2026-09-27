@@ -4,10 +4,15 @@
 
 import collections
 import dataclasses
+import functools
 import json
 import os
 import sys
+import tempfile
+import typing as T
 from pathlib import Path
+
+import ninja_artifacts
 
 _SCRIPT_DIR = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(_SCRIPT_DIR, "../../build/bazel/scripts"))
@@ -17,6 +22,52 @@ from build_utils import BazelLauncher, NinjaRunner
 _DEBUG = False
 
 _SECONDARY_BUILD_DIR_PREFIX = "build/secondary/"
+
+# Linux caps any single command-line argument at 128 KiB (MAX_ARG_STRLEN,
+# hard-coded as PAGE_SIZE * 32) and the whole argv plus environment at
+# ARG_MAX (2 MiB under the default 8 MiB stack rlimit).
+#
+# Both budgets stay well under their cap: ARG_MAX scales with the stack rlimit
+# and is shared with the environment, these counts are characters rather than
+# bytes, and overshooting means an E2BIG crash with no affected-test signal
+# while undershooting only costs extra subprocesses.
+_MAX_SINGLE_ARG_CHARS = 64 * 1024
+_MAX_AGGREGATE_ARGS_CHARS = 512 * 1024
+
+
+def _chunk_by_char_limit(
+    items: list[str], separator: str, max_chars: int
+) -> list[list[str]]:
+    """Split items into chunks so that separator.join(chunk) fits in max_chars.
+
+    Args:
+        items: The strings to split into chunks.
+        separator: The string each chunk will later be joined with. Pass the
+            same value used at the join() call site, so the budget accounting
+            here cannot drift from the argument that is actually built.
+        max_chars: Maximum length of any joined chunk.
+    Returns:
+        A list of chunks. A single item longer than max_chars gets its own
+        chunk, since it cannot be split any further.
+    """
+    if not items:
+        return []
+    separator_len = len(separator)
+    chunks: list[list[str]] = []
+    current_chunk: list[str] = []
+    current_len = 0
+    for item in items:
+        added_len = len(item) + (separator_len if current_chunk else 0)
+        if current_chunk and current_len + added_len > max_chars:
+            chunks.append(current_chunk)
+            current_chunk = [item]
+            current_len = len(item)
+        else:
+            current_chunk.append(item)
+            current_len += added_len
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
 
 
 def debug_log(msg: str) -> None:
@@ -87,9 +138,7 @@ def gn_label_to_build_gn_path(label: str) -> str:
         return ""
     # Strip toolchain if present: //foo:bar(//build/toolchain:...)
     target = label.partition("(")[0]
-    # Strip // prefix
-    if target.startswith("//"):
-        target = target[2:]
+    target = target.removeprefix("//")
     # Strip target name after :
     pkg_dir = target.partition(":")[0]
     if pkg_dir:
@@ -190,9 +239,7 @@ class GnTestArtifactsMap(dict[str, GnTestArtifactsInfo]):
 
 
 def create_gn_test_artifacts_mapping(build_dir: Path) -> GnTestArtifactsMap:
-    gn_test_infos, bazel_test_infos = split_gn_and_bazel_tests(
-        parse_tests_json(build_dir)
-    )
+    gn_test_infos, _ = split_gn_and_bazel_tests(parse_tests_json(build_dir))
     return _create_gn_test_artifacts_mapping(gn_test_infos, build_dir)
 
 
@@ -274,13 +321,31 @@ class AffectedTestTarget:
     os_name: str
 
 
-def map_file_path_to_bazel_label(file_path: str, fuchsia_dir: Path) -> str:
+@dataclasses.dataclass(frozen=True)
+class AffectedTestsResult:
+    """Represents the result of find_tests_affected_by_changed_files."""
+
+    # Set of affected test targets.
+    affected_tests: set[AffectedTestTarget]
+
+    # True if no targets in the build graph were affected by the changed files.
+    build_not_affected: bool
+
+
+def _quote_bazel_query_word(word: str) -> str:
+    """Quote a target label or path for safe inclusion in a Bazel query expression."""
+    escaped = word.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def map_file_path_to_bazel_label(
+    file_path: str,
+    fuchsia_dir: Path,
+    package_for_dir: T.Callable[[str], str],
+) -> str:
     """Map a given file path to a Bazel target label.
 
-    This inspects the filesystem to find package boundaries determined
-    by the existence of BUILD.bazel files.
-
-    For example, is //some/package/BUILD.bazel exists, then an input
+    For example, if //some/package/BUILD.bazel exists, then an input
     of 'some/package/with/target/in/subdir' will produce a result
     of '@@//some/package:with/target/in/subdir'.
 
@@ -288,22 +353,14 @@ def map_file_path_to_bazel_label(file_path: str, fuchsia_dir: Path) -> str:
         file_path: A file path. If relative, this is assumed to be relative to
             fuchsia_dir.
         fuchsia_dir: The path to the Fuchsia source directory.
+        package_for_dir: Maps a directory to the Bazel package enclosing it.
     Returns:
         A Bazel target label looking like @@//<package>:<target>.
     """
     if os.path.isabs(file_path):
         file_path = os.path.relpath(file_path, fuchsia_dir)
-    # Need to find the BUILD.bazel file that defines a package covering this source file.
-    # This could be cached for performance.
-    package_path = os.path.dirname(file_path)
-    while package_path != "":
-        if (fuchsia_dir / package_path / "BUILD.bazel").exists():
-            break
-        package_path = os.path.dirname(package_path)
 
-    if package_path == ".":
-        package_path = ""
-
+    package_path = package_for_dir(os.path.dirname(file_path))
     return f"@@//{package_path}:{os.path.relpath(file_path, package_path)}"
 
 
@@ -318,8 +375,22 @@ def map_file_paths_to_bazel_labels(
     Returns:
         A set of Bazel labels corresponding to the input source files.
     """
+
+    # Package boundaries are determined by the presence of a BUILD.bazel file,
+    # so resolving one directory means walking up to the root in the worst case.
+    # Memoizing the recursive call caches every directory along the way, not
+    # just the ones asked about directly, which matters for changes that touch
+    # thousands of files sharing common ancestors.
+    @functools.cache
+    def package_for_dir(dir_path: str) -> str:
+        if not dir_path or dir_path == ".":
+            return ""
+        if (fuchsia_dir / dir_path / "BUILD.bazel").exists():
+            return dir_path
+        return package_for_dir(os.path.dirname(dir_path))
+
     return {
-        map_file_path_to_bazel_label(file_path, fuchsia_dir)
+        map_file_path_to_bazel_label(file_path, fuchsia_dir, package_for_dir)
         for file_path in file_paths
     }
 
@@ -344,136 +415,119 @@ def find_bazel_tests_affected_by_changed_files(
     """
     # There are three sets of files to consider:
     #
-    # - Regular input sources, these are passed as inputs to rdeps(), then the
-    #   result is intersected with the labels of the test labels to find which
-    #   ones are affected.
+    # - Regular input sources, which can be passed as inputs to allrdeps().
     #
-    # - Bazel BUILD.bazel files, these are ignored as inputs by rdeps(), but one can
-    #   substitute //src/foo:BUILD.bazel with //src/foo:all to get equivalent results.
+    # - Bazel BUILD.bazel files, which are ignored as inputs by rdeps/allrdeps,
+    #   so //src/foo:BUILD.bazel is substituted with //src/foo:all.
     #
-    # - Bazel .bzl files, these are ignored as inputs to query functions.
-    #   However, it is possible to use buildfiles(deps(<target_set>)) to report the
-    #   corresponding .bzl files, then match these with the changed .bzl files.
-    #
-    #   To avoid doing one query per test label, use binary partitioning to find
-    #   the set of affected tests. This will still be significantly slower than
-    #   the above two cases though.
+    # - Bazel .bzl files, which are resolved by SkyQuery's
+    #   siblings(rbuildfiles(...)) operator scoped to --universe_scope=<all_test_labels>.
+    #   rbuildfiles() is transitive over load() edges, so a .bzl file loaded
+    #   only by another .bzl file still resolves to the BUILD files using it.
     #
     all_test_labels = {test.label for test in bazel_tests}
+    if not all_test_labels:
+        return []
 
     changed_input_labels: set[str] = set()
-    changed_bzl_labels: set[str] = set()
+    changed_bzl_files: set[str] = set()
     for changed_label in map_file_paths_to_bazel_labels(
         changed_files, fuchsia_dir
     ):
-        package, colon, target = changed_label.partition(":")
-        if colon is None:
-            target = os.path.basename(package)
+        package, _, target = changed_label.partition(":")
         if target.endswith(".bzl"):
-            changed_bzl_labels.add(f"{package}:{target}")
+            pkg_path = package.removeprefix("@@//")
+            changed_bzl_files.add(
+                os.path.join(pkg_path, target) if pkg_path else target
+            )
         else:
             if target in ("BUILD", "BUILD.bazel"):
                 target = "all"
             changed_input_labels.add(f"{package}:{target}")
 
-    def run_query(query_args: list[str]) -> list[str]:
+    if not changed_input_labels and not changed_bzl_files:
+        return []
+
+    def run_query(query_args: list[str], query_expr: str) -> list[str]:
         query_args = ["--config=quiet", "--consistent_labels"] + query_args
         if _DEBUG:
             debug_log(f"BAZEL QUERY: {query_args}\n")
         ret = bazel_launcher.run_query("query", query_args, ignore_errors=True)
+        # With --keep_going (set by ignore_errors=True), Bazel returns 0 when all
+        # targets in the query exist or 3 (PARTIAL_ANALYSIS_FAILURE) when some
+        # changed files are not Bazel targets. The latter happens on nearly every
+        # change, since most changed files are not Bazel targets at all. Any other
+        # exit code (such as 2 for a query syntax/flag error) is fatal and must not
+        # be silently treated as zero affected tests.
+        if ret.returncode not in (0, 3):
+            # ignore_errors=True discards Bazel's stderr, and the temporary
+            # --query_file is gone by the time anyone reads this, so embed the
+            # query expression itself to make the failure diagnosable.
+            raise RuntimeError(
+                f"bazel query failed with returncode {ret.returncode}:"
+                f" {query_args}\nquery: {query_expr}"
+            )
         return ret.stdout.splitlines()
 
-    affected_test_labels: set[str] = set()
-
+    query_terms: list[str] = []
     if changed_input_labels:
-        # For regular source files, and BUILD files, use rdeps() to get the set of
-        # reverse dependencies, then intersect it with our set of known test labels.
-        reverse_source_deps = set(
-            run_query(
-                [
-                    "rdeps(//...,set({}))".format(
-                        " ".join(sorted(changed_input_labels))
-                    ),
-                ]
+        quoted_inputs = " ".join(
+            _quote_bazel_query_word(label)
+            for label in sorted(changed_input_labels)
+        )
+        query_terms.append(f"set({quoted_inputs})")
+    if changed_bzl_files:
+        if _DEBUG:
+            debug_log(
+                "CHANGED BZL FILES:\n  {}\n".format(
+                    "\n  ".join(sorted(changed_bzl_files))
+                )
+            )
+        bzl_args = ", ".join(
+            _quote_bazel_query_word(path) for path in sorted(changed_bzl_files)
+        )
+        query_terms.append(f"siblings(rbuildfiles({bzl_args}))")
+
+    query_expr = f"allrdeps({' + '.join(query_terms)})"
+
+    affected_test_labels: set[str] = set()
+    universe_chunks = _chunk_by_char_limit(
+        sorted(all_test_labels),
+        separator=",",
+        max_chars=_MAX_SINGLE_ARG_CHARS,
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="wt", suffix=".bazel_query"
+    ) as query_file:
+        query_file.write(query_expr)
+        query_file.flush()
+        for universe_chunk in universe_chunks:
+            reverse_deps = set(
+                run_query(
+                    [
+                        # allrdeps() and rbuildfiles() only exist in Bazel's
+                        # SkyQuery environment, which is entered by passing
+                        # --universe_scope together with --order_output=no.
+                        # Without both, the query fails to parse. Unlike
+                        # rdeps(), allrdeps() takes no universe argument of its
+                        # own; --universe_scope is where it gets its scope, and
+                        # results are limited to that preloaded closure.
+                        f"--universe_scope={','.join(universe_chunk)}",
+                        "--order_output=no",
+                        f"--query_file={query_file.name}",
+                    ],
+                    query_expr,
+                )
+            )
+            affected_test_labels.update(reverse_deps & all_test_labels)
+
+    if _DEBUG:
+        debug_log(
+            "All affected Bazel test labels:\n  {}\n".format(
+                "\n  ".join(sorted(affected_test_labels))
             )
         )
-
-        if _DEBUG:
-            debug_log(
-                "All reverse source deps:\n  {}\n".format(
-                    "\n  ".join(label for label in sorted(reverse_source_deps))
-                )
-            )
-
-        affected_source_test_labels = reverse_source_deps & all_test_labels
-        affected_test_labels.update(affected_source_test_labels)
-
-        if _DEBUG:
-            debug_log(
-                "All affected source test labels:\n  {}\n".format(
-                    "\n  ".join(sorted(affected_source_test_labels))
-                )
-            )
-
-    if changed_bzl_labels:
-        if _DEBUG:
-            debug_log(
-                "CHANGED BZL LABELS:\n  {}\n".format(
-                    "\n  ".join(sorted(changed_bzl_labels))
-                )
-            )
-        # For .bzl files, use buildfiles() to get the set of load files needed
-        # by a given set of test targets. To avoid doing one query per test, use
-        # binary partitioning to find the minimal set of test targets that cover
-        # all the changed .bzl files.
-        partition_queue: list[list[str]] = []
-        partition_queue.append(sorted(all_test_labels))
-        while partition_queue:
-            if _DEBUG:
-                debug_log(
-                    "PARTITION QUEUE {}:\n  {}\n".format(
-                        len(partition_queue),
-                        "\n  ".join(
-                            f"{len(partition)} - {partition[0]}..."
-                            for partition in partition_queue
-                        ),
-                    )
-                )
-            current_partition = partition_queue.pop(0)
-
-            # Find the .bzl files required by this partition, then intersect
-            # them with changed_bzl_files.
-            build_labels = run_query(
-                [
-                    "buildfiles(deps(set({})))".format(
-                        " ".join(sorted(current_partition))
-                    ),
-                ]
-            )
-            bzl_labels = set(f for f in build_labels if f.endswith(".bzl"))
-            affected_bzl_labels = bzl_labels & changed_bzl_labels
-            if _DEBUG:
-                debug_log(
-                    "AFFECTED BZL LABELS:\n  {}".format(
-                        "\n  ".join(
-                            label for label in sorted(affected_bzl_labels)
-                        )
-                    )
-                )
-            if not affected_bzl_labels:
-                # No .bzl files in this partition are affected, so skip it.
-                continue
-
-            if len(current_partition) == 1:
-                # Found an individual test affected by the changed .bzl files.
-                affected_test_labels.add(current_partition[0])
-                continue
-
-            # Split the partition in half and add one half to the queue,
-            # process the other in this loop iteration.
-            mid = len(current_partition) // 2
-            partition_queue.append(current_partition[mid:])
-            partition_queue.append(current_partition[:mid])
 
     label_to_os_names = collections.defaultdict(list)
     for test in bazel_tests:
@@ -530,13 +584,14 @@ def find_tests_affected_by_changed_files(
     fuchsia_dir: Path,
     ninja_runner: NinjaRunner,
     bazel_launcher: BazelLauncher,
-) -> set[AffectedTestTarget]:
-    """Return the set of test labels that are affected by a set of changed files.
+) -> AffectedTestsResult:
+    """Return the set of test labels and build affected status for changed files.
 
     Given a set of paths to changed files (for example after applying a
     git commit just after the last build), determine which targets need to
     be rebuilt (and for tests re-run), return the set of tests labels that
-    would need to be rebuilt and then re-run after the build.
+    would need to be rebuilt and then re-run after the build, as well as whether
+    any build graph targets were affected.
 
     Args:
         changed_files: List of file path strings, relative to Fuchsia source directory,
@@ -545,7 +600,8 @@ def find_tests_affected_by_changed_files(
         ninja_runner: A NinjaRunner instance.
         bazel_launcher: A BazelLauncher instance.
     Returns:
-        A set of tuples, each containing a test target label and its OS name.
+        An AffectedTestsResult containing the set of affected tests and whether
+        the build was unaffected.
     """
 
     if _DEBUG:
@@ -576,19 +632,8 @@ def find_tests_affected_by_changed_files(
             ),
         )
 
-    ninja_results: set[AffectedTestTarget] = set()
-
-    if gn_tests:
-        ninja_results.update(
-            _find_gn_tests_affected_by_build_gn_files(gn_tests, changed_sources)
-        )
-
-        # Read the content of tests.json to determine which important artifacts
-        # each test requires at runtime.
-        gn_test_artifacts = _create_gn_test_artifacts_mapping(
-            gn_tests, build_dir
-        )
-
+    affected_ninja_artifacts: set[str] = set()
+    if changed_sources:
         # The list of source files as they must appear in the Ninja build plan.
         # All source inputs appear with a prefix like ../../ that corresponds
         # to the relative path from the build directory to the Fuchsia source one.
@@ -607,17 +652,34 @@ def find_tests_affected_by_changed_files(
         #
         # Note that for now, all Bazel targets, tests or not, must be wrapped through
         # GN bazel_action() targets.
-        tool_output = ninja_runner.run_and_extract_output(
-            [
-                "-t",
-                "affected",
-                "--depfile",
-                "--ignore-errors",
-            ]
-            + ninja_sources
+        for source_chunk in _chunk_by_char_limit(
+            ninja_sources,
+            separator=" ",
+            max_chars=_MAX_AGGREGATE_ARGS_CHARS,
+        ):
+            tool_output = ninja_runner.run_and_extract_output(
+                [
+                    "-t",
+                    "affected",
+                    "--depfile",
+                    "--ignore-errors",
+                ]
+                + source_chunk
+            )
+            affected_ninja_artifacts.update(tool_output.splitlines())
+
+    ninja_results: set[AffectedTestTarget] = set()
+
+    if gn_tests:
+        ninja_results.update(
+            _find_gn_tests_affected_by_build_gn_files(gn_tests, changed_sources)
         )
 
-        affected_ninja_artifacts = set(tool_output.splitlines())
+        # Read the content of tests.json to determine which important artifacts
+        # each test requires at runtime.
+        gn_test_artifacts = _create_gn_test_artifacts_mapping(
+            gn_tests, build_dir
+        )
 
         ninja_results.update(
             {
@@ -640,4 +702,21 @@ def find_tests_affected_by_changed_files(
             )
         )
 
-    return ninja_results | bazel_results
+    affected_build_artifacts: set[str] = set()
+    if affected_ninja_artifacts:
+        last_build_artifacts = set(
+            ninja_artifacts.get_last_build_artifacts(ninja_runner)
+        )
+        affected_build_artifacts = (
+            affected_ninja_artifacts & last_build_artifacts
+        )
+    build_not_affected = not changed_sources or (
+        len(affected_build_artifacts) == 0
+        and len(ninja_results) == 0
+        and len(bazel_results) == 0
+    )
+
+    return AffectedTestsResult(
+        affected_tests=ninja_results | bazel_results,
+        build_not_affected=build_not_affected,
+    )

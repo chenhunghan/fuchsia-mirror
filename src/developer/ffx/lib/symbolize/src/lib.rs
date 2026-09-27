@@ -14,6 +14,38 @@ use fuchsia_sync::Mutex;
 use std::os::raw::{c_char, c_void};
 use std::ptr::NonNull;
 
+// LINT.IfChange
+/// The type of address being resolved.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum AddressType {
+    /// Return address after a call (symbolizer will subtract 1 to locate
+    /// callsite).
+    Return = 0,
+    /// Exact instruction pointer (symbolizer will not adjust the address).
+    Exact = 1,
+    /// Unknown address type (symbolizer defaults to subtracting 1).
+    #[default]
+    Unknown = 2,
+}
+// LINT.ThenChange(//src/developer/ffx/lib/symbolize/sys/wrapper.h)
+
+impl From<AddressType> for symbolizer_sys::AddressType {
+    fn from(addr_type: AddressType) -> Self {
+        match addr_type {
+            AddressType::Return => symbolizer_sys::AddressType_Return,
+            AddressType::Exact => symbolizer_sys::AddressType_Exact,
+            AddressType::Unknown => symbolizer_sys::AddressType_Unknown,
+        }
+    }
+}
+
+impl From<bool> for AddressType {
+    fn from(pc_is_return_address: bool) -> Self {
+        if pc_is_return_address { AddressType::Return } else { AddressType::Exact }
+    }
+}
+
 /// A symbolizer for program counters.
 #[derive(Debug)]
 pub struct Symbolizer {
@@ -109,8 +141,12 @@ impl Symbolizer {
         }
     }
 
-    /// Resolve a single address.
-    pub fn resolve_addr(&self, addr: u64) -> Result<Vec<ResolvedLocation>, ResolveError> {
+    /// Resolve a single address with an explicit address type.
+    pub fn resolve_addr(
+        &self,
+        addr: u64,
+        address_type: AddressType,
+    ) -> Result<Vec<ResolvedLocation>, ResolveError> {
         struct LocationCallbackContext {
             locations: Vec<ResolvedLocation>,
         }
@@ -146,6 +182,7 @@ impl Symbolizer {
             symbolizer_sys::symbolizer_resolve_address(
                 self.inner.as_ptr(),
                 addr,
+                address_type.into(),
                 Some(location_callback),
                 &mut context as *mut _ as *mut c_void,
             )
@@ -374,6 +411,7 @@ impl std::str::FromStr for MappingFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::str::FromStr;
 
     #[test]
@@ -388,5 +426,55 @@ mod tests {
         let input = "wrong";
         let flags = MappingFlags::from_str(input);
         assert_eq!(flags, Err(MappingFlagsError::InvalidFlagsInput("wrong".to_string())));
+    }
+
+    #[test]
+    fn test_address_type_conversions() {
+        assert_eq!(
+            symbolizer_sys::AddressType::from(AddressType::Return),
+            symbolizer_sys::AddressType_Return
+        );
+        assert_eq!(
+            symbolizer_sys::AddressType::from(AddressType::Exact),
+            symbolizer_sys::AddressType_Exact
+        );
+        assert_eq!(
+            symbolizer_sys::AddressType::from(AddressType::Unknown),
+            symbolizer_sys::AddressType_Unknown
+        );
+
+        assert_eq!(AddressType::from(true), AddressType::Return);
+        assert_eq!(AddressType::from(false), AddressType::Exact);
+        assert_eq!(AddressType::default(), AddressType::Unknown);
+    }
+
+    #[test]
+    fn test_address_type_layout_and_values() {
+        assert_eq!(std::mem::size_of::<AddressType>(), 1);
+        assert_eq!(std::mem::align_of::<AddressType>(), 1);
+        assert_eq!(std::mem::size_of::<symbolizer_sys::AddressType>(), 1);
+        assert_eq!(std::mem::align_of::<symbolizer_sys::AddressType>(), 1);
+
+        assert_eq!(symbolizer_sys::AddressType_Return, 0);
+        assert_eq!(symbolizer_sys::AddressType_Exact, 1);
+        assert_eq!(symbolizer_sys::AddressType_Unknown, 2);
+
+        assert_eq!(symbolizer_sys::AddressType::from(AddressType::Return), 0);
+        assert_eq!(symbolizer_sys::AddressType::from(AddressType::Exact), 1);
+        assert_eq!(symbolizer_sys::AddressType::from(AddressType::Unknown), 2);
+    }
+
+    #[test]
+    fn test_address_type_distinct_and_hash() {
+        assert_ne!(AddressType::Exact, AddressType::Return);
+        assert_ne!(AddressType::Exact, AddressType::Unknown);
+        assert_ne!(AddressType::Return, AddressType::Unknown);
+
+        let set: HashSet<AddressType> =
+            HashSet::from([AddressType::Exact, AddressType::Return, AddressType::Unknown]);
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&AddressType::Exact));
+        assert!(set.contains(&AddressType::Return));
+        assert!(set.contains(&AddressType::Unknown));
     }
 }

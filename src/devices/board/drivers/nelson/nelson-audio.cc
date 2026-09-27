@@ -327,7 +327,7 @@ zx_status_t Nelson::AudioInit() {
   }
   {
     auto controller_out_spec = fuchsia_driver_framework::CompositeNodeSpec{{
-        .name = "aml_tdm",
+        .name = "nelson-audio-i2s-out",
         .parents2 = kOutControllerParents,
     }};
     auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(
@@ -392,7 +392,7 @@ zx_status_t Nelson::AudioInit() {
     tdm_dev.metadata() = tdm_metadata;
 
     auto tdm_spec = fuchsia_driver_framework::CompositeNodeSpec{{
-        .name = "aml_tdm_dai_out",
+        .name = "nelson-pcm-dai-out",
         .parents2 = kParentSpecInit,
     }};
     auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, tdm_dev),
@@ -458,7 +458,7 @@ zx_status_t Nelson::AudioInit() {
     tdm_dev.metadata() = tdm_metadata;
 
     auto tdm_spec = fuchsia_driver_framework::CompositeNodeSpec{{
-        .name = "aml_tdm_dai_in",
+        .name = "nelson-pcm-dai-in",
         .parents2 = kParentSpecInit,
     }};
     auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, tdm_dev),
@@ -505,7 +505,7 @@ zx_status_t Nelson::AudioInit() {
     dev_in.metadata() = pdm_metadata;
 
     auto pdm_spec = fuchsia_driver_framework::CompositeNodeSpec{{
-        .name = "aml_pdm",
+        .name = "nelson-audio-pdm-in",
         .parents2 = kParentSpecInit,
     }};
     auto result = pbus_.buffer(arena)->AddCompositeNodeSpec(fidl::ToWire(fidl_arena, dev_in),

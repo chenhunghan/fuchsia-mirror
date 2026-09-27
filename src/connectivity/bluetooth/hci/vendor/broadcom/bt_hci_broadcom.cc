@@ -136,15 +136,36 @@ constexpr zx::duration kFirmwareDownloadDelay = zx::msec(50);
 // firmware load.
 constexpr zx::duration kBaudRateSwitchDelay = zx::msec(200);
 
-constexpr zx::duration kCoreDumpCooldown = zx::min(20);
+constexpr zx::duration kCrashEventCooldown = zx::min(20);
 
 constexpr uint8_t kVendorSpecificEventCode = 0xFF;
 
 // 0x1B = DBFW subevent code, 0x03 = the dump type is "core dump"
 constexpr std::array<uint8_t, 2> kCrashVendorSubeventPrefix = {0x1B, 0x03};
+// 0x58 = BQR subevent code, 0x05 = Root Inflammation quality report ID
+constexpr std::array<uint8_t, 2> kBqrRootInflammationPrefix = {0x58, 0x05};
 constexpr char kCrashProgramName[] = "bt-hci-broadcom";
 constexpr char kCrashSignature[] = "bt-hci-broadcom-core-dump";
 constexpr char kCoreDumpCountInspectPropertyName[] = "core_dump_count";
+constexpr char kRootInflammationCountInspectPropertyName[] = "root_inflammation_count";
+
+// Returns true if `bytes` is a vendor event carrying the given subevent prefix (bytes 2-3).
+bool MatchesVendorSubevent(const std::vector<uint8_t>& bytes,
+                           const std::array<uint8_t, 2>& prefix) {
+  return bytes.size() >= 4 && bytes[0] == kVendorSpecificEventCode && bytes[2] == prefix[0] &&
+         bytes[3] == prefix[1];
+}
+
+// Returns the class of controller crash `bytes` indicates, if any.
+std::optional<CrashEventType> ClassifyCrashEvent(const std::vector<uint8_t>& bytes) {
+  if (MatchesVendorSubevent(bytes, kCrashVendorSubeventPrefix)) {
+    return CrashEventType::kCoreDump;
+  }
+  if (MatchesVendorSubevent(bytes, kBqrRootInflammationPrefix)) {
+    return CrashEventType::kRootInflammation;
+  }
+  return std::nullopt;
+}
 
 }  // namespace
 
@@ -174,22 +195,23 @@ class HciTransportPassthroughImpl : public fidl::Server<fhbt::HciTransport>,
                                     public fidl::AsyncEventHandler<fhbt::HciTransport> {
  public:
   using ActivityCallback = fit::function<void(ActivityType)>;
-  using CoreDumpCallback = fit::function<void()>;
+  using CrashEventCallback = fit::function<void(CrashEventType)>;
 
   explicit HciTransportPassthroughImpl(fidl::ClientEnd<fhbt::HciTransport> upstream_client_end,
-                                       ActivityCallback activity_cb, CoreDumpCallback core_dump_cb,
+                                       ActivityCallback activity_cb,
+                                       CrashEventCallback crash_event_cb,
                                        async_dispatcher_t* dispatcher)
       : activity_cb_(std::move(activity_cb)),
-        core_dump_cb_(std::move(core_dump_cb)),
+        crash_event_cb_(std::move(crash_event_cb)),
         upstream_client_(std::move(upstream_client_end), dispatcher, this) {}
 
   static fidl::ServerBindingRef<fhbt::HciTransport> BindServer(
       async_dispatcher_t* dispatcher,
       fidl::ServerEnd<fuchsia_hardware_bluetooth::HciTransport> server_end,
       fidl::ClientEnd<fuchsia_hardware_bluetooth::HciTransport> upstream_client_end,
-      ActivityCallback activity_cb, CoreDumpCallback core_dump_cb) {
+      ActivityCallback activity_cb, CrashEventCallback crash_event_cb) {
     std::unique_ptr impl = std::make_unique<HciTransportPassthroughImpl>(
-        std::move(upstream_client_end), std::move(activity_cb), std::move(core_dump_cb),
+        std::move(upstream_client_end), std::move(activity_cb), std::move(crash_event_cb),
         dispatcher);
     HciTransportPassthroughImpl* impl_ptr = impl.get();
 
@@ -216,12 +238,9 @@ class HciTransportPassthroughImpl : public fidl::Server<fhbt::HciTransport>,
   void OnReceive(fidl::Event<fhbt::HciTransport::OnReceive>& event) override {
     activity_cb_(ActivityType::kReceivePacket);
 
-    // Check if it is a core dump event.
     if (event.Which() == fhbt::ReceivedPacket::Tag::kEvent) {
-      const std::vector<uint8_t>& bytes = event.event().value();
-      if (bytes.size() >= 4 && bytes[0] == kVendorSpecificEventCode &&
-          bytes[2] == kCrashVendorSubeventPrefix[0] && bytes[3] == kCrashVendorSubeventPrefix[1]) {
-        core_dump_cb_();
+      if (std::optional<CrashEventType> type = ClassifyCrashEvent(event.event().value())) {
+        crash_event_cb_(*type);
       }
     }
 
@@ -264,7 +283,7 @@ class HciTransportPassthroughImpl : public fidl::Server<fhbt::HciTransport>,
 
  private:
   ActivityCallback activity_cb_;
-  CoreDumpCallback core_dump_cb_;
+  CrashEventCallback crash_event_cb_;
   fidl::Client<fhbt::HciTransport> upstream_client_;
 
   std::optional<fidl::ServerBindingRef<fuchsia_hardware_bluetooth::HciTransport>> binding_ref_;
@@ -341,6 +360,8 @@ void BtHciBroadcom::Start(fdf::DriverContext context, fdf::StartCompleter comple
   }
 
   core_dump_count_ = component_inspector_->root().CreateUint(kCoreDumpCountInspectPropertyName, 0);
+  root_inflammation_count_ =
+      component_inspector_->root().CreateUint(kRootInflammationCountInspectPropertyName, 0);
 
   // Continue initialization through the fpromise executor.
   start_completer_.emplace(std::move(completer));
@@ -392,7 +413,7 @@ fidl::ClientEnd<fuchsia_hardware_bluetooth::HciTransport> BtHciBroadcom::AddHciT
   auto binding_ref = HciTransportPassthroughImpl::BindServer(
       executor_->dispatcher(), std::move(server_end), std::move(upstream_client_end),
       fit::bind_member<&BtHciBroadcom::NoteActivity>(this),
-      fit::bind_member<&BtHciBroadcom::NoteCoreDump>(this));
+      fit::bind_member<&BtHciBroadcom::NoteCrashEvent>(this));
 
   active_clients_.push_back(binding_ref);
   return std::move(client_end);
@@ -433,9 +454,12 @@ void BtHciBroadcom::GetCrashParameters(GetCrashParametersCompleter::Sync& comple
   fidl::Arena arena;
   auto builder = fhbt::wire::VendorCrashParameters::Builder(arena);
 
-  auto inner_view = fidl::VectorView<uint8_t>::FromExternal(
-      const_cast<uint8_t*>(kCrashVendorSubeventPrefix.data()), kCrashVendorSubeventPrefix.size());
-  std::array<fidl::VectorView<uint8_t>, 1> crash_events_array = {inner_view};
+  auto to_view = [](const std::array<uint8_t, 2>& prefix) {
+    return fidl::VectorView<uint8_t>::FromExternal(const_cast<uint8_t*>(prefix.data()),
+                                                   prefix.size());
+  };
+  std::array<fidl::VectorView<uint8_t>, 2> crash_events_array = {
+      to_view(kCrashVendorSubeventPrefix), to_view(kBqrRootInflammationPrefix)};
 
   builder.crash_events(fidl::VectorView<fidl::VectorView<uint8_t>>::FromExternal(
       crash_events_array.data(), crash_events_array.size()));
@@ -870,11 +894,24 @@ void BtHciBroadcom::NoteActivity(ActivityType activity) {
   executor_->schedule_task(AssertLevel(PowerLevel::kOn));
 }
 
-void BtHciBroadcom::NoteCoreDump() {
+void BtHciBroadcom::NoteCrashEvent(CrashEventType type) {
+  inspect::UintProperty* count = nullptr;
+  std::optional<zx::time>* last_time = nullptr;
+  switch (type) {
+    case CrashEventType::kCoreDump:
+      count = &core_dump_count_;
+      last_time = &last_core_dump_time_;
+      break;
+    case CrashEventType::kRootInflammation:
+      count = &root_inflammation_count_;
+      last_time = &last_root_inflammation_time_;
+      break;
+  }
+
   zx::time now = async::Now(dispatcher_);
-  if (!last_core_dump_time_.has_value() || (now - *last_core_dump_time_) >= kCoreDumpCooldown) {
-    core_dump_count_.Add(1);
-    last_core_dump_time_ = now;
+  if (!last_time->has_value() || (now - **last_time) >= kCrashEventCooldown) {
+    count->Add(1);
+    *last_time = now;
   }
 }
 

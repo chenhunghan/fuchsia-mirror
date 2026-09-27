@@ -4,8 +4,9 @@
 
 // TODO(https://fxbug.dev/504722357): Remove this in favor of more granular
 // attributes when the Rust port is completed.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
+use crate::virtio::VirtioFeatureBits;
 use bitfield::bitfield;
 use fidl_next_fuchsia_images2 as fidl_images2;
 use std::num::NonZero;
@@ -29,8 +30,8 @@ bitfield! {
     /// Documented feature bits for virtio-gpu devices.
     // @cite(virtio): sec="5.7.3" title="Feature bits"
     #[repr(transparent)]
-    #[derive(Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout)]
-    pub struct FeatureBits(u32);
+    #[derive(Copy, Clone, PartialEq, Eq, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+    pub struct GpuFeatureBits(u128);
     impl Debug;
 
     /// True iff the device supports the virgl 3D mode.
@@ -64,6 +65,18 @@ bitfield! {
     pub bool, blob_alignment_is_valid, set_blob_alignment_is_valid: 5;
 }
 
+impl From<VirtioFeatureBits> for GpuFeatureBits {
+    fn from(feature_bits: VirtioFeatureBits) -> GpuFeatureBits {
+        GpuFeatureBits(feature_bits.0)
+    }
+}
+
+impl From<GpuFeatureBits> for VirtioFeatureBits {
+    fn from(feature_bits: GpuFeatureBits) -> VirtioFeatureBits {
+        VirtioFeatureBits(feature_bits.0)
+    }
+}
+
 bitfield! {
     /// Events signaled by the virtio-gpu device.
     // @cite(virtio): sec="5.7.4.2" title="Events"
@@ -93,7 +106,7 @@ pub struct DeviceConfiguration {
 
     /// Clears pending events in `pending_events`.
     ///
-    /// Write-only for the guest driver.
+    /// Write-only for the driver.
     ///
     /// The bits have W1/C (Write 1 to Clear) semantics. Writing true (1) into a
     /// bit will clear the corresponding bit in `pending_events`.
@@ -372,7 +385,7 @@ bitfield! {
     /// Marks a command as belonging to a rendering context timeline.
     ///
     /// The driver must only set this flag to true if it has negotiated
-    /// `FeatureBits::supports_contexts_and_timelines`.
+    /// [`GpuFeatureBits::supports_contexts_and_timelines`].
     ///
     /// If true, the command belongs to the timeline uniquely identified by
     /// [`BufferHeader::context_id`] and [`BufferHeader::ring_index`].
@@ -416,6 +429,23 @@ pub struct BufferHeader {
     pub ring_index: u8,
 
     pub _padding: [u8; 3],
+}
+
+impl BufferHeader {
+    /// Returns a header for a buffer that does not use fences or contexts.
+    ///
+    /// Fences and rendering contexts are only used by the 3D commands, which
+    /// this driver does not implement.
+    pub fn new(buffer_type: BufferType) -> Self {
+        Self {
+            type_: buffer_type,
+            flags: BufferHeaderFlags(0),
+            fence_id: 0,
+            context_id: 0,
+            ring_index: 0,
+            _padding: [0; 3],
+        }
+    }
 }
 
 /// virtio-gpu representation of the [`fuchsia.math/RectU`] FIDL structure.
@@ -518,11 +548,17 @@ impl std::fmt::Debug for ResourceFormat {
 impl TryFrom<fidl_images2::PixelFormat> for ResourceFormat {
     type Error = zx::Status;
 
+    /// Errors if the virtio-gpu device does not support `value`.
+    ///
+    /// All error conditions are logged.
     fn try_from(value: fidl_images2::PixelFormat) -> Result<Self, Self::Error> {
         match value {
             fidl_images2::PixelFormat::B8G8R8A8 => Ok(Self::B8G8R8A8),
             fidl_images2::PixelFormat::R8G8B8A8 => Ok(Self::R8G8B8A8),
-            _ => Err(zx::Status::NOT_SUPPORTED),
+            _ => {
+                log::warn!("Unsupported sysmem pixel format: {:?}", value);
+                Err(zx::Status::NOT_SUPPORTED)
+            }
         }
     }
 }
@@ -540,7 +576,7 @@ pub struct GetDisplayInfoCommand {
 
 /// virtio-gpu resource ID.
 ///
-/// The guest manages resource IDs. [`Create2DResourceCommand`] assigns a
+/// The driver manages resource IDs. [`Create2DResourceCommand`] assigns a
 /// resource ID. [`BufferType::DESTROY_RESOURCE_COMMAND`] (not yet implemented)
 /// frees a previously assigned resource ID.
 ///
@@ -637,7 +673,7 @@ define_attach_resource_backing_command!(AttachResourceBackingCommand2, 2);
 /// [`MAX_SCANOUT_COUNT`].
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct ScanoutId(pub(crate) u32);
+pub struct ScanoutId(pub u32);
 
 impl ScanoutId {
     /// True iff the value represents a valid scanout ID.
@@ -1448,5 +1484,47 @@ mod tests {
     fn test_blob_memory_pool_debug() {
         assert_eq!(format!("{:?}", BlobMemoryPool::GUEST), "GUEST");
         assert_eq!(format!("{:?}", BlobMemoryPool(100)), "UnknownBlobMemoryPool(100)");
+    }
+
+    #[fuchsia::test]
+    fn test_gpu_feature_bits_abi() {
+        assert_eq!(size_of::<GpuFeatureBits>(), 16);
+        assert_eq!(align_of::<GpuFeatureBits>(), 16);
+    }
+
+    #[fuchsia::test]
+    fn test_scanout_id_abi() {
+        assert_eq!(size_of::<ScanoutId>(), 4);
+        assert_eq!(align_of::<ScanoutId>(), 4);
+    }
+
+    #[fuchsia::test]
+    fn test_resource_format_abi() {
+        assert_eq!(size_of::<ResourceFormat>(), 4);
+        assert_eq!(align_of::<ResourceFormat>(), 4);
+    }
+
+    #[fuchsia::test]
+    fn test_capability_set_id_abi() {
+        assert_eq!(size_of::<CapabilitySetId>(), 4);
+        assert_eq!(align_of::<CapabilitySetId>(), 4);
+    }
+
+    #[fuchsia::test]
+    fn test_events_abi() {
+        assert_eq!(size_of::<Events>(), 4);
+        assert_eq!(align_of::<Events>(), 4);
+    }
+
+    #[fuchsia::test]
+    fn test_buffer_header_flags_abi() {
+        assert_eq!(size_of::<BufferHeaderFlags>(), 4);
+        assert_eq!(align_of::<BufferHeaderFlags>(), 4);
+    }
+
+    #[fuchsia::test]
+    fn test_blob_usage_flags_abi() {
+        assert_eq!(size_of::<BlobUsageFlags>(), 4);
+        assert_eq!(align_of::<BlobUsageFlags>(), 4);
     }
 }

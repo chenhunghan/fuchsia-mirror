@@ -27,12 +27,13 @@ class VsyncSource : public fidl::Server<fuchsia_ui_display_singleton::VsyncSourc
   ~VsyncSource() override;
 
  private:
-  // |fuchsia_ui_display_singleton::VsyncSource|
+  // `fuchsia_ui_display_singleton::VsyncSource`
   void SetVsyncEnabled(SetVsyncEnabledRequest& request,
                        SetVsyncEnabledCompleter::Sync& completer) override;
 
   // Registered as a callback with the default display.
-  void OnVsync(zx::time_monotonic timestamp, display::WireConfigStamp displayed_config_stamp);
+  void OnVsync(display::DisplayId display_id, zx::time_monotonic timestamp,
+               display::WireConfigStamp displayed_config_stamp);
 
   void UpdateVsyncCallbackRegistration(bool enabled);
   bool vsync_enabled() const;

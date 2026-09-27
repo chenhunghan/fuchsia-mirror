@@ -20,7 +20,7 @@ use flex_fuchsia_net_interfaces as fnet_interfaces;
 use futures::{Stream, TryStreamExt as _};
 use std::collections::btree_map::{self, BTreeMap};
 use std::collections::hash_map::{self, HashMap};
-use std::convert::{Infallible as Never, TryFrom as _};
+use std::convert::TryFrom as _;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -1179,8 +1179,8 @@ impl<I: FieldInterests> From<EventWithInterest<I>> for fnet_interfaces::Event {
 
 struct PortIdentityKoidConverter;
 
-impl From<Never> for PropertiesValidationError {
-    fn from(value: Never) -> Self {
+impl From<!> for PropertiesValidationError {
+    fn from(value: !) -> Self {
         match value {}
     }
 }
@@ -1188,7 +1188,7 @@ impl From<Never> for PropertiesValidationError {
 impl fidl_table_validation::Converter for PortIdentityKoidConverter {
     type Fidl = Option<u64>;
     type Validated = Option<PortIdentityKoid>;
-    type Error = Never;
+    type Error = !;
 
     fn try_from_fidl(value: Self::Fidl) -> Result<Self::Validated, Self::Error> {
         Ok(value.map(|value| PortIdentityKoid::from_raw(value)))

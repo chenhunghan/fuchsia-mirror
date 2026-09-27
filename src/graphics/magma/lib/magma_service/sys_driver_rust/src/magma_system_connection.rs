@@ -961,7 +961,7 @@ mod tests {
 
         let mut connection = create_test_connection(device.clone());
 
-        let bogus_handle: zx::NullableHandle = unsafe { std::mem::transmute(0u32) };
+        let bogus_handle = zx::NullableHandle::invalid();
         assert!(connection.import_object(bogus_handle, 0, MagmaObjectType::Semaphore, 1).is_err());
     }
 
@@ -1143,10 +1143,9 @@ mod tests {
         let id = 1;
 
         // Bogus handle (invalid).
-        let bogus_vmo: zx::Vmo = unsafe { std::mem::transmute(0u32) };
         assert!(
             connection
-                .import_object(zx::NullableHandle::from(bogus_vmo), 0, MagmaObjectType::Buffer, id)
+                .import_object(zx::NullableHandle::invalid(), 0, MagmaObjectType::Buffer, id)
                 .is_err()
         );
 

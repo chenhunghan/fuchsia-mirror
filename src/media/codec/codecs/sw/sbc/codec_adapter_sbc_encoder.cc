@@ -52,6 +52,25 @@ void CodecAdapterSbcEncoder::ProcessInputLoop() {
   std::optional<CodecInputItem> maybe_input_item;
   while ((maybe_input_item = input_queue_.WaitForElement())) {
     CodecInputItem input_item = std::move(maybe_input_item.value());
+
+    auto return_packet = fit::defer([this, &input_item] {
+      if (input_item.is_packet()) {
+        events_->onCoreCodecInputPacketDone(input_item.packet());
+      }
+    });
+
+    bool is_active = [this, &input_item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
+      std::unique_lock<std::mutex> lock(lock_);
+      while (output_reconfig_pending_ && !input_item.is_format_details()) {
+        reconfig_cond_.wait(lock);
+      }
+      return stream_active_;
+    }();
+
+    if (!is_active) {
+      return;
+    }
+
     if (input_item.is_format_details()) {
       if (context_) {
         events_->onCoreCodecFailCodec("Midstream input format change is not supported.");
@@ -61,6 +80,11 @@ void CodecAdapterSbcEncoder::ProcessInputLoop() {
       if (CreateContext(std::move(input_item.format_details())) != kOk) {
         // Creation failed; a failure was reported through `events_`.
         return;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(lock_);
+        output_reconfig_pending_ = true;
       }
 
       events_->onCoreCodecMidStreamOutputConstraintsChange(
@@ -84,6 +108,16 @@ void CodecAdapterSbcEncoder::ProcessInputLoop() {
 }
 
 void CodecAdapterSbcEncoder::CleanUpAfterStream() {
+  if (output_buffer_) {
+    auto base = output_buffer_->base();
+    output_buffer_pool_.FreeBuffer(base);
+    output_buffer_ = nullptr;
+  }
+  if (output_packet_) {
+    free_output_packets_.Push(output_packet_);
+    output_packet_ = nullptr;
+  }
+  output_offset_ = 0;
   context_ = std::nullopt;
   chunk_input_stream_.reset();
 
@@ -174,20 +208,6 @@ CodecAdapterSbcEncoder::CoreCodecGetBufferCollectionConstraints2(
   ZX_DEBUG_ASSERT(!result.usage().has_value());
 
   return result;
-}
-
-void CodecAdapterSbcEncoder::CoreCodecStopStream() {
-  async::PostTask(input_processing_loop_.dispatcher(), [this] {
-    if (output_buffer_) {
-      // If we have an output buffer pending but not sent, return it to the pool. CodecAdapterSW
-      // expects all buffers returned after stream is stopped.
-      auto base = output_buffer_->base();
-      output_buffer_pool_.FreeBuffer(base);
-      output_buffer_ = nullptr;
-    }
-  });
-
-  CodecAdapterSW::CoreCodecStopStream();
 }
 
 CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
@@ -356,15 +376,9 @@ CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
 // TODO(turnage): Store progress on an output buffer so it can be used across
 //                multiple input packets if we're behind.
 CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::EncodeInput(
-    CodecPacket* input_packet) {
+    const CodecPacket* input_packet) {
   FX_DCHECK(context_);
   FX_DCHECK(chunk_input_stream_);
-
-  auto return_to_client = fit::defer([this, input_packet]() {
-    if (input_packet) {
-      events_->onCoreCodecInputPacketDone(input_packet);
-    }
-  });
 
   ChunkInputStream::Status status;
   if (input_packet == nullptr) {

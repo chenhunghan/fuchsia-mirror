@@ -254,8 +254,8 @@ async fn upload_data<T: AsyncRead + AsyncWrite + Unpin>(
     interface: &mut T,
     progress_listener: &ProgressListener<'_>,
     timeout: Duration,
-    mut bytes_offset: u64,
 ) -> Result<(), fastboot::FastbootError> {
+    let _lock = ctx.lock_transfer().await;
     let expected = data.len().try_into().unwrap();
     let reply =
         send_with_timeout(ctx.clone(), Command::Download(expected), interface, timeout).await?;
@@ -274,8 +274,7 @@ async fn upload_data<T: AsyncRead + AsyncWrite + Unpin>(
             return log_err(CouldNotWriteToInterface(e), progress_listener).await;
         }
 
-        bytes_offset += u64::try_from(chunk.len()).unwrap();
-        progress_listener.on_progress(bytes_offset).await?;
+        progress_listener.on_progress(u64::try_from(chunk.len()).unwrap()).await?;
     }
 
     wait_for_ack(interface, progress_listener, timeout).await?;
@@ -648,36 +647,32 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Debug + Send> Fastboot for FastbootProx
         let ctx = self.ctx.clone();
         let interface = self.interface().await?;
 
-        let (finishing_cmd, length) = match op {
+        let length_bytes = match op {
             StreamOp::Fill { val, length_bytes } => {
                 log::trace!("fastboot: filling {} bytes", length_bytes);
+                let finishing_cmd = Command::StreamFill {
+                    partition: name.to_owned(),
+                    offset_bytes,
+                    length_bytes,
+                    val,
+                };
+                handle_command(&ctx, &finishing_cmd, interface, timeout).await?;
                 progress_listener
-                    .on_progress(offset_bytes + length_bytes)
+                    .on_progress(length_bytes)
                     .await
                     .map_err(|e| fastboot::FastbootError::from(e))?;
-
-                (
-                    Command::StreamFill {
-                        partition: name.to_owned(),
-                        offset_bytes,
-                        length_bytes,
-                        val,
-                    },
-                    length_bytes,
-                )
+                length_bytes
             }
             StreamOp::Flash { data, crc32 } => {
-                upload_data(&ctx, &data, interface, &progress_listener, timeout, offset_bytes)
-                    .await?;
-                (
-                    Command::StreamFlash { partition: name.to_owned(), offset_bytes, crc32 },
-                    u64::try_from(data.len()).unwrap(),
-                )
+                upload_data(&ctx, &data, interface, &progress_listener, timeout).await?;
+                let finishing_cmd =
+                    Command::StreamFlash { partition: name.to_owned(), offset_bytes, crc32 };
+                handle_command(&ctx, &finishing_cmd, interface, timeout).await?;
+                u64::try_from(data.len()).unwrap()
             }
         };
 
-        handle_command(&ctx, &finishing_cmd, interface, timeout).await?;
-        log::trace!("fastboot: streamed {length} bytes to {name}");
+        log::trace!("fastboot: streamed {length_bytes} bytes to {name}");
         Ok(())
     }
 }
@@ -1441,8 +1436,45 @@ mod test {
         assert_eq!(progress_rx.recv().await, Some(UploadProgress::OnProgress { bytes_written: 4 }));
         assert_eq!(
             progress_rx.recv().await,
-            Some(UploadProgress::OnProgress { bytes_written: 4100 })
+            Some(UploadProgress::OnProgress { bytes_written: 4096 })
         );
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_stream_upload_acquires_transfer_lock() -> Result<()> {
+        let mut test_transport = TestTransport::new();
+        test_transport.extend([
+            Reply::Data(4),
+            Reply::Okay("".to_string()),
+            Reply::Okay("".to_string()),
+        ]);
+
+        let ctx = FastbootContext::new();
+        let mut fastboot_client = FastbootProxy::<TestTransport> {
+            target_id: "foo".to_string(),
+            interface: Some(test_transport),
+            interface_factory: Box::new(TestTransportFactory {}),
+            ctx: ctx.clone(),
+        };
+
+        let guard = ctx.lock_transfer().await;
+        let (progress_tx, _progress_rx) = mpsc::channel(2);
+        let flash_cmd = StreamCommand {
+            offset_bytes: 0,
+            op: StreamOp::Flash { data: bytes::Bytes::from_static(&[1, 2, 3, 4]), crc32: 0x1234 },
+        };
+
+        let mut stream_fut = Box::pin(fastboot_client.stream(
+            "zircon_a",
+            flash_cmd,
+            &progress_tx,
+            Duration::seconds(1),
+        ));
+        assert!(futures::poll!(&mut stream_fut).is_pending());
+
+        drop(guard);
+        stream_fut.await?;
         Ok(())
     }
 }

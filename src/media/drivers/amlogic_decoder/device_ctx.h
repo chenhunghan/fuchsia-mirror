@@ -106,11 +106,12 @@ class DeviceCtx : public DdkDeviceType,
   // Specific device driving:
   std::unique_ptr<AmlogicVideo> video_;
 
-  // FIDL interface handling:
-  std::unique_ptr<DeviceFidl> device_fidl_;
-
   // Codec admission control:
   CodecAdmissionControl codec_admission_control_;
+
+  // FIDL interface handling; this must be destructed before codec_admission_control_, so must
+  // remain ordered after codec_admission_control_:
+  std::unique_ptr<DeviceFidl> device_fidl_;
 };
 
 }  // namespace amlogic_decoder

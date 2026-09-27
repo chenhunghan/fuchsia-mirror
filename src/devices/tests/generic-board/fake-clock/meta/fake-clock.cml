@@ -19,6 +19,7 @@
         { service: "fuchsia.hardware.clock.Service" },
     ],
     use: [
+        { service: "fuchsia.hardware.interrupt.ControllerRegistryService" },
         { service: "fuchsia.hardware.platform.device.Service" },
     ],
     expose: [

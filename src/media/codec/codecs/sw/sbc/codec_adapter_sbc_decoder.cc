@@ -22,6 +22,23 @@ constexpr char kPcmMimeType[] = "audio/pcm";
 constexpr uint8_t kPcmBitsPerSample = 16;
 constexpr size_t kMaxInputFrames = 64;
 
+bool FormatDetailsAreEqualForOutputBuffers(const fuchsia::media::FormatDetails& lhs,
+                                           const fuchsia::media::FormatDetails& rhs) {
+  if (lhs.has_mime_type() != rhs.has_mime_type()) {
+    return false;
+  }
+  if (lhs.has_mime_type() && lhs.mime_type() != rhs.mime_type()) {
+    return false;
+  }
+  if (lhs.has_oob_bytes() != rhs.has_oob_bytes()) {
+    return false;
+  }
+  if (lhs.has_oob_bytes() && lhs.oob_bytes() != rhs.oob_bytes()) {
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 CodecAdapterSbcDecoder::CodecAdapterSbcDecoder(std::mutex& lock,
@@ -34,38 +51,82 @@ void CodecAdapterSbcDecoder::ProcessInputLoop() {
   std::optional<CodecInputItem> maybe_input_item;
   while ((maybe_input_item = input_queue_.WaitForElement())) {
     CodecInputItem input_item = std::move(maybe_input_item.value());
+
+    auto return_packet = fit::defer([this, &input_item] {
+      if (input_item.is_packet()) {
+        events_->onCoreCodecInputPacketDone(input_item.packet());
+      }
+    });
+
+    bool is_active = [this, &input_item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
+      std::unique_lock<std::mutex> lock(lock_);
+      while (output_reconfig_pending_ && !input_item.is_format_details()) {
+        reconfig_cond_.wait(lock);
+      }
+      return stream_active_;
+    }();
+    if (!is_active) {
+      return;
+    }
     if (input_item.is_format_details()) {
       if (context_) {
         events_->onCoreCodecFailCodec("Midstream input format change is not supported.");
         return;
       }
 
-      if (CreateContext(std::move(input_item.format_details())) != kOk) {
+      bool format_changed = true;
+      if (last_format_details_) {
+        format_changed = !FormatDetailsAreEqualForOutputBuffers(*last_format_details_,
+                                                                input_item.format_details());
+        // TODO(b/534928661): Ideally we wouldn't need to re-allocate output buffers if they're
+        // already suitable, but currently sbc_decode_stream_switching_without_close requires
+        // format_changed = true here.
+        format_changed = true;
+      }
+      last_format_details_ = fidl::Clone(input_item.format_details());
+
+      if (CreateContext(*last_format_details_) != kOk) {
         // Creation failed; a failure was reported through `events_`.
         return;
       }
 
-      events_->onCoreCodecMidStreamOutputConstraintsChange(
-          /*output_re_config_required=*/true);
+      if (format_changed) {
+        {
+          std::lock_guard<std::mutex> lock(lock_);
+          output_reconfig_pending_ = true;
+        }
+        events_->onCoreCodecMidStreamOutputConstraintsChange(
+            /*output_re_config_required=*/true);
+      }
     } else if (input_item.is_end_of_stream()) {
       ZX_DEBUG_ASSERT(context_);
-
       if (DecodeInput(nullptr) == kShouldTerminate) {
-        events_->onCoreCodecFailCodec("Failed to stop stream");
         return;
       }
     } else if (input_item.is_packet()) {
       ZX_DEBUG_ASSERT(context_);
-
       if (DecodeInput(input_item.packet()) == kShouldTerminate) {
-        events_->onCoreCodecFailCodec("Failed to decode packet");
         return;
       }
     }
   }
 }
 
-void CodecAdapterSbcDecoder::CleanUpAfterStream() { context_ = std::nullopt; }
+void CodecAdapterSbcDecoder::CleanUpAfterStream() {
+  // If we have an output buffer pending but not sent, return it to the pool. CodecAdapterSW
+  // expects all buffers returned after stream is stopped.
+  if (output_buffer_) {
+    auto base = output_buffer_->base();
+    output_buffer_pool_.FreeBuffer(base);
+    output_buffer_ = nullptr;
+  }
+  if (output_packet_) {
+    free_output_packets_.Push(output_packet_);
+    output_packet_ = nullptr;
+  }
+  output_offset_ = 0;
+  context_ = std::nullopt;
+}
 
 std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterSbcDecoder::OutputFormatDetails() {
   FX_DCHECK(context_);
@@ -143,20 +204,6 @@ CodecAdapterSbcDecoder::CoreCodecGetBufferCollectionConstraints2(
   ZX_DEBUG_ASSERT(!result.usage().has_value());
 
   return result;
-}
-
-void CodecAdapterSbcDecoder::CoreCodecStopStream() {
-  async::PostTask(input_processing_loop_.dispatcher(), [this] {
-    if (output_buffer_) {
-      // If we have an output buffer pending but not sent, return it to the pool. CodecAdapterSW
-      // expects all buffers returned after stream is stopped.
-      auto base = output_buffer_->base();
-      output_buffer_pool_.FreeBuffer(base);
-      output_buffer_ = nullptr;
-    }
-  });
-
-  CodecAdapterSW::CoreCodecStopStream();
 }
 
 fuchsia::media::PcmFormat CodecAdapterSbcDecoder::DecodeCodecInfo(
@@ -237,16 +284,13 @@ CodecAdapterSbcDecoder::InputLoopStatus CodecAdapterSbcDecoder::CreateContext(
 }
 
 CodecAdapterSbcDecoder::InputLoopStatus CodecAdapterSbcDecoder::DecodeInput(
-    CodecPacket* input_packet) {
+    const CodecPacket* input_packet) {
   FX_DCHECK(context_);
 
   if (!input_packet) {
     events_->onCoreCodecOutputEndOfStream(/*error_detected_before=*/false);
     return kOk;
   }
-
-  auto return_to_client =
-      fit::defer([this, input_packet]() { events_->onCoreCodecInputPacketDone(input_packet); });
 
   uint32_t bytes_left = input_packet->valid_length_bytes();
   uint8_t* input_data = input_packet->buffer()->base() + input_packet->start_offset();

@@ -21,7 +21,7 @@ struct DataAvailable {
 ///
 /// Notifiers can be cloned to allow for multiple current producers.
 #[derive(Debug, Clone)]
-pub struct DataNotifier {
+pub(crate) struct DataNotifier {
     inner: Arc<DataAvailable>,
 }
 
@@ -31,7 +31,7 @@ impl DataNotifier {
     /// If the watcher is not currently waiting, the notification will have no
     /// effect until the watcher starts waiting. Multiple notifications are
     /// coalesced.
-    pub fn notify(&self) {
+    pub(crate) fn notify(&self) {
         let DataAvailable { available, waker } = &*self.inner;
 
         let prev = available.swap(true, Ordering::Relaxed);
@@ -46,13 +46,13 @@ impl DataNotifier {
 /// The watcher is used to wait for notifications from one or more
 /// [`DataNotifier`]s.
 #[derive(Debug)]
-pub struct DataWatcher {
+pub(crate) struct DataWatcher {
     inner: Arc<DataAvailable>,
 }
 
 impl DataWatcher {
     /// Creates a new watcher and notifier pair.
-    pub fn new() -> (Self, DataNotifier) {
+    pub(crate) fn new() -> (Self, DataNotifier) {
         let watcher = DataWatcher { inner: Arc::new(DataAvailable::default()) };
         let notifier = DataNotifier { inner: Arc::clone(&watcher.inner) };
         (watcher, notifier)
@@ -64,7 +64,7 @@ impl DataWatcher {
     /// To be clear, this method clears any previous notification, and the returned
     /// future will only complete the *next* time [`DataNotifier::notify`] is
     /// called.
-    pub fn reset_and_wait(&mut self) -> impl Future<Output = ()> + use<'_> {
+    pub(crate) fn reset_and_wait(&mut self) -> impl Future<Output = ()> + use<'_> {
         let DataAvailable { available, waker } = &*self.inner;
 
         available.store(false, Ordering::Relaxed);
@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test() {
+    fn notifications() {
         let mut exec = fuchsia_async::TestExecutor::new();
 
         let (mut watcher, tcp) = DataWatcher::new();

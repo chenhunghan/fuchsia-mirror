@@ -542,6 +542,7 @@ pub trait Crypt: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{JournalCipher, JournalXtsCipher, StreamCipher, UnwrappedKey};
+    use zerocopy::IntoBytes;
 
     #[test]
     fn test_journal_xts_cipher_roundtrip() {
@@ -625,7 +626,7 @@ mod tests {
     fn test_journal_xts_cipher_aligned_and_unaligned_allocations() {
         let key = UnwrappedKey::new(vec![0x5a; 32]);
         let test_lengths = [1, 5, 16, 25];
-        // Big enough to ensure no re-allocations.
+        // Enough initialized storage for every test length plus the unaligned offset.
         let backing_size: usize = test_lengths.iter().max().unwrap() + 1;
         // Packed into u128 to ensure alignment.
         let mut backing_vector = vec![0u128; backing_size.div_ceil(16)];
@@ -639,18 +640,12 @@ mod tests {
 
             // Aligned case.
             {
-                let mut buf = std::mem::ManuallyDrop::new(unsafe {
-                    Vec::<u8>::from_raw_parts(
-                        backing_vector.as_mut_ptr().cast::<u8>(),
-                        len,
-                        backing_size,
-                    )
-                });
+                let buf = &mut backing_vector.as_mut_bytes()[..len];
                 assert!(buf.as_ptr().cast::<u128>().is_aligned());
                 buf.copy_from_slice(plaintext.as_slice());
                 let mut encrypted = {
                     let mut enc = JournalXtsCipher::new(&key, 13);
-                    enc.encrypt(&buf)
+                    enc.encrypt(buf)
                 };
                 {
                     let mut dec = JournalXtsCipher::new(&key, 13);
@@ -661,18 +656,12 @@ mod tests {
 
             // Unaligned case.
             {
-                let mut buf = std::mem::ManuallyDrop::new(unsafe {
-                    Vec::<u8>::from_raw_parts(
-                        backing_vector.as_mut_ptr().cast::<u8>().wrapping_byte_add(1),
-                        len,
-                        backing_size,
-                    )
-                });
+                let buf = &mut backing_vector.as_mut_bytes()[1..1 + len];
                 assert!(!buf.as_ptr().cast::<u128>().is_aligned());
                 buf.copy_from_slice(plaintext.as_slice());
                 let mut encrypted = {
                     let mut enc = JournalXtsCipher::new(&key, 13);
-                    enc.encrypt(&buf)
+                    enc.encrypt(buf)
                 };
                 {
                     let mut dec = JournalXtsCipher::new(&key, 13);

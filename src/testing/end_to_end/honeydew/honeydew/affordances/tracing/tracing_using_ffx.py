@@ -49,7 +49,6 @@ class TracingUsingFfx(tracing.Tracing):
         self._buffer_size: int | None = None
         self._categories: list[str] | None = None
         self._buffering_mode: f_tracing.BufferingMode | None = None
-        self._compression: bool | None = None
         self._temp_trace_file: str | None = None
 
         reboot_affordance.register_for_on_device_boot(fn=self.reboot_handler)
@@ -71,7 +70,6 @@ class TracingUsingFfx(tracing.Tracing):
         self._buffer_size = None
         self._categories = None
         self._buffering_mode = None
-        self._compression = None
 
     def verify_supported(self) -> None:
         """Check if Trace is supported on the DUT.
@@ -121,9 +119,12 @@ class TracingUsingFfx(tracing.Tracing):
 
         Raises:
             TracingStateError: When trace session is already initialized.
+            TracingError: When compression is False (uncompressed tracing is not supported).
         """
-        if compression is None:
-            compression = True
+        if compression is False:
+            raise TracingError(
+                "Uncompressed tracing is not supported in TracingUsingFfx"
+            )
 
         if categories is None:
             categories = DEFAULT_CATEGORIES
@@ -146,7 +147,6 @@ class TracingUsingFfx(tracing.Tracing):
         self._categories = categories
         self._buffer_size = buffer_size
         self._buffering_mode = buffering_mode
-        self._compression = compression
         self._session_initialized = True
 
     async def start(self) -> None:
@@ -175,9 +175,6 @@ class TracingUsingFfx(tracing.Tracing):
                 cmd.extend(["--buffering-mode", "circular"])
             elif self._buffering_mode == f_tracing.BufferingMode.STREAMING:
                 cmd.extend(["--buffering-mode", "streaming"])
-
-        if not self._compression:
-            cmd.append("--nocompress")
 
         try:
             self._ffx.run(cmd)

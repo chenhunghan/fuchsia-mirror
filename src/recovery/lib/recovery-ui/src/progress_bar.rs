@@ -164,12 +164,10 @@ impl ProgressBar {
                         sleep_time = MonotonicDuration::from_millis(step_time_ms);
                         final_progress.store(progress as u32, Ordering::Release);
                     } else {
-                        match rx.try_next() {
-                            Ok(value) => {
-                                if let Some((progress, step_time_ms)) = value {
-                                    sleep_time = MonotonicDuration::from_millis(step_time_ms);
-                                    final_progress.store(progress as u32, Ordering::Release);
-                                }
+                        match rx.try_recv() {
+                            Ok((progress, step_time_ms)) => {
+                                sleep_time = MonotonicDuration::from_millis(step_time_ms);
+                                final_progress.store(progress as u32, Ordering::Release);
                             }
                             Err(_) => { // Ignore
                             }

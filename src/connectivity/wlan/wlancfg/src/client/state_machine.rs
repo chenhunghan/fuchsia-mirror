@@ -1382,8 +1382,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1400,8 +1400,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1480,8 +1480,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1565,8 +1565,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1583,8 +1583,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1602,8 +1602,8 @@ mod tests {
 
         // Check that connected telemetry event is sent
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ConnectResult { iface_id: 1, policy_connect_reason, result, multiple_bss_candidates, ap_state, network_is_likely_hidden: _ })) => {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ConnectResult { iface_id: 1, policy_connect_reason, result, multiple_bss_candidates, ap_state, network_is_likely_hidden: _ }) => {
                 assert_eq!(bss_description, ap_state.original().clone().into());
                 assert_eq!(multiple_bss_candidates, connect_selection.target.network_has_multiple_bss);
                 assert_eq!(policy_connect_reason, Some(connect_selection.reason));
@@ -1633,7 +1633,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -1713,8 +1713,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1725,8 +1725,8 @@ mod tests {
 
         // Check that connect result telemetry event is sent
         assert_matches!(
-            test_values.telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ConnectResult { iface_id: 1, policy_connect_reason, result, multiple_bss_candidates, ap_state, network_is_likely_hidden: _ })) => {
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ConnectResult { iface_id: 1, policy_connect_reason, result, multiple_bss_candidates, ap_state, network_is_likely_hidden: _ }) => {
                 assert_eq!(bss_description, ap_state.original().clone().into());
                 assert_eq!(multiple_bss_candidates, connect_selection.target.network_has_multiple_bss);
                 assert_eq!(policy_connect_reason, Some(connect_selection.reason));
@@ -1768,19 +1768,19 @@ mod tests {
 
         // Empty update sent to NotifyListeners (which in this case, will not actually be sent.)
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ClientStateUpdate {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ClientStateUpdate {
                 state: fidl_policy::WlanClientState::ConnectionsEnabled,
                 networks
-            }))) => {
+            })) => {
                 assert!(networks.is_empty());
             }
         );
 
         // A defect should be logged.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 }))
         );
 
         // Check for a connected update
@@ -1796,8 +1796,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1878,8 +1878,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1902,8 +1902,8 @@ mod tests {
 
         // A defect should be logged.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 }))
         );
     }
 
@@ -1974,8 +1974,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -1997,7 +1997,7 @@ mod tests {
         });
 
         // No defect should have been observed.
-        assert_matches!(test_values.defect_receiver.try_next(), Ok(None));
+        assert_matches!(test_values.defect_receiver.try_recv(), Err(e) if e.is_closed());
     }
 
     #[fuchsia::test]
@@ -2033,8 +2033,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -2081,8 +2081,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -2154,7 +2154,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -2166,7 +2166,7 @@ mod tests {
             AVERAGE_SCORE_DELTA_MINIMUM_DURATION + zx::MonotonicDuration::from_seconds(1),
         ));
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PostConnectionSignals { .. });
         });
 
@@ -2175,7 +2175,7 @@ mod tests {
             METRICS_SHORT_CONNECT_DURATION + zx::MonotonicDuration::from_seconds(1),
         ));
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::LongDurationSignals { .. });
         });
 
@@ -2214,14 +2214,14 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
         assert_matches!(exec.run_until_stalled(&mut receiver), Poll::Ready(Ok(())));
 
         // Disconnect telemetry event sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { track_subsequent_downtime, info: Some(info) } => {
                 assert!(!track_subsequent_downtime);
                 assert_matches!(info, DisconnectInfo {connected_duration, is_sme_reconnecting, disconnect_source, previous_connect_reason, ap_state, ..} => {
@@ -2299,7 +2299,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -2339,7 +2339,7 @@ mod tests {
         });
 
         // Disconnect telemetry event sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { track_subsequent_downtime, info: Some(info) } => {
                 assert!(track_subsequent_downtime);
                 assert_matches!(info, DisconnectInfo {connected_duration, is_sme_reconnecting, disconnect_source, previous_connect_reason, ap_state, ..} => {
@@ -2391,7 +2391,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -2403,7 +2403,7 @@ mod tests {
             AVERAGE_SCORE_DELTA_MINIMUM_DURATION + zx::MonotonicDuration::from_seconds(1),
         ));
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PostConnectionSignals { .. });
         });
 
@@ -2412,7 +2412,7 @@ mod tests {
             METRICS_SHORT_CONNECT_DURATION + zx::MonotonicDuration::from_seconds(1),
         ));
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::LongDurationSignals { .. });
         });
 
@@ -2429,7 +2429,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Disconnect telemetry event sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { info: Some(info), .. } => {
                 assert_eq!(info.connected_duration, zx::MonotonicDuration::from_hours(12));
             });
@@ -2444,10 +2444,7 @@ mod tests {
             .expect("failed to send connect result event");
 
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-        assert_matches!(
-            telemetry_receiver.try_next(),
-            Ok(Some(TelemetryEvent::ConnectResult { .. }))
-        );
+        assert_matches!(telemetry_receiver.try_recv(), Ok(TelemetryEvent::ConnectResult { .. }));
 
         // SME notifies Policy of another disconnection
         exec.set_fake_time(fasync::MonotonicInstant::after(zx::MonotonicDuration::from_hours(2)));
@@ -2459,7 +2456,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Another disconnect telemetry event sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { info, .. } => {
                 assert_eq!(info.unwrap().connected_duration, zx::MonotonicDuration::from_hours(2));
             });
@@ -2529,7 +2526,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut state_fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -2597,7 +2594,7 @@ mod tests {
         assert_matches!(poll_sme_req(&mut exec, &mut sme_fut), Poll::Pending);
 
         // No telemetry event is sent
-        assert_matches!(telemetry_receiver.try_next(), Err(_));
+        assert_matches!(telemetry_receiver.try_recv(), Err(_));
     }
 
     #[fuchsia::test]
@@ -2643,7 +2640,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -2655,7 +2652,7 @@ mod tests {
             AVERAGE_SCORE_DELTA_MINIMUM_DURATION + zx::MonotonicDuration::from_seconds(1),
         ));
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PostConnectionSignals { .. });
         });
 
@@ -2664,7 +2661,7 @@ mod tests {
             METRICS_SHORT_CONNECT_DURATION + zx::MonotonicDuration::from_seconds(1),
         ));
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::LongDurationSignals { .. });
         });
 
@@ -2717,13 +2714,13 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
         // Disconnect telemetry event sent
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { track_subsequent_downtime, info: Some(info) } => {
                 assert!(!track_subsequent_downtime);
                 assert_matches!(info, DisconnectInfo {connected_duration, is_sme_reconnecting, disconnect_source, previous_connect_reason, ap_state, ..} => {
@@ -2749,8 +2746,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
         // Check for a connected update
@@ -2766,8 +2763,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -2836,7 +2833,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -2915,7 +2912,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Check there were no state updates
-        assert_matches!(test_values.update_receiver.try_next(), Err(_));
+        assert_matches!(test_values.update_receiver.try_recv(), Err(_));
     }
 
     #[fuchsia::test]
@@ -2955,7 +2952,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -3008,8 +3005,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
     }
@@ -3076,9 +3073,8 @@ mod tests {
 
         let request = test_values
             .roam_service_request_receiver
-            .try_next()
-            .expect("error receiving roam service request")
-            .expect("received None roam service request");
+            .try_recv()
+            .expect("error receiving roam service request");
         assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor{ mut roam_trigger_data_receiver, .. } => {
             // Run the state machine
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
@@ -3097,12 +3093,12 @@ mod tests {
             assert_matches!(poll_sme_req(&mut exec, &mut sme_fut), Poll::Pending);
 
             // Verify telemetry event
-            assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+            assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
                 assert_matches!(event, TelemetryEvent::OnSignalReport { .. });
             });
 
             // Verify that signal report is sent to the roam monitor
-            assert_matches!(roam_trigger_data_receiver.try_next(), Ok(Some(RoamTriggerData::SignalReportInd(_))));
+            assert_matches!(roam_trigger_data_receiver.try_recv(), Ok(RoamTriggerData::SignalReportInd(_)));
 
             // Verify that the status is updated.
             let status = test_values.status_reader.read_status().expect("failed to read status");
@@ -3126,12 +3122,12 @@ mod tests {
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
             // Verify telemetry events;
-            assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+            assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
                 assert_matches!(event, TelemetryEvent::OnSignalReport { .. });
             });
 
             // Verify that signal report is sent to the roam monitor
-            assert_matches!(roam_trigger_data_receiver.try_next(), Ok(Some(RoamTriggerData::SignalReportInd(_))));
+            assert_matches!(roam_trigger_data_receiver.try_recv(), Ok(RoamTriggerData::SignalReportInd(_)));
         });
     }
 
@@ -3172,7 +3168,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { ap_state, .. } => {
                 assert_eq!(ap_state.tracked.channel.primary, bss_description.primary.number)
             });
@@ -3198,14 +3194,14 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify telemetry event
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::OnChannelSwitched { info } => {
                 assert_eq!(info, channel_switch_info);
             });
         });
 
         // Verify the roam monitor was re-initialized with the new channel
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { ap_state, .. } => {
                 assert_eq!(ap_state.tracked.channel.primary, 10)
             });
@@ -3221,7 +3217,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify telemetry event
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { info, .. } => {
                 assert_eq!(info.unwrap().ap_state.tracked.channel.primary, 10);
             });
@@ -3264,7 +3260,7 @@ mod tests {
 
         // Verify roam monitor selection was sent.
         let mut roam_sender;
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { roam_request_sender, .. } => {
                 roam_sender = roam_request_sender;
             });
@@ -3288,7 +3284,7 @@ mod tests {
         );
 
         // Verify roam attempt telemetry event.
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PolicyRoamAttempt { request, connected_duration } => {
                 assert_eq!(request.candidate, roam_candidate);
                 assert_eq!(request.reasons, vec![]);
@@ -3338,7 +3334,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -3356,7 +3352,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify the roam monitor was re-initialized with the new BSS
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { ap_state, .. } => {
                 assert_eq!(ap_state.original().bssid.to_array(), bss_desc.bssid);
             });
@@ -3389,7 +3385,7 @@ mod tests {
         });
 
         // Verify telemetry event for roam result
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PolicyInitiatedRoamResult { result, .. } => {
                 assert_eq!(result, roam_result);
             });
@@ -3397,7 +3393,7 @@ mod tests {
 
         // Explicitly verify there is _not_ a disconnect metric logged, since we have not exited the
         // ESS.
-        assert_matches!(telemetry_receiver.try_next(), Err(_));
+        assert_matches!(telemetry_receiver.try_recv(), Err(_));
 
         // Run time forward past the timeout for the pending roam request.
         exec.set_fake_time(fasync::MonotonicInstant::after(
@@ -3448,7 +3444,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -3482,12 +3478,12 @@ mod tests {
 
         // A defect should be logged.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 }))
         );
 
         // Verify telemetry event for roam result
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PolicyInitiatedRoamResult { result, .. } => {
                 assert_eq!(result, roam_result);
             });
@@ -3495,10 +3491,10 @@ mod tests {
 
         // Explicitly verify there is _not_ a disconnect metric logged, since we have not exited the
         // ESS.
-        assert_matches!(telemetry_receiver.try_next(), Err(_));
+        assert_matches!(telemetry_receiver.try_recv(), Err(_));
 
         // Verify the roam monitor was _not_ re-initialized.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Err(_));
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Err(_));
 
         // Run time forward past the timeout for the pending roam request.
         exec.set_fake_time(fasync::MonotonicInstant::after(
@@ -3551,7 +3547,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -3601,14 +3597,14 @@ mod tests {
         });
 
         // Verify telemetry event for disconnect
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { info, .. } => {
                 assert_eq!(info.unwrap().disconnect_source, disconnect_info.disconnect_source);
             });
         });
 
         // Verify telemetry event for roam result
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PolicyInitiatedRoamResult { result, .. } => {
                 assert_eq!(result, roam_result);
             });
@@ -3616,8 +3612,8 @@ mod tests {
 
         // A defect should be logged.
         assert_matches!(
-            test_values.defect_receiver.try_next(),
-            Ok(Some(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 })))
+            test_values.defect_receiver.try_recv(),
+            Ok(Defect::Iface(IfaceFailure::ConnectionFailure { iface_id: 1 }))
         );
 
         // Check for an SME disconnect request
@@ -3676,7 +3672,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -3717,7 +3713,7 @@ mod tests {
         });
 
         // Verify a disconnect event was logged to telemetry
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { info, .. } => {
                 assert_eq!(info.unwrap().disconnect_source, fidl_sme::DisconnectSource::User(fidl_sme::UserDisconnectReason::Unknown));
             });
@@ -3725,11 +3721,11 @@ mod tests {
 
         // Verify a disconnected listener update is sent.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ClientStateUpdate {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ClientStateUpdate {
                 state: fidl_policy::WlanClientState::ConnectionsEnabled,
                 networks
-            }))) => {
+            })) => {
                 assert_eq!(networks.len(), 1);
                 assert_eq!(networks[0].id, connect_selection.target.network);
                 assert_eq!(networks[0].state, fidl_policy::ConnectionState::Disconnected);
@@ -3778,7 +3774,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 
@@ -3811,7 +3807,7 @@ mod tests {
         });
 
         // Verify a disconnect event was logged to telemetry
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { info, .. } => {
                 assert_eq!(info.unwrap().disconnect_source, fidl_sme::DisconnectSource::User(fidl_sme::UserDisconnectReason::Unknown));
             });
@@ -3819,11 +3815,11 @@ mod tests {
 
         // Verify a disconnected listener update is sent.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ClientStateUpdate {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ClientStateUpdate {
                 state: fidl_policy::WlanClientState::ConnectionsEnabled,
                 networks
-            }))) => {
+            })) => {
                 assert_eq!(networks.len(), 1);
                 assert_eq!(networks[0].id, connect_selection.target.network);
                 assert_eq!(networks[0].state, fidl_policy::ConnectionState::Disconnected);
@@ -3865,7 +3861,7 @@ mod tests {
 
         // Verify roam monitor init was sent.
         let mut roam_sender;
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { roam_request_sender, .. } => {
                 roam_sender = roam_request_sender;
             });
@@ -3892,7 +3888,7 @@ mod tests {
         );
 
         // Verify roam attempt telemetry event.
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::PolicyRoamAttempt { request, .. } => {
                 assert_eq!(request.candidate,
                     roam_candidate);
@@ -3930,7 +3926,7 @@ mod tests {
         });
 
         // Verify a disconnect event was logged to telemetry
-        assert_matches!(test_values.telemetry_receiver.try_next(), Ok(Some(event)) => {
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Ok(event) => {
             assert_matches!(event, TelemetryEvent::Disconnected { info, .. } => {
                 assert_eq!(info.unwrap().disconnect_source, fidl_sme::DisconnectSource::User(fidl_sme::UserDisconnectReason::Unknown));
             });
@@ -3938,11 +3934,11 @@ mod tests {
 
         // Verify a disconnected listener update is sent.
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ClientStateUpdate {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ClientStateUpdate {
                 state: fidl_policy::WlanClientState::ConnectionsEnabled,
                 networks
-            }))) => {
+            })) => {
                 assert_eq!(networks.len(), 1);
                 assert_eq!(networks[0].id, connect_selection.target.network);
                 assert_eq!(networks[0].state, fidl_policy::ConnectionState::Disconnected);
@@ -3985,11 +3981,11 @@ mod tests {
 
         // The state machine should have sent a listener update
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(ClientStateUpdate {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(ClientStateUpdate {
                 state: fidl_policy::WlanClientState::ConnectionsEnabled,
                 networks
-            }))) => {
+            })) => {
                 assert!(networks.is_empty());
             }
         );
@@ -4051,8 +4047,8 @@ mod tests {
             }],
         };
         assert_matches!(
-            test_values.update_receiver.try_next(),
-            Ok(Some(listener::Message::NotifyListeners(updates))) => {
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
             assert_eq!(updates, client_state_update);
         });
 
@@ -4199,7 +4195,7 @@ mod tests {
 
         // Verify that a disconnect event was logged on exit.
         let mut telemetry_events = Vec::new();
-        while let Ok(Some(event)) = test_values.telemetry_receiver.try_next() {
+        while let Ok(event) = test_values.telemetry_receiver.try_recv() {
             telemetry_events.push(event)
         }
 
@@ -4264,7 +4260,7 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify roam monitor request was sent.
-        assert_matches!(test_values.roam_service_request_receiver.try_next(), Ok(Some(request)) => {
+        assert_matches!(test_values.roam_service_request_receiver.try_recv(), Ok(request) => {
             assert_matches!(request, RoamServiceRequest::InitializeRoamMonitor { .. });
         });
 

@@ -16,9 +16,7 @@ from honeydew import affordances_capable, errors
 from honeydew.affordances.affordance import AsyncLazyReady, ensure_ready
 from honeydew.affordances.connectivity.wlan.utils import errors as wlan_errors
 from honeydew.affordances.connectivity.wlan.utils.types import (
-    AccessPointState,
     Credential,
-    NetworkConfig,
 )
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.ffx import types as ffx_types
@@ -47,7 +45,7 @@ _ACCESS_POINT_LISTENER_PROXY = FidlEndpoint(
 @dataclass
 class _AccessPointControllerState:
     proxy: f_wlan_policy.AccessPointControllerClient
-    updates: asyncio.Queue[list[AccessPointState]]
+    updates: asyncio.Queue[list[f_wlan_policy.AccessPointState]]
     # Keep the async task for fuchsia.wlan.policy/AccessPointStateUpdates so it
     # doesn't get garbage collected when cancelled.
     access_point_state_updates_server_task: asyncio.Task[None]
@@ -174,7 +172,9 @@ class WlanPolicyAp(AsyncLazyReady):
             f_wlan_policy.AccessPointControllerClient(controller_client.take())
         )
 
-        updates: asyncio.Queue[list[AccessPointState]] = asyncio.Queue()
+        updates: asyncio.Queue[
+            list[f_wlan_policy.AccessPointState]
+        ] = asyncio.Queue()
 
         updates_client, updates_server = self._fc_transport.channel_create()
         access_point_state_updates_server = AccessPointStateUpdatesImpl(
@@ -228,13 +228,16 @@ class WlanPolicyAp(AsyncLazyReady):
             HoneydewWlanRequestRejectedError: WLAN rejected the request
         """
         assert self._access_point_controller is not None
-        cred = Credential.from_password(password)
 
         try:
             resp = await self._access_point_controller.proxy.start_access_point(
-                config=NetworkConfig(
-                    ssid, security, cred.type(), cred.value()
-                ).to_fidl(),
+                config=f_wlan_policy.NetworkConfig(
+                    id_=f_wlan_policy.NetworkIdentifier(
+                        ssid=list(ssid.encode("utf-8")),
+                        type_=security,
+                    ),
+                    credential=Credential.from_password(password).to_fidl(),
+                ),
                 mode=mode,
                 band=band,
             )
@@ -270,13 +273,16 @@ class WlanPolicyAp(AsyncLazyReady):
             HoneydewWlanRequestRejectedError: WLAN rejected the request
         """
         assert self._access_point_controller is not None
-        cred = Credential.from_password(password)
 
         try:
             resp = await self._access_point_controller.proxy.stop_access_point(
-                config=NetworkConfig(
-                    ssid, security, cred.type(), cred.value()
-                ).to_fidl(),
+                config=f_wlan_policy.NetworkConfig(
+                    id_=f_wlan_policy.NetworkIdentifier(
+                        ssid=list(ssid.encode("utf-8")),
+                        type_=security,
+                    ),
+                    credential=Credential.from_password(password).to_fidl(),
+                ),
             )
         except FcTransportStatus as status:
             raise wlan_errors.HoneydewWlanError(
@@ -329,7 +335,9 @@ class WlanPolicyAp(AsyncLazyReady):
             )
         )
 
-        updates: asyncio.Queue[list[AccessPointState]] = asyncio.Queue()
+        updates: asyncio.Queue[
+            list[f_wlan_policy.AccessPointState]
+        ] = asyncio.Queue()
         updates_client, updates_server = self._fc_transport.channel_create()
         access_point_state_updates_server = AccessPointStateUpdatesImpl(
             updates_server, updates
@@ -354,7 +362,7 @@ class WlanPolicyAp(AsyncLazyReady):
     async def get_update(
         self,
         timeout: float | None = None,
-    ) -> list[AccessPointState]:
+    ) -> list[f_wlan_policy.AccessPointState]:
         """Get a list of AP state listener updates.
 
         This call will return with an update immediately the
@@ -390,7 +398,9 @@ class AccessPointStateUpdatesImpl(f_wlan_policy.AccessPointStateUpdatesServer):
     """
 
     def __init__(
-        self, server: Channel, updates: asyncio.Queue[list[AccessPointState]]
+        self,
+        server: Channel,
+        updates: asyncio.Queue[list[f_wlan_policy.AccessPointState]],
     ) -> None:
         super().__init__(server)
         self._updates = updates
@@ -405,10 +415,8 @@ class AccessPointStateUpdatesImpl(f_wlan_policy.AccessPointStateUpdatesServer):
         Args:
             request: Current summary of WLAN access point operating states.
         """
-        access_points = [
-            AccessPointState.from_fidl(ap) for ap in request.access_points
-        ]
         _LOGGER.debug(
-            "OnAccessPointStateUpdates called with %s", repr(access_points)
+            "OnAccessPointStateUpdates called with %s",
+            repr(request.access_points),
         )
-        await self._updates.put(access_points)
+        await self._updates.put(list(request.access_points))

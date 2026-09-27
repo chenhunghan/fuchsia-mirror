@@ -165,7 +165,7 @@ pub fn format_size_fixed_rs(buf: &mut [u8], bytes: usize, mut unit: u8) -> &str 
         if ui < num_units {
             // If the chosen divisor divides the input value evenly, don't print out a
             // fractional part.
-            if orig_bytes % divisor == 0 {
+            if orig_bytes.is_multiple_of(divisor) {
                 let _ = core::write!(&mut writer, "{}{}", bytes, units[ui] as char);
             } else {
                 // We don't have an exact number, so print one unit of precision.

@@ -1,28 +1,28 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "StatusUpdate",
-  "type": "object",
-  "required": [
-    "message",
-    "status"
-  ],
-  "properties": {
-    "status": {
-      "$ref": "#/definitions/NotificationType"
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "StatusUpdate",
+    "type": "object",
+    "properties": {
+        "status": {
+            "$ref": "#/definitions/NotificationType"
+        },
+        "message": {
+            "type": "string"
+        }
     },
-    "message": {
-      "type": "string"
+    "required": [
+        "status",
+        "message"
+    ],
+    "definitions": {
+        "NotificationType": {
+            "type": "string",
+            "enum": [
+                "Info",
+                "Success",
+                "Warning",
+                "Error"
+            ]
+        }
     }
-  },
-  "definitions": {
-    "NotificationType": {
-      "type": "string",
-      "enum": [
-        "Info",
-        "Success",
-        "Warning",
-        "Error"
-      ]
-    }
-  }
 }

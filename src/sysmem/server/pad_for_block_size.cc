@@ -16,7 +16,8 @@
 #include <fbl/algorithm.h>
 #include <fbl/string_printf.h>
 #include <safemath/safe_math.h>
-#include <src/sysmem/server/macros.h>
+
+#include "src/sysmem/server/utils.h"
 
 namespace sysmem_service {
 
@@ -148,15 +149,8 @@ using fuchsia_logging::LogSeverity::Error;
 using fuchsia_logging::LogSeverity::Info;
 using fuchsia_logging::LogSeverity::Warn;
 
-template <typename T, typename U>
-auto CheckRoundDown(T a, U b) {
-  return CheckMul(CheckDiv(a, b), b);
-}
-
-template <typename T, typename U>
-auto CheckRoundUp(T a, U b) {
-  return CheckMul(CheckDiv(CheckAdd(a, CheckSub(b, 1)), b), b);
-}
+using sysmem_service::CheckRoundDown;
+using sysmem_service::CheckRoundUp;
 
 bool AccumulateMaxPaddingBytesFromHeightLowerBound(
     const CheckedNumeric<uint64_t>& height_lower_bound, fuchsia_math::SizeU block_size_param,
@@ -204,14 +198,10 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
 
   // max width based on height_lower_bound, space within buffer_settings_size_bytes, and
   // bytes_per_row_divisor
-  max_width_upper_bound =
-      CheckMin(max_width_upper_bound,
-               CheckDiv(CheckDiv(buffer_settings_size_bytes, stride_bytes_per_width_pixel),
-                        height_lower_bound));
-  max_width_upper_bound =
-      CheckDiv(CheckRoundDown(CheckMul(max_width_upper_bound, stride_bytes_per_width_pixel),
-                              constraints_bytes_per_row_divisor),
-               stride_bytes_per_width_pixel);
+  auto max_bytes_per_row_upper_bound = CheckRoundDown(
+      CheckDiv(buffer_settings_size_bytes, height_lower_bound), constraints_bytes_per_row_divisor);
+  max_width_upper_bound = CheckMin(
+      max_width_upper_bound, CheckDiv(max_bytes_per_row_upper_bound, stride_bytes_per_width_pixel));
 
   // account for max_size.width
   max_width_upper_bound = CheckMin(max_width_upper_bound, constraints_max_size_width);
@@ -240,12 +230,16 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
     return true;
   }
 
-  ZX_DEBUG_ASSERT(CheckMod(height_lower_bound, constraints_size_alignment_height).ValueOrDie() ==
-                  0);
+  auto mod_height = CheckMod(height_lower_bound, constraints_size_alignment_height);
+  ZX_ASSERT(mod_height.IsValid());
+  ZX_ASSERT(mod_height.ValueOrDie() == 0);
 
+  ZX_ASSERT(max_width_upper_bound.IsValid());
+  ZX_ASSERT(constraints_max_size_width.IsValid());
   ZX_DEBUG_ASSERT(max_width_upper_bound.ValueOrDie() <= constraints_max_size_width.ValueOrDie());
-  ZX_DEBUG_ASSERT(CheckMod(max_width_upper_bound, constraints_size_alignment_width).ValueOrDie() ==
-                  0);
+  auto mod_width = CheckMod(max_width_upper_bound, constraints_size_alignment_width);
+  ZX_ASSERT(mod_width.IsValid());
+  ZX_ASSERT(mod_width.ValueOrDie() == 0);
   // at this point max_width is allowed to still be an over-estimate here due to constraints not
   // taken into account above, but is not allowed to be an under-estimate here; also, the above
   // must not take block_size into account, as max_width at this point is an upper bound what
@@ -255,10 +249,12 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
   // we don't need to worry about partial right-most block occupancy in terms of width, because
   // bytes_per_row_divisor will already cause the non-block-aligned-up ImageFormatImageSize to see
   // the complete block width
-  ZX_DEBUG_ASSERT(constraints_bytes_per_row_divisor.ValueOrDie() >=
-                  bytes_per_row_per_block.ValueOrDie());
-  ZX_DEBUG_ASSERT(
-      CheckMod(constraints_bytes_per_row_divisor, bytes_per_row_per_block).ValueOrDie() == 0);
+  ZX_ASSERT(constraints_bytes_per_row_divisor.IsValid());
+  ZX_ASSERT(bytes_per_row_per_block.IsValid());
+  ZX_ASSERT(constraints_bytes_per_row_divisor.ValueOrDie() >= bytes_per_row_per_block.ValueOrDie());
+  auto mod_divisor = CheckMod(constraints_bytes_per_row_divisor, bytes_per_row_per_block);
+  ZX_ASSERT(mod_divisor.IsValid());
+  ZX_ASSERT(mod_divisor.ValueOrDie() == 0);
 
   // This width and height may not actually be possible per constraints.max_* fields, but we can
   // still use it to derive an upper-bound on the amount of padding needed.
@@ -270,6 +266,8 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
     complain(FROM_HERE, Warn, "!height_lower_bound.IsValid<uint32_t>()");
     return false;
   }
+  ZX_ASSERT(max_width_upper_bound.IsValid<uint32_t>());
+  ZX_ASSERT(height_lower_bound.IsValid<uint32_t>());
   auto non_block_aligned_format_result =
       ImageConstraintsToFormat(constraints, max_width_upper_bound.ValueOrDie<uint32_t>(),
                                height_lower_bound.ValueOrDie<uint32_t>());
@@ -293,6 +291,8 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
     complain(FROM_HERE, Warn, "!block_aligned_height.IsValid<uint32_t>()");
     return false;
   }
+  ZX_ASSERT(block_aligned_width.IsValid<uint32_t>());
+  ZX_ASSERT(block_aligned_height.IsValid<uint32_t>());
   auto block_aligned_format_result = ImageConstraintsToFormat(
       constraints_for_block_aligned, block_aligned_width.ValueOrDie<uint32_t>(),
       block_aligned_height.ValueOrDie<uint32_t>());
@@ -315,6 +315,8 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
     complain(FROM_HERE, Warn, "!image_bytes_block_aligned.IsValid()");
     return false;
   }
+  ZX_ASSERT(image_bytes_block_aligned.IsValid());
+  ZX_ASSERT(image_bytes_non_block_aligned.IsValid());
   if (image_bytes_block_aligned.ValueOrDie() < image_bytes_non_block_aligned.ValueOrDie()) {
     // this is unexpected / supposed to be impossible
     auto log_image_format = [&complain](const fuchsia_images2::ImageFormat& image_format) {
@@ -351,6 +353,7 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
     complain(FROM_HERE, Warn, "!new_max_padding_bytes_so_far.IsValid<uint64_t>()");
     return false;
   }
+  ZX_ASSERT(new_max_padding_bytes_so_far.IsValid());
   max_padding_bytes_so_far = new_max_padding_bytes_so_far.ValueOrDie();
 
   return true;
@@ -401,13 +404,17 @@ fit::result<fit::failed, uint64_t> PaddedSizeFromBlockSize(
   ZX_DEBUG_ASSERT(constraints_param.bytes_per_row_divisor().has_value());
   auto constraints_bytes_per_row_divisor =
       CheckedNumeric<uint64_t>(*constraints_param.bytes_per_row_divisor());
+  ZX_ASSERT(constraints_bytes_per_row_divisor.IsValid());
+  ZX_ASSERT(bytes_per_row_per_block.IsValid());
   ZX_DEBUG_ASSERT(constraints_bytes_per_row_divisor.ValueOrDie() >=
                   bytes_per_row_per_block.ValueOrDie());
-  ZX_DEBUG_ASSERT(
-      CheckMod(constraints_bytes_per_row_divisor, bytes_per_row_per_block).ValueOrDie() == 0);
+  auto mod_divisor = CheckMod(constraints_bytes_per_row_divisor, bytes_per_row_per_block);
+  ZX_ASSERT(mod_divisor.IsValid());
+  ZX_ASSERT(mod_divisor.ValueOrDie() == 0);
   // The lower this value specified by the client, the faster the search for max width below will
   // be.
-  ZX_DEBUG_ASSERT(constraints_max_size_width.ValueOrDie() <= 0xFFFFFFFE);
+  ZX_ASSERT(constraints_max_size_width.IsValid());
+  ZX_ASSERT(constraints_max_size_width.ValueOrDie() <= 0xFFFFFFFE);
 
   // intentional copy/clone; no_upper_bounds_constraints is to be able to call
   // ImageConstraintsToFormat for width and height that are aligned up to block size without hitting
@@ -437,10 +444,13 @@ fit::result<fit::failed, uint64_t> PaddedSizeFromBlockSize(
       complain(FROM_HERE, Warn, "!min_height_lower_bound.IsValid<uint32_t>()");
       return fit::failed();
     }
+    ZX_ASSERT(min_height_lower_bound.IsValid());
+    ZX_ASSERT(constraints_min_size_height.IsValid());
     ZX_DEBUG_ASSERT(min_height_lower_bound.ValueOrDie() >=
                     constraints_min_size_height.ValueOrDie());
-    ZX_DEBUG_ASSERT(
-        CheckMod(min_height_lower_bound, constraints_size_alignment_height).ValueOrDie() == 0);
+    auto mod_height = CheckMod(min_height_lower_bound, constraints_size_alignment_height);
+    ZX_ASSERT(mod_height.IsValid());
+    ZX_ASSERT(mod_height.ValueOrDie() == 0);
     // at this point min_height is allowed to be an under-estimate, but not an over-estimate
 
     // AccumulateMaxPaddingBytesFromHeightLowerBound checks IsValid() for all
@@ -483,6 +493,8 @@ fit::result<fit::failed, uint64_t> PaddedSizeFromBlockSize(
 
     // We won't always have a second height to try, if the second height would exceed
     // max_size.height.
+    ZX_ASSERT(second_lowest_height_lower_bound.IsValid());
+    ZX_ASSERT(constraints_max_size_height.IsValid());
     if (second_lowest_height_lower_bound.ValueOrDie() <= constraints_max_size_height.ValueOrDie()) {
       if (!AccumulateMaxPaddingBytesFromHeightLowerBound(
               second_lowest_height_lower_bound, pad_for_block_size_param,
@@ -508,6 +520,7 @@ fit::result<fit::failed, uint64_t> PaddedSizeFromBlockSize(
     complain(FROM_HERE, Warn, "!result.IsValid<uint64_t>()");
     return fit::failed();
   }
+  ZX_ASSERT(result.IsValid());
   return fit::ok(result.ValueOrDie());
 }
 

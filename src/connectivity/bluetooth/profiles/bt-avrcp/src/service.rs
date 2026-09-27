@@ -278,8 +278,7 @@ mod tests {
         // Running the stream handler should produce a request to register a target
         exec.run_until_stalled(&mut handler_fut).expect_pending("should not be ready");
 
-        let request =
-            service_request_receiver.try_next().unwrap().expect("a request should be made");
+        let request = service_request_receiver.try_recv().expect("a request should be made");
 
         match request {
             ServiceRequest::RegisterTargetHandler { target_handler: _, reply } => {
@@ -331,8 +330,7 @@ mod tests {
         // Running the stream handler should produce a request for a controller.
         assert!(exec.run_until_stalled(&mut handler_fut).is_pending());
 
-        let request =
-            service_request_receiver.try_next().unwrap().expect("a request should be made");
+        let request = service_request_receiver.try_recv().expect("a request should be made");
         let _connections =
             handle_get_controller(&mut exec, profile_proxy.clone(), request, transport);
 
@@ -354,8 +352,7 @@ mod tests {
         // Running the stream handler should produce a request for a controller.
         exec.run_until_stalled(&mut handler_fut).expect_pending("should be pending");
 
-        let request =
-            service_request_receiver.try_next().unwrap().expect("a request should be made");
+        let request = service_request_receiver.try_recv().expect("a request should be made");
         let _connections =
             handle_get_controller(&mut exec, profile_proxy.clone(), request, transport);
 
@@ -403,8 +400,7 @@ mod tests {
         // Running the stream handler should produce a request for a controller.
         exec.run_until_stalled(&mut handler_fut).expect_pending("should be pending");
 
-        let request =
-            service_request_receiver.try_next().unwrap().expect("a request should be made");
+        let request = service_request_receiver.try_recv().expect("a request should be made");
         let _connections =
             handle_get_controller(&mut exec, profile_proxy.clone(), request, transport);
 
@@ -426,8 +422,7 @@ mod tests {
         // Running the stream handler should produce a request for a controller.
         exec.run_until_stalled(&mut handler_fut).expect_pending("should be pending");
 
-        let request =
-            service_request_receiver.try_next().unwrap().expect("a request should be made");
+        let request = service_request_receiver.try_recv().expect("a request should be made");
         let _connections =
             handle_get_controller(&mut exec, profile_proxy.clone(), request, transport);
 
@@ -481,10 +476,8 @@ mod tests {
         exec.run_until_stalled(&mut register_fut).expect_pending("should be pending");
 
         // We should have a service request.
-        let request = service_request_receiver
-            .try_next()
-            .unwrap()
-            .expect("Service request should be handled");
+        let request =
+            service_request_receiver.try_recv().expect("Service request should be handled");
 
         // Handing it to Peer Manager should resolve the request
         peer_manager.handle_service_request(request);
@@ -504,10 +497,8 @@ mod tests {
         let register_fut = peer_manager_proxy.register_target_handler(target_client_2);
         let mut register_fut = pin!(register_fut);
         exec.run_until_stalled(&mut register_fut).expect_pending("should be pending");
-        let request = service_request_receiver
-            .try_next()
-            .unwrap()
-            .expect("Service request should be handled");
+        let request =
+            service_request_receiver.try_recv().expect("Service request should be handled");
         peer_manager.handle_service_request(request);
         assert_matches!(
             exec.run_until_stalled(&mut register_fut).expect("should be ready"),
@@ -521,10 +512,8 @@ mod tests {
         let register_fut = peer_manager_proxy.register_target_handler(target_client_3);
         let mut register_fut = pin!(register_fut);
         exec.run_until_stalled(&mut register_fut).expect_pending("should be pending");
-        let request = service_request_receiver
-            .try_next()
-            .unwrap()
-            .expect("Service request should be handled");
+        let request =
+            service_request_receiver.try_recv().expect("Service request should be handled");
         peer_manager.handle_service_request(request);
         let expected_status = zx::Status::ALREADY_BOUND.into_raw();
         assert_matches!(exec.run_until_stalled(&mut register_fut).expect("should be ready"), Ok(Err(status)) if status == expected_status);
@@ -547,10 +536,8 @@ mod tests {
         exec.run_until_stalled(&mut register_fut).expect_pending("should be pending");
 
         // We should have a service request.
-        let request = service_request_receiver
-            .try_next()
-            .unwrap()
-            .expect("Service request should be handled");
+        let request =
+            service_request_receiver.try_recv().expect("Service request should be handled");
 
         // Handing it to Peer Manager should resolve the request
         peer_manager.handle_service_request(request);
@@ -570,10 +557,8 @@ mod tests {
         let register_fut = peer_manager_proxy.set_absolute_volume_handler(volume_client_2);
         let mut register_fut = pin!(register_fut);
         exec.run_until_stalled(&mut register_fut).expect_pending("should be pending");
-        let request = service_request_receiver
-            .try_next()
-            .unwrap()
-            .expect("Service request should be handled");
+        let request =
+            service_request_receiver.try_recv().expect("Service request should be handled");
         peer_manager.handle_service_request(request);
         assert_matches!(
             exec.run_until_stalled(&mut register_fut).expect("should be ready"),
@@ -587,10 +572,8 @@ mod tests {
         let register_fut = peer_manager_proxy.set_absolute_volume_handler(volume_client_3);
         let mut register_fut = pin!(register_fut);
         exec.run_until_stalled(&mut register_fut).expect_pending("should be pending");
-        let request = service_request_receiver
-            .try_next()
-            .unwrap()
-            .expect("Service request should be handled");
+        let request =
+            service_request_receiver.try_recv().expect("Service request should be handled");
         peer_manager.handle_service_request(request);
         let expected_status = zx::Status::ALREADY_BOUND.into_raw();
         assert_matches!(exec.run_until_stalled(&mut register_fut).expect("should be ready"), Ok(Err(status)) if status == expected_status);

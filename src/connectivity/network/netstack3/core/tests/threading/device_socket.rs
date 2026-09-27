@@ -64,6 +64,7 @@ fn packet_socket_change_device_and_protocol_atomic() {
                     RecvEthernetFrameMeta {
                         device_id,
                         parsing_context: NetworkParsingContext::default(),
+                        gso_info: None,
                     },
                     make_ethernet_frame(ethertype),
                 );

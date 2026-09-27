@@ -197,6 +197,9 @@ zx::result<> RegistersDevice::CreateNode(Register<T>& reg) {
       fdf::MakeProperty2(arena, bind_fuchsia::NAME, reg.id()),
       fdf::MakeProperty2(arena, bind_fuchsia::SERVICE, "fuchsia.hardware.registers.Service"),
   };
+  if (reg.global_id().has_value()) {
+    properties.push_back(fdf::MakeProperty2(arena, bind_fuchsia::ID, *reg.global_id()));
+  }
   auto args = fuchsia_driver_framework::wire::NodeAddArgs::Builder(arena)
                   .name(arena, "register-" + reg.id())
                   .offers2(arena, std::move(offers))
@@ -238,10 +241,14 @@ zx::result<> RegistersDevice::Create(
     auto mask = GetMask<T>(m.mask().value());
     masks.emplace(m.mmio_offset().value(), std::make_pair(mask, m.count().value()));
   }
+  std::optional<uint32_t> global_id;
+  if (auto it = register_ids_.find(std::string(reg.name().value())); it != register_ids_.end()) {
+    global_id = it->second;
+  }
   return std::visit(
       [&](auto&& d) { return CreateNode(d); },
       registers_.emplace_back(std::in_place_type<Register<T>>, mmios_[reg.mmio_id().value()],
-                              std::string(reg.name().value()), std::move(masks)));
+                              std::string(reg.name().value()), global_id, std::move(masks)));
 }
 
 zx::result<> RegistersDevice::MapMmio(fuchsia_hardware_registers::Mask::Tag& tag) {
@@ -365,6 +372,11 @@ zx::result<> RegistersDevice::Start(fdf::DriverContext context) {
     if (generic_res.is_ok()) {
       auto parsed = registers_metadata::RegistersMetadata::Parse(generic_res.value());
       if (parsed) {
+        for (const auto& r : parsed->registers) {
+          if (r.id.has_value()) {
+            register_ids_[r.name] = *r.id;
+          }
+        }
         auto converted = ConvertMetadata(*parsed);
         if (converted.is_ok()) {
           metadata = std::move(converted.value());

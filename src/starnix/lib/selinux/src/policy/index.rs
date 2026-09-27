@@ -9,8 +9,8 @@ use super::{
 use crate::new_policy::rules::{HasRuleKey, RuleKind};
 use crate::new_policy::traits::{HasName, HasPolicyId};
 use crate::new_policy::{
-    Class, ClassDefault, ClassDefaultRange, CommonSymbol, FsUseType, GenfsConPath, HandleUnknown,
-    IdAndNameIndexed, SymbolArray,
+    CategorySet, Class, ClassDefault, ClassDefaultRange, CommonSymbol, FsUseType, GenfsConPath,
+    HandleUnknown, IdAndNameIndexed, SymbolArray,
 };
 use crate::{
     ClassPermission as _, KernelClass, KernelPermission, NullessByteStr, PolicyCap,
@@ -278,9 +278,7 @@ impl PolicyIndex {
                     ClassDefaultRange::Unspecified => {
                         (unspecified_low.clone(), unspecified_high.cloned())
                     }
-                    ClassDefaultRange::UnknownUsedValue => {
-                        unreachable!("Invalid ClassDefaultRange in validated policy")
-                    }
+                    ClassDefaultRange::Glblub => glblub_range(source, target),
                 },
             };
 
@@ -534,6 +532,37 @@ fn get_permission_id_by_name(
         return Some(permission.id());
     }
     None
+}
+
+/// Returns the set of categories present in both `left` and `right`.
+fn intersect_categories(left: &MlsLevel, right: &MlsLevel) -> CategorySet {
+    let right_categories = right.categories();
+    CategorySet::from_ids(left.category_ids().filter(|id| right_categories.contains(*id)))
+}
+
+/// Returns the intersection of the `source` and `target` ranges.
+///
+/// If the two ranges do not overlap then the intersection is empty, and the returned range is
+/// mis-ordered, i.e. its high level does not dominate its low level. Such a range is rejected
+/// when the resulting Security Context is validated.
+fn glblub_range(
+    source: &SecurityContext,
+    target: &SecurityContext,
+) -> (MlsLevel, Option<MlsLevel>) {
+    let source_low = source.low_level();
+    let source_high = source.effective_high_level();
+    let target_low = target.low_level();
+    let target_high = target.effective_high_level();
+
+    let low_level = MlsLevel::new(
+        std::cmp::max(source_low.sensitivity(), target_low.sensitivity()),
+        intersect_categories(source_low, target_low),
+    );
+    let high_level = MlsLevel::new(
+        std::cmp::min(source_high.sensitivity(), target_high.sensitivity()),
+        intersect_categories(source_high, target_high),
+    );
+    (low_level, Some(high_level))
 }
 
 impl Deref for PolicyIndex {

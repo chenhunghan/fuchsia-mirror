@@ -10,7 +10,7 @@
 ##           [--dry-run] [--verbose] [--emit] [--all]
 ##           [--files=FILES,[FILES ...]]
 ##           [--target=GN_TARGET]
-##           [--git] [--changed-lines] [-- PATTERN]
+##           [--git] [-- PATTERN]
 ##
 ##   --dry-run Stops the program short of running the formatters
 ##   --all     Formats all code in the git repo under the current working
@@ -31,11 +31,6 @@
 ##             commit in the upstream branch (or against HEAD if no such commit
 ##             is found).  Files that are locally modified, staged or touched by
 ##             any commits introduced on the local branch are formatted.
-##   --changed-lines
-##             Format changed lines only. Only supported on a subset of languages
-##             (currently, just C++). Unsupported languages will continue to have
-##             the entire file formatted. "Changes" are relative to the git
-##             commit that would be used by "--git".
 ##   --parallel
 ##             Formats all files in the background rather than waiting on each one
 ##             before starting the next.
@@ -48,7 +43,7 @@
 ##             to filter what files are affected. For example, to format all
 ##             rust source files use `fx format-code --all -- "*.rs"`
 ##
-## Supported Languages: C, C++, cml, dml, Dart, FIDL, GN, Go, Python, Rust, JSON
+## Supported Languages: C, C++, cml, dml, Dart, FIDL, GN, Go, Proto, Python, Rust, JSON
 
 set -e
 
@@ -95,31 +90,10 @@ function print-and-execute() {
   "$@"
 }
 
-# Format the given C++ file.
-function format-cc-file() {
-  if [[ -n ${CHANGED_LINES} ]]; then
-    # Only update changed lines.
-    local changed_line_commands=$(git-print-changed-lines "$1" "--lines=%dF:%dL ")
-    if [[ -n ${changed_line_commands} ]]; then
-        print-and-execute ${CLANG_CMD} ${changed_line_commands} "$1"
-    fi
-  else
-    # Update entire files.
-    print-and-execute ${CLANG_CMD} "$1"
-  fi
-  # Unconditionally update header guards.
-  if [[ $1 =~ .*\.h ]]; then
-    print-and-execute ${FIX_HEADER_GUARDS_CMD} "$1"
-  fi
-}
-
-# Run the given format command on a single file, warning if "CHANGED_LINES" is set.
+# Run the given format command on a single file.
 function format-full-file() {
   local command="$1"
   local file="$2"
-  if [ -n "${CHANGED_LINES}" ]; then
-    echo "Warning: cannot format only modified lines; formatting full file ${file}" >&2
-  fi
   print-and-execute ${command} "${file}"
 }
 
@@ -127,8 +101,6 @@ function format-full-file() {
 function format-file() {
   filename="$(basename "$1")"
   case "${filename}" in
-    *.c | *.cc | *.cpp | *.h | *.hh | *.hpp | *.proto | *.ts)
-      format-cc-file "$1" ;;
     *.config) format-full-file "${JSON_FMT_CMD}" "$1" ;;
     *.json) format-full-file "${JSON_FMT_CMD}" "$1" ;;
     # TODO(https://fxbug.dev/514804491): temporarily disabled due to upstream bugs.
@@ -163,7 +135,6 @@ function canonicalize() {
 ARGS_GN=
 DRY_RUN=
 VERBOSE=
-CHANGED_LINES=
 PARALLEL=
 FILES_SPECIFIED=
 EMIT=
@@ -178,7 +149,6 @@ while [ $# -gt 0 ]; do
     --parallel) PARALLEL="1" ;;
     --verbose) VERBOSE="1" ;;
     --dry-run) DRY_RUN="1" ;;
-    --changed-lines) CHANGED_LINES="1" ;;
     --emit) EMIT="--emit" ;;
     --all)
       GET_FILES=get_all_files
@@ -238,20 +208,6 @@ get_all_files() {
   && IFS=$OLDIFS
 }
 
-# Print lines changed in the given file.
-#
-# "Changes" are calculated relative to `git-diff-base`.
-git-print-changed-lines() {
-  # Have git run `/usr/bin/diff` on the input file.
-  #
-  # We in turn ask `diff` to print for each new or modified line the format
-  # string in `$2`. Details about the format string can be found in the man
-  # page for diff, under `--new-group-format`.
-  git difftool -y \
-    -x "diff --new-group-format='$2' --line-format=''" \
-    $(get-diff-base) -- "$1"
-}
-
 $GET_FILES
 
 if [[ $ARGS_GN == "1" ]]; then
@@ -263,10 +219,8 @@ if [[ -n "${VERBOSE}" ]]; then
 fi
 
 readonly PY_TOOL="${FUCHSIA_DIR}/scripts/fuchsia-vendored-python"
-readonly CLANG_CMD="${PREBUILT_CLANG_DIR}/bin/clang-format -style=file -fallback-style=Google -sort-includes -i"
 readonly JSON_FMT_CMD="${PY_TOOL} ${FUCHSIA_DIR}/scripts/style/json-fmt.py --no-sort-keys --ignore-errors --quiet"
 # readonly DTSFMT_CMD="fx-command-run dtsfmt"
-readonly FIX_HEADER_GUARDS_CMD="${PY_TOOL} ${FUCHSIA_DIR}/scripts/style/check-header-guards.py --fix"
 
 # Mapping from tool name to a list of extensions for files to which the tool
 # applies. Used to determine which tools to compile just-in-time based on the

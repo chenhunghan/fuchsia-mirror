@@ -72,10 +72,10 @@ impl OutputValidator for H264NalValidator {
 }
 
 pub struct H264DecoderValidator {
-    num_frames: usize,
-    input_stream: Rc<VideoFrameStream>,
-    normalized_sad_threshold: f64,
-    require_sw: bool,
+    pub num_frames: usize,
+    pub input_stream: Rc<VideoFrameStream>,
+    pub normalized_sad_threshold: f64,
+    pub require_sw: bool,
 }
 
 #[async_trait(?Send)]

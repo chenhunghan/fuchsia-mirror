@@ -34,21 +34,15 @@
 
 use anyhow::{Error, ensure};
 
-/// Abstraction over a contiguous in-memory byte buffer that supports appending and truncation.
+/// Abstraction over a contiguous in-memory byte buffer that supports appending.
 pub trait Buffer: AsRef<[u8]> + AsMut<[u8]> + Send {
     /// Appends data to the end of the buffer.
     fn put(&mut self, data: &[u8]);
-
-    /// Truncates the buffer to `len` bytes.
-    fn truncate(&mut self, len: usize);
 }
 
 impl Buffer for Vec<u8> {
     fn put(&mut self, data: &[u8]) {
         self.extend_from_slice(data);
-    }
-    fn truncate(&mut self, len: usize) {
-        self.truncate(len);
     }
 }
 

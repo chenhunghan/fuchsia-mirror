@@ -135,6 +135,13 @@ class WifiChipBaseTestClass(WlanixBaseTestClass):
         self.wlanix_proxy.get_wifi(wifi=server.take())
         wifi_proxy = fidl_wlanix.WifiClient(proxy)
 
+        # Wlanix will power up the hardware on `start`, which is usually desired for tests.
+        (await wifi_proxy.start()).unwrap()
+        state_response = (await wifi_proxy.get_state()).unwrap()
+        assert (
+            state_response.is_started
+        ), "WiFi state should be started after calling start()"
+
         response = (await wifi_proxy.get_chip_ids()).unwrap()
         assert (
             response.chip_ids is not None

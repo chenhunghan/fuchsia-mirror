@@ -7,6 +7,7 @@ group("bin") {
     "devfs",
     "driver-host",
     "driver-index",
+    "driver_debug",
     "driver_manager",
     "driver_manager_rust",
     "driver_runtime",
@@ -18,6 +19,7 @@ group("tests") {
   deps = [
     "driver-host:tests",
     "driver-index:tests",
+    "driver_debug:tests",
     "driver_manager/tests",
     "driver_manager_rust:tests",
     "driver_playground:tests",

@@ -613,6 +613,72 @@ TEST(LoadedElfModule, InvalidHeader) {
   EXPECT_TRUE(result.is_error());
 }
 
+TEST(LoadedElfModule, InvalidPhdrSize) {
+  // 64-bit case
+  {
+    constexpr size_t kNumPhdrs = 1;
+    using FakeModule = FakeElf64Module<kNumPhdrs>;
+
+    FakeModule fake;
+    memset(&fake, 0, sizeof(fake));
+
+    // Set up 64-bit ELF header
+    memcpy(fake.ehdr.e_ident, ELFMAG, SELFMAG);
+    fake.ehdr.e_ident[EI_CLASS] = ELFCLASS64;
+    fake.ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
+    fake.ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+    fake.ehdr.e_type = ET_DYN;
+    fake.ehdr.e_machine = EM_X86_64;
+    fake.ehdr.e_version = EV_CURRENT;
+    fake.ehdr.e_phoff = offsetof(FakeModule, phdr);
+    fake.ehdr.e_phnum = kNumPhdrs;
+    fake.ehdr.e_phentsize = sizeof(Elf64_Phdr) + 1;  // Invalid size
+
+    LocalMemory mem;
+    uint64_t load_addr = reinterpret_cast<uint64_t>(&fake);
+    Module module(load_addr, &mem, Module::AddressMode::kProcess);
+
+    LoadedElfModule loaded(module);
+    auto result = loaded.Load();
+    EXPECT_TRUE(result.is_error());
+    if (result.is_error()) {
+      EXPECT_EQ(result.error_value().msg(), "Invalid e_phentsize");
+    }
+  }
+
+  // 32-bit case
+  {
+    constexpr size_t kNumPhdrs = 1;
+    using FakeModule = FakeElf32Module<kNumPhdrs>;
+
+    FakeModule fake;
+    memset(&fake, 0, sizeof(fake));
+
+    // Set up 32-bit ELF header
+    memcpy(fake.ehdr.e_ident, ELFMAG, SELFMAG);
+    fake.ehdr.e_ident[EI_CLASS] = ELFCLASS32;
+    fake.ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
+    fake.ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+    fake.ehdr.e_type = ET_DYN;
+    fake.ehdr.e_machine = EM_ARM;
+    fake.ehdr.e_version = EV_CURRENT;
+    fake.ehdr.e_phoff = offsetof(FakeModule, phdr);
+    fake.ehdr.e_phnum = kNumPhdrs;
+    fake.ehdr.e_phentsize = sizeof(Elf32_Phdr) + 1;  // Invalid size
+
+    LocalMemory mem;
+    uint64_t load_addr = reinterpret_cast<uint64_t>(&fake);
+    Module module(load_addr, &mem, Module::AddressMode::kProcess);
+
+    LoadedElfModule loaded(module);
+    auto result = loaded.Load();
+    EXPECT_TRUE(result.is_error());
+    if (result.is_error()) {
+      EXPECT_EQ(result.error_value().msg(), "Invalid e_phentsize");
+    }
+  }
+}
+
 }  // namespace
 
 }  // namespace unwinder

@@ -61,7 +61,7 @@ void ReleaseFenceManager::OnVsync(uint64_t frame_number, zx::time_monotonic time
   // show up on-screen.  Any release fences associated with them should be signaled at this time.
   // Additionally, it *may* be possible to invoke the frame-presented callback for some or all of
   // these frames... but only if all previous callbacks have been invoked.  This is due to the
-  // contract with FrameScheduler, which dictates that callbacks must be invoked in order.
+  // contract with `FrameScheduler`, which dictates that callbacks must be invoked in order.
   const auto begin_it = frame_records_.lower_bound(0);
   const auto end_it = frame_records_.upper_bound(frame_number);
   bool all_earlier_callbacks_were_invoked = true;
@@ -78,7 +78,7 @@ void ReleaseFenceManager::OnVsync(uint64_t frame_number, zx::time_monotonic time
       utils::SignalCounterFences(record.release_counters_to_signal_when_frame_presented, timestamp);
       record.release_counters_to_signal_when_frame_presented.clear();
 
-      // The contract with the FrameScheduler dictates that callbacks must be invoked in order.
+      // The contract with the `FrameScheduler` dictates that callbacks must be invoked in order.
       // Therefore, if we reach a record whose callback cannot be invoked (e.g. because that frame
       // is GPU-composited and hasn't finished rendering), then no subsequent callback can be
       // invoked, even if all other conditions are met.
@@ -94,11 +94,18 @@ void ReleaseFenceManager::OnVsync(uint64_t frame_number, zx::time_monotonic time
     // presentation time.
     //
     // Note: the iterator is incremented at the call-site (i.e. here) before the unincremented value
-    // is potentially erased by MaybeEraseFrameRecord().  This is why we don't put "++it" into the
+    // is potentially erased by `MaybeEraseFrameRecord()`.  This is why we don't put `++it` into the
     // enclosing for-statement: if the previous entry is erased, then we would increment an invalid
     // iterator.
     MaybeEraseFrameRecord(it++);
   }
+}
+
+void ReleaseFenceManager::MarkAllFramesPresented(zx::time_monotonic timestamp) {
+  if (frame_records_.empty()) {
+    return;
+  }
+  OnVsync(frame_records_.rbegin()->first, timestamp);
 }
 
 bool ReleaseFenceManager::MaybeInvokeFramePresentedCallback(FrameRecord& record) {
@@ -106,11 +113,11 @@ bool ReleaseFenceManager::MaybeInvokeFramePresentedCallback(FrameRecord& record)
 
   // Both conditions must be true to invoke the callback.
   if (record.render_finished && record.frame_presented) {
-    // It would be nice to DCHECK(record.render_done_time <= record.actual_presentation_time),
+    // It would be nice to `DCHECK(record.render_done_time <= record.actual_presentation_time)`,
     // however this is not possible. In the case of a dropped GPU-composited frame, it is possible
     // for a subsequent direct-scanout frame to be presented on-screen while the dropped frame is
-    // still being rendered.  Since the first/dropped frame gets the same |actual_presentation_time|
-    // as the next frame, this would be earlier than the |render_done_time|.
+    // still being rendered.  Since the first/dropped frame gets the same `actual_presentation_time`
+    // as the next frame, this would be earlier than the `render_done_time`.
 
     utils::SignalCounterFences(record.present_fences, record.timestamps.actual_presentation_time);
     record.present_fences.clear();
@@ -160,7 +167,7 @@ void ReleaseFenceManager::SignalOrScheduleSignalForReleaseFences(
       // Signal the fences as soon as the previous frame has finished rendering.  This may have
       // already occurred; if so, signal the fences immediately.  Otherwise, stash the fences to be
       // signaled later, when rendering is finished.  This is preferable to to setting up an
-      // async::Wait() here, because we already had to set one up when we received the previous
+      // `async::Wait()` here, because we already had to set one up when we received the previous
       // frame, so we might as well piggy-back on that.
       if (previous_frame.render_finished) {
         utils::SignalReleaseFences(release_fences);
@@ -201,10 +208,10 @@ std::unique_ptr<ReleaseFenceManager::FrameRecord> ReleaseFenceManager::NewGpuCom
   record->frame_type = FrameType::kGpuComposition;
   record->frame_presented_callback = std::move(frame_presented_callback);
 
-  // Set up a waiter on the |render_finished_fence|.
+  // Set up a waiter on the `render_finished_fence`.
   record->render_finished_wait = std::make_unique<async::WaitOnce>(
       render_finished_fence.get(), ZX_EVENT_SIGNALED, ZX_WAIT_ASYNC_TIMESTAMP);
-  // Keep the fence alive as long as the WaitOnce.
+  // Keep the fence alive as long as the `WaitOnce`.
   record->render_finished_fence = std::move(render_finished_fence);
 
   zx_status_t wait_status = record->render_finished_wait->Begin(
@@ -213,7 +220,7 @@ std::unique_ptr<ReleaseFenceManager::FrameRecord> ReleaseFenceManager::NewGpuCom
         FX_DCHECK(status == ZX_OK || status == ZX_ERR_CANCELED) << "unexpected status: " << status;
         if (status == ZX_ERR_CANCELED) {
           // Must return immediately if canceled.  In particular, we cannot rely on the validity of
-          // the |this| pointer, because we may have been canceled due to the destruction of the
+          // the `this` pointer, because we may have been canceled due to the destruction of the
           // manager (because this would cause the destruction of all frame-records, and hence also
           // this wait).
           return;
@@ -234,8 +241,8 @@ std::unique_ptr<ReleaseFenceManager::FrameRecord> ReleaseFenceManager::NewDirect
   record->frame_presented_callback = std::move(frame_presented_callback);
 
   // TODO(https://fxbug.dev/42154139): might want to add an offset to the time, so we don't screw up
-  // the FrameScheduler. Another idea would be to use zero, and have the FrameScheduler ignore such
-  // values.
+  // the `FrameScheduler`. Another idea would be to use zero, and have the `FrameScheduler` ignore
+  // such values.
   record->render_finished = true;
   record->timestamps.render_done_time = async::Now(dispatcher_);
 
@@ -256,7 +263,7 @@ ReleaseFenceManager::FrameRecordIterator ReleaseFenceManager::FindFrameRecord(
   auto it = frame_records_.find(frame_number);
 
 #ifndef NDEBUG
-  // This is an invariant that should be maintained by the rest of ReleaseFenceManager.  However,
+  // This is an invariant that should be maintained by the rest of `ReleaseFenceManager`.  However,
   // if it is violated, this method is nevertheless careful not to return a pointer to bogus memory.
   FX_DCHECK((frame_number == first_frame_number_) == (it == frame_records_.end()))
       << "Should find a record for any frame #, except first frame.  Requested frame #: "
@@ -268,7 +275,7 @@ ReleaseFenceManager::FrameRecordIterator ReleaseFenceManager::FindFrameRecord(
 
 void ReleaseFenceManager::OnRenderFinished(uint64_t frame_number, zx::time timestamp) {
   // NOTE: this name is important for benchmarking.  Do not remove or modify it
-  // without also updating the "process_gfx_trace.go" script.
+  // without also updating the `process_gfx_trace.go` script.
   TRACE_DURATION("gfx", "ReleaseFenceManager::OnRenderFinished", "frame number", frame_number);
   TRACE_FLOW_END("gfx", "scenic_frame", frame_number);
 
@@ -283,11 +290,11 @@ void ReleaseFenceManager::OnRenderFinished(uint64_t frame_number, zx::time times
     record.release_fences_to_signal_when_render_finished.clear();
     utils::SignalCounterFences(record.release_counters_to_signal_when_render_finished, timestamp);
     record.release_counters_to_signal_when_render_finished.clear();
-    record.render_finished_wait.reset();  // safe from within WaitOnce() closure.
+    record.render_finished_wait.reset();  // safe from within `WaitOnce()` closure.
   }
 
   // If there are previous frames whose callback hasn't been invoked, we cannot invoke the
-  // callback for this frame either, due to the contract with FrameScheduler that callbacks
+  // callback for this frame either, due to the contract with `FrameScheduler` that callbacks
   // must be invoked in the order received.
   {
     auto begin_it = frame_records_.begin();

@@ -20,6 +20,8 @@
 use anyhow::{Context as _, Error, format_err};
 use diagnostics_log::PublishOptions;
 use fidl_fuchsia_location_namedplace::RegulatoryRegionWatcherMarker;
+use fidl_fuchsia_power_broker as fbroker;
+use fidl_fuchsia_power_system as fsystem;
 use fidl_fuchsia_wlan_device_service::DeviceMonitorMarker;
 use fidl_fuchsia_wlan_policy as fidl_policy;
 use fuchsia_async as fasync;
@@ -36,6 +38,7 @@ use std::convert::Infallible;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use wlan_power_manager::{DevicePowerManager, PowerManager};
 use wlan_trace as wtrace;
 use wlancfg_lib::access_point::AccessPoint;
 use wlancfg_lib::client::connection_selection::{
@@ -50,7 +53,7 @@ use wlancfg_lib::client::{self, scan};
 use wlancfg_lib::config_management::{SavedNetworksManager, SavedNetworksManagerApi};
 use wlancfg_lib::legacy::{self, IfaceRef};
 use wlancfg_lib::mode_management::iface_manager_api::IfaceManagerApi;
-use wlancfg_lib::mode_management::phy_manager::PhyManager;
+use wlancfg_lib::mode_management::phy_manager::{self, PhyManager};
 use wlancfg_lib::mode_management::{
     DEFECT_CHANNEL_SIZE, create_iface_manager, device_monitor, recovery,
 };
@@ -239,6 +242,48 @@ async fn run_regulatory_manager(
 async fn run_all_futures() -> Result<(), Error> {
     // Get wlancfg product config data.
     let cfg = wlancfg_config::Config::take_from_startup_handle();
+
+    // Set up power framework
+    info!("Power Framework Enabled: {}", cfg.power_framework_enabled);
+    let proxies = if cfg.power_framework_enabled {
+        match (
+            fuchsia_component::client::connect_to_protocol::<fsystem::ActivityGovernorMarker>(),
+            fuchsia_component::client::connect_to_protocol::<fbroker::TopologyMarker>(),
+        ) {
+            (Ok(ag), Ok(pb)) => Some((ag, pb)),
+            (ag_res, pb_res) => {
+                if let Err(e) = ag_res {
+                    warn!("Failed to connect to fuchsia.power.system.ActivityGovernor: {:?}", e);
+                }
+                if let Err(e) = pb_res {
+                    warn!("Failed to connect to fuchsia.power.broker.Topology: {:?}", e);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let power_manager = Arc::new(DevicePowerManager::new(proxies));
+    // Register for suspend/resume notifications
+    let (initial_wake_lease, suspend_blocker_requests) = if cfg.power_framework_enabled {
+        let (suspend_blocker_client, suspend_blocker_requests) =
+            fidl::endpoints::create_request_stream::<fsystem::SuspendBlockerMarker>();
+        let lease = match power_manager
+            .register_suspend_blocker(suspend_blocker_client, "wlancfg-suspend-blocker")
+            .await
+        {
+            Ok(lease) => Some(lease),
+            Err(e) => {
+                warn!("Failed to register suspend blocker: {:?}", e);
+                None
+            }
+        };
+        (lease, Some(suspend_blocker_requests))
+    } else {
+        (None, None)
+    };
+
     let monitor_svc = fuchsia_component::client::connect_to_protocol::<DeviceMonitorMarker>()
         .context("failed to connect to device monitor")?;
 
@@ -304,7 +349,7 @@ async fn run_all_futures() -> Result<(), Error> {
     // Get the recovery settings.
     info!("Recovery Profile: {}", cfg.recovery_profile);
     info!("Recovery Enabled: {}", cfg.recovery_enabled);
-    info!("Power Framework Enabled: {}", cfg.power_framework_enabled);
+
     let phy_manager = Arc::new(Mutex::new(PhyManager::new(
         monitor_svc.clone(),
         recovery::lookup_recovery_profile(&cfg.recovery_profile),
@@ -312,6 +357,7 @@ async fn run_all_futures() -> Result<(), Error> {
         component::inspector().root().create_child("phy_manager"),
         telemetry_sender.clone(),
         recovery_sender,
+        power_manager.clone(),
     )));
     let configurator =
         legacy::deprecated_configuration::DeprecatedConfigurator::new(phy_manager.clone());
@@ -381,6 +427,16 @@ async fn run_all_futures() -> Result<(), Error> {
     let saved_networks_metrics_fut = saved_networks_manager_metrics_loop(saved_networks.clone());
     let regulatory_fut = run_regulatory_manager(iface_manager.clone(), regulatory_sender);
 
+    let suspend_blocker_fut: future::LocalBoxFuture<'static, Result<(), Error>> =
+        if let Some(requests) = suspend_blocker_requests {
+            Box::pin(phy_manager::serve_suspend_blocker(phy_manager.clone(), requests))
+        } else {
+            Box::pin(future::ready(Ok(())))
+        };
+
+    // We're initialized now, we can stop keeping the system awake
+    drop(initial_wake_lease);
+
     let _ = futures::try_join!(
         fidl_fut,
         dev_watcher_fut,
@@ -390,7 +446,8 @@ async fn run_all_futures() -> Result<(), Error> {
         regulatory_fut,
         telemetry_fut.map(Ok),
         roam_manager_service_fut.map(Ok),
-        connection_selection_service.map(Ok)
+        connection_selection_service.map(Ok),
+        suspend_blocker_fut,
     )?;
     Ok(())
 }

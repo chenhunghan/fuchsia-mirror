@@ -1749,7 +1749,7 @@ mod tests {
         saved_networks.record_periodic_metrics().await;
 
         // Verify metric is logged with two saved networks, which each have one config
-        assert_matches!(telemetry_receiver.try_next(), Ok(Some(TelemetryEvent::SavedNetworkCount { saved_network_count, config_count_per_saved_network })) => {
+        assert_matches!(telemetry_receiver.try_recv(), Ok(TelemetryEvent::SavedNetworkCount { saved_network_count, config_count_per_saved_network }) => {
             assert_eq!(saved_network_count, 2);
             assert_eq!(config_count_per_saved_network, [1, 1]);
         });

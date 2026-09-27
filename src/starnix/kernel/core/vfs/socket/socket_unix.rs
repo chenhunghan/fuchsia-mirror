@@ -295,12 +295,18 @@ impl UnixSocket {
         Ok(())
     }
 
-    fn connect_datagram(&self, socket: &SocketHandle, peer: &SocketHandle) -> Result<(), Errno> {
+    fn connect_datagram(
+        &self,
+        socket: &SocketHandle,
+        current_task: &CurrentTask,
+        peer: &SocketHandle,
+    ) -> Result<(), Errno> {
         {
             let unix_socket = socket.downcast_socket::<UnixSocket>().unwrap();
             let peer_inner = unix_socket.lock();
             self.check_type_for_connect(socket, peer, &peer_inner.address)?;
         }
+        security::unix_may_send(current_task, socket, peer)?;
         let unix_socket = socket.downcast_socket::<UnixSocket>().unwrap();
         unix_socket.lock().state = UnixSocketState::Connected(peer.clone());
         Ok(())
@@ -507,7 +513,9 @@ impl SocketOps for UnixSocket {
             SocketType::Stream | SocketType::SeqPacket => {
                 self.connect_stream(socket, current_task, &peer)
             }
-            SocketType::Datagram | SocketType::Raw => self.connect_datagram(socket, &peer),
+            SocketType::Datagram | SocketType::Raw => {
+                self.connect_datagram(socket, current_task, &peer)
+            }
             _ => error!(EINVAL),
         }
     }

@@ -12,6 +12,7 @@ pub struct FDomainTransport {
     output: Pin<Box<dyn AsyncWrite + Unpin + Send>>,
     write_progress: usize,
     in_buf: Vec<u8>,
+    in_buf_offset: usize,
 }
 
 impl FDomainTransport {
@@ -25,6 +26,7 @@ impl FDomainTransport {
             output: Pin::new(output),
             write_progress: 0,
             in_buf: Vec::new(),
+            in_buf_offset: 0,
         }
     }
 }
@@ -41,13 +43,27 @@ impl fdomain_client::FDomainTransport for FDomainTransport {
         msg: &[u8],
         ctx: &mut Context<'_>,
     ) -> Poll<Result<(), Option<std::io::Error>>> {
-        if self.write_progress < 4 {
-            let size: u32 = msg
-                .len()
-                .try_into()
-                .map_err(|_| std::io::Error::other("Message size exceeded u32 capacity"))?;
-            let out_buf = size.to_le_bytes();
+        let size: u32 = msg
+            .len()
+            .try_into()
+            .map_err(|_| std::io::Error::other("Message size exceeded u32 capacity"))?;
+        let out_buf = size.to_le_bytes();
 
+        if self.write_progress == 0 {
+            let slices = [std::io::IoSlice::new(&out_buf), std::io::IoSlice::new(msg)];
+            match self.output.as_mut().poll_write_vectored(ctx, &slices) {
+                Poll::Ready(Ok(n)) if n == 4 + msg.len() => {
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Ok(n)) => {
+                    self.write_progress = n;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(Some(e))),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        if self.write_progress < 4 {
             while self.write_progress < 4 {
                 let offset = self.write_progress;
                 let got = ready!(self.output.as_mut().poll_write(ctx, &out_buf[offset..]))?;
@@ -97,15 +113,28 @@ impl futures::Stream for FDomainTransport {
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if self.in_buf.len() > 4 {
-                let len: usize =
-                    u32::from_le_bytes(self.in_buf[..4].try_into().unwrap()).try_into().unwrap();
+            let unread = self.in_buf.len() - self.in_buf_offset;
+            if unread >= 4 {
+                let len: usize = u32::from_le_bytes(
+                    self.in_buf[self.in_buf_offset..self.in_buf_offset + 4].try_into().unwrap(),
+                )
+                .try_into()
+                .unwrap();
 
-                if self.in_buf.len() >= len + 4 {
-                    let tail = self.in_buf.split_off(len + 4);
-                    let mut got = std::mem::replace(&mut self.in_buf, tail);
-                    got.drain(..4);
-                    return Poll::Ready(Some(Ok(got.into())));
+                if unread >= len + 4 {
+                    let packet_start = self.in_buf_offset + 4;
+                    let packet_end = packet_start + len;
+                    let packet = self.in_buf[packet_start..packet_end].to_vec().into_boxed_slice();
+                    self.in_buf_offset = packet_end;
+                    if self.in_buf_offset == self.in_buf.len() {
+                        self.in_buf.clear();
+                        self.in_buf_offset = 0;
+                    } else if self.in_buf_offset > 65536 {
+                        let offset = self.in_buf_offset;
+                        self.in_buf.drain(..offset);
+                        self.in_buf_offset = 0;
+                    }
+                    return Poll::Ready(Some(Ok(packet)));
                 }
             }
 
@@ -114,7 +143,7 @@ impl futures::Stream for FDomainTransport {
             let buf = ready!(this.input.as_mut().poll_fill_buf(ctx))?;
 
             if buf.is_empty() {
-                match self.in_buf.len() {
+                match this.in_buf.len() - this.in_buf_offset {
                     0 => log::debug!("FDomain transport closed, ending stream"),
                     n => log::warn!(
                         "FDomain transport closed with incomplete packet of length {n}, ending stream"
